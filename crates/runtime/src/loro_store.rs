@@ -341,6 +341,16 @@ pub(crate) fn doc_from_snapshot(
     Ok(doc)
 }
 
+/// Which of `fields` the doc holds (a key in its root map).
+pub(crate) fn held_keys(doc: &LoroDoc, fields: &[CrdtField]) -> Vec<String> {
+    let map = pylon_crdt::root_map(doc);
+    fields
+        .iter()
+        .filter(|f| map.get(&f.name).is_some())
+        .map(|f| f.name.clone())
+        .collect()
+}
+
 /// Where a backend keeps each CRDT row's server-side records, beside its
 /// snapshot and in the same transaction: the peers of its synthetic ops
 /// (`_pylon_crdt_synthetic`), the server's last whole write of each text,

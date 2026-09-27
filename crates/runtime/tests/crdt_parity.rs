@@ -646,3 +646,173 @@ fn stored_snapshot(url: &str, id: &str) -> Option<Vec<u8>> {
         .unwrap()
         .map(|r| r.get(0))
 }
+
+impl Env {
+    /// Store `snapshot` as the row's doc, underneath the runtime.
+    fn store_snapshot(&self, id: &str, snapshot: &[u8]) {
+        match &self.backend {
+            Backend::Sqlite(dir) => {
+                let conn = rusqlite::Connection::open(dir.path().join("app.db")).unwrap();
+                conn.execute(
+                    "INSERT OR REPLACE INTO _pylon_crdt_snapshots (entity, row_id, snapshot, updated_at)
+                     VALUES ('Doc', ?1, ?2, '')",
+                    rusqlite::params![id, snapshot],
+                )
+                .unwrap();
+                self.rt.crdt_store().clear_cache();
+            }
+            Backend::Postgres(url) => {
+                let mut client = postgres::Client::connect(url, postgres::NoTls).unwrap();
+                client
+                    .execute(
+                        "INSERT INTO _pylon_crdt_snapshots (entity, row_id, snapshot)
+                         VALUES ('Doc', $1, $2)
+                         ON CONFLICT (entity, row_id) DO UPDATE SET snapshot = EXCLUDED.snapshot",
+                        &[&id, &snapshot],
+                    )
+                    .unwrap();
+            }
+        }
+    }
+}
+
+/// A doc an older build left holding only the fields a server update wrote:
+/// a client's read gets the row's other values, so its edit to one of them
+/// keeps what the row held.
+#[test]
+fn a_partial_doc_takes_the_row_values_it_lacks() {
+    on_both(|env| {
+        let id = env.bare_row();
+        let partial = LoroDoc::new();
+        pylon_crdt::root_map(&partial).insert("title", "a").unwrap();
+        partial.commit();
+        env.store_snapshot(&id, &pylon_crdt::encode_snapshot(&partial));
+        let client = online_client(env, &id);
+        let before = client.oplog_vv();
+        let body = text_in(&client, "body");
+        assert_eq!(body.to_string(), "hello", "{}", env.name());
+        body.insert(body.len_unicode(), " x").unwrap();
+        client.commit();
+        env.push(&id, &client, &before);
+        let row = env.row(&id);
+        assert_eq!(row["body"], "hello x", "{}", env.name());
+        assert_eq!(row["likes"], 3, "{}", env.name());
+        assert_eq!(row["tags"], json!(["x"]), "{}", env.name());
+    });
+}
+
+/// A push to a row deleted after the router's check is refused, and leaves
+/// no snapshot behind.
+#[test]
+fn a_push_to_a_deleted_row_is_refused() {
+    on_both(|env| {
+        let id = env.bare_row();
+        let client = online_client(env, &id);
+        let before = client.oplog_vv();
+        patch(&client, json!({"done": true}));
+        assert!(env.rt.delete("Doc", &id).unwrap());
+        let update = client.export(ExportMode::updates(&before)).unwrap();
+        let refused = env.rt.crdt_apply_update("Doc", &id, &update).unwrap_err();
+        assert_eq!(refused.code, "ENTITY_NOT_FOUND", "{}", env.name());
+        let snapshots = env.raw(
+            "SELECT COUNT(*) FROM _pylon_crdt_snapshots WHERE entity = 'Doc' AND row_id = ?1",
+            "SELECT COUNT(*) FROM _pylon_crdt_snapshots WHERE entity = 'Doc' AND row_id = $1",
+            &id,
+        );
+        assert_eq!(snapshots, 0, "{}", env.name());
+    });
+}
+
+/// Postgres: a delete and an update of one row, with the delete holding the
+/// snapshot row while the update runs, do not deadlock: the delete takes
+/// the doc's advisory lock first, so the update waits and then finds no
+/// row.
+#[test]
+fn a_delete_and_an_update_do_not_deadlock() {
+    let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
+        return;
+    };
+    let env = postgres(&url);
+    let id = env.bare_row();
+    env.snapshot(&id); // Seeds the doc: snapshot, synthetic, and base rows.
+                       // Hold the row's synthetic record, so the delete stops on it after it
+                       // deleted (and locked) the snapshot row.
+    let mut holder = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    let mut hold = holder.transaction().unwrap();
+    hold.query(
+        "SELECT 1 FROM _pylon_crdt_synthetic WHERE entity = 'Doc' AND row_id = $1 FOR UPDATE",
+        &[&id],
+    )
+    .unwrap();
+    std::thread::scope(|s| {
+        let delete = s.spawn(|| env.rt.delete("Doc", &id));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let update = s.spawn(|| env.rt.update("Doc", &id, &json!({"body": "late"})));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        hold.commit().unwrap();
+        assert!(delete.join().unwrap().unwrap(), "the delete");
+        assert!(!update.join().unwrap().unwrap(), "the update finds no row");
+    });
+}
+
+/// Postgres: a read that seeds a row's doc and a delete of the row leave no
+/// snapshot or side record behind.
+#[test]
+fn a_seed_and_a_delete_leave_no_orphan() {
+    let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
+        return;
+    };
+    let env = postgres(&url);
+    let id = env.bare_row();
+    // Hold the entity row, so the seed stops on it with the doc's lock held.
+    let mut holder = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    let mut hold = holder.transaction().unwrap();
+    hold.query("SELECT 1 FROM \"Doc\" WHERE id = $1 FOR UPDATE", &[&id])
+        .unwrap();
+    std::thread::scope(|s| {
+        let seed = s.spawn(|| env.rt.crdt_snapshot("Doc", &id));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let delete = s.spawn(|| env.rt.delete("Doc", &id));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        hold.commit().unwrap();
+        let _ = seed.join().unwrap();
+        assert!(delete.join().unwrap().unwrap(), "the delete");
+    });
+    for table in [
+        "_pylon_crdt_snapshots",
+        "_pylon_crdt_synthetic",
+        "_pylon_crdt_base",
+        "_pylon_crdt_links",
+    ] {
+        let left = env.raw(
+            "",
+            &format!("SELECT COUNT(*) FROM {table} WHERE entity = 'Doc' AND row_id = $1"),
+            &id,
+        );
+        assert_eq!(left, 0, "{table}");
+    }
+}
+
+/// Postgres: a mutation's ctx.db.update of a row with no doc seeds the doc
+/// first, so the fields it did not write keep their values.
+#[test]
+fn a_mutation_update_of_a_row_with_no_doc_keeps_the_other_fields() {
+    let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
+        return;
+    };
+    let env = postgres(&url);
+    let id = env.bare_row();
+    env.rt
+        .run_in_pg_mutation_tx_for_tests::<_, bool, pylon_http::DataError>(|store| {
+            store.update("Doc", &id, &json!({"title": "b"}))
+        })
+        .unwrap();
+    let online = online_client(&env, &id);
+    let before = online.oplog_vv();
+    patch(&online, json!({"done": true}));
+    env.push(&id, &online, &before);
+    let row = env.row(&id);
+    assert_eq!(row["title"], "b");
+    assert_eq!(row["body"], "hello");
+    assert_eq!(row["likes"], 3);
+}

@@ -2189,10 +2189,11 @@ impl Runtime {
     }
 
     /// Before a client reads a CRDT row's doc: a row with no doc gets one
-    /// from its values, and a row the one-time reconcile has not reached
-    /// has its register and text fields brought in line with the row. The
-    /// client then starts from those values, so its own edits come after
-    /// them. A write transaction only when something changes.
+    /// from its values, a doc without a field the row holds takes the row's
+    /// value, and a row the one-time reconcile has not reached has its
+    /// register and text fields brought in line with the row. The client
+    /// then starts from those values, so its own edits come after them. A
+    /// write transaction only when something changes.
     pub(crate) fn prepare_crdt_doc_for_read(
         &self,
         conn: &Connection,
@@ -2207,7 +2208,15 @@ impl Runtime {
                 message: format!("read the snapshot of {} {id}: {e}", ent.name),
             })?;
         if has_doc && !self.crdt_reconcile_pending(conn, &ent.name, id) {
-            return Ok(());
+            let fields = self.crdt_fields_for(ent)?;
+            let values = self.crdt_missing_values(conn, ent, id, &fields)?;
+            if values.is_empty() {
+                return Ok(());
+            }
+            return with_write_tx(self, conn, || {
+                self.apply_fields(conn, &ent.name, id, &fields, values);
+                Ok(())
+            });
         }
         let fields = self.crdt_fields_for(ent)?;
         let Some(row) = self.crdt_row_for_doc(conn, ent, id, &fields)? else {
@@ -2227,10 +2236,11 @@ impl Runtime {
         })
     }
 
-    /// Before a client reads a Postgres CRDT row's doc: a row with no doc
-    /// gets one from its values, so the client starts from them and its own
-    /// edits come after (as on SQLite, `prepare_crdt_doc_for_read`). A write
-    /// transaction only when the row has no doc.
+    /// Before a client reads a Postgres CRDT row's doc: the doc takes the
+    /// row's values it lacks (a row with no doc gets one), so the client
+    /// starts from them and its own edits come after (as on SQLite,
+    /// `prepare_crdt_doc_for_read`). The values are read first; a write
+    /// transaction only when the doc changes.
     pub(crate) fn pg_prepare_crdt_doc_for_read(
         &self,
         ent: &ManifestEntity,
@@ -2239,27 +2249,44 @@ impl Runtime {
         let Some(pg) = self.pg_backend() else {
             return Ok(());
         };
-        let has_doc = pg.store.with_client(|c| {
-            pg_loro_store::PgLoroStore::has_snapshot(c, &ent.name, id).map_err(|e| {
-                pylon_http::DataError {
-                    code: "CRDT_SNAPSHOT_FAILED".into(),
-                    message: format!("read the snapshot of {} {id}: {e}", ent.name),
-                }
-            })
-        })?;
-        if has_doc {
-            return Ok(());
-        }
         let fields = self
             .crdt_fields_for(ent)
             .map_err(|e| pylon_http::DataError {
                 code: e.code,
                 message: e.message,
             })?;
+        let err = |e: loro_store::LoroStoreError| pylon_http::DataError {
+            code: "CRDT_SNAPSHOT_FAILED".into(),
+            message: format!("read the doc of {} {id}: {e}", ent.name),
+        };
+        let needs_seed = pg
+            .store
+            .with_client(|c| -> Result<bool, pylon_http::DataError> {
+                let held = pg
+                    .crdt
+                    .held_fields(c, &ent.name, id, &fields)
+                    .map_err(err)?;
+                if held.as_ref().is_some_and(|h| h.len() == fields.len()) {
+                    return Ok(false);
+                }
+                let Some(mut row) = pylon_storage::pg_tx_store::tx_get_by_id(c, &ent.name, id)?
+                else {
+                    return Ok(false);
+                };
+                parse_json_fields_in_row(ent, &mut row);
+                parse_crdt_containers_in_row(&fields, &mut row);
+                Ok(match held {
+                    None => true,
+                    Some(held) => !missing_values(&fields, &held, &row).is_empty(),
+                })
+            })?;
+        if !needs_seed {
+            return Ok(());
+        }
         pg.store
             .with_transaction_raw(|tx| -> Result<bool, pylon_http::DataError> {
                 pg.crdt
-                    .seed_missing_doc(tx, &ent.name, id, &fields, |c| {
+                    .seed_missing_fields(tx, &ent.name, id, &fields, |c| {
                         pg_row_for_doc(c, ent, &fields, id)
                     })
                     .map_err(|e| pylon_http::DataError {
@@ -2267,7 +2294,7 @@ impl Runtime {
                         message: format!("seed the doc of {} {id}: {e}", ent.name),
                     })
             })?;
-        // A read before the seed cached the empty doc.
+        // A read before the seed cached the doc as it was.
         pg.crdt.evict(&ent.name, id);
         Ok(())
     }
@@ -2289,6 +2316,12 @@ impl Runtime {
                 code: "CRDT_APPLY_FAILED".into(),
                 message: format!("read the snapshot of {} {id}: {e}", ent.name),
             })?;
+        if has_doc {
+            // A doc left partial by an older build takes the row's values
+            // it lacks first, as a read does.
+            let values = self.crdt_missing_values(conn, ent, id, fields)?;
+            self.apply_fields(conn, &ent.name, id, fields, values);
+        }
         if !has_doc || !self.crdt_reconcile_pending(conn, &ent.name, id) {
             return Ok((has_doc, None));
         }
@@ -2408,7 +2441,8 @@ impl Runtime {
     /// (from before inserts seeded one) gets one from its current values
     /// first, or the patch would make a doc holding only the written fields,
     /// and a client's next push would project the rest (a counter as 0, a
-    /// list as empty) into the row.
+    /// list as empty) into the row; a doc without a field the row holds
+    /// takes the row's value.
     fn seed_missing_crdt_doc(
         &self,
         conn: &Connection,
@@ -2427,8 +2461,37 @@ impl Runtime {
             if let Some(row) = self.crdt_row_for_doc(conn, ent, id, fields)? {
                 self.seed_crdt_doc(conn, &ent.name, id, fields, &row);
             }
+        } else {
+            let values = self.crdt_missing_values(conn, ent, id, fields)?;
+            self.apply_fields(conn, &ent.name, id, fields, values);
         }
         Ok(())
+    }
+
+    /// The row's values for the fields its doc does not hold (see
+    /// [`missing_values`]); empty when the doc holds every field. The row
+    /// is read only when the doc lacks a field.
+    fn crdt_missing_values(
+        &self,
+        conn: &Connection,
+        ent: &ManifestEntity,
+        id: &str,
+        fields: &[pylon_crdt::CrdtField],
+    ) -> Result<Vec<(String, serde_json::Value)>, RuntimeError> {
+        let held = self
+            .crdt_store()
+            .held_fields(conn, &ent.name, id, fields)
+            .map_err(|e| RuntimeError {
+                code: "CRDT_SNAPSHOT_FAILED".into(),
+                message: format!("read the doc of {} {id}: {e}", ent.name),
+            })?;
+        if held.len() == fields.len() {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .crdt_row_for_doc(conn, ent, id, fields)?
+            .map(|row| missing_values(fields, &held, &row))
+            .unwrap_or_default())
     }
 
     /// A CRDT row as its doc holds it: JSON and list fields parsed,
@@ -3001,18 +3064,12 @@ impl Runtime {
                         pylon_storage::pg_tx_store::tx_insert(tx, &self.manifest, entity, &row)
                             .map(|_| ())
                             .map_err(data_err_to_runtime)?;
-                        pg.crdt.cache_after_commit(tx, entity, &id);
                         Ok(())
                     });
-                if result.is_err() {
-                    // Rollback drops the persisted snapshot, but the
-                    // in-memory LoroDoc was mutated in-place by
-                    // apply_patch. Evict it so the next access
-                    // re-hydrates from disk (which is back in the
-                    // pre-apply state). Without this, the cache would
-                    // hold a doc ahead of the materialized row.
-                    pg.crdt.evict(entity, &id);
-                }
+                // The next read hydrates from what committed (a doc
+                // cached inside the transaction could reach a reader
+                // before a COMMIT that then failed).
+                pg.crdt.evict(entity, &id);
                 result?;
                 return Ok(id);
             }
@@ -3411,14 +3468,11 @@ impl Runtime {
                                 ),
                             });
                         }
-                        // Refresh the cache from the just-persisted
-                        // snapshot so post-commit reads on this process
-                        // skip the re-hydration round-trip.
-                        pg.crdt.cache_after_commit(tx, entity, id);
                         Ok(updated)
                     });
+                // The next read hydrates from what committed.
+                pg.crdt.evict(entity, id);
                 if result.is_err() {
-                    pg.crdt.evict(entity, id);
                     // ENTITY_NOT_FOUND from the inner closure is the
                     // intended return for "no such row" — translate
                     // into Ok(false) so callers see the same shape
@@ -5627,10 +5681,10 @@ pub(crate) fn pg_row_for_doc<C: pylon_storage::pg_exec::PgConn>(
     Ok(Some(row))
 }
 
-/// A server write of a Postgres CRDT row: a row with no doc gets one from
-/// its values first (or the patch would make a doc holding only the
-/// written fields, and a client's next push would project the rest into
-/// the row), then the patch. Returns the projection.
+/// A server write of a Postgres CRDT row: the doc takes the row's values it
+/// lacks first (a row with no doc gets one; otherwise the patch would make
+/// a doc holding only the written fields, and a client's next read would
+/// start from nulls), then the patch. Returns the projection.
 pub(crate) fn pg_crdt_patch<C: pylon_storage::pg_exec::PgConn>(
     crdt: &pg_loro_store::PgLoroStore,
     conn: &mut C,
@@ -5639,10 +5693,29 @@ pub(crate) fn pg_crdt_patch<C: pylon_storage::pg_exec::PgConn>(
     id: &str,
     data: &serde_json::Value,
 ) -> Result<serde_json::Value, loro_store::LoroStoreError> {
-    crdt.seed_missing_doc(conn, &ent.name, id, fields, |c| {
+    crdt.seed_missing_fields(conn, &ent.name, id, fields, |c| {
         pg_row_for_doc(c, ent, fields, id)
     })?;
     crdt.apply_patch(conn, &ent.name, id, fields, data)
+}
+
+/// The row's values for the fields a doc does not hold (`held`): what a doc
+/// left partial by an older build takes from its row. A null is not a
+/// value the doc lacks.
+pub(crate) fn missing_values(
+    fields: &[pylon_crdt::CrdtField],
+    held: &[String],
+    row: &serde_json::Value,
+) -> Vec<(String, serde_json::Value)> {
+    fields
+        .iter()
+        .filter(|f| !held.contains(&f.name))
+        .filter_map(|f| {
+            row.get(&f.name)
+                .filter(|v| !v.is_null())
+                .map(|v| (f.name.clone(), v.clone()))
+        })
+        .collect()
 }
 
 pub(crate) fn seed_values(

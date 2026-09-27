@@ -70,24 +70,52 @@ pub fn ensure_sidecar(client: &mut Client) -> Result<(), LoroStoreError> {
     client
         .execute(CREATE_PG_SIDECAR_SQL, &[])
         .map(|_| ())
-        .map_err(|e| LoroStoreError::Storage(format!("create pg sidecar: {e}")))?;
+        .map_err(|e| pg_err("create pg sidecar", e))?;
     client
         .batch_execute(CREATE_PG_SIDE_TABLES_SQL)
-        .map_err(|e| LoroStoreError::Storage(format!("create pg side tables: {e}")))
+        .map_err(|e| pg_err("create pg side tables", e))
 }
 
-/// Delete a row's snapshot and side records, in the caller's transaction.
+/// A Postgres error with its server message and SQLSTATE (`postgres::Error`
+/// displays only "db error").
+pub(crate) fn pg_err(what: &str, e: postgres::Error) -> LoroStoreError {
+    match e.as_db_error() {
+        Some(db) => LoroStoreError::Storage(format!(
+            "{what}: {} (SQLSTATE {})",
+            db.message(),
+            db.code().code()
+        )),
+        None => LoroStoreError::Storage(format!("{what}: {e}")),
+    }
+}
+
+/// Take the row's CRDT advisory lock for the rest of the transaction.
+/// Every CRDT write, and a delete, takes it before any row lock, so they
+/// queue on it instead of locking the snapshot, side, and entity rows in
+/// different orders.
+fn lock_doc<C: PgConn>(conn: &mut C, entity: &str, row_id: &str) -> Result<(), LoroStoreError> {
+    conn.execute(
+        "SELECT pg_advisory_xact_lock($1::int, $2::int)",
+        &[&pg_advisory_key(entity), &pg_advisory_key(row_id)],
+    )
+    .map(|_| ())
+    .map_err(|e| pg_err("crdt advisory lock", e))
+}
+
+/// Delete a row's snapshot and side records, in the caller's transaction,
+/// under the row's advisory lock (a write in flight finishes first).
 pub fn delete_row_records<C: PgConn>(
     conn: &mut C,
     entity: &str,
     row_id: &str,
 ) -> Result<(), LoroStoreError> {
+    lock_doc(conn, entity, row_id)?;
     for table in std::iter::once("_pylon_crdt_snapshots").chain(ROW_SIDE_TABLES) {
         conn.execute(
             &format!("DELETE FROM {table} WHERE entity = $1 AND row_id = $2"),
             &[&entity, &row_id],
         )
-        .map_err(|e| LoroStoreError::Storage(format!("delete from {table}: {e}")))?;
+        .map_err(|e| pg_err(&format!("delete from {table}"), e))?;
     }
     Ok(())
 }
@@ -113,9 +141,7 @@ pub fn prune_batch(
             "SELECT row_id FROM _pylon_crdt_snapshots WHERE entity = $1 LIMIT $2".to_string()
         }
     };
-    let err = |e: postgres::Error| {
-        LoroStoreError::Storage(format!("prune pg snapshots of {entity}: {e}"))
-    };
+    let err = |e: postgres::Error| pg_err(&format!("prune pg snapshots of {entity}"), e);
     let mut tx = client.transaction().map_err(err)?;
     let row_ids: Vec<String> = tx
         .query(sql.as_str(), &[&entity, &batch])
@@ -135,7 +161,7 @@ pub fn snapshot_entities(client: &mut Client) -> Result<Vec<String>, LoroStoreEr
     client
         .query("SELECT DISTINCT entity FROM _pylon_crdt_snapshots", &[])
         .map(|rows| rows.into_iter().map(|r| r.get::<_, String>(0)).collect())
-        .map_err(|e| LoroStoreError::Storage(format!("list pg snapshot entities: {e}")))
+        .map_err(|e| pg_err("list pg snapshot entities", e))
 }
 
 /// The side records in a Postgres database, on the caller's connection
@@ -154,7 +180,7 @@ impl<C: PgConn> SideRecords for PgSide<'_, C> {
                 "SELECT peer FROM _pylon_crdt_synthetic WHERE entity = $1 AND row_id = $2",
                 &[&entity, &row_id],
             )
-            .map_err(|e| LoroStoreError::Storage(format!("read synthetic peers: {e}")))?;
+            .map_err(|e| pg_err("read synthetic peers", e))?;
         Ok(rows
             .into_iter()
             .map(|r| r.get::<_, i64>(0) as u64)
@@ -174,7 +200,7 @@ impl<C: PgConn> SideRecords for PgSide<'_, C> {
                 &[&entity, &row_id, &(peer as i64)],
             )
             .map(|_| ())
-            .map_err(|e| LoroStoreError::Storage(format!("record a synthetic peer: {e}")))
+            .map_err(|e| pg_err("record a synthetic peer", e))
     }
 
     fn read_json(
@@ -190,7 +216,7 @@ impl<C: PgConn> SideRecords for PgSide<'_, C> {
                 &format!("SELECT {key}, {value} FROM {name} WHERE entity = $1 AND row_id = $2"),
                 &[&entity, &row_id],
             )
-            .map_err(|e| LoroStoreError::Storage(format!("read {name}: {e}")))?;
+            .map_err(|e| pg_err(&format!("read {name}"), e))?;
         Ok(rows.into_iter().map(|r| (r.get(0), r.get(1))).collect())
     }
 
@@ -214,7 +240,7 @@ impl<C: PgConn> SideRecords for PgSide<'_, C> {
                 &[&entity, &row_id, &key, &json],
             )
             .map(|_| ())
-            .map_err(|e| LoroStoreError::Storage(format!("write {name}: {e}")))
+            .map_err(|e| pg_err(&format!("write {name}"), e))
     }
 
     fn delete_json(
@@ -231,7 +257,7 @@ impl<C: PgConn> SideRecords for PgSide<'_, C> {
                 &[&entity, &row_id, &key],
             )
             .map(|_| ())
-            .map_err(|e| LoroStoreError::Storage(format!("delete from {name}: {e}")))
+            .map_err(|e| pg_err(&format!("delete from {name}"), e))
     }
 }
 
@@ -242,6 +268,12 @@ pub struct PgLoroStore {
     /// Bounded; see [`crate::crdt_cache`].
     docs: crate::crdt_cache::DocCache,
     peers: Peers,
+    /// When the Postgres server this process last wrote through started
+    /// (`pg_postmaster_start_time()`, epoch seconds). A failover or a
+    /// point-in-time restore answers from another server instance, whose
+    /// data can be behind what this process wrote: the peers are renewed,
+    /// so no op id is used twice.
+    server_started: Mutex<Option<f64>>,
 }
 
 impl Default for PgLoroStore {
@@ -255,7 +287,26 @@ impl PgLoroStore {
         Self {
             docs: Default::default(),
             peers: Peers::new(),
+            server_started: Mutex::new(None),
         }
+    }
+
+    /// Record the start time of the Postgres server a write reads from.
+    /// When it changed (a failover, restart, or restore), the peers are
+    /// renewed and the cache cleared. Returns whether it changed.
+    fn note_server_start(&self, started: f64) -> bool {
+        let mut known = self.server_started.lock().unwrap();
+        let changed = known.is_some_and(|k| k != started);
+        if changed {
+            tracing::warn!(
+                "[crdt-pg] the Postgres server changed (failover, restart, or restore): \
+                 new CRDT peers for this process"
+            );
+            self.peers.renew();
+            self.docs.clear();
+        }
+        *known = Some(started);
+        changed
     }
 
     /// Hydrate a doc for a CRDT write, taking a transaction-scoped
@@ -280,27 +331,19 @@ impl PgLoroStore {
         entity: &str,
         row_id: &str,
     ) -> Result<(LoroDoc, bool), LoroStoreError> {
-        // pg_advisory_xact_lock(key1, key2) — two-key form fits the
-        // (entity, row_id) tuple naturally. We hash each side into an
-        // i32 so the same logical row maps to the same lock across
-        // processes. Released automatically at tx end.
-        let entity_key = pg_advisory_key(entity);
-        let row_key = pg_advisory_key(row_id);
-        conn.execute(
-            "SELECT pg_advisory_xact_lock($1::int, $2::int)",
-            &[&entity_key, &row_key],
-        )
-        .map_err(|e| LoroStoreError::Storage(format!("crdt advisory lock: {e}")))?;
-
-        let snapshot: Option<Vec<u8>> = conn
+        lock_doc(conn, entity, row_id)?;
+        let row = conn
             .query_opt(
-                "SELECT snapshot FROM _pylon_crdt_snapshots \
-                 WHERE entity = $1 AND row_id = $2",
+                "SELECT (SELECT snapshot FROM _pylon_crdt_snapshots \
+                         WHERE entity = $1 AND row_id = $2), \
+                        extract(epoch FROM pg_postmaster_start_time())::float8",
                 &[&entity, &row_id],
             )
-            .map_err(|e| LoroStoreError::Storage(format!("read pg snapshot: {e}")))?
-            .map(|r| r.get::<_, Vec<u8>>(0));
-
+            .map_err(|e| pg_err("read pg snapshot", e))?
+            .ok_or_else(|| LoroStoreError::Storage("read pg snapshot: no row".into()))?;
+        let snapshot: Option<Vec<u8>> = row.get(0);
+        let started: f64 = row.get(1);
+        self.note_server_start(started);
         let doc = doc_from_snapshot(snapshot.as_deref(), &self.peers)?;
         Ok((doc, snapshot.is_some()))
     }
@@ -343,7 +386,7 @@ impl PgLoroStore {
                 "SELECT snapshot FROM _pylon_crdt_snapshots WHERE entity = $1 AND row_id = $2",
                 &[&entity, &row_id],
             )
-            .map_err(|e| LoroStoreError::Storage(format!("read pg snapshot: {e}")))?
+            .map_err(|e| pg_err("read pg snapshot", e))?
             .map(|r| r.get::<_, Vec<u8>>(0));
 
         let doc = doc_from_snapshot(snapshot.as_deref(), &self.peers)?;
@@ -368,7 +411,7 @@ impl PgLoroStore {
             &[&entity, &row_id, &snap],
         )
         .map(|_| ())
-        .map_err(|e| LoroStoreError::Storage(format!("persist pg snapshot: {e}")))
+        .map_err(|e| pg_err("persist pg snapshot", e))
     }
 
     /// Apply a JSON patch, persist the new snapshot, return the
@@ -376,12 +419,11 @@ impl PgLoroStore {
     /// projected JSON into the entity row — typically done in the
     /// same `with_transaction_raw` so both writes share BEGIN/COMMIT.
     ///
-    /// Multi-replica safe: hydrates with `SELECT ... FOR UPDATE`,
-    /// which serializes concurrent updates to the same row across
-    /// processes. Bypasses the in-memory cache on the write path —
-    /// the cache only updates after commit (see `cache_after_commit`),
-    /// so a stale cache from a different process can't shadow the
-    /// row-locked snapshot we just read.
+    /// Multi-replica safe: hydrates under the row's advisory lock, which
+    /// serializes concurrent writes to the same row across processes.
+    /// Bypasses the in-memory cache on the write path, so a stale cache
+    /// from a different process can't shadow the snapshot just read; the
+    /// caller evicts the row's cached doc after the transaction ends.
     pub fn apply_patch<C: PgConn>(
         &self,
         conn: &mut C,
@@ -393,12 +435,7 @@ impl PgLoroStore {
         let (doc, _) = self.hydrate_for_write(conn, entity, row_id)?;
         patch_doc(&mut PgSide(conn), &doc, entity, row_id, fields, patch)?;
         Self::persist_snapshot(conn, entity, row_id, &doc)?;
-        let projected = project_doc_to_json(&doc, fields);
-        // Cache update happens through `cache_after_commit` from the
-        // runtime layer once the surrounding tx commits. If the tx
-        // rolls back, no cache write happens — so the next read
-        // hydrates from the (unchanged) sidecar.
-        Ok(projected)
+        Ok(project_doc_to_json(&doc, fields))
     }
 
     /// Apply a binary update from a peer. Returns the projected JSON
@@ -485,7 +522,7 @@ impl PgLoroStore {
             &[&entity, &row_id],
         )
         .map(|r| r.is_some())
-        .map_err(|e| LoroStoreError::Storage(format!("read pg snapshot: {e}")))
+        .map_err(|e| pg_err("read pg snapshot", e))
     }
 
     /// The row's doc as stored, as JSON for `fields`.
@@ -501,11 +538,14 @@ impl PgLoroStore {
         Ok(project_doc_to_json(&doc, fields))
     }
 
-    /// Give a row with no doc one from its values (a row from before its
-    /// entity was CRDT, or written around the runtime), under the row's
-    /// advisory lock. Returns whether it did. `row` is the row as the doc
-    /// holds it (see `Runtime::crdt_row_for_doc`).
-    pub fn seed_missing_doc<C: PgConn>(
+    /// Bring a row's doc up to its values where the doc lacks them, under
+    /// the row's advisory lock: a row with no doc (from before its entity
+    /// was CRDT, or written around the runtime) gets one, stored even when
+    /// empty; a doc without a field the row holds (left by an older build,
+    /// which made a doc of only the fields a server update wrote) takes the
+    /// row's value. Returns whether the doc changed. `row` reads the row as
+    /// the doc holds it (see `crate::pg_row_for_doc`).
+    pub fn seed_missing_fields<C: PgConn>(
         &self,
         conn: &mut C,
         entity: &str,
@@ -513,25 +553,46 @@ impl PgLoroStore {
         fields: &[CrdtField],
         row: impl FnOnce(&mut C) -> Result<Option<Value>, LoroStoreError>,
     ) -> Result<bool, LoroStoreError> {
-        let (_, had_doc) = self.hydrate_for_write(conn, entity, row_id)?;
-        if had_doc {
+        let (doc, had_doc) = self.hydrate_for_write(conn, entity, row_id)?;
+        let held = crate::loro_store::held_keys(&doc, fields);
+        if had_doc && held.len() == fields.len() {
             return Ok(false);
         }
         let Some(row) = row(conn)? else {
             return Ok(false);
         };
-        let failed = self.apply_seed_fields(
-            conn,
-            entity,
-            row_id,
-            fields,
-            crate::seed_values(fields, &row),
-        )?;
+        let values = crate::missing_values(fields, &held, &row);
+        if values.is_empty() {
+            if !had_doc {
+                Self::persist_snapshot(conn, entity, row_id, &doc)?;
+                self.evict(entity, row_id);
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+        let failed = self.apply_seed_fields(conn, entity, row_id, fields, values)?;
         for (field, why) in failed {
             tracing::warn!(entity, row_id, field = %field, "seed a CRDT doc from its row: {why}");
         }
         self.evict(entity, row_id);
         Ok(true)
+    }
+
+    /// Which of `fields` the row's doc holds, from the read cache. None
+    /// when the row has no stored snapshot.
+    pub fn held_fields<C: PgConn>(
+        &self,
+        conn: &mut C,
+        entity: &str,
+        row_id: &str,
+        fields: &[CrdtField],
+    ) -> Result<Option<Vec<String>>, LoroStoreError> {
+        if !Self::has_snapshot(conn, entity, row_id)? {
+            return Ok(None);
+        }
+        let handle = self.get_or_hydrate_read(conn, entity, row_id)?;
+        let doc = handle.lock().unwrap();
+        Ok(Some(crate::loro_store::held_keys(&doc, fields)))
     }
 
     /// Full snapshot for the row. Returns the encoded LoroDoc bytes
@@ -612,7 +673,7 @@ impl PgLoroStore {
                 "SELECT snapshot FROM _pylon_crdt_snapshots WHERE entity = $1 AND row_id = $2",
                 &[&entity, &row_id],
             )
-            .map_err(|e| LoroStoreError::Storage(format!("read pg snapshot: {e}")))?
+            .map_err(|e| pg_err("read pg snapshot", e))?
             .map(|r| r.get::<_, Vec<u8>>(0));
         let bytes = snap.unwrap_or_default();
         // If the row exists, return its bytes verbatim. If it
@@ -624,32 +685,6 @@ impl PgLoroStore {
         } else {
             Ok(bytes)
         }
-    }
-
-    /// Refresh the in-memory cache entry for a row from the
-    /// just-committed sidecar bytes. Called by the runtime layer
-    /// after `with_transaction_raw` commits the CRDT write — this
-    /// way the cache only ever reflects what's on disk, and a
-    /// rolled-back tx leaves no cache poison.
-    ///
-    /// On any read error we evict instead of caching stale state.
-    pub fn cache_after_commit<C: PgConn>(&self, conn: &mut C, entity: &str, row_id: &str) {
-        let snap_result = conn.query_opt(
-            "SELECT snapshot FROM _pylon_crdt_snapshots WHERE entity = $1 AND row_id = $2",
-            &[&entity, &row_id],
-        );
-        let bytes = match snap_result {
-            Ok(Some(row)) => row.get::<_, Vec<u8>>(0),
-            _ => {
-                self.evict(entity, row_id);
-                return;
-            }
-        };
-        let Ok(doc) = doc_from_snapshot(Some(&bytes), &self.peers) else {
-            self.evict(entity, row_id);
-            return;
-        };
-        self.docs.insert(entity, row_id, Arc::new(Mutex::new(doc)));
     }
 
     /// Drop a row's cached doc. Next access re-hydrates from the PG
@@ -773,14 +808,7 @@ impl PgCrdtHook for PgCrdtHookImpl {
     }
 
     fn after_commit(&self, entity: &str, id: &str) {
-        // Refresh cache via a fresh client connection. Can't pass
-        // the tx in here since it's already committed and dropped.
-        // The cache_after_commit method on PgLoroStore expects a
-        // PgConn — we don't have one here. Simplest: evict so the
-        // next read re-hydrates from the persisted snapshot. This
-        // is correct (just one extra round-trip for the next read);
-        // the alternative would require the runtime to hand us a
-        // fresh client which is more plumbing for marginal benefit.
+        // The next read hydrates from the committed snapshot.
         self.crdt.evict(entity, id);
     }
 
@@ -822,4 +850,27 @@ fn crdt_fields_for(
         });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A write through another Postgres server instance (a failover or a
+    /// restore) takes new peers; the same server keeps them.
+    #[test]
+    fn a_new_server_start_renews_the_peers() {
+        let store = PgLoroStore::new();
+        let peers = |s: &PgLoroStore| (s.peers.server(), s.peers.synthetic());
+        let first = peers(&store);
+        assert!(!store.note_server_start(100.0));
+        assert!(!store.note_server_start(100.0));
+        assert_eq!(peers(&store), first);
+        assert!(store.note_server_start(250.5));
+        let renewed = peers(&store);
+        assert_ne!(renewed.0, first.0);
+        assert_ne!(renewed.1, first.1);
+        assert!(!store.note_server_start(250.5));
+        assert_eq!(peers(&store), renewed);
+    }
 }

@@ -402,22 +402,14 @@ impl Runtime {
                         };
                         json_results.push(result);
                     }
-                    // Refresh cache for CRDT rows we touched.
-                    for (entity, id) in &crdt_touched {
-                        pg.crdt.cache_after_commit(tx, entity, id);
-                    }
                     Ok(json_results)
                 });
-
-        match result {
-            Ok(json_results) => Ok((true, json_results)),
-            Err(e) => {
-                for (entity, id) in &crdt_touched {
-                    pg.crdt.evict(entity, id);
-                }
-                Err(e)
-            }
+        // The next read of each CRDT row this touched hydrates from what
+        // committed.
+        for (entity, id) in &crdt_touched {
+            pg.crdt.evict(entity, id);
         }
+        result.map(|json_results| (true, json_results))
     }
 }
 
@@ -1121,8 +1113,20 @@ impl DataStore for Runtime {
                                  no materialized row — refusing to commit an orphan snapshot."
                             ),
                         };
-                        // The doc's advisory lock first, then the row's (the
-                        // order every CRDT write takes them).
+                        // A doc left partial by an older build takes the row's
+                        // values it lacks first, as a read does. The doc's
+                        // advisory lock comes before the row's (the order
+                        // every CRDT write takes them).
+                        if crate::pg_loro_store::PgLoroStore::has_snapshot(tx, entity, row_id)
+                            .map_err(crdt_err)?
+                        {
+                            pg_backend
+                                .crdt
+                                .seed_missing_fields(tx, entity, row_id, &crdt_fields, |c| {
+                                    crate::pg_row_for_doc(c, &ent, &crdt_fields, row_id)
+                                })
+                                .map_err(crdt_err)?;
+                        }
                         let (before_push, touched, had_doc) = pg_backend
                             .crdt
                             .apply_client_update(tx, entity, row_id, &crdt_fields, update)
@@ -1208,18 +1212,10 @@ impl DataStore for Runtime {
                             code: "CRDT_SNAPSHOT_FAILED".into(),
                             message: format!("post-update snapshot {entity}/{row_id}: {e}"),
                         })?;
-                        // Refresh the cache so the next reader on this
-                        // process skips the round-trip.
-                        pg_backend.crdt.cache_after_commit(tx, entity, row_id);
                         Ok(snap)
                     });
-            if result.is_err() {
-                // Same cache-coherency hygiene as Runtime::insert /
-                // update — the in-memory doc absorbed the peer's
-                // update before the tx rolled back, so evict to
-                // force re-hydration from the persisted snapshot.
-                pg_backend.crdt.evict(entity, row_id);
-            }
+            // The next read hydrates from what committed.
+            pg_backend.crdt.evict(entity, row_id);
             return result;
         }
         // Find the entity so we can build the projection field list +
@@ -1244,6 +1240,20 @@ impl DataStore for Runtime {
 
         let conn = self.lock_conn_pub().map_err(into_data_error)?;
         crate::with_write_tx(self, &conn, || -> Result<Vec<u8>, crate::RuntimeError> {
+            // A row a delete removed after the router's check: no snapshot
+            // for a row that does not exist (as on Postgres).
+            if self
+                .crdt_row_for_doc(&conn, &ent, row_id, &crdt_fields)?
+                .is_none()
+            {
+                return Err(crate::RuntimeError {
+                    code: "ENTITY_NOT_FOUND".into(),
+                    message: format!(
+                        "Peer-pushed CRDT update targets {entity}/{row_id} which has no \
+                         materialized row — refusing to commit an orphan snapshot."
+                    ),
+                });
+            }
             let (has_doc, before) =
                 self.prepare_crdt_doc_for_push(&conn, &ent, row_id, &crdt_fields)?;
             // Apply the update to the LoroDoc + persist the new snapshot
