@@ -306,7 +306,7 @@ Turn it on for the server with a UDP port:
 
 | Variable | Meaning |
 | --- | --- |
-| `PYLON_WEBTRANSPORT_PORT` | UDP port to serve WebTransport on. Unset: off. |
+| `PYLON_WEBTRANSPORT_PORT` | UDP port to serve WebTransport on. Unset: off. 443 is the best choice: networks that block other UDP ports usually allow it. The Docker image lets its non-root user bind it; in a container run with no-new-privileges, use a port of 1024 or more. |
 | `PYLON_WEBTRANSPORT_BIND` | Address to bind. Default: every address. On Fly, `fly-global-services`. |
 | `PYLON_WEBTRANSPORT_URL` | The URL clients connect to, `https://<host>:<port>/shard`. Default `https://localhost:<port>/shard`. |
 
