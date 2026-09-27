@@ -706,7 +706,20 @@ async fn run_connection(
             // client that stopped reading; or the client went silent.
             _ = check.tick() => {
                 if queue.is_closed() {
-                    break ConnectionEnd::Closed("client too slow; outbound queue closed".into());
+                    // A queue closes for a stopped shard or a transfer too.
+                    // The writer then drains it, closes the socket, and
+                    // returns the reason at once; only a writer stuck in a
+                    // send misses this wait.
+                    let why = match tokio::time::timeout(Duration::from_secs(1), &mut writer).await {
+                        Ok(stopped) => {
+                            stopped.unwrap_or_else(|e| format!("writer task failed: {e}"))
+                        }
+                        Err(_) if shard.is_running() => {
+                            "client too slow; outbound queue closed".to_string()
+                        }
+                        Err(_) => "shard stopped".to_string(),
+                    };
+                    break ConnectionEnd::Closed(why);
                 }
                 if last_activity.elapsed() >= IDLE_TIMEOUT {
                     break ConnectionEnd::Closed("idle timeout".into());

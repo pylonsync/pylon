@@ -426,7 +426,12 @@ fn host_time_in_a_tick_does_not_count_against_the_budget() {
     // the same tick budget.
     s.set_on_tick(|_, _| std::thread::sleep(Duration::from_millis(200)));
     for _ in 0..3 {
-        send(&s, "u1", json!({ "input": { "move": { "dx": 1, "dy": 0 } } })).unwrap();
+        send(
+            &s,
+            "u1",
+            json!({ "input": { "move": { "dx": 1, "dy": 0 } } }),
+        )
+        .unwrap();
         s.run_tick();
     }
     assert!(s.is_running(), "{:?}", s.with_state(|sim| sim.failure()));
