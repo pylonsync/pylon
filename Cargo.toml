@@ -53,6 +53,8 @@ postgres = { version = "0.19", features = ["with-serde_json-1", "with-chrono-0_4
 # OpenSSL.
 tokio-postgres-rustls = { version = "0.13" }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+# WebTransport for shard connections (HTTP/3 over QUIC); ring, like rustls.
+wtransport = { version = "0.7", default-features = false, features = ["ring", "self-signed"] }
 rustls-native-certs = "0.8"
 rustls-pemfile = "2"
 # OIDC provider RS256 id_token signing. `pem` feature for PKCS#8

@@ -47,6 +47,7 @@ serde_json = { workspace = true }
 tiny_http = { workspace = true }
 tungstenite = { workspace = true }
 tokio = { workspace = true }
+wtransport = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
 tracing = { workspace = true }

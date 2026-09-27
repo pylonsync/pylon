@@ -78,6 +78,7 @@ fn run(name: &str, precision: f32, budget: usize) {
                     }),
                     dropped: 0,
                     queue_full: false,
+                    datagram: None,
                 },
             );
             if sub == 0 {

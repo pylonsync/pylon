@@ -196,6 +196,7 @@ impl Reference {
         FrameOutput {
             bytes: frame.finish(),
             delta_of: (!full).then_some(input.dropped),
+            datagrams: Vec::new(),
         }
     }
 }
@@ -344,6 +345,7 @@ fn run(seed: u64, budget: usize, with_area: bool) {
                 area,
                 dropped: sub.dropped,
                 queue_full,
+                datagram: None,
             };
             let a = fast.frame(&store, &config, tick, input);
             let input = FrameInput {
@@ -352,6 +354,7 @@ fn run(seed: u64, budget: usize, with_area: bool) {
                 area,
                 dropped: sub.dropped,
                 queue_full,
+                datagram: None,
             };
             let b = slow.frame(&store, &config, tick, input);
             assert_eq!(

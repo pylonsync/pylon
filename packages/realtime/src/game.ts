@@ -26,7 +26,12 @@
  */
 
 import type { ShardClock } from "./clock";
-import { connectShard, type ShardClient, type ShardConnectOptions } from "./connection";
+import {
+  connectShard,
+  type ShardClient,
+  type ShardConnectOptions,
+  type ShardTransport,
+} from "./connection";
 import {
   EntityInterpolator,
   type InterpolatedEntity,
@@ -37,6 +42,11 @@ import type { EntityTable, ReplicationSummary } from "./replication";
 import type { ShardInputRejection } from "./wire";
 
 export interface ShardGameOptions extends ShardConnectOptions {
+  /**
+   * Default `"auto"`: WebTransport where the browser and the app support
+   * it, else a WebSocket. See `ShardTransport`.
+   */
+  transport?: ShardTransport;
   /**
    * How far behind the shard's estimated current tick entities are drawn,
    * in ms. It must cover the time between frames plus network jitter.
@@ -94,7 +104,11 @@ export function connectShardGame<TInput = unknown>(
   options: ShardGameOptions,
 ): ShardGame<TInput> {
   const now = options.now ?? (() => performance.now());
-  const connection = connectShard<unknown, TInput>(shardId, { ...options, now });
+  const connection = connectShard<unknown, TInput>(shardId, {
+    transport: "auto",
+    ...options,
+    now,
+  });
   const interpolator = new EntityInterpolator(options.interpolation);
   const delayMs = options.interpolationDelayMs ?? 100;
   const predictors: Array<Predictor<unknown, TInput>> = [];

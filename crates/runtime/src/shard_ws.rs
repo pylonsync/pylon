@@ -38,6 +38,12 @@ use tokio_tungstenite::tungstenite::{
 use crate::ip_limit::IpConnCounter;
 pub use crate::ip_limit::IpConnGuard;
 
+/// Bounds on a version 3 connection's datagram size (`?dmax=`). The low end
+/// leaves room for a datagram's header and one update; the high end is the
+/// largest UDP payload.
+const MIN_DATAGRAM: usize = 128;
+const MAX_DATAGRAM: usize = 65_507;
+
 /// The server sends a ping this often.
 const PING_INTERVAL: Duration = Duration::from_secs(20);
 /// A connection that sends nothing (not even a pong) for this long is
@@ -96,7 +102,7 @@ fn worker_threads() -> usize {
 
 /// The runtime every shard connection runs on, whichever port it came in
 /// on. Built on first use.
-fn runtime() -> Option<&'static tokio::runtime::Runtime> {
+pub(crate) fn runtime() -> Option<&'static tokio::runtime::Runtime> {
     static RT: std::sync::OnceLock<Option<tokio::runtime::Runtime>> = std::sync::OnceLock::new();
     RT.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
@@ -125,10 +131,12 @@ fn main_port_ip_counter() -> &'static Arc<IpConnCounter> {
     C.get_or_init(|| ip_counter(max_connections_per_ip_from_env()))
 }
 
-/// Reserve a main-port shard connection slot for `ip`. `None` when the IP
-/// is at its cap; the caller answers 429 before upgrading.
+/// Reserve a main-port shard connection slot for `ip` (WebSocket on `/shard`
+/// and WebTransport count together). `None` when the IP is at its cap; the
+/// caller answers 429 before upgrading.
 pub fn admit_main_port(ip: std::net::IpAddr) -> Option<IpConnGuard> {
-    main_port_ip_counter().acquire(ip)
+    // `::ffff:1.2.3.4` and `1.2.3.4` are one client.
+    main_port_ip_counter().acquire(ip.to_canonical())
 }
 
 /// Run a shard connection that arrived on the main HTTP port at `/shard`.
@@ -430,7 +438,7 @@ async fn handle_connection(
 
 /// How a shard connection ended. Written to the request log when the
 /// connection closes.
-enum ConnectionEnd {
+pub(crate) enum ConnectionEnd {
     /// The client closed the connection.
     ClientClosed,
     /// The server closed the connection, or the connection failed. The text
@@ -443,15 +451,26 @@ enum ConnectionEnd {
 /// nothing about a connection that the server rejects right after the
 /// upgrade. This row shows the reason.
 fn log_connection_end(started: Instant, end: &ConnectionEnd) {
+    log_connection_end_as("WS", started, end);
+}
+
+/// [`log_connection_end`] for a transport named `method` in the request
+/// log ("WS", "WT").
+pub(crate) fn log_connection_end_as(method: &str, started: Instant, end: &ConnectionEnd) {
     let ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
     let reason = match end {
         ConnectionEnd::ClientClosed => None,
         ConnectionEnd::Closed(reason) => {
-            tracing::info!("[shard-ws] connection closed after {ms}ms: {reason}");
+            let tag = if method == "WT" {
+                "shard-wt"
+            } else {
+                "shard-ws"
+            };
+            tracing::info!("[{tag}] connection closed after {ms}ms: {reason}");
             Some(reason.as_str())
         }
     };
-    crate::metrics::record_log_row("WS", "/shard", 101, ms, 0, 0, reason);
+    crate::metrics::record_log_row(method, "/shard", 101, ms, 0, 0, reason);
 }
 
 /// Read the shard parameters from an upgrade request's URI and headers.
@@ -518,12 +537,18 @@ async fn run_connection(
         return ConnectionEnd::Closed("missing ?shard= parameter".into());
     };
     let sid = query_param(&query, "sid").unwrap_or_else(|| "anon".to_string());
-    // Wire protocol version (see pylon_realtime::wire): `?v=2`, else 1.
-    let version: u8 = if query_param(&query, "v").as_deref() == Some("2") {
-        2
-    } else {
-        1
+    // Wire protocol version (see pylon_realtime::wire): `?v=3`, `?v=2`,
+    // else 1. Version 3 carries replication updates as datagrams of up to
+    // `dmax` bytes (default 1200).
+    let version: u8 = match query_param(&query, "v").as_deref() {
+        Some("3") => 3,
+        Some("2") => 2,
+        _ => 1,
     };
+    let datagram_max: usize = query_param(&query, "dmax")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1200)
+        .clamp(MIN_DATAGRAM, MAX_DATAGRAM);
 
     // Resolve auth token. Preference order:
     //   1. Authorization: Bearer ...   (native clients)
@@ -568,7 +593,14 @@ async fn run_connection(
             subscriber_id.clone(),
             shard_auth.clone(),
         );
-        tokio::task::spawn_blocking(move || shard.add_queued_subscriber(sid, &auth)).await
+        tokio::task::spawn_blocking(move || {
+            if version == 3 {
+                shard.add_queued_datagram_subscriber(sid, &auth, datagram_max)
+            } else {
+                shard.add_queued_subscriber(sid, &auth)
+            }
+        })
+        .await
     };
     let joined = match joined {
         Ok(r) => r,
@@ -613,40 +645,16 @@ async fn run_connection(
                         .or(Some(String::new()));
                 }
                 let payload = match (version, frame.kind) {
-                    (2, FrameKind::Snapshot) => wire::frame_v2(
-                        wire::kind::SNAPSHOT,
-                        codec,
-                        frame.tick,
-                        frame.ack,
-                        &frame.bytes,
-                    ),
-                    (2, FrameKind::InputRejected) => wire::frame_v2(
-                        wire::kind::INPUT_REJECTED,
-                        codec,
-                        frame.tick,
-                        frame.ack,
-                        &frame.bytes,
-                    ),
-                    (2, FrameKind::Replication) => wire::frame_v2(
-                        wire::kind::REPLICATION,
-                        wire::codec::REPLICATION,
-                        frame.tick,
-                        frame.ack,
-                        &frame.bytes,
-                    ),
-                    (2, FrameKind::Transfer) => wire::frame_v2(
-                        wire::kind::TRANSFER,
-                        wire::codec::JSON,
-                        frame.tick,
-                        frame.ack,
-                        &frame.bytes,
-                    ),
+                    // Only a version 3 subscription gets datagrams.
+                    (2, FrameKind::Datagram) => continue,
+                    (2 | 3, _) => frame_v2_of(&frame, codec),
                     // Version 1 has no transfer frame: the close below says
                     // why the connection ends.
                     (_, FrameKind::Transfer) => continue,
                     (_, FrameKind::Snapshot) => wire::frame_v1(frame.tick, &frame.bytes),
                     // Version 1 has no rejection frame.
                     (_, FrameKind::InputRejected) => continue,
+                    (_, FrameKind::Datagram) => continue,
                     // Version 1 cannot mark a frame as replication.
                     (_, FrameKind::Replication) => {
                         let reason =
@@ -750,6 +758,39 @@ async fn run_connection(
             }
             // Binary frames are in the shard's codec in version 2, JSON in
             // version 1.
+            // Version 3: a type byte, then acks or an input in the shard's
+            // codec.
+            Message::Binary(bytes) if version == 3 => match bytes.first() {
+                Some(&wire::client::ACKS) => match wire::decode_datagram_acks(&bytes) {
+                    Some(acks) => queue.push_datagram_acks(&acks),
+                    None => break ConnectionEnd::Closed("malformed datagram acks".into()),
+                },
+                Some(&wire::client::INPUT) => {
+                    process_input(
+                        &shard,
+                        &queue,
+                        &subscriber_id,
+                        &shard_auth,
+                        shard.snapshot_format(),
+                        bytes[1..].to_vec(),
+                        version,
+                    )
+                    .await;
+                }
+                Some(&wire::client::JSON_INPUT) => {
+                    process_input(
+                        &shard,
+                        &queue,
+                        &subscriber_id,
+                        &shard_auth,
+                        SnapshotFormat::Json,
+                        bytes[1..].to_vec(),
+                        version,
+                    )
+                    .await;
+                }
+                _ => break ConnectionEnd::Closed("unknown client message type".into()),
+            },
             Message::Binary(bytes) => {
                 let format = if version == 2 {
                     shard.snapshot_format()
@@ -801,8 +842,21 @@ async fn close_with(sink: &mut WsSink, code: CloseCode, reason: String) {
 /// The push runs the authorize hook under the shard's state lock, which a
 /// tick holds, and it may run module code: it runs on a blocking thread, so
 /// a slow shard does not stall the async workers every connection shares.
+/// A queued frame as a wire version 2 (or 3) frame: the 18-byte header and
+/// the payload. `codec` is the shard's snapshot codec byte.
+pub(crate) fn frame_v2_of(frame: &pylon_realtime::Frame, codec: u8) -> Vec<u8> {
+    let (kind, codec) = match frame.kind {
+        FrameKind::Snapshot => (wire::kind::SNAPSHOT, codec),
+        FrameKind::InputRejected => (wire::kind::INPUT_REJECTED, codec),
+        FrameKind::Replication => (wire::kind::REPLICATION, wire::codec::REPLICATION),
+        FrameKind::Transfer => (wire::kind::TRANSFER, wire::codec::JSON),
+        FrameKind::Datagram => (wire::kind::DATAGRAM, wire::codec::REPLICATION),
+    };
+    wire::frame_v2(kind, codec, frame.tick, frame.ack, &frame.bytes)
+}
+
 /// The reader awaits it, so one connection's inputs stay in order.
-async fn process_input(
+pub(crate) async fn process_input(
     shard: &Arc<dyn pylon_realtime::DynShard>,
     queue: &Arc<OutboundQueue>,
     subscriber_id: &SubscriberId,
@@ -824,7 +878,7 @@ async fn process_input(
             return;
         }
     };
-    if version != 2 {
+    if version < 2 {
         return;
     }
     match pylon_realtime::encode_snapshot(&rejection, shard.snapshot_format()) {

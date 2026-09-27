@@ -25,9 +25,24 @@
 //! **Baselines.** A new subscription, and a subscription whose outbound
 //! queue dropped frames or is full, gets a full frame: the client clears
 //! its table and receives every entity in view.
+//!
+//! **Unreliable transports.** A subscription with
+//! [`FrameInput::datagram`] set (WebTransport) gets its spawns, despawns,
+//! and full frames as frames on the reliable stream, and its updates as
+//! datagrams (`pylon_replication::datagram`), which may be lost or come out
+//! of order. Updates there carry absolute positions. The client acks each
+//! datagram ([`Replicator::ack_datagrams`]); until an ack covers a change,
+//! the next datagrams send it again. An ack proves only that the client's
+//! state is *at least* that datagram's (it skips a datagram older than one
+//! it applied), so for each entity the replicator keeps every state the
+//! client may hold: the acked one and those sent after it. An axis goes out
+//! when any of them differs from the entity's position. An entity with too
+//! many unacked datagrams, or an update too big for a datagram, spawns
+//! again on the stream.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
+use pylon_replication::datagram::{encode_entry_into, DatagramBuilder};
 use pylon_replication::frame::{encode_update_body_into, quantize3, ComponentChange, FrameBuilder};
 use pylon_replication::{EntityId, Replicated};
 
@@ -139,20 +154,89 @@ pub struct FrameInput<'a> {
     pub dropped: u64,
     /// The queue is full, so this frame will replace what it holds.
     pub queue_full: bool,
+    /// Set for a subscription on an unreliable transport: updates go out as
+    /// datagrams (see the module docs). None: every change is in the frame.
+    pub datagram: Option<DatagramInput>,
+}
+
+/// How to build a subscription's datagrams.
+#[derive(Debug, Clone, Copy)]
+pub struct DatagramInput {
+    /// The largest datagram the connection carries, in bytes.
+    pub max_size: usize,
+    /// The highest `client_seq` the shard has processed for the subscriber.
+    pub input_ack: u64,
 }
 
 /// One subscription's frame, and how to queue it.
 pub struct FrameOutput {
+    /// The frame. For a subscription with datagrams, empty when the stream
+    /// has nothing this tick (no spawn, despawn, or full frame).
     pub bytes: Vec<u8>,
     /// For a delta, the queue's dropped-frame count its baseline assumed
     /// (see `OutboundQueue::push_replication`); None for a full frame.
     pub delta_of: Option<u64>,
+    /// The subscription's datagrams this tick (see [`FrameInput::datagram`]).
+    pub datagrams: Vec<Vec<u8>>,
+}
+
+/// How many datagrams per subscription the replicator remembers for acks.
+/// An ack for an older one counts for nothing: what it held is sent again.
+const DATAGRAMS_REMEMBERED: usize = 256;
+
+/// Unacked datagram updates one entity may have before it spawns again on
+/// the stream. Bounds what the replicator keeps for a client that stopped
+/// acking.
+const MAX_UNACKED_PER_ENTITY: usize = 32;
+
+/// An entity as a subscription on an unreliable transport may have it.
+#[derive(Debug)]
+struct DatagramSent {
+    spawn_seq: u64,
+    /// The tick of the stream frame that carried the spawn. Updates name
+    /// it (see `pylon_replication::datagram`), and a datagram the client
+    /// took before it had that frame changed nothing.
+    spawn_tick: u64,
+    /// The newest state the client is known to have: the store's change
+    /// counter and the quantized position.
+    acked_seq: u64,
+    acked_q: [i64; 3],
+    /// States sent after the acked one and not acked yet: (datagram number,
+    /// change counter, position). The client may hold any of them.
+    unacked: Vec<(u64, u64, [i64; 3])>,
+    /// The tick the entity was last sent (for priority).
+    sent_tick: u64,
+}
+
+/// A datagram being filled: the builder, its frame number, and the
+/// (entity, spawn tick) pairs it carries.
+type OpenDatagram = (DatagramBuilder, u64, Vec<(EntityId, u64)>);
+
+/// A subscription on an unreliable transport.
+#[derive(Debug, Default)]
+struct DatagramBaseline {
+    entities: Vec<(EntityId, DatagramSent)>,
+    precision: f32,
+    dropped: u64,
+    started: bool,
+    /// The last datagram number used.
+    last_datagram: u64,
+    /// The tick of the last stream frame built for the subscription.
+    last_stream_tick: u64,
+    /// Recent datagrams and the entities (and their spawn ticks) each held.
+    sent: VecDeque<(u64, Vec<(EntityId, u64)>)>,
+}
+
+#[derive(Debug)]
+enum Subscription {
+    Reliable(Baseline),
+    Datagram(DatagramBaseline),
 }
 
 /// Per-subscription baselines for one shard.
 #[derive(Debug, Default)]
 pub struct Replicator {
-    baselines: HashMap<u64, Baseline>,
+    baselines: HashMap<u64, Subscription>,
     /// The store's entities this tick, sorted by id (see `TickEntity`),
     /// and their ids.
     table: Vec<TickEntity>,
@@ -282,6 +366,20 @@ impl Replicator {
             }
             self.table_precision = Some(precision.to_bits());
         }
+        match input.datagram {
+            None => self.reliable_frame(store, config, tick, precision, input),
+            Some(d) => self.datagram_frame(store, config, tick, precision, input, d),
+        }
+    }
+
+    fn reliable_frame(
+        &mut self,
+        store: &Replicated,
+        config: &ReplicationConfig,
+        tick: u64,
+        precision: f32,
+        input: FrameInput<'_>,
+    ) -> FrameOutput {
         let Replicator {
             baselines,
             table,
@@ -293,7 +391,15 @@ impl Replicator {
             ..
         } = self;
         let visible: &[EntityId] = input.visible.unwrap_or(all_ids);
-        let base = baselines.entry(input.key).or_default();
+        let sub = baselines
+            .entry(input.key)
+            .or_insert_with(|| Subscription::Reliable(Baseline::default()));
+        if !matches!(sub, Subscription::Reliable(_)) {
+            *sub = Subscription::Reliable(Baseline::default());
+        }
+        let Subscription::Reliable(base) = sub else {
+            unreachable!("set above")
+        };
         // A new precision rescales every position the client has.
         let full = !base.started
             || input.dropped != base.dropped
@@ -479,6 +585,337 @@ impl Replicator {
         FrameOutput {
             bytes: frame.finish(),
             delta_of: (!full).then_some(input.dropped),
+            datagrams: Vec::new(),
+        }
+    }
+
+    fn datagram_frame(
+        &mut self,
+        store: &Replicated,
+        config: &ReplicationConfig,
+        tick: u64,
+        precision: f32,
+        input: FrameInput<'_>,
+        dg: DatagramInput,
+    ) -> FrameOutput {
+        let Replicator {
+            baselines,
+            table,
+            all_ids,
+            candidates,
+            bodies,
+            order,
+            ..
+        } = self;
+        let visible: &[EntityId] = input.visible.unwrap_or(all_ids);
+        let sub = baselines
+            .entry(input.key)
+            .or_insert_with(|| Subscription::Datagram(DatagramBaseline::default()));
+        if !matches!(sub, Subscription::Datagram(_)) {
+            *sub = Subscription::Datagram(DatagramBaseline::default());
+        }
+        let Subscription::Datagram(base) = sub else {
+            unreachable!("set above")
+        };
+        let full = !base.started
+            || input.dropped != base.dropped
+            || input.queue_full
+            || base.precision != precision;
+        base.started = true;
+        base.dropped = input.dropped;
+        base.precision = precision;
+        let mut frame = FrameBuilder::new(full, precision);
+        let mut stream_has_changes = full;
+        let old = std::mem::take(&mut base.entities);
+        let old = if full {
+            // The client clears its table; acks of earlier datagrams no
+            // longer describe anything it has.
+            base.sent.clear();
+            Vec::new()
+        } else {
+            old
+        };
+        // An update body that cannot share a datagram with anything else
+        // still has to fit this.
+        let max_body = dg
+            .max_size
+            .saturating_sub(pylon_replication::datagram::MAX_HEADER_LEN + 10);
+
+        candidates.clear();
+        bodies.clear();
+        let seq = store.seq();
+        let mut changes: Vec<ComponentChange<'_>> = Vec::new();
+        let mut entities: Vec<(EntityId, DatagramSent)> = Vec::with_capacity(visible.len());
+        let mut cursor = 0usize;
+        let mut had = old.into_iter().peekable();
+        let mut vis = visible.iter().copied().peekable();
+        // A spawn goes out in this tick's stream frame, whose header names
+        // the tick; the client records it as the entity's spawn tick.
+        let spawn = |frame: &mut FrameBuilder, t: &TickEntity| -> DatagramSent {
+            let e = store.get(t.id).expect("the tick table matches the store");
+            frame.spawn(
+                t.id,
+                t.q,
+                e.components
+                    .iter()
+                    .filter_map(|(c, v)| v.bytes.as_deref().map(|b| (*c, b)))
+                    .collect::<Vec<_>>()
+                    .into_iter(),
+            );
+            DatagramSent {
+                spawn_seq: t.spawn_seq,
+                spawn_tick: tick,
+                // The spawn carries the whole state, reliably.
+                acked_seq: seq,
+                acked_q: t.q,
+                unacked: Vec::new(),
+                sent_tick: tick,
+            }
+        };
+        loop {
+            let (id, sent) = match (vis.peek().copied(), had.peek().map(|(id, _)| *id)) {
+                (None, None) => break,
+                (Some(v), Some(h)) if h < v => {
+                    had.next();
+                    frame.despawn(h);
+                    stream_has_changes = true;
+                    continue;
+                }
+                (None, Some(h)) => {
+                    had.next();
+                    frame.despawn(h);
+                    stream_has_changes = true;
+                    continue;
+                }
+                (Some(v), Some(h)) if h == v => {
+                    vis.next();
+                    (v, had.next().map(|(_, s)| s))
+                }
+                (Some(v), _) => {
+                    vis.next();
+                    (v, None)
+                }
+            };
+            let (at, found) = seek(table, cursor, id);
+            cursor = at;
+            if !found {
+                if sent.is_some() {
+                    frame.despawn(id);
+                    stream_has_changes = true;
+                }
+                continue;
+            }
+            let t = table[at];
+            // A new entity under the id, or one whose unacked states piled
+            // up: spawn it again on the stream.
+            let sent = match sent {
+                Some(sent)
+                    if t.spawn_seq != sent.spawn_seq
+                        || sent.unacked.len() >= MAX_UNACKED_PER_ENTITY =>
+                {
+                    frame.despawn(id);
+                    None
+                }
+                other => other,
+            };
+            let Some(mut sent) = sent else {
+                let s = spawn(&mut frame, &t);
+                stream_has_changes = true;
+                entities.push((id, s));
+                continue;
+            };
+            if t.seq > sent.acked_seq {
+                // An axis goes out when any state the client may hold
+                // differs from the position.
+                let mut axes = [None; 3];
+                for (i, axis) in axes.iter_mut().enumerate() {
+                    if sent.acked_q[i] != t.q[i] || sent.unacked.iter().any(|u| u.2[i] != t.q[i]) {
+                        *axis = Some(t.q[i]);
+                    }
+                }
+                changes.clear();
+                if t.component_seq > sent.acked_seq {
+                    let e = store.get(id).expect("the tick table matches the store");
+                    changes.extend(
+                        e.components
+                            .iter()
+                            .filter(|(_, c)| c.seq > sent.acked_seq)
+                            .map(|(id, c)| (*id, c.bytes.as_deref())),
+                    );
+                }
+                if axes == [None; 3] && changes.is_empty() {
+                    // Every state the client may hold is this one.
+                    sent.acked_seq = seq;
+                    sent.acked_q = t.q;
+                    sent.unacked.clear();
+                } else {
+                    let start = bodies.len();
+                    encode_entry_into(bodies, sent.spawn_tick, axes, &changes);
+                    if bodies.len() - start > max_body {
+                        // Too big for any datagram: send the whole entity
+                        // again on the stream.
+                        bodies.truncate(start);
+                        frame.despawn(id);
+                        let s = spawn(&mut frame, &t);
+                        stream_has_changes = true;
+                        entities.push((id, s));
+                        continue;
+                    }
+                    let staleness = (tick.saturating_sub(sent.sent_tick) + 1) as f64;
+                    let distance = input.area.map_or(0.0, |a| {
+                        let (x, y) = config.plane.project(t.pos);
+                        let (dx, dy) = (x as f64 - a.x as f64, y as f64 - a.y as f64);
+                        (dx * dx + dy * dy).sqrt() / (a.radius as f64).max(1e-6)
+                    });
+                    let priority = staleness / (1.0 + distance);
+                    candidates.push(Candidate {
+                        id,
+                        priority: if priority.is_nan() { 0.0 } else { priority },
+                        body: (start, bodies.len()),
+                        // For a datagram update, the position it sends.
+                        delta: t.q,
+                        seq,
+                        slot: entities.len(),
+                        chosen: true,
+                    });
+                }
+            }
+            entities.push((id, sent));
+        }
+
+        let budget = config.max_bytes_per_tick;
+        let cost = |c: &Candidate| c.body.1 - c.body.0 + pylon_replication::varint::len_u64(c.id);
+        if budget > 0 && candidates.iter().map(cost).sum::<usize>() > budget {
+            order.clear();
+            order.extend(candidates.iter().map(|c| rank_key(c.priority, c.id)));
+            order.sort_unstable();
+            let mut used = 0usize;
+            let mut first = true;
+            for &key in order.iter() {
+                let i = candidates
+                    .binary_search_by_key(&(key as u64), |c| c.id)
+                    .expect("a ranked candidate is present");
+                let c = &mut candidates[i];
+                let n = cost(c);
+                c.chosen = first || used + n <= budget;
+                if c.chosen {
+                    first = false;
+                    used += n;
+                }
+            }
+        }
+
+        // The stream frame this tick, if any, goes out before its datagrams.
+        let stream_tick = if stream_has_changes {
+            tick
+        } else {
+            base.last_stream_tick
+        };
+        base.last_stream_tick = stream_tick;
+
+        // Pack the chosen updates, in id order, into datagrams that fit.
+        // Each names how many the tick has, known once all are packed.
+        let mut packed: Vec<OpenDatagram> = Vec::new();
+        for c in candidates.iter().filter(|c| c.chosen) {
+            let body = &bodies[c.body.0..c.body.1];
+            let fits = packed
+                .last()
+                .is_some_and(|(b, _, _)| b.len_with(c.id, body) <= dg.max_size);
+            if !fits {
+                base.last_datagram += 1;
+                packed.push((
+                    DatagramBuilder::new(
+                        base.last_datagram,
+                        tick,
+                        dg.input_ack,
+                        stream_tick,
+                        precision,
+                    ),
+                    base.last_datagram,
+                    Vec::new(),
+                ));
+            }
+            let (b, number, held) = packed.last_mut().expect("pushed above");
+            b.update(c.id, body);
+            let sent = &mut entities[c.slot].1;
+            held.push((c.id, sent.spawn_tick));
+            sent.unacked.push((*number, c.seq, c.delta));
+            sent.sent_tick = tick;
+        }
+        if packed.is_empty() && !full {
+            // Nothing new in datagrams: one empty datagram still carries
+            // the tick, the input ack, and the stream tick, so the client
+            // can take the tick as whole (a full frame is whole by itself).
+            // A lost one is followed by the next tick's.
+            base.last_datagram += 1;
+            packed.push((
+                DatagramBuilder::new(
+                    base.last_datagram,
+                    tick,
+                    dg.input_ack,
+                    stream_tick,
+                    precision,
+                ),
+                base.last_datagram,
+                Vec::new(),
+            ));
+        }
+        let parts = packed.len() as u64;
+        let mut datagrams = Vec::with_capacity(packed.len());
+        for (b, number, held) in packed {
+            datagrams.push(b.finish(parts));
+            if !held.is_empty() {
+                base.sent.push_back((number, held));
+            }
+        }
+        while base.sent.len() > DATAGRAMS_REMEMBERED {
+            base.sent.pop_front();
+        }
+        base.entities = entities;
+        let bytes = if stream_has_changes {
+            frame.finish()
+        } else {
+            Vec::new()
+        };
+        FrameOutput {
+            bytes,
+            delta_of: (!full).then_some(input.dropped),
+            datagrams,
+        }
+    }
+
+    /// Record a subscription's datagram acks: (datagram number, the tick of
+    /// the last stream frame the client had applied when it took that
+    /// datagram; see `ReplicaTable::stream_tick`).
+    pub fn ack_datagrams(&mut self, key: u64, acks: &[(u64, u64)]) {
+        let Some(Subscription::Datagram(base)) = self.baselines.get_mut(&key) else {
+            return;
+        };
+        for &(number, stream_tick) in acks {
+            let Ok(i) = base.sent.binary_search_by_key(&number, |(n, _)| *n) else {
+                // Unknown, forgotten, or already acked.
+                continue;
+            };
+            let (_, held) = base.sent.remove(i).expect("found above");
+            for (id, spawn_tick) in held {
+                let Ok(at) = base.entities.binary_search_by_key(&id, |(id, _)| *id) else {
+                    continue;
+                };
+                let sent = &mut base.entities[at].1;
+                // The client skipped updates for an entity whose spawn it
+                // did not have yet, or for another spawn of the id.
+                if sent.spawn_tick != spawn_tick || stream_tick < sent.spawn_tick {
+                    continue;
+                }
+                let Some(pos) = sent.unacked.iter().position(|u| u.0 == number) else {
+                    continue;
+                };
+                // The client has this state or a later one it was sent.
+                let (_, seq, q) = sent.unacked[pos];
+                sent.acked_seq = seq;
+                sent.acked_q = q;
+                sent.unacked.drain(..=pos);
+            }
         }
     }
 }
@@ -511,6 +948,7 @@ mod tests {
             area: None,
             dropped: 0,
             queue_full: false,
+            datagram: None,
         }
     }
 

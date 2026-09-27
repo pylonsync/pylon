@@ -10,7 +10,7 @@
 //!
 //! | Offset | Size | Field |
 //! | --- | --- | --- |
-//! | 0 | 1 | Frame kind: `1` snapshot, `2` input rejected, `3` replication |
+//! | 0 | 1 | Frame kind: `1` snapshot, `2` input rejected, `3` replication, `4` transfer, `5` datagram (version 3), `6` closing (WebTransport) |
 //! | 1 | 1 | Codec of the payload: `0` JSON, `1` MessagePack, `2` bincode, `3` custom, `4` replication |
 //! | 2 | 8 | Tick number, u64 big-endian |
 //! | 10 | 8 | Ack: the highest `client_seq` the shard has processed for this subscriber, u64 big-endian, `0` when none |
@@ -35,6 +35,22 @@
 //! - a text frame holds it as JSON,
 //! - a binary frame holds it in the shard's codec.
 //!
+//! # Version 3
+//!
+//! Version 2 for a subscription whose replication updates travel as
+//! datagrams (`pylon_replication::datagram`): a WebTransport session, or
+//! the WebSocket a machine opens to relay one to the shard's owner.
+//!
+//! - Frame kind `5` carries one datagram (codec byte `4`). Over WebSocket
+//!   it arrives in order; the client handles it as if it could not.
+//! - A client binary message starts with a type byte ([`client`]): `0` an
+//!   input envelope in the shard's codec, `1` datagram acks
+//!   ([`encode_datagram_acks`]), `2` an input envelope as JSON. A text
+//!   message is a JSON input envelope, as in version 2.
+//! - Over WebTransport, a datagram travels as a bare QUIC datagram (no
+//!   header) and acks as a bare QUIC datagram from the client: the type
+//!   byte `1` and the acks.
+//!
 //! # Version 1
 //!
 //! A snapshot frame is the 8-byte big-endian tick followed by the payload,
@@ -58,6 +74,63 @@ pub mod kind {
     pub const REPLICATION: u8 = 3;
     /// A [`super::TransferNotice`], JSON. The last frame on the connection.
     pub const TRANSFER: u8 = 4;
+    /// A replication datagram, version 3 only. Its codec byte is
+    /// [`super::codec::REPLICATION`].
+    pub const DATAGRAM: u8 = 5;
+    /// WebTransport only: the server is about to close the session. JSON
+    /// `{ code, reason }` with the session close code. The client closes
+    /// the session when it reads it: wtransport closes the QUIC connection
+    /// without a session-close capsule, so a browser would not see the code.
+    pub const CLOSING: u8 = 6;
+}
+
+/// The type byte of a version 3 client binary message.
+pub mod client {
+    /// An input envelope in the shard's codec.
+    pub const INPUT: u8 = 0;
+    /// Datagram acks ([`super::encode_datagram_acks`]).
+    pub const ACKS: u8 = 1;
+    /// An input envelope as JSON: on a WebTransport stream, where a
+    /// WebSocket client would send a text message.
+    pub const JSON_INPUT: u8 = 2;
+}
+
+/// Acks one message may carry.
+pub const MAX_ACKS_PER_MESSAGE: usize = 512;
+
+/// Encode datagram acks: the type byte [`client::ACKS`], a varint count,
+/// then per ack the datagram number and the tick of the last stream frame
+/// the client had applied when it took it (`ReplicaTable::stream_tick`),
+/// both varints.
+pub fn encode_datagram_acks(acks: &[(u64, u64)]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(2 + acks.len() * 4);
+    out.push(client::ACKS);
+    pylon_replication::varint::write_u64(&mut out, acks.len() as u64);
+    for &(number, applied) in acks {
+        pylon_replication::varint::write_u64(&mut out, number);
+        pylon_replication::varint::write_u64(&mut out, applied);
+    }
+    out
+}
+
+/// Decode what [`encode_datagram_acks`] wrote, type byte included. None
+/// for anything else, or more than [`MAX_ACKS_PER_MESSAGE`] acks.
+pub fn decode_datagram_acks(bytes: &[u8]) -> Option<Vec<(u64, u64)>> {
+    let (&kind, mut rest) = bytes.split_first()?;
+    if kind != client::ACKS {
+        return None;
+    }
+    let n = pylon_replication::varint::read_u64(&mut rest)?;
+    if n > MAX_ACKS_PER_MESSAGE as u64 {
+        return None;
+    }
+    let mut acks = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        let number = pylon_replication::varint::read_u64(&mut rest)?;
+        let applied = pylon_replication::varint::read_u64(&mut rest)?;
+        acks.push((number, applied));
+    }
+    rest.is_empty().then_some(acks)
 }
 
 /// Codec bytes in the version 2 header.
@@ -215,6 +288,29 @@ pub fn peek_client_seq(format: SnapshotFormat, bytes: &[u8]) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn datagram_acks_round_trip_and_reject_junk() {
+        let acks = vec![(1, 0), (300, 7), (u64::MAX, u64::MAX)];
+        let bytes = encode_datagram_acks(&acks);
+        assert_eq!(bytes[0], client::ACKS);
+        assert_eq!(decode_datagram_acks(&bytes), Some(acks));
+        assert_eq!(
+            decode_datagram_acks(&encode_datagram_acks(&[])),
+            Some(vec![])
+        );
+        assert_eq!(decode_datagram_acks(&[client::INPUT, 0]), None);
+        let mut trailing = encode_datagram_acks(&[(1, 1)]);
+        trailing.push(0);
+        assert_eq!(decode_datagram_acks(&trailing), None);
+        let mut too_many = vec![client::ACKS];
+        pylon_replication::varint::write_u64(&mut too_many, MAX_ACKS_PER_MESSAGE as u64 + 1);
+        assert_eq!(decode_datagram_acks(&too_many), None);
+        let good = encode_datagram_acks(&[(5, 6), (7, 8)]);
+        for cut in 0..good.len() {
+            assert_eq!(decode_datagram_acks(&good[..cut]), None);
+        }
+    }
 
     #[test]
     fn v2_header_layout() {

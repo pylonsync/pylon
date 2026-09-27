@@ -3,10 +3,11 @@
 /**
  * useShard — React hook for real-time sharded simulations (games, MMO zones, etc.).
  *
- * Connects to a Pylon shard over WebSocket, receives snapshots as they
- * arrive, and sends inputs upstream. It re-renders on every frame, so it
- * suits small, turn-based, or UI-only use; a game's render loop should use
- * `connectShardGame` from `@pylonsync/realtime`.
+ * Connects to a Pylon shard (a WebSocket, or WebTransport with
+ * `transport`), receives snapshots as they arrive, and sends inputs
+ * upstream. It re-renders on every frame, so it suits small, turn-based,
+ * or UI-only use; a game's render loop should use `connectShardGame` from
+ * `@pylonsync/realtime`.
  *
  * @example
  * ```tsx
@@ -40,7 +41,7 @@ export type { ShardClient };
 // ---------------------------------------------------------------------------
 
 export interface UseShardOptions extends ShardConnectOptions {
-  /** Unused: a shard connection is always a WebSocket. */
+  /** Unused: there is no SSE transport for shards. */
   sseFallback?: boolean;
 }
 
@@ -118,6 +119,8 @@ export function useShard<TSnapshot = unknown, TInput = unknown>(
   const baseUrl = options.baseUrl;
   const wsUrl = options.wsUrl;
   const wsPort = options.wsPort;
+  const transport = options.transport;
+  const webTransportInfoUrl = options.webTransportInfoUrl;
 
   useEffect(() => {
     const client = connectShard<TSnapshot, TInput>(shardId, {
@@ -157,7 +160,7 @@ export function useShard<TSnapshot = unknown, TInput = unknown>(
       clientRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shardId, token, ticket, subscriberId, baseUrl, wsUrl, wsPort]);
+  }, [shardId, token, ticket, subscriberId, baseUrl, wsUrl, wsPort, transport, webTransportInfoUrl]);
 
   const send = (input: TInput): number => {
     if (clientRef.current) return clientRef.current.send(input);

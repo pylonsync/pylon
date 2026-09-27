@@ -241,8 +241,8 @@ entity otherwise. `can_see` still hides entities. `snapshot*` is not used.
 | `y_up` | The ground plane interest management uses: `false` for x/y, `true` for x/z. |
 
 A new connection, and one whose outbound queue dropped frames, gets a full
-frame. Replication needs the shard WebSocket (`/shard`); SSE refuses a
-replicating shard.
+frame. Replication needs the shard WebSocket (`/shard`) or WebTransport
+(see below); SSE refuses a replicating shard.
 
 For 300 players in one area, all moving, at 20 Hz: about 23 KB/s per
 client with no budget, and 15 KB/s with a 900-byte budget, where a
@@ -293,6 +293,71 @@ connection alone, with `onReplication` and `entities`. `useShard` in
 `@pylonsync/react` re-renders on every frame; use it for small,
 turn-based, or UI-only shards. In Swift, `ShardClient<NoSnapshot, Input>`
 has `entities` and a `replication()` stream.
+
+### WebTransport
+
+Over a WebSocket (TCP), one lost packet holds back every frame behind it
+until it is sent again. Over WebTransport (QUIC over UDP), entity updates
+travel as datagrams: a lost one delays only itself, and the next update
+for the entity carries its current position. Spawns, despawns, full
+frames, snapshots, and inputs still travel in order on a stream.
+
+Turn it on for the server with a UDP port:
+
+| Variable | Meaning |
+| --- | --- |
+| `PYLON_WEBTRANSPORT_PORT` | UDP port to serve WebTransport on. Unset: off. |
+| `PYLON_WEBTRANSPORT_BIND` | Address to bind. Default: every address. On Fly, `fly-global-services`. |
+| `PYLON_WEBTRANSPORT_URL` | The URL clients connect to, `https://<host>:<port>/shard`. Default `https://localhost:<port>/shard`. |
+
+The server makes its own self-signed certificates, each valid for 13 days,
+and changes to the next one every 6 days. Clients pin them by hash, so
+no domain or CA is needed. `GET /_pylon/shard/webtransport` returns the
+URL and the hashes, or 404 when WebTransport is off. On an app with
+several machines, each machine lists the hashes of every machine, and a
+session that reaches a machine without the shard is relayed to the
+machine that runs it. WebTransport sessions count against
+`PYLON_SHARD_WS_MAX_PER_IP` together with WebSockets.
+
+In the client, `transport` picks the connection:
+
+```ts
+const game = connectShardGame(shardId, { subscriberId, ticket, tickRate: 20 });
+game.connection.transport; // "webtransport" or "websocket"
+```
+
+- `"auto"` (the default for `connectShardGame`): WebTransport when the
+  browser has it and the app serves it, else a WebSocket. When a session
+  does not open (UDP blocked, `webTransportTimeoutMs`, default 3000), the
+  client uses WebSockets from then on.
+- `"websocket"` (the default for `connectShard` and `useShard`).
+- `"webtransport"`: WebTransport or an error.
+
+In a browser without WebTransport, `"auto"` uses a WebSocket. The Swift
+client uses WebSockets.
+`webTransportInfoUrl` sets where the client fetches the URL and hashes,
+when the API is not at `baseUrl`.
+
+The wire format: the client opens one bidirectional stream and sends a
+hello, a 4-byte big-endian length and JSON
+`{ shard, sid, ticket?, token? }`. Then each message on the stream is a
+4-byte length and a message: from the server, a version 2 frame; from
+the client, a type byte (`0` input in the shard's codec, `1` datagram
+acks, `2` input as JSON) and the body. The server sends updates as bare
+datagrams (`EntityTable.applyDatagram` reads them; apply stream frames
+with `apply(payload, tick)` so the table knows their ticks), and the
+client acks each one with a datagram: type byte `1`, a varint count, then
+per ack the datagram's frame number and `EntityTable.streamTick`.
+
+Each datagram names how many datagrams its tick has and the tick of the
+last stream frame sent by then. Every tick without a full frame sends at
+least one. The client applies a tick's datagrams, and takes its input
+ack, only when it has all of them and that stream frame, or when a later
+tick is whole. So the ack always describes the table, which prediction
+needs. Before the server closes a session it sends a closing frame (kind
+`6`, JSON `{ code, reason }`), because a browser's `closed` does not get
+the code from a server close; the client closes the session when it
+reads it.
 
 ## Declare the shard kind
 
@@ -739,6 +804,9 @@ pylon bench shard --join joinArena --bots 300 --duration 30 --rate 10 \
   for each input.
 - `--url` defaults to `http://localhost:4321`. An `https://` origin connects
   over `wss://`.
+- `--transport webtransport` connects over WebTransport, from the URL and
+  hashes at `/_pylon/shard/webtransport`. `--drop-datagrams <percent>`
+  drops that share of the datagrams each bot receives, to test loss.
 
 The report gives:
 
@@ -939,6 +1007,9 @@ starts it from that save; its clients reconnect after the gap. Give the platform
 - An open shard connection keeps the app's machine running.
 - A machine with autostop on can stop when no client is connected. Its
   shards end, like on any restart.
+- WebTransport is off by default. Turn it on in the app's **Scaling**
+  settings. The app gets a dedicated IPv4 address for UDP (Fly bills it
+  monthly) and must run one machine per region.
 - A machine gets 45 seconds to stop, so a deploy saves its shards (and, on
   an app with several machines, hands them over) before it exits. On one
   machine, the new one starts them from that save.

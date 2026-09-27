@@ -35,7 +35,9 @@ Optional:
 ```sh
 PYLON_JOBS_DB=/var/lib/pylon/jobs.db          # SQLite job sidecar only
 PYLON_WORKFLOWS_DB=/var/lib/pylon/workflows.db # SQLite workflow sidecar only
-PYLON_SHARD_WS_MAX_PER_IP=0                   # shard WS connections per client IP (default 64; 0 = no cap)
+PYLON_SHARD_WS_MAX_PER_IP=0                   # shard WS and WebTransport connections per client IP (default 64; 0 = no cap)
+PYLON_WEBTRANSPORT_PORT=443                   # serve shard WebTransport on this UDP port (unset: off)
+PYLON_WEBTRANSPORT_URL=https://host:443/shard # the URL shard clients connect to over WebTransport
 PYLON_SHARD_TICKET_SECRET=...                 # shard ticket key; same value on every machine (default: derived from PYLON_JWT_SECRET)
 PYLON_OAUTH_GOOGLE_CLIENT_ID=...              # enable Google OAuth
 PYLON_OAUTH_GITHUB_CLIENT_ID=...              # enable GitHub OAuth

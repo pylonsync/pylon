@@ -1811,6 +1811,7 @@ impl ClusterState {
             capacity: self.me.capacity,
             load: 0,
             epoch: self.lease.lock().unwrap().epoch,
+            wt_hashes: crate::shard_wt::own_hashes_text(),
         }
     }
 
@@ -2742,6 +2743,15 @@ impl WasmShardHost {
             Ok(true) => {
                 if c.id_conflict.swap(false, Ordering::Relaxed) {
                     tracing::info!("[shards] machine id {} is free; joining", c.me.id);
+                }
+                // A WebTransport client may reach any machine: it gets every
+                // live machine's certificate hashes.
+                if crate::shard_wt::is_running() {
+                    if let Ok(machines) = c.dir.live_machines() {
+                        crate::shard_wt::set_cluster_hashes(
+                            machines.iter().filter_map(|m| m.wt_hashes.as_deref()),
+                        );
+                    }
                 }
                 let mut lease = c.lease.lock().unwrap();
                 if let Some(until) = lease.renew(epoch, sent, Instant::now()) {

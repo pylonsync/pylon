@@ -10,7 +10,8 @@ const DEFAULT_FRONTIER = "frontier-main";
  * A player sees 250 units around them and gets at most 900 bytes of updates
  * per tick (18 KB/s at 20 Hz). `size` sets the side of a NEW zone, default
  * 2000; a small zone puts every player in view of the others, like a keep
- * fight.
+ * fight. On an app that runs on several machines, `machine` places a new
+ * zone on that machine.
  */
 export default action({
   // Anyone with a guest session (POST /api/auth/guest) may play.
@@ -18,6 +19,7 @@ export default action({
   args: {
     frontier: v.optional(v.string()),
     size: v.optional(v.number()),
+    machine: v.optional(v.string()),
   },
   async handler(ctx, args) {
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "sign in first");
@@ -28,12 +30,17 @@ export default action({
     }
     if (!(await ctx.shards.get(shardId))) {
       try {
-        await ctx.shards.create("frontier", shardId, {
-          width: size,
-          height: size,
-          view_radius: 250,
-          max_bytes_per_tick: 900,
-        });
+        await ctx.shards.create(
+          "frontier",
+          shardId,
+          {
+            width: size,
+            height: size,
+            view_radius: 250,
+            max_bytes_per_tick: 900,
+          },
+          { machine: args.machine as string | undefined },
+        );
       } catch (err) {
         // Two first players at once: the other call created it.
         if ((err as { code?: string }).code !== "SHARD_EXISTS") throw err;
