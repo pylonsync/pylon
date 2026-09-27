@@ -7604,6 +7604,184 @@ mod tests {
         assert_eq!(row["order"], serde_json::json!(["M", "n", "p"]));
     }
 
+    /// Many merging pushes from one offline client add one synthetic peer,
+    /// not one per push.
+    #[test]
+    fn merging_pushes_share_one_synthetic_peer() {
+        use pylon_http::DataStore;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        let (id, fields) = bare_doc_row(&rt);
+        rt.crdt_snapshot("Doc", &id).unwrap();
+        let offline = client_doc(1, 0);
+        pylon_crdt::apply_patch(&offline, &fields, &serde_json::json!({"body": "a"})).unwrap();
+        push_since(&rt, &id, &offline, &Default::default());
+        for _ in 0..20 {
+            let pushed = offline.oplog_vv();
+            let body = text_in(&offline, "body");
+            body.insert(body.len_unicode(), "b").unwrap();
+            offline.commit();
+            push_since(&rt, &id, &offline, &pushed);
+        }
+        assert_eq!(body_of(&rt, &id), format!("a{}", "b".repeat(20)));
+        let conn = rt.lock_write_conn().unwrap();
+        assert_eq!(
+            rt.crdt_store()
+                .synthetic_peers(&conn, "Doc", &id)
+                .unwrap()
+                .len(),
+            1
+        );
+        let bytes = rt.crdt_store().snapshot(&conn, "Doc", &id).unwrap();
+        let doc = pylon_crdt::loro::LoroDoc::new();
+        pylon_crdt::apply_update(&doc, &bytes).unwrap();
+        assert!(doc.oplog_vv().len() <= 4, "{:?}", doc.oplog_vv());
+    }
+
+    /// A client can put any container under a field's key. A text under a
+    /// tree or counter field is left as Loro merged it: the push does not
+    /// panic, and the next write still works.
+    #[test]
+    fn a_container_of_the_wrong_type_under_a_key_does_not_panic() {
+        use pylon_http::DataStore;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        for field in ["outline", "likes"] {
+            let (id, _) = bare_doc_row(&rt);
+            rt.crdt_snapshot("Doc", &id).unwrap();
+            for peer in [1u64, 2] {
+                let client = client_doc(peer, 40);
+                let t = pylon_crdt::root_map(&client)
+                    .insert_container(field, pylon_crdt::loro::LoroText::new())
+                    .unwrap();
+                t.insert(0, "x").unwrap();
+                client.commit();
+                let _ = rt.crdt_apply_update(
+                    "Doc",
+                    &id,
+                    &client
+                        .export(pylon_crdt::loro::ExportMode::all_updates())
+                        .unwrap(),
+                );
+            }
+            rt.update("Doc", &id, &serde_json::json!({"title": "still writes"}))
+                .unwrap();
+        }
+    }
+
+    /// Two increments near the f64 limit in a counter that lost its key
+    /// overflow: the holder's total is left as it was, not reset to 0.
+    #[test]
+    fn an_overflowing_merged_increment_does_not_reset_the_counter() {
+        use pylon_http::DataStore;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        let (id, fields) = bare_doc_row(&rt);
+        rt.crdt_snapshot("Doc", &id).unwrap();
+        let offline = client_doc(1, 0);
+        pylon_crdt::apply_patch(&offline, &fields, &serde_json::json!({"likes": 1.5e308})).unwrap();
+        pylon_crdt::apply_patch(&offline, &fields, &serde_json::json!({"likes": 1.5e308})).unwrap();
+        push_since(&rt, &id, &offline, &Default::default());
+        assert_ne!(key_owner(&rt, &id, "likes"), 1);
+        let row = rt.get_by_id("Doc", &id).unwrap().unwrap();
+        assert_eq!(row["likes"], 3);
+    }
+
+    /// A register value of the wrong type that lost to a synthetic op is
+    /// skipped; the push's other edits land.
+    #[test]
+    fn a_register_of_the_wrong_type_does_not_reject_the_push() {
+        use pylon_http::DataStore;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        let (id, fields) = bare_doc_row(&rt);
+        rt.crdt_snapshot("Doc", &id).unwrap();
+        let client = client_doc(1, 0);
+        pylon_crdt::root_map(&client).insert("done", "yes").unwrap();
+        pylon_crdt::apply_patch(&client, &fields, &serde_json::json!({"body": "typed"})).unwrap();
+        let update = client
+            .export(pylon_crdt::loro::ExportMode::all_updates())
+            .unwrap();
+        rt.crdt_apply_update("Doc", &id, &update).unwrap();
+        let row = rt.get_by_id("Doc", &id).unwrap().unwrap();
+        assert_eq!(row["body"], "typed");
+    }
+
+    /// A later push that deletes much of a merged text whose images a
+    /// server write already deleted: the merge reads the holder once, not
+    /// once per deleted element.
+    #[test]
+    fn a_merge_over_deleted_images_stays_fast() {
+        use pylon_http::DataStore;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        let (id, fields) = bare_doc_row(&rt);
+        let seeded = rt.crdt_snapshot("Doc", &id).unwrap().unwrap();
+        // Another client edits the seed, so the offline text is added.
+        let online = client_doc(9, 0);
+        pylon_crdt::apply_update(&online, &seeded).unwrap();
+        let before = online.oplog_vv();
+        let t = text_in(&online, "body");
+        t.insert(t.len_unicode(), "!").unwrap();
+        online.commit();
+        push_since(&rt, &id, &online, &before);
+        let words: String = (0..1500).map(|i| format!("w{i:03} ")).collect();
+        let offline = client_doc(1, 0);
+        pylon_crdt::apply_patch(&offline, &fields, &serde_json::json!({"body": words})).unwrap();
+        push_since(&rt, &id, &offline, &Default::default());
+        rt.update("Doc", &id, &serde_json::json!({"body": "rewritten"}))
+            .unwrap();
+        let pushed = offline.oplog_vv();
+        let t = text_in(&offline, "body");
+        let mut pos = 0;
+        while pos < t.len_unicode() {
+            t.delete(pos, 1).unwrap();
+            pos += 2;
+        }
+        offline.commit();
+        let started = std::time::Instant::now();
+        push_since(&rt, &id, &offline, &pushed);
+        let took = started.elapsed();
+        assert_eq!(body_of(&rt, &id), "rewritten");
+        assert!(took < std::time::Duration::from_secs(3), "{took:?}");
+    }
+
+    /// A long text whose every line differs from the holder's still links
+    /// on its first merge: the holder does not take a second copy of it.
+    #[test]
+    fn a_long_text_whose_every_line_changed_links_on_its_first_merge() {
+        use pylon_http::DataStore;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        let (id, fields) = bare_doc_row(&rt);
+        rt.crdt_snapshot("Doc", &id).unwrap();
+        let line = |i: usize, tag: &str| format!("line {i} of the document {tag}\n");
+        let holder: String = (0..2000).map(|i| line(i, "")).collect();
+        rt.update("Doc", &id, &serde_json::json!({"body": holder}))
+            .unwrap();
+        // Another client edits it, so it is not the server's write.
+        let online = client_doc(9, 0);
+        pylon_crdt::apply_update(&online, &rt.crdt_snapshot("Doc", &id).unwrap().unwrap()).unwrap();
+        let before = online.oplog_vv();
+        text_in(&online, "body").insert(0, "top\n").unwrap();
+        online.commit();
+        push_since(&rt, &id, &online, &before);
+        let source: String = (0..2000).map(|i| line(i, "edited")).collect();
+        let offline = client_doc(1, 0);
+        pylon_crdt::apply_patch(&offline, &fields, &serde_json::json!({"body": source})).unwrap();
+        push_since(&rt, &id, &offline, &Default::default());
+        let body = body_of(&rt, &id);
+        let limit = holder.chars().count() + 4 + 2000 * 6 + 16;
+        assert!(body.chars().count() <= limit, "{}", body.chars().count());
+        assert!(body.contains("line 8 of the document edited"));
+    }
+
     /// Pruning a row's snapshot removes its server-side records, and only
     /// its own.
     #[test]
@@ -7642,12 +7820,13 @@ mod tests {
         assert!(count("_pylon_crdt_base", &kept) > 0);
     }
 
-    /// Each synthetic write takes its own peer (one for all its fields),
-    /// recorded beside the snapshot where a client's update cannot change
-    /// it: a database restored from a backup cannot make a second op under
-    /// an id clients already hold.
+    /// Synthetic writes take the process's synthetic peer (a new one per
+    /// process, so a database restored from a backup cannot make a second
+    /// op under an id clients already hold), recorded beside the snapshot
+    /// where a client's update cannot change it. Writes in one process
+    /// share it, so the row's version vector does not grow per write.
     #[test]
-    fn synthetic_writes_take_their_own_peers() {
+    fn synthetic_writes_share_the_process_peer() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("app.db");
         let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
@@ -7682,6 +7861,10 @@ mod tests {
             "one peer for a write of three fields"
         );
         assert!(write("two").is_empty());
+        assert_eq!(peers(&conn).len(), 1, "one peer per process");
+        // A new process (the cache cleared) takes a new peer.
+        rt.crdt_store().clear_cache();
+        assert!(write("three").is_empty());
         let recorded = peers(&conn);
         assert_eq!(recorded.len(), 2);
         let bytes = rt.crdt_store().snapshot(&conn, "Doc", &id).unwrap();

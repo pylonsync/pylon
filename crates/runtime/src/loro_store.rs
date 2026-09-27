@@ -273,20 +273,22 @@ fn fresh_peer() -> u64 {
 }
 
 /// Run `write` as a synthetic write (a doc created or brought in line from
-/// its row, or a client's value applied again): under a fresh random peer,
-/// so op ids stay unique even after a database is restored from a backup,
-/// then back to another fresh peer for the server's own writes. Returns
-/// the peer, for the caller to record in `_pylon_crdt_synthetic`.
-fn as_synthetic(doc: &LoroDoc, write: impl FnOnce() -> Result<(), String>) -> Result<u64, String> {
-    let peer = fresh_peer();
+/// its row, or a merge after a client's update) under `peer`, then go back
+/// to the doc's own peer. The caller records `peer` in
+/// `_pylon_crdt_synthetic`.
+fn as_synthetic(
+    doc: &LoroDoc,
+    peer: u64,
+    write: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let own = doc.peer_id();
     doc.set_peer_id(peer)
         .map_err(|e| format!("set a synthetic peer: {e}"))?;
     let written = write();
     doc.commit();
-    let reset = doc.set_peer_id(fresh_peer());
+    let reset = doc.set_peer_id(own);
     written?;
-    reset.map_err(|e| format!("reset the peer: {e}"))?;
-    Ok(peer)
+    reset.map_err(|e| format!("reset the peer: {e}"))
 }
 
 thread_local! {
@@ -320,17 +322,35 @@ fn note_changed(entity: &str, row_id: &str) {
 /// One instance per Runtime. Holds a bounded cache of doc handles
 /// (see [`crate::crdt_cache`]), each behind its own `Mutex` so
 /// concurrent access to *different* rows doesn't contend.
-#[derive(Default)]
 pub struct LoroStore {
     /// Per-row cache. The cache lock is held only for lookup/insert;
     /// Loro work happens under the per-doc Mutex, so two requests
     /// targeting different rows never block each other.
     docs: crate::crdt_cache::DocCache,
+    /// The peer of this process's synthetic ops: random per process (and
+    /// per cache clear), so op ids stay unique after a database is
+    /// restored from a backup, and one per process, so a row's version
+    /// vector does not grow with every synthetic write.
+    synthetic_peer: std::sync::atomic::AtomicU64,
+}
+
+impl Default for LoroStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LoroStore {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            docs: Default::default(),
+            synthetic_peer: std::sync::atomic::AtomicU64::new(fresh_peer()),
+        }
+    }
+
+    fn synthetic_peer(&self) -> u64 {
+        self.synthetic_peer
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Get the cached doc for a row, hydrating from the sidecar if absent.
@@ -549,6 +569,21 @@ impl LoroStore {
             .collect())
     }
 
+    fn drop_links(
+        &self,
+        conn: &Connection,
+        entity: &str,
+        row_id: &str,
+        source: &str,
+    ) -> Result<(), LoroStoreError> {
+        conn.prepare_cached(
+            "DELETE FROM _pylon_crdt_links WHERE entity = ?1 AND row_id = ?2 AND source = ?3",
+        )
+        .and_then(|mut stmt| stmt.execute(params![entity, row_id, source]))
+        .map(|_| ())
+        .map_err(|e| LoroStoreError::Storage(format!("drop links: {e}")))
+    }
+
     fn record_links(
         &self,
         conn: &Connection,
@@ -590,7 +625,9 @@ impl LoroStore {
         let tried = values.len();
         let mut failed = Vec::new();
         let mut written = Vec::new();
-        let peer = as_synthetic(&doc, || {
+        let peer = self.synthetic_peer();
+        let start = doc.oplog_vv().get(&peer).copied().unwrap_or(0);
+        as_synthetic(&doc, peer, || {
             for (name, value) in values {
                 let patch = serde_json::json!({ name.clone(): value });
                 match apply_patch(&doc, fields, &patch) {
@@ -605,7 +642,7 @@ impl LoroStore {
             self.record_synthetic(conn, entity, row_id, peer)?;
         }
         let written: Vec<&str> = written.iter().map(String::as_str).collect();
-        self.record_bases(conn, entity, row_id, &doc, fields, &written, peer, 0)?;
+        self.record_bases(conn, entity, row_id, &doc, fields, &written, peer, start)?;
         self.persist_snapshot(conn, entity, row_id, &doc)?;
         Ok(failed)
     }
@@ -655,17 +692,31 @@ impl LoroStore {
                         .is_some_and(|p| peers.contains(&p))
             })
             .collect();
-        let bases = self.bases(conn, entity, row_id)?;
-        let mut links = self.links(conn, entity, row_id)?;
+        let merging = pylon_crdt::merge::has_sources(&doc, fields, &imported, &prior);
+        let (bases, mut links) = if merging {
+            (
+                self.bases(conn, entity, row_id)?,
+                self.links(conn, entity, row_id)?,
+            )
+        } else {
+            Default::default()
+        };
         let held = doc.oplog_vv();
         let mut linked = Vec::new();
-        let peer = as_synthetic(&doc, || {
+        let peer = self.synthetic_peer();
+        as_synthetic(&doc, peer, || {
+            // A value the field cannot take (a client can write any) is
+            // left as Loro merged it.
             for (name, value) in &registers {
-                apply_patch(&doc, fields, &serde_json::json!({ *name: value }))?;
+                if let Err(e) = apply_patch(&doc, fields, &serde_json::json!({ *name: value })) {
+                    tracing::warn!(entity, row_id, field = %name, "apply a client's value again: {e}");
+                }
             }
-            linked = pylon_crdt::merge::merge_after_import(
-                &doc, fields, &imported, &prior, &bases, &mut links,
-            )?;
+            if merging {
+                linked = pylon_crdt::merge::merge_after_import(
+                    &doc, fields, &imported, &prior, &bases, &mut links,
+                )?;
+            }
             Ok(())
         })
         .map_err(LoroStoreError::Apply)?;
@@ -673,8 +724,9 @@ impl LoroStore {
             self.record_synthetic(conn, entity, row_id, peer)?;
         }
         for source in linked {
-            if let Some(l) = links.get(&source) {
-                self.record_links(conn, entity, row_id, &source, l)?;
+            match links.get(&source) {
+                Some(l) => self.record_links(conn, entity, row_id, &source, l)?,
+                None => self.drop_links(conn, entity, row_id, &source)?,
             }
         }
         self.persist_snapshot(conn, entity, row_id, &doc)?;
@@ -862,6 +914,8 @@ impl LoroStore {
     /// Drop every cached doc. Tests only (`reset_for_tests`).
     pub fn clear_cache(&self) {
         self.docs.clear();
+        self.synthetic_peer
+            .store(fresh_peer(), std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Number of rows currently held in memory. Diagnostic.

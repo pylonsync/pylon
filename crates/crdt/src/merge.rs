@@ -35,9 +35,9 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use loro::cursor::{Cursor, Side};
+use loro::cursor::Side;
 use loro::{
-    ContainerID, ContainerType, IdSpan, Index, JsonMapOp, JsonOpContent, LoroDoc, LoroValue,
+    ContainerID, ContainerType, IdSpan, JsonMapOp, JsonOpContent, LoroDoc, LoroValue,
     ValueOrContainer, VersionVector, ID,
 };
 use serde::{Deserialize, Serialize};
@@ -50,11 +50,14 @@ use crate::{
 
 /// How long the first merge's diff of two values may take before it
 /// settles for a coarser match.
-const ALIGN_DEADLINE: Duration = Duration::from_millis(500);
+const ALIGN_DEADLINE: Duration = Duration::from_millis(200);
 
 /// The shortest run of equal characters the first merge links, when it adds
 /// a source's text to a holder: a shorter one matches by chance.
 const MIN_TEXT_RUN: usize = 4;
+
+/// Sources one field merges per push at most.
+const MAX_SOURCES: usize = 16;
 
 /// Container chains followed at most (a field's key moved from container
 /// to container).
@@ -284,9 +287,13 @@ pub fn read_import(doc: &LoroDoc, fields: &[CrdtField], before: &VersionVector) 
             containers.push(cid.clone());
         }
     }
+    let held: HashMap<ContainerID, String> = holders(doc, fields)
+        .into_iter()
+        .map(|(field, cid)| (cid, field))
+        .collect();
     let mut changed: HashMap<String, Vec<ContainerID>> = HashMap::new();
     for cid in containers {
-        let Some((field, top)) = field_of(doc, &cid, &created, &kinds) else {
+        let Some((field, top)) = field_of(doc, &cid, &created, &held, &kinds) else {
             continue;
         };
         if !touched.contains(&field) {
@@ -316,25 +323,21 @@ fn counter_increment(op: &loro::JsonFutureOp) -> Option<f64> {
 }
 
 /// The field a container belongs to, and the container under the field's
-/// key it is part of (a tree node's metadata map: its tree). A container
-/// that no key holds is found through the op that created it.
+/// key it is part of (a tree node's metadata map: its tree). `created` and
+/// `held` map containers the import created, and the ones the keys hold, to
+/// their fields; any other container is found through the op that created
+/// it.
 fn field_of(
     doc: &LoroDoc,
     cid: &ContainerID,
     created: &HashMap<ContainerID, String>,
+    held: &HashMap<ContainerID, String>,
     kinds: &HashMap<&str, CrdtFieldKind>,
 ) -> Option<(String, ContainerID)> {
-    if let Some(path) = doc.get_path_to_container(cid) {
-        let (top, Index::Key(key)) = path.get(1)? else {
-            return None;
-        };
-        let key = key.to_string();
-        return kinds.contains_key(key.as_str()).then(|| (key, top.clone()));
-    }
     let root = ContainerID::new_root(ROOT_MAP, ContainerType::Map);
     let mut cid = cid.clone();
     for _ in 0..MAX_CHAIN {
-        if let Some(field) = created.get(&cid) {
+        if let Some(field) = created.get(&cid).or_else(|| held.get(&cid)) {
             return Some((field.clone(), cid));
         }
         let ContainerID::Normal { peer, counter, .. } = &cid else {
@@ -363,11 +366,48 @@ fn field_of(
     None
 }
 
+/// The container type a field's kind keeps under its key; none for a
+/// register.
+fn container_type(kind: CrdtFieldKind) -> Option<ContainerType> {
+    use CrdtFieldKind as K;
+    match kind {
+        K::Text => Some(ContainerType::Text),
+        K::List => Some(ContainerType::List),
+        K::MovableList => Some(ContainerType::MovableList),
+        K::Tree => Some(ContainerType::Tree),
+        K::Counter => Some(ContainerType::Counter),
+        K::LwwString | K::LwwNumber | K::LwwBool | K::LwwJson => None,
+    }
+}
+
+/// Whether [`merge_after_import`] has anything to merge: a field whose key
+/// moved to another container of its kind, or another container of its
+/// kind the import changed.
+pub fn has_sources(
+    doc: &LoroDoc,
+    fields: &[CrdtField],
+    imported: &Imported,
+    prior: &HashMap<String, ContainerID>,
+) -> bool {
+    let now = holders(doc, fields);
+    fields.iter().any(|f| {
+        let (Some(kind), Some(holder)) = (container_type(f.kind), now.get(&f.name)) else {
+            return false;
+        };
+        holder.container_type() == kind
+            && prior
+                .get(&f.name)
+                .into_iter()
+                .chain(imported.changed.get(&f.name).into_iter().flatten())
+                .any(|c| c != holder && c.container_type() == kind)
+    })
+}
+
 /// After an import: merge, per text, list, tree, or counter field, the
-/// containers the import changed and the container the key moved from
-/// into the one holding the key. `prior` is the holders before the import;
-/// `links` is the row's links, updated in place. Returns the sources whose
-/// links changed.
+/// containers of its kind the import changed, and the container the key
+/// moved from, into the one holding the key. `prior` is the holders before
+/// the import; `links` is the row's links, updated in place. Returns the
+/// sources whose links changed or were dropped.
 pub fn merge_after_import(
     doc: &LoroDoc,
     fields: &[CrdtField],
@@ -380,91 +420,102 @@ pub fn merge_after_import(
     let now = holders(doc, fields);
     let mut updated = Vec::new();
     for f in fields {
-        let Some(holder) = now.get(&f.name) else {
+        let (Some(kind), Some(holder)) = (container_type(f.kind), now.get(&f.name)) else {
             continue;
         };
-        let displaced = prior.get(&f.name).filter(|p| *p != holder);
-        let changed = imported.changed.get(&f.name);
-        match f.kind {
-            K::Counter => {
-                let mut add: f64 = changed
-                    .into_iter()
-                    .flatten()
-                    .filter(|c| *c != holder && Some(*c) != displaced)
-                    .filter_map(|c| imported.increments.get(c))
-                    .sum();
-                if let Some(p) = displaced {
-                    add += counter_value(doc, p);
+        // A key holding another type of container (a client can write any)
+        // is left as Loro merged it; a source of another type is skipped.
+        if holder.container_type() != kind {
+            continue;
+        }
+        let displaced = prior
+            .get(&f.name)
+            .filter(|p| *p != holder && p.container_type() == kind);
+        let changed: Vec<&ContainerID> = imported
+            .changed
+            .get(&f.name)
+            .into_iter()
+            .flatten()
+            .filter(|c| *c != holder && c.container_type() == kind)
+            .collect();
+        if f.kind == K::Counter {
+            let mut add: f64 = changed
+                .iter()
+                .filter(|c| Some(**c) != displaced)
+                .filter_map(|c| imported.increments.get(*c))
+                .sum();
+            if let Some(p) = displaced {
+                add += counter_value(doc, p);
+            }
+            if add != 0.0 && add.is_finite() {
+                doc.get_counter(holder.clone())
+                    .increment(add)
+                    .map_err(|e| format!("counter {}: {e}", f.name))?;
+            }
+            continue;
+        }
+        // The displaced container first: links into it from earlier merges
+        // go on through its own links.
+        let mut sources: Vec<&ContainerID> = displaced.into_iter().collect();
+        for c in changed {
+            if !sources.contains(&c) {
+                sources.push(c);
+            }
+        }
+        if sources.len() > MAX_SOURCES {
+            tracing::warn!(
+                field = %f.name,
+                sources = sources.len(),
+                "an update changed more containers of one field than a push merges; \
+                 the rest merge when they change again"
+            );
+            sources.truncate(MAX_SOURCES);
+        }
+        for source in sources {
+            let key = source.to_string();
+            let earlier = links
+                .get(&key)
+                .cloned()
+                .and_then(|l| translate(l, holder, links));
+            let base = bases.get(&f.name);
+            let merged = if f.kind == K::Tree {
+                merge_tree(doc, f, source, holder, earlier, base)
+            } else {
+                // Only a first merge compares with the base write.
+                let (in_source, in_holder) = if earlier.is_none() {
+                    (base_in(base, source, links), base_in(base, holder, links))
+                } else {
+                    (BaseIn::Nothing, BaseIn::Nothing)
+                };
+                merge_seq(doc, source, holder, earlier, base, &in_source, &in_holder)
+            };
+            match merged {
+                Ok(merged) => {
+                    links.insert(key.clone(), merged);
                 }
-                if add != 0.0 {
-                    apply_patch(
-                        doc,
-                        std::slice::from_ref(f),
-                        &serde_json::json!({ &f.name: add }),
-                    )?;
+                // What a failed merge inserted is not linked: dropping the
+                // source's links makes the next merge a first merge, whose
+                // diff links it.
+                Err(e) => {
+                    tracing::warn!(
+                        field = %f.name,
+                        source = %key,
+                        "merge a container into the one holding its key: {e}"
+                    );
+                    links.remove(&key);
                 }
             }
-            K::Text | K::List | K::MovableList | K::Tree => {
-                // The displaced container first: links into it from
-                // earlier merges go on through its own links.
-                let mut sources: Vec<&ContainerID> = displaced.into_iter().collect();
-                for c in changed.into_iter().flatten() {
-                    if c != holder && !sources.contains(&c) {
-                        sources.push(c);
-                    }
-                }
-                for source in sources {
-                    if source.container_type() != holder.container_type() {
-                        continue;
-                    }
-                    let key = source.to_string();
-                    let earlier = links
-                        .get(&key)
-                        .cloned()
-                        .and_then(|l| translate(l, holder, links));
-                    let merged = if f.kind == K::Tree {
-                        merge_tree(doc, f, source, holder, earlier, bases.get(&f.name))
-                    } else {
-                        let base = bases.get(&f.name);
-                        let base_in_source = base_elements(doc, base, source, links);
-                        let base_in_holder = base_elements(doc, base, holder, links);
-                        merge_seq(
-                            doc,
-                            source,
-                            holder,
-                            earlier,
-                            base,
-                            &base_in_source,
-                            &base_in_holder,
-                        )
-                    };
-                    // A merge that fails leaves the source unlinked: the next
-                    // one starts over from a diff of the two values, which
-                    // links what this one inserted.
-                    match merged {
-                        Ok(merged) => {
-                            links.insert(key.clone(), merged);
-                            updated.push(key);
-                        }
-                        Err(e) => tracing::warn!(
-                            field = %f.name,
-                            source = %key,
-                            "merge a container into the one holding its key: {e}"
-                        ),
-                    }
-                }
-            }
-            _ => {}
+            updated.push(key);
         }
     }
     doc.commit();
     Ok(updated)
 }
 
-/// A counter's value, 0 for one the doc does not hold (Loro asserts the
-/// container exists).
+/// A counter's value, 0 for a container the doc does not hold or that is
+/// not a counter (Loro asserts both).
 pub fn counter_value(doc: &LoroDoc, id: &ContainerID) -> f64 {
-    if doc.has_container(id) {
+    if id.container_type() == ContainerType::Counter && doc.has_container(id) {
         doc.get_counter(id.clone()).get_value()
     } else {
         0.0
@@ -497,37 +548,56 @@ fn translate(
     None
 }
 
-/// The ids of the base write's elements in `container`: in the container it
-/// wrote, those in its span; in a container that one was merged into
+/// Which elements of a container came from the base write: in the container
+/// it wrote, those in its span; in a container that one was merged into
 /// (through any chain), their images.
-fn base_elements(
-    doc: &LoroDoc,
+enum BaseIn {
+    Nothing,
+    Span { peer: u64, start: i32, end: i32 },
+    Images(HashSet<ID>),
+}
+
+impl BaseIn {
+    fn contains(&self, id: ID) -> bool {
+        match self {
+            BaseIn::Nothing => false,
+            BaseIn::Span { peer, start, end } => {
+                id.peer == *peer && id.counter >= *start && id.counter < *end
+            }
+            BaseIn::Images(ids) => ids.contains(&id),
+        }
+    }
+}
+
+fn base_in(
     base: Option<&BaseWrite>,
     container: &ContainerID,
     all: &HashMap<String, Links>,
-) -> HashSet<ID> {
+) -> BaseIn {
     let Some(base) = base else {
-        return HashSet::new();
+        return BaseIn::Nothing;
     };
     if base.container == container.to_string() {
-        return read_elements(doc, container)
-            .into_iter()
-            .map(|e| e.id)
-            .filter(|id| base.wrote(*id))
-            .collect();
+        return BaseIn::Span {
+            peer: base.peer,
+            start: base.start,
+            end: base.end,
+        };
     }
     let Some(links) = all
         .get(&base.container)
         .cloned()
         .and_then(|l| translate(l, container, all))
     else {
-        return HashSet::new();
+        return BaseIn::Nothing;
     };
-    expand(&links.runs)
-        .into_iter()
-        .filter(|(s, _)| base.wrote(*s))
-        .filter_map(|(_, t)| t)
-        .collect()
+    BaseIn::Images(
+        expand(&links.runs)
+            .into_iter()
+            .filter(|(s, _)| base.wrote(*s))
+            .filter_map(|(_, t)| t)
+            .collect(),
+    )
 }
 
 /// One element of a text or list.
@@ -668,76 +738,231 @@ impl Seq {
     }
 }
 
-/// Where element `id` of `cid` is now, and whether it is still there (a
-/// deleted element reads as the position it had).
-fn locate(doc: &LoroDoc, cid: &ContainerID, id: ID) -> Option<(usize, bool)> {
-    let found = doc
-        .get_cursor_pos(&Cursor::new(Some(id), cid.clone(), Side::Middle, 0))
-        .ok()?;
-    Some((found.current.pos, found.update.is_none()))
-}
-
-fn delete_element(doc: &LoroDoc, seq: &Seq, holder: &ContainerID, id: ID) -> Result<(), String> {
-    if let Some((pos, true)) = locate(doc, holder, id) {
-        seq.delete(pos)?;
+/// Pairs of equal elements of `a` and `b` (by index), in runs of at least
+/// `min_run`. A text is diffed by words, then by characters within the
+/// spans that differ, so a long text with many changes still links; a list
+/// item by item.
+fn align(a: &[Elem], b: &[Elem], text: bool, min_run: usize) -> Vec<(usize, usize)> {
+    let deadline = Instant::now() + ALIGN_DEADLINE;
+    let mut out = Vec::new();
+    if text {
+        let ca: Vec<&str> = a.iter().map(|e| e.value.as_str().unwrap_or("")).collect();
+        let cb: Vec<&str> = b.iter().map(|e| e.value.as_str().unwrap_or("")).collect();
+        align_text(
+            &ca,
+            0..ca.len(),
+            &cb,
+            0..cb.len(),
+            Level::Word,
+            deadline,
+            min_run,
+            &mut out,
+        );
+    } else {
+        let ka: Vec<String> = a.iter().map(|e| e.value.to_string()).collect();
+        let kb: Vec<String> = b.iter().map(|e| e.value.to_string()).collect();
+        for (oa, ob, len) in equal_runs(similar::Algorithm::Myers, &ka, &kb, deadline) {
+            if len >= min_run {
+                out.extend((0..len).map(|k| (oa + k, ob + k)));
+            }
+        }
     }
-    Ok(())
+    out
 }
 
-/// Pairs of equal elements of `a` and `b` (by index), from a diff of their
-/// values: runs of at least `min_run`.
-fn align(a: &[Elem], b: &[Elem], min_run: usize) -> Vec<(usize, usize)> {
-    let ka: Vec<String> = a.iter().map(|e| e.value.to_string()).collect();
-    let kb: Vec<String> = b.iter().map(|e| e.value.to_string()).collect();
-    similar::capture_diff_slices_deadline(
-        similar::Algorithm::Myers,
-        &ka,
-        &kb,
-        Some(Instant::now() + ALIGN_DEADLINE),
-    )
-    .into_iter()
-    .filter_map(|op| match op {
-        similar::DiffOp::Equal {
-            old_index,
-            new_index,
-            len,
-        } if len >= min_run => Some((0..len).map(move |k| (old_index + k, new_index + k))),
-        _ => None,
-    })
-    .flatten()
-    .collect()
+/// Equal runs `(a index, b index, len)` of two token sequences. Patience
+/// anchors on tokens found once on each side (words); Myers, for
+/// characters, finds the shortest edit.
+fn equal_runs(
+    algorithm: similar::Algorithm,
+    a: &[String],
+    b: &[String],
+    deadline: Instant,
+) -> Vec<(usize, usize, usize)> {
+    similar::capture_diff_slices_deadline(algorithm, a, b, Some(deadline))
+        .into_iter()
+        .filter_map(|op| match op {
+            similar::DiffOp::Equal {
+                old_index,
+                new_index,
+                len,
+            } => Some((old_index, new_index, len)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Level {
+    Word,
+    Char,
+}
+
+/// The largest span, in characters per side, diffed character by
+/// character.
+const MAX_CHAR_SPAN: usize = 4096;
+
+/// Split `chars[range]` into tokens (as char ranges): words (a run of
+/// letters and digits, or one other character) or characters.
+fn tokens(
+    chars: &[&str],
+    range: std::ops::Range<usize>,
+    level: Level,
+) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    let mut start = range.start;
+    for i in range.clone() {
+        let ends = match level {
+            Level::Word => {
+                let word = |c: &str| c.chars().all(char::is_alphanumeric);
+                !word(chars[i]) || i + 1 == range.end || !word(chars[i + 1])
+            }
+            Level::Char => true,
+        };
+        if ends {
+            out.push(start..i + 1);
+            start = i + 1;
+        }
+    }
+    if start < range.end {
+        out.push(start..range.end);
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn align_text(
+    a: &[&str],
+    ar: std::ops::Range<usize>,
+    b: &[&str],
+    br: std::ops::Range<usize>,
+    level: Level,
+    deadline: Instant,
+    min_run: usize,
+    out: &mut Vec<(usize, usize)>,
+) {
+    let mut emit = |oa: usize, ob: usize, len: usize| {
+        if len >= min_run {
+            out.extend((0..len).map(|k| (oa + k, ob + k)));
+        }
+    };
+    // The common start and end, exactly.
+    let head = a[ar.clone()]
+        .iter()
+        .zip(&b[br.clone()])
+        .take_while(|(x, y)| x == y)
+        .count();
+    let (ar, br) = (ar.start + head..ar.end, br.start + head..br.end);
+    let tail = a[ar.clone()]
+        .iter()
+        .rev()
+        .zip(b[br.clone()].iter().rev())
+        .take_while(|(x, y)| x == y)
+        .count();
+    emit(ar.start - head, br.start - head, head);
+    emit(ar.end - tail, br.end - tail, tail);
+    let (ar, br) = (ar.start..ar.end - tail, br.start..br.end - tail);
+    if ar.is_empty() || br.is_empty() || Instant::now() > deadline {
+        return;
+    }
+    if level == Level::Char {
+        if ar.len() > MAX_CHAR_SPAN || br.len() > MAX_CHAR_SPAN {
+            return;
+        }
+        let ka: Vec<String> = a[ar.clone()].iter().map(|c| c.to_string()).collect();
+        let kb: Vec<String> = b[br.clone()].iter().map(|c| c.to_string()).collect();
+        for (oa, ob, len) in equal_runs(similar::Algorithm::Myers, &ka, &kb, deadline) {
+            emit(ar.start + oa, br.start + ob, len);
+        }
+        return;
+    }
+    let ta = tokens(a, ar.clone(), level);
+    let tb = tokens(b, br.clone(), level);
+    let key = |chars: &[&str], t: &std::ops::Range<usize>| chars[t.clone()].concat();
+    let ka: Vec<String> = ta.iter().map(|t| key(a, t)).collect();
+    let kb: Vec<String> = tb.iter().map(|t| key(b, t)).collect();
+    let next = Level::Char;
+    // Equal token runs link; the spans between them are diffed finer.
+    let (mut ia, mut ib) = (0, 0);
+    let runs = equal_runs(similar::Algorithm::Patience, &ka, &kb, deadline);
+    for (oa, ob, len) in runs
+        .into_iter()
+        .chain(std::iter::once((ta.len(), tb.len(), 0)))
+    {
+        let gap_a = ta.get(ia).map_or(ar.end, |t| t.start)..ta.get(oa).map_or(ar.end, |t| t.start);
+        let gap_b = tb.get(ib).map_or(br.end, |t| t.start)..tb.get(ob).map_or(br.end, |t| t.start);
+        if !gap_a.is_empty() && !gap_b.is_empty() {
+            align_text(a, gap_a, b, gap_b, next, deadline, min_run, out);
+        }
+        if len > 0 {
+            let start_a = ta[oa].start;
+            let start_b = tb[ob].start;
+            let chars = ta[oa + len - 1].end - start_a;
+            if chars >= min_run {
+                out.extend((0..chars).map(|k| (start_a + k, start_b + k)));
+            }
+        }
+        (ia, ib) = (oa + len, ob + len);
+    }
 }
 
 /// Whether `elems` are exactly the base write's elements: as many as it
-/// wrote, all from it (`ids`), and for a movable list with the values it
-/// wrote.
-fn is_base(elems: &[Elem], base: Option<&BaseWrite>, ids: &HashSet<ID>) -> bool {
+/// wrote, all from it, and for a movable list with the values it wrote.
+fn is_base(elems: &[Elem], base: Option<&BaseWrite>, ids: &BaseIn) -> bool {
     let Some(base) = base else {
         return false;
     };
     base.len == elems.len()
-        && elems.iter().all(|e| ids.contains(&e.id))
+        && elems.iter().all(|e| ids.contains(e.id))
         && base
             .values
             .as_ref()
             .is_none_or(|values| elems.iter().map(|e| &e.value).eq(values.iter()))
 }
 
+/// An edit to the holder, at a position in the holder as read before any.
+enum Edit {
+    Delete(usize),
+    Set(usize, Value),
+    /// Insert the source's elements `i..j` before position `at`.
+    Insert {
+        at: usize,
+        i: usize,
+        j: usize,
+    },
+}
+
+impl Edit {
+    /// Edits run from the highest key down, so an edit leaves the
+    /// positions of the ones still to run as they were. A delete or set of
+    /// the element at `p` runs before an insert before `p`; inserts before
+    /// one position run last source run first.
+    fn key(&self) -> (usize, usize) {
+        match self {
+            Edit::Delete(p) | Edit::Set(p, _) => (2 * p + 1, 0),
+            Edit::Insert { at, i, .. } => (2 * at, *i),
+        }
+    }
+}
+
 /// Merge the text or list `source` into `holder` (see the module docs).
-#[allow(clippy::too_many_arguments)]
 fn merge_seq(
     doc: &LoroDoc,
     source: &ContainerID,
     holder: &ContainerID,
     earlier: Option<Links>,
     base: Option<&BaseWrite>,
-    base_in_source: &HashSet<ID>,
-    base_in_holder: &HashSet<ID>,
+    base_in_source: &BaseIn,
+    base_in_holder: &BaseIn,
 ) -> Result<Links, String> {
     let seq = Seq::of(doc, holder).ok_or_else(|| format!("{holder} is not a text or list"))?;
     let movable = matches!(seq, Seq::Movable(_));
     let src = read_elements(doc, source);
+    let dst = read_elements(doc, holder);
+    // Where each element of the holder is; an image not here was deleted.
+    let at: HashMap<ID, usize> = dst.iter().enumerate().map(|(p, e)| (e.id, p)).collect();
     let mut link: HashMap<ID, Option<ID>> = HashMap::new();
+    let mut edits: Vec<Edit> = Vec::new();
     match earlier {
         Some(earlier) => {
             let alive: HashSet<ID> = src.iter().map(|e| e.id).collect();
@@ -754,8 +979,8 @@ fn merge_seq(
             for (s, t) in expanded {
                 if alive.contains(&s) {
                     link.insert(s, t);
-                } else if let Some(t) = t {
-                    delete_element(doc, &seq, holder, t)?;
+                } else if let Some(&p) = t.as_ref().and_then(|t| at.get(t)) {
+                    edits.push(Edit::Delete(p));
                 }
             }
             for e in src.iter().filter(|_| movable) {
@@ -763,8 +988,8 @@ fn merge_seq(
                     continue;
                 };
                 if was != &e.value {
-                    if let Some((pos, true)) = locate(doc, holder, *t) {
-                        seq.set(pos, &e.value)?;
+                    if let Some(&p) = at.get(t) {
+                        edits.push(Edit::Set(p, e.value.clone()));
                     }
                 }
             }
@@ -775,27 +1000,27 @@ fn merge_seq(
             }
         }
         None => {
-            let dst = read_elements(doc, holder);
             let replace = is_base(&dst, base, base_in_holder);
-            let min_run = if replace || !matches!(seq, Seq::Text(_)) {
-                1
-            } else {
-                MIN_TEXT_RUN
-            };
+            let text = matches!(seq, Seq::Text(_));
+            let min_run = if replace || !text { 1 } else { MIN_TEXT_RUN };
             let mut in_holder = vec![false; dst.len()];
-            for (i, j) in align(&src, &dst, min_run) {
+            for (i, j) in align(&src, &dst, text, min_run) {
                 link.insert(src[i].id, Some(dst[j].id));
                 in_holder[j] = true;
             }
             if replace {
-                for (e, _) in dst.iter().zip(&in_holder).filter(|(_, linked)| !**linked) {
-                    delete_element(doc, &seq, holder, e.id)?;
-                }
+                edits.extend(
+                    in_holder
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, linked)| !**linked)
+                        .map(|(p, _)| Edit::Delete(p)),
+                );
             }
         }
     }
     // The source's unlinked elements, a run at a time, beside the images of
-    // their neighbours.
+    // their nearest neighbours still in the holder.
     let mut i = 0;
     while i < src.len() {
         if link.contains_key(&src[i].id) {
@@ -806,13 +1031,26 @@ fn merge_seq(
         while j < src.len() && !link.contains_key(&src[j].id) {
             j += 1;
         }
-        let pos = anchor(doc, &seq, holder, &src, &link, i, j);
-        let values: Vec<Value> = src[i..j].iter().map(|e| e.value.clone()).collect();
-        let ids = seq.insert(pos, &values)?;
-        for (e, id) in src[i..j].iter().zip(ids) {
-            link.insert(e.id, Some(id));
-        }
+        edits.push(Edit::Insert {
+            at: anchor(&src, &link, &at, i, j, dst.len()),
+            i,
+            j,
+        });
         i = j;
+    }
+    edits.sort_by_key(|e| std::cmp::Reverse(e.key()));
+    for edit in edits {
+        match edit {
+            Edit::Delete(p) => seq.delete(p)?,
+            Edit::Set(p, value) => seq.set(p, &value)?,
+            Edit::Insert { at, i, j } => {
+                let values: Vec<Value> = src[i..j].iter().map(|e| e.value.clone()).collect();
+                let ids = seq.insert(at, &values)?;
+                for (e, id) in src[i..j].iter().zip(ids) {
+                    link.insert(e.id, Some(id));
+                }
+            }
+        }
     }
     let pairs: Vec<(ID, Option<ID>)> = src
         .iter()
@@ -831,32 +1069,30 @@ fn merge_seq(
 }
 
 /// Where the source's elements `i..j` go in the holder: after the image of
-/// the nearest earlier source element that has one, else before the image
-/// of the nearest later one, else at the end.
+/// the nearest earlier source element whose image is still there, else
+/// before that of the nearest later one, else at the end.
 fn anchor(
-    doc: &LoroDoc,
-    seq: &Seq,
-    holder: &ContainerID,
     src: &[Elem],
     link: &HashMap<ID, Option<ID>>,
+    at: &HashMap<ID, usize>,
     i: usize,
     j: usize,
+    len: usize,
 ) -> usize {
-    for e in src[..i].iter().rev() {
-        if let Some(Some(t)) = link.get(&e.id) {
-            if let Some((pos, here)) = locate(doc, holder, *t) {
-                return if here { pos + 1 } else { pos };
-            }
-        }
-    }
-    for e in &src[j..] {
-        if let Some(Some(t)) = link.get(&e.id) {
-            if let Some((pos, _)) = locate(doc, holder, *t) {
-                return pos;
-            }
-        }
-    }
-    seq.len()
+    let image = |e: &Elem| {
+        link.get(&e.id)
+            .copied()
+            .flatten()
+            .and_then(|t| at.get(&t))
+            .copied()
+    };
+    src[..i]
+        .iter()
+        .rev()
+        .find_map(image)
+        .map(|p| p + 1)
+        .or_else(|| src[j..].iter().find_map(image))
+        .unwrap_or(len)
 }
 
 fn node_id(node: &Value) -> Option<&str> {
@@ -1029,5 +1265,37 @@ fn break_cycles(nodes: &mut [Value]) {
         for n in nodes.iter_mut().filter(|n| node_id(n) == Some(id.as_str())) {
             n["parent"] = Value::Null;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn elems(s: &str) -> Vec<Elem> {
+        s.chars()
+            .enumerate()
+            .map(|(i, c)| Elem {
+                id: ID::new(1, i as i32),
+                value: Value::String(c.to_string()),
+            })
+            .collect()
+    }
+
+    /// Every line of a long text changed: the words still link.
+    #[test]
+    fn align_links_a_long_text_whose_every_line_changed() {
+        let line = |i: usize, tag: &str| format!("line {i} of the document {tag}\n");
+        let a: String = (0..2000).map(|i| line(i, "edited")).collect();
+        let b: String = (0..2000).map(|i| line(i, "")).collect();
+        let started = Instant::now();
+        let pairs = align(&elems(&a), &elems(&b), true, MIN_TEXT_RUN);
+        let took = started.elapsed();
+        assert!(
+            pairs.len() >= b.chars().count() - 2000,
+            "{} of {} in {took:?}",
+            pairs.len(),
+            b.chars().count()
+        );
     }
 }
