@@ -5596,13 +5596,27 @@ pub(crate) fn fill_values(
 }
 
 /// A Postgres row as its CRDT doc holds it (JSON and list fields parsed,
-/// encrypted fields still encrypted), read in the caller's transaction.
+/// encrypted fields still encrypted), read in the caller's transaction with
+/// the row locked until it ends: a concurrent delete waits, or has already
+/// removed it (None). Take the row's CRDT advisory lock first.
 pub(crate) fn pg_row_for_doc<C: pylon_storage::pg_exec::PgConn>(
     conn: &mut C,
     ent: &ManifestEntity,
     fields: &[pylon_crdt::CrdtField],
     id: &str,
 ) -> Result<Option<serde_json::Value>, loro_store::LoroStoreError> {
+    let locked = conn
+        .query_opt(
+            &format!(
+                "SELECT 1 FROM {} WHERE id = $1 FOR UPDATE",
+                quote_ident(&ent.name)
+            ),
+            &[&id],
+        )
+        .map_err(|e| loro_store::LoroStoreError::Storage(format!("lock {} {id}: {e}", ent.name)))?;
+    if locked.is_none() {
+        return Ok(None);
+    }
     let Some(mut row) = pylon_storage::pg_tx_store::tx_get_by_id(conn, &ent.name, id)
         .map_err(|e| loro_store::LoroStoreError::Storage(format!("[{}] {}", e.code, e.message)))?
     else {

@@ -1114,24 +1114,27 @@ impl DataStore for Runtime {
                                 message: format!("crdt apply update {entity}/{row_id}: {e}"),
                             }
                         };
-                        // Refuse to commit a snapshot for a row that does not
-                        // exist (a peer pushed an update for a row this
-                        // replica has never seen).
-                        let Some(row) = crate::pg_row_for_doc(tx, &ent, &crdt_fields, row_id)
-                            .map_err(crdt_err)?
-                        else {
-                            return Err(DataError {
-                                code: "ENTITY_NOT_FOUND".into(),
-                                message: format!(
-                                    "Peer-pushed CRDT update targets {entity}/{row_id} which has \
-                             no materialized row — refusing to commit an orphan snapshot."
-                                ),
-                            });
+                        let orphan = || DataError {
+                            code: "ENTITY_NOT_FOUND".into(),
+                            message: format!(
+                                "Peer-pushed CRDT update targets {entity}/{row_id} which has \
+                                 no materialized row — refusing to commit an orphan snapshot."
+                            ),
                         };
+                        // The doc's advisory lock first, then the row's (the
+                        // order every CRDT write takes them).
                         let (before_push, touched, had_doc) = pg_backend
                             .crdt
                             .apply_client_update(tx, entity, row_id, &crdt_fields, update)
                             .map_err(crdt_err)?;
+                        // A row that does not exist, or that a concurrent
+                        // delete removed (the row stays locked from here):
+                        // the snapshot is not committed.
+                        let Some(row) = crate::pg_row_for_doc(tx, &ent, &crdt_fields, row_id)
+                            .map_err(crdt_err)?
+                        else {
+                            return Err(orphan());
+                        };
                         // A row with no doc: the update came first, so its
                         // fields stand; the fields it did not set take the
                         // row's values, or the projection below would null
@@ -1183,13 +1186,15 @@ impl DataStore for Runtime {
                             let changes = serde_json::Value::Object(changes);
                             let stored = crate::serialize_json_fields_for_storage(&ent, &changes)
                                 .unwrap_or(changes);
-                            pylon_storage::pg_tx_store::tx_update(
+                            if !pylon_storage::pg_tx_store::tx_update(
                                 tx,
                                 self.manifest(),
                                 entity,
                                 row_id,
                                 &stored,
-                            )?;
+                            )? {
+                                return Err(orphan());
+                            }
                         }
                         // Read the snapshot back from the tx, bypassing the
                         // cache — a prior `crdt_snapshot()` call could have

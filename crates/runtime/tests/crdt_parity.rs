@@ -602,3 +602,47 @@ fn a_delete_removes_the_side_records() {
         }
     });
 }
+
+/// Postgres: a push that waits on a concurrent delete of its row does not
+/// commit a snapshot for the deleted row.
+#[test]
+fn a_push_racing_a_delete_commits_no_orphan_snapshot() {
+    let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
+        return;
+    };
+    let env = postgres(&url);
+    let id = env.rt.insert("Doc", &fresh_doc()).unwrap();
+    let online = online_client(&env, &id);
+    let before = online.oplog_vv();
+    patch(&online, json!({"done": true}));
+    let update = online.export(ExportMode::updates(&before)).unwrap();
+    let before_race = stored_snapshot(&url, &id);
+    // Another runtime deletes the row and holds its transaction open.
+    let mut deleter = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    let mut tx = deleter.transaction().unwrap();
+    tx.execute("DELETE FROM \"Doc\" WHERE id = $1", &[&id])
+        .unwrap();
+    std::thread::scope(|s| {
+        let push = s.spawn(|| env.rt.crdt_apply_update("Doc", &id, &update));
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        tx.commit().unwrap();
+        let pushed = push.join().unwrap();
+        assert_eq!(pushed.unwrap_err().code, "ENTITY_NOT_FOUND");
+    });
+    let stored = stored_snapshot(&url, &id);
+    assert_eq!(
+        stored, before_race,
+        "the push changed nothing that committed"
+    );
+}
+
+fn stored_snapshot(url: &str, id: &str) -> Option<Vec<u8>> {
+    let mut client = postgres::Client::connect(url, postgres::NoTls).unwrap();
+    client
+        .query_opt(
+            "SELECT snapshot FROM _pylon_crdt_snapshots WHERE entity = 'Doc' AND row_id = $1",
+            &[&id],
+        )
+        .unwrap()
+        .map(|r| r.get(0))
+}
