@@ -19,6 +19,11 @@
 #      back, and take a GM's heal sent after a commit (and none after a
 #      rollback). Machines f and g are killed during a grant and right after
 #      one commits; the zones start elsewhere and each item exists once.
+#   2f. WebTransport: machines h and i serve WebTransport; h lists both
+#      machines' certificate hashes. Bench bots on WebTransport join a
+#      frontier zone placed on b (which has none) through h, which relays
+#      the sessions; with a fifth of their datagrams dropped they still get
+#      state and acks.
 #   3. packages/realtime's shard-cluster.e2e.test.ts creates an arena through
 #      a, pinned to b; connects through a (proxied to b: b is not on Fly);
 #      moves a player; kills b; and finds the arena started on a from b's
@@ -59,6 +64,11 @@ PORT_D=4881
 PORT_E=4891
 PORT_F=4901
 PORT_G=4911
+PORT_H=4921
+PORT_I=4931
+# WebTransport (UDP) ports of machines h and i.
+WT_H=4925
+WT_I=4935
 PG_PROXY_PORT=55432
 TMP="$(mktemp -d -t pylon-shard-cluster.XXXXXX)"
 PIDS=()
@@ -222,6 +232,42 @@ sleep 3
 		PYLON_SHARD_DATA_KILL="$PID_F,$PID_G" \
 		PYLON_SHARD_ADMIN_TOKEN="$ADMIN_TOKEN" \
 		bun test src/shard-data.e2e.test.ts) || fail "the data e2e test failed"
+
+echo "→ 2f. WebTransport: h relays sessions for a zone on b"
+start h "$PORT_H" PYLON_REPLICA_ID=h PYLON_WEBTRANSPORT_PORT="$WT_H" \
+	PYLON_WEBTRANSPORT_URL="https://127.0.0.1:$WT_H/shard"
+PID_H=$PID
+start i "$PORT_I" PYLON_REPLICA_ID=i PYLON_WEBTRANSPORT_PORT="$WT_I" \
+	PYLON_WEBTRANSPORT_URL="https://127.0.0.1:$WT_I/shard"
+PID_I=$PID
+up "$PORT_H"
+up "$PORT_I"
+# A heartbeat or two, so h has read i's hashes.
+sleep 5
+INFO=$(curl -sf "http://127.0.0.1:$PORT_H/_pylon/shard/webtransport") ||
+	fail "h does not serve /_pylon/shard/webtransport"
+HASHES=$(grep -o '"certHashes":\[[^]]*\]' <<<"$INFO" | grep -o '"[A-Za-z0-9+/=]\{44\}"' | wc -l | tr -d ' ')
+[[ "$HASHES" == 4 ]] || {
+	echo "$INFO" >&2
+	fail "h lists $HASHES certificate hashes, not its 2 and i's 2"
+}
+BENCH=$("$PYLON" bench shard --url "http://127.0.0.1:$PORT_H" --transport webtransport \
+	--join joinFrontier --join-args '{"frontier":"wt-relay","size":400,"machine":"b"}' \
+	--bots 5 --duration 6 --ramp 1 --drop-datagrams 20 \
+	--input '"join"' --input '{"move_to":{"x":"$rand:0:400","y":"$rand:0:400"}}' --json) ||
+	fail "the WebTransport bench through h failed: $BENCH"
+for want in '"connected":5' '"failed":0' '"dropped":0' '"decode_errors":0'; do
+	grep -q "$want" <<<"$BENCH" || {
+		echo "$BENCH" >&2
+		fail "WebTransport through h: no $want"
+	}
+done
+grep -Eq '"frames":[0-9]{2,}' <<<"$BENCH" && grep -Eq '"inputs_acked":[1-9]' <<<"$BENCH" || {
+	echo "$BENCH" >&2
+	fail "WebTransport through h: no state or no acks"
+}
+grep -q "GET /shard?shard=wt-relay" "$TMP/b.log" || fail "b did not serve the relayed sessions"
+kill "$PID_H" "$PID_I"
 
 echo "→ 3. e2e: create on b through a, connect through a, kill b"
 (cd "$ROOT/packages/realtime" &&

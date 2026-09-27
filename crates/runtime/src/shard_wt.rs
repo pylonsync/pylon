@@ -421,15 +421,25 @@ async fn run_session(
             "the connection carries no datagrams",
         );
     }
-    let Some(shard) = registry.get(&hello.shard) else {
-        // Another machine may run it: QUIC cannot be handed over, so this
+    // The lookup may read the shard directory with a blocking Postgres
+    // client, which must not run on an async worker.
+    let found = {
+        let (registry, id) = (Arc::clone(&registry), hello.shard.clone());
+        tokio::task::spawn_blocking(move || match registry.get(&id) {
+            Some(shard) => Ok(shard),
+            None => Err(registry.locate(&id)),
+        })
+        .await
+    };
+    let shard = match found {
+        Ok(Ok(shard)) => shard,
+        // Another machine runs it: QUIC cannot be handed over, so this
         // machine relays the session there (see `relay`).
-        if let pylon_realtime::ShardLocation::Remote {
+        Ok(Err(pylon_realtime::ShardLocation::Remote {
             machine_id,
             address: Some(address),
             ..
-        } = registry.locate(&hello.shard)
-        {
+        })) => {
             return relay(
                 conn,
                 send,
@@ -441,11 +451,14 @@ async fn run_session(
             )
             .await;
         }
-        return close(
-            conn,
-            close_code::POLICY,
-            &format!("shard \"{}\" not found", hello.shard),
-        );
+        Ok(Err(_)) => {
+            return close(
+                conn,
+                close_code::POLICY,
+                &format!("shard \"{}\" not found", hello.shard),
+            );
+        }
+        Err(e) => return close(conn, close_code::AGAIN, &format!("lookup task failed: {e}")),
     };
 
     let subscriber_id = SubscriberId::new(hello.sid);
