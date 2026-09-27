@@ -35,6 +35,7 @@ type ShardStats = {
 	inputs_ms: Quantiles;
 	sim_ms: Quantiles;
 	interest_ms: Quantiles;
+	frames_ms: Quantiles;
 	encode_ms: Quantiles;
 	bytes_per_tick: Quantiles;
 	bytes_per_subscriber: Quantiles;
@@ -374,6 +375,7 @@ function ShardDetailView({ id, onBack }: { id: string; onBack: () => void }) {
 											["Inputs (apply_input)", s.inputs_ms],
 											["Simulation (tick)", s.sim_ms],
 											["Interest and snapshots", s.interest_ms],
+											["Replication frames", s.frames_ms],
 											["Encoding and queueing", s.encode_ms],
 										] as const
 									).map(([label, q]) => (

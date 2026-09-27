@@ -988,8 +988,10 @@ export interface ManifestShard {
   maxInstances?: number;
   /** Memory cap per shard, in MiB. Default 64. */
   memoryMb?: number;
-  /** Time budget for one tick (its inputs, `tick`, and the snapshots) or
-   *  one authorize call, in milliseconds. A tick that runs longer stops the
+  /** CPU time budget for the module in one tick (its inputs, `tick`, and
+   *  the snapshots) or one authorize call, in milliseconds. It counts only
+   *  the time the module's code runs: not the host's work, and not time the
+   *  machine makes the tick wait for a CPU. A tick that uses more stops the
    *  shard. Default 100. */
   tickBudgetMs?: number;
   /** Stop a shard after this many seconds with no subscribers and no

@@ -331,6 +331,19 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
                     await openSocket()
                     return
                 }
+                let reason = task.closeReason.flatMap { String(data: $0, encoding: .utf8) }
+                if Self.refusedForGood(
+                    closeCode: task.closeCode.rawValue, reason: reason,
+                    hasTicketProvider: config.ticketProvider != nil,
+                    hasTransferTicket: transferTicket != nil)
+                {
+                    stateContinuation?.yield(
+                        .failed(
+                            "shard \(shardId) refused the connection (\(reason ?? "")); set ticketProvider to get new tickets"
+                        ))
+                    running = false
+                    return
+                }
                 stateContinuation?.yield(.failed("\(error)"))
                 if config.autoReconnect, running {
                     await scheduleReconnect()
@@ -380,6 +393,19 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
             }
         }
         return config.ticket
+    }
+
+    /// True when the server refused the connection's credentials (close
+    /// code 1008 with an "unauthorized" reason: an expired ticket, one
+    /// signed with an old secret, a session that ended) and the next attempt
+    /// would send the same ones. Retrying cannot succeed then; only a
+    /// `ticketProvider` brings new credentials. A shard that is not found
+    /// is worth retrying: a restarted machine brings it back.
+    static func refusedForGood(
+        closeCode: Int, reason: String?, hasTicketProvider: Bool, hasTransferTicket: Bool
+    ) -> Bool {
+        guard closeCode == 1008, reason?.hasPrefix("unauthorized") == true else { return false }
+        return hasTransferTicket || !hasTicketProvider
     }
 
     /// True when a shard ticket (`v1.<payload>.<signature>`, the payload

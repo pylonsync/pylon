@@ -118,6 +118,9 @@ export interface ShardClient<TSnapshot = unknown, TInput = unknown> {
   readonly connected: boolean;
 }
 
+/** WebSocket close code 1008: the server refused the connection by policy. */
+const POLICY_CLOSE = 1008;
+
 /**
  * True when a shard ticket (`v1.<payload>.<signature>`, the payload
  * base64url JSON with `exp` in Unix seconds) expires within `marginSecs`.
@@ -379,12 +382,27 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
       dispatchError(new Error(`WebSocket error connecting to shard ${currentShard}`));
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event?: { code?: number; reason?: string }) => {
       connected = false;
       for (const h of closeHandlers) h();
       if (transferring && !closed) {
         transferring = false;
         reconnectTimer = setTimeout(connect, 0);
+        return;
+      }
+      // The server refused these credentials (an expired ticket, one signed
+      // with an old secret, a session that ended). The same ones fail the
+      // same way on every retry; only a ticket function can bring new ones.
+      const refused =
+        event?.code === POLICY_CLOSE && (event.reason ?? "").startsWith("unauthorized");
+      const sameCredentials = transferTicket !== null || typeof options.ticket !== "function";
+      if (refused && sameCredentials && !closed) {
+        dispatchError(
+          new Error(
+            `shard ${currentShard} refused the connection (${event?.reason}); pass a ticket function to get new tickets`,
+          ),
+        );
+        closed = true;
         return;
       }
       scheduleReconnect();

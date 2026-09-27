@@ -124,6 +124,7 @@ The client passes the ticket when it connects: `connectShard(shard, { subscriber
 
 - `subscriberId` defaults to the calling user's id.
 - `ttlSecs` defaults to 60 and is capped at 3600. The ticket only gates joining. A subscriber stays connected after its ticket expires.
+- A client with a fixed ticket stops reconnecting when the shard refuses it (expired, or signed with an old key). Pass a ticket function (TypeScript `ticket: (shardId) => ...`, Swift `ticketProvider`) to get a new ticket on each connection attempt.
 - The host signs tickets with `PYLON_SHARD_TICKET_SECRET`, or a key derived from `PYLON_JWT_SECRET`. When shards run on several machines, set one of them to the same value on every machine.
 
 The three flavors expose different context surfaces:

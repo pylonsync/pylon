@@ -1260,6 +1260,7 @@ impl<S: SimState> Shard<S> {
         store: &crate::Replicated,
         subs: &[Arc<Subscriber<S::Snapshot>>],
         tick: u64,
+        frames_time: &mut Duration,
     ) -> Vec<TickSnapshot<S::Snapshot>> {
         let config = state.replication_config();
         let mut replicator = self.replicator.lock().unwrap();
@@ -1312,6 +1313,7 @@ impl<S: SimState> Shard<S> {
             let (dropped, queue_full) = sub
                 .queue()
                 .map_or((0, false), |q| (q.dropped_snapshots(), q.is_full()));
+            let started = Instant::now();
             let frame = replicator.frame(
                 store,
                 &config,
@@ -1324,6 +1326,7 @@ impl<S: SimState> Shard<S> {
                     queue_full,
                 },
             );
+            *frames_time += started.elapsed();
             out.push(TickSnapshot::Replication(
                 Arc::from(frame.bytes),
                 frame.delta_of,
@@ -1379,10 +1382,11 @@ impl<S: SimState> Shard<S> {
         state: &S,
         subs: &[Arc<Subscriber<S::Snapshot>>],
         tick: u64,
+        frames_time: &mut Duration,
     ) -> (Vec<TickSnapshot<S::Snapshot>>, Vec<S::Snapshot>) {
         if let Some(store) = state.replicated() {
             return (
-                self.replication_frames(state, &store, subs, tick),
+                self.replication_frames(state, &store, subs, tick, frames_time),
                 Vec::new(),
             );
         }
@@ -1537,8 +1541,10 @@ impl<S: SimState> Shard<S> {
             let ticked = Instant::now();
             phases.tick = ticked - applied;
 
-            let (snapshots, shared) = self.take_snapshots(&state, &subs, tick_number);
-            phases.interest = ticked.elapsed();
+            let mut frames = Duration::ZERO;
+            let (snapshots, shared) = self.take_snapshots(&state, &subs, tick_number, &mut frames);
+            phases.frames = frames;
+            phases.interest = ticked.elapsed().saturating_sub(frames);
             (snapshots, shared, state.is_finished())
         };
         let delivering = Instant::now();

@@ -24,16 +24,19 @@ pub struct Phases {
     pub inputs: Duration,
     /// The simulation's `tick` (and the `on_tick` hook).
     pub tick: Duration,
-    /// Interest management and building each subscriber's snapshot or
-    /// replication frame.
+    /// Interest management, and each subscriber's snapshot for a shard
+    /// that does not replicate.
     pub interest: Duration,
+    /// Building each subscriber's replication frame, for a shard that
+    /// replicates.
+    pub frames: Duration,
     /// Encoding and queueing frames for subscribers.
     pub encode: Duration,
 }
 
 impl Phases {
     pub fn total(&self) -> Duration {
-        self.inputs + self.tick + self.interest + self.encode
+        self.inputs + self.tick + self.interest + self.frames + self.encode
     }
 }
 
@@ -81,6 +84,7 @@ pub struct PhaseSeconds {
     pub inputs: f64,
     pub tick: f64,
     pub interest: f64,
+    pub frames: f64,
     pub encode: f64,
 }
 
@@ -113,6 +117,7 @@ pub struct ShardStats {
     pub inputs_ms: Quantiles,
     pub sim_ms: Quantiles,
     pub interest_ms: Quantiles,
+    pub frames_ms: Quantiles,
     pub encode_ms: Quantiles,
     pub phase_seconds_total: PhaseSeconds,
     /// Frame bytes queued per tick, for all subscribers together.
@@ -169,6 +174,7 @@ impl StatsRecorder {
         p.inputs += sample.phases.inputs;
         p.tick += sample.phases.tick;
         p.interest += sample.phases.interest;
+        p.frames += sample.phases.frames;
         p.encode += sample.phases.encode;
         self.window.push_back(WindowTick {
             whole: sample.whole,
@@ -215,12 +221,14 @@ impl StatsRecorder {
             inputs_ms: Quantiles::of(w.iter().map(|s| ms(s.phases.inputs))),
             sim_ms: Quantiles::of(w.iter().map(|s| ms(s.phases.tick))),
             interest_ms: Quantiles::of(w.iter().map(|s| ms(s.phases.interest))),
+            frames_ms: Quantiles::of(w.iter().map(|s| ms(s.phases.frames))),
             encode_ms: Quantiles::of(w.iter().map(|s| ms(s.phases.encode))),
             phase_seconds_total: PhaseSeconds {
                 whole: self.whole_total.as_secs_f64(),
                 inputs: t.inputs.as_secs_f64(),
                 tick: t.tick.as_secs_f64(),
                 interest: t.interest.as_secs_f64(),
+                frames: t.frames.as_secs_f64(),
                 encode: t.encode.as_secs_f64(),
             },
             bytes_per_tick: Quantiles::of(w.iter().map(|s| s.bytes as f64)),
@@ -242,11 +250,12 @@ mod tests {
     fn sample(ms_each: u64, bytes: &[u64], dropped: u64) -> TickSample {
         let d = Duration::from_millis(ms_each);
         TickSample {
-            whole: d * 5,
+            whole: d * 6,
             phases: Phases {
                 inputs: d,
                 tick: d,
                 interest: d,
+                frames: d,
                 encode: d,
             },
             subscriber_bytes: bytes.to_vec(),
@@ -265,8 +274,9 @@ mod tests {
         r.input_rate_limited();
         let s = r.snapshot();
         assert_eq!(s.ticks, 100);
-        // Phases of 0..9 ms each; the whole tick is longer than the four.
-        assert_eq!(s.tick_ms.max, 45.0);
+        // Phases of 0..9 ms each; the whole tick is the five together.
+        assert_eq!(s.tick_ms.max, 54.0);
+        assert_eq!(s.frames_ms.max, 9.0);
         assert_eq!(s.sim_ms.p50, 5.0);
         assert_eq!(s.bytes_total, (1..=100u64).map(|i| 3 * i).sum::<u64>());
         assert_eq!(s.bytes_per_tick.max, 300.0);
@@ -280,7 +290,7 @@ mod tests {
             r.record(sample(1, &[7], 0));
         }
         let s = r.snapshot();
-        assert_eq!(s.tick_ms.max, 5.0);
+        assert_eq!(s.tick_ms.max, 6.0);
         assert_eq!(s.bytes_per_subscriber.max, 7.0);
         assert_eq!(s.dropped_frames_total, 1);
         assert_eq!(s.ticks, 100 + WINDOW_TICKS as u64);

@@ -58,6 +58,16 @@ pub type ComponentChange<'a> = (ComponentId, Option<&'a [u8]>);
 /// axes, and the component changes. Returns the body.
 pub fn encode_update_body(delta: [i64; 3], components: &[ComponentChange<'_>]) -> Vec<u8> {
     let mut body = Vec::with_capacity(8);
+    encode_update_body_into(&mut body, delta, components);
+    body
+}
+
+/// [`encode_update_body`], appended to `body`.
+pub fn encode_update_body_into(
+    body: &mut Vec<u8>,
+    delta: [i64; 3],
+    components: &[ComponentChange<'_>],
+) {
     let mut m = 0u8;
     for (i, bit) in [mask::X, mask::Y, mask::Z].into_iter().enumerate() {
         if delta[i] != 0 {
@@ -70,13 +80,12 @@ pub fn encode_update_body(delta: [i64; 3], components: &[ComponentChange<'_>]) -
     body.push(m);
     for d in delta {
         if d != 0 {
-            varint::write_i64(&mut body, d);
+            varint::write_i64(body, d);
         }
     }
     if !components.is_empty() {
-        write_components(&mut body, components.iter().copied());
+        write_components(body, components.iter().copied());
     }
-    body
 }
 
 fn write_components<'a>(
