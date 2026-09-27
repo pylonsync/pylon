@@ -3876,7 +3876,8 @@ fn start_server(
 
         // Where a shard client connects over WebTransport, and the hashes of
         // the certificates it may present. Public: they are no secret, and
-        // a client asks before it has a session.
+        // a client asks before it has a session, often from the app's own
+        // origin rather than the API's (so the CORS header).
         if url == "/_pylon/shard/webtransport" && method == Method::Get {
             let (status, body) = match crate::shard_wt::endpoint_info_json() {
                 Some(body) => (200, body),
@@ -3889,7 +3890,15 @@ fn start_server(
                 Response::from_string(body)
                     .with_status_code(status)
                     .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
-                    .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap()),
+                    .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap())
+                    .with_header(
+                        Header::from_bytes(
+                            "Access-Control-Allow-Origin",
+                            cors_origin.as_bytes().to_vec(),
+                        )
+                        .unwrap(),
+                    )
+                    .with_header(Header::from_bytes("Vary", "Origin").unwrap()),
             );
             let _ = request.respond(response);
             mt.record_request("GET", status);

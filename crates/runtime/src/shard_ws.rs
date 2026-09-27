@@ -131,10 +131,12 @@ fn main_port_ip_counter() -> &'static Arc<IpConnCounter> {
     C.get_or_init(|| ip_counter(max_connections_per_ip_from_env()))
 }
 
-/// Reserve a main-port shard connection slot for `ip`. `None` when the IP
-/// is at its cap; the caller answers 429 before upgrading.
+/// Reserve a main-port shard connection slot for `ip` (WebSocket on `/shard`
+/// and WebTransport count together). `None` when the IP is at its cap; the
+/// caller answers 429 before upgrading.
 pub fn admit_main_port(ip: std::net::IpAddr) -> Option<IpConnGuard> {
-    main_port_ip_counter().acquire(ip)
+    // `::ffff:1.2.3.4` and `1.2.3.4` are one client.
+    main_port_ip_counter().acquire(ip.to_canonical())
 }
 
 /// Run a shard connection that arrived on the main HTTP port at `/shard`.
@@ -459,7 +461,12 @@ pub(crate) fn log_connection_end_as(method: &str, started: Instant, end: &Connec
     let reason = match end {
         ConnectionEnd::ClientClosed => None,
         ConnectionEnd::Closed(reason) => {
-            tracing::info!("[shard-ws] connection closed after {ms}ms: {reason}");
+            let tag = if method == "WT" {
+                "shard-wt"
+            } else {
+                "shard-ws"
+            };
+            tracing::info!("[{tag}] connection closed after {ms}ms: {reason}");
             Some(reason.as_str())
         }
     };

@@ -210,6 +210,10 @@ struct DatagramSent {
     sent_tick: u64,
 }
 
+/// A datagram being filled: the builder, its frame number, and the
+/// (entity, generation) pairs it carries.
+type OpenDatagram = (DatagramBuilder, u64, Vec<(EntityId, u8)>);
+
 /// A subscription on an unreliable transport.
 #[derive(Debug, Default)]
 struct DatagramBaseline {
@@ -813,7 +817,7 @@ impl Replicator {
 
         // Pack the chosen updates, in id order, into datagrams that fit.
         let mut datagrams = Vec::new();
-        let mut open: Option<(DatagramBuilder, u64, Vec<(EntityId, u8)>)> = None;
+        let mut open: Option<OpenDatagram> = None;
         for c in candidates.iter().filter(|c| c.chosen) {
             let body = &bodies[c.body.0..c.body.1];
             if open

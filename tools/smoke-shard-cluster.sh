@@ -246,6 +246,11 @@ up "$PORT_I"
 sleep 5
 INFO=$(curl -sf "http://127.0.0.1:$PORT_H/_pylon/shard/webtransport") ||
 	fail "h does not serve /_pylon/shard/webtransport"
+# A page on another origin reads it too.
+curl -sf -o /dev/null -D - -H "Origin: http://localhost:$PORT_H" \
+	"http://127.0.0.1:$PORT_H/_pylon/shard/webtransport" |
+	grep -qi "^access-control-allow-origin: http://localhost:$PORT_H" ||
+	fail "/_pylon/shard/webtransport has no CORS header"
 HASHES=$(grep -o '"certHashes":\[[^]]*\]' <<<"$INFO" | grep -o '"[A-Za-z0-9+/=]\{44\}"' | wc -l | tr -d ' ')
 [[ "$HASHES" == 4 ]] || {
 	echo "$INFO" >&2

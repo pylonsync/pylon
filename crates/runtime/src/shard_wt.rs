@@ -40,6 +40,7 @@ use pylon_realtime::{
 };
 use serde::Deserialize;
 use wtransport::endpoint::endpoint_side::Server;
+use wtransport::error::ConnectionError;
 use wtransport::{Connection, Endpoint, Identity, RecvStream, SendStream, ServerConfig, VarInt};
 
 use crate::shard_ws::{frame_v2_of, log_connection_end_as, process_input, ConnectionEnd};
@@ -320,6 +321,14 @@ async fn accept_loop(
                 request.not_found().await;
                 return;
             }
+            // The same cap as shard WebSockets, counted together
+            // (`PYLON_SHARD_WS_MAX_PER_IP`). The address is the client's
+            // own: the QUIC handshake has validated it.
+            let ip = request.remote_address().ip().to_canonical();
+            let Some(_slot) = crate::shard_ws::admit_main_port(ip) else {
+                request.too_many_requests().await;
+                return;
+            };
             let conn = match request.accept().await {
                 Ok(c) => c,
                 Err(e) => {
@@ -373,13 +382,36 @@ async fn write_message(send: &mut SendStream, bytes: &[u8]) -> Result<(), String
         .map_err(|e| format!("stream write: {e}"))
 }
 
+/// How a session ended once its connection closed: by the client (it closed
+/// the session, or the browser went away), or for a reason worth logging.
+fn ended_by(error: ConnectionError) -> ConnectionEnd {
+    match error {
+        // wtransport closes the connection itself when the client closes
+        // the session; the server's own closes do not come here.
+        ConnectionError::ApplicationClosed(_)
+        | ConnectionError::ConnectionClosed(_)
+        | ConnectionError::LocallyClosed => ConnectionEnd::ClientClosed,
+        ConnectionError::TimedOut => ConnectionEnd::Closed("the connection timed out".into()),
+        other => ConnectionEnd::Closed(other.to_string()),
+    }
+}
+
+/// A stream read failed: when the whole connection closed, why; else the
+/// read error (the client reset the stream).
+async fn read_failed(conn: &Connection, error: String) -> ConnectionEnd {
+    match tokio::time::timeout(Duration::from_millis(100), conn.closed()).await {
+        Ok(closed) => ended_by(closed),
+        Err(_) => ConnectionEnd::Closed(error),
+    }
+}
+
 fn close(conn: &Connection, code: u32, reason: &str) -> ConnectionEnd {
     // A close reason is at most 1024 bytes in WebTransport.
     let mut end = reason.len().min(1024);
     while !reason.is_char_boundary(end) {
         end -= 1;
     }
-    conn.close(VarInt::from_u32(code), reason[..end].as_bytes());
+    conn.close(VarInt::from_u32(code), &reason.as_bytes()[..end]);
     ConnectionEnd::Closed(reason.to_string())
 }
 
@@ -540,7 +572,7 @@ async fn run_session(
                     let bytes = match message {
                         Ok(Some(b)) => b,
                         Ok(None) => return ConnectionEnd::ClientClosed,
-                        Err(e) => return ConnectionEnd::Closed(e),
+                        Err(e) => return read_failed(conn, e).await,
                     };
                     match bytes.first() {
                         Some(&wire::client::ACKS) => match wire::decode_datagram_acks(&bytes) {
@@ -559,8 +591,9 @@ async fn run_session(
                     }
                 }
                 datagram = conn.receive_datagram() => {
-                    let Ok(datagram) = datagram else {
-                        return ConnectionEnd::ClientClosed;
+                    let datagram = match datagram {
+                        Ok(d) => d,
+                        Err(e) => return ended_by(e),
                     };
                     // Acks are the only datagrams a client sends; anything
                     // else is ignored, like a corrupt packet.
@@ -704,7 +737,7 @@ async fn relay(
             },
             message = read_message(&mut recv, MAX_CLIENT_MESSAGE) => match message {
                 Ok(Some(bytes)) => {
-                    if up_tx.send(Message::Binary(bytes.into())).await.is_err() {
+                    if up_tx.send(Message::Binary(bytes)).await.is_err() {
                         return close(conn, close_code::AGAIN, "the shard's machine closed");
                     }
                 }
@@ -714,20 +747,20 @@ async fn relay(
                 }
                 Err(e) => {
                     let _ = up_tx.close().await;
-                    return ConnectionEnd::Closed(e);
+                    return read_failed(conn, e).await;
                 }
             },
             datagram = conn.receive_datagram() => match datagram {
                 Ok(d) => {
                     if wire::decode_datagram_acks(&d).is_some()
-                        && up_tx.send(Message::Binary(d.payload().to_vec().into())).await.is_err()
+                        && up_tx.send(Message::Binary(d.payload().to_vec())).await.is_err()
                     {
                         return close(conn, close_code::AGAIN, "the shard's machine closed");
                     }
                 }
-                Err(_) => {
+                Err(e) => {
                     let _ = up_tx.close().await;
-                    return ConnectionEnd::ClientClosed;
+                    return ended_by(e);
                 }
             },
         }
