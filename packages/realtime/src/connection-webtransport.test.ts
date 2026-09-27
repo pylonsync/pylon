@@ -602,3 +602,23 @@ test("a session with no whole tick for 5 s closes, even when nothing arrives", a
   expect(errors).toContain("WebTransport to shard field: datagrams stopped arriving");
   client.close();
 });
+
+test("a snapshot shard over WebTransport is not taken for a stall", async () => {
+  let clock = 1000;
+  const client = connectShard("field", {
+    subscriberId: "p1",
+    baseUrl: "h",
+    ticket: "t1",
+    transport: "webtransport",
+    now: () => clock,
+  });
+  await until("the session", () => client.connected);
+  const wt = FakeWebTransport.sessions[FakeWebTransport.sessions.length - 1];
+  wt.sendFrames([frame(1, 0, 1, 0, json({ n: 1 }))]);
+  await until("the snapshot", () => client.tick === 1);
+  clock += 10_000;
+  await new Promise((r) => setTimeout(r, 1100));
+  expect(wt.clientClose).toBeNull();
+  expect(client.connected).toBe(true);
+  client.close();
+});

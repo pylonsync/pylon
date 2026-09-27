@@ -306,6 +306,9 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
   let receivedStreamTick = -1;
   // When the table last held a whole tick (or the session opened).
   let lastWholeAt = 0;
+  // Whether this link replicates entities. Only then does the server send
+  // datagrams every tick; a snapshot shard sends none.
+  let replicating = false;
   let lastKind: Link["kind"] | null = null;
   let clientSeq = 0;
   let closed = false;
@@ -445,6 +448,7 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
     pendingStream.length = 0;
     receivedStreamTick = -1;
     lastWholeAt = now();
+    replicating = false;
     // Inputs sent on the old connection are never acknowledged on this
     // one (acks restart with the connection).
     sentAt.clear();
@@ -550,6 +554,7 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
   const stalled = (from: Link) => {
     if (
       from !== link ||
+      !replicating ||
       (now() - lastWholeAt <= STALL_MS &&
         pending.size <= MAX_PENDING_TICKS &&
         pendingStream.length <= MAX_PENDING_TICKS)
@@ -607,6 +612,7 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
         // tick's frame is built, and would make the clock run early.
         observeTick(frame.tick, at);
       }
+      if (frame.kind === ShardFrameKind.Replication) replicating = true;
       if (frame.kind === ShardFrameKind.Replication && from.kind === "webtransport" && !isFullFrame(frame.payload)) {
         // It waits with its tick's datagrams (see `applyWhole`).
         pendingStream.push({ tick: frame.tick, payload: frame.payload });
@@ -671,6 +677,7 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
     if (from !== link) return;
     try {
       const h = readDatagramHeader(datagram);
+      replicating = true;
       if (h.tick <= wholeTick || h.parts < 1) return;
       observeTick(h.tick, at);
       let p = pending.get(h.tick);
