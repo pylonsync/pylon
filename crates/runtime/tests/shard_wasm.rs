@@ -116,7 +116,9 @@ fn drain(q: &pylon_realtime::OutboundQueue, format: SnapshotFormat) -> (Value, V
                 ack = f.ack;
             }
             FrameKind::InputRejected => rejections.push(decode(&f.bytes)),
-            FrameKind::Replication => panic!("the arena guest sends snapshots"),
+            FrameKind::Replication | FrameKind::Datagram => {
+                panic!("the arena guest sends snapshots")
+            }
             FrameKind::Transfer => panic!("no transfer in this test"),
         }
     }

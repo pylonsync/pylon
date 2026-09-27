@@ -38,6 +38,12 @@ use tokio_tungstenite::tungstenite::{
 use crate::ip_limit::IpConnCounter;
 pub use crate::ip_limit::IpConnGuard;
 
+/// Bounds on a version 3 connection's datagram size (`?dmax=`). The low end
+/// leaves room for a datagram's header and one update; the high end is the
+/// largest UDP payload.
+const MIN_DATAGRAM: usize = 128;
+const MAX_DATAGRAM: usize = 65_507;
+
 /// The server sends a ping this often.
 const PING_INTERVAL: Duration = Duration::from_secs(20);
 /// A connection that sends nothing (not even a pong) for this long is
@@ -518,12 +524,18 @@ async fn run_connection(
         return ConnectionEnd::Closed("missing ?shard= parameter".into());
     };
     let sid = query_param(&query, "sid").unwrap_or_else(|| "anon".to_string());
-    // Wire protocol version (see pylon_realtime::wire): `?v=2`, else 1.
-    let version: u8 = if query_param(&query, "v").as_deref() == Some("2") {
-        2
-    } else {
-        1
+    // Wire protocol version (see pylon_realtime::wire): `?v=3`, `?v=2`,
+    // else 1. Version 3 carries replication updates as datagrams of up to
+    // `dmax` bytes (default 1200).
+    let version: u8 = match query_param(&query, "v").as_deref() {
+        Some("3") => 3,
+        Some("2") => 2,
+        _ => 1,
     };
+    let datagram_max: usize = query_param(&query, "dmax")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1200)
+        .clamp(MIN_DATAGRAM, MAX_DATAGRAM);
 
     // Resolve auth token. Preference order:
     //   1. Authorization: Bearer ...   (native clients)
@@ -568,7 +580,14 @@ async fn run_connection(
             subscriber_id.clone(),
             shard_auth.clone(),
         );
-        tokio::task::spawn_blocking(move || shard.add_queued_subscriber(sid, &auth)).await
+        tokio::task::spawn_blocking(move || {
+            if version == 3 {
+                shard.add_queued_datagram_subscriber(sid, &auth, datagram_max)
+            } else {
+                shard.add_queued_subscriber(sid, &auth)
+            }
+        })
+        .await
     };
     let joined = match joined {
         Ok(r) => r,
@@ -613,34 +632,43 @@ async fn run_connection(
                         .or(Some(String::new()));
                 }
                 let payload = match (version, frame.kind) {
-                    (2, FrameKind::Snapshot) => wire::frame_v2(
+                    (2 | 3, FrameKind::Snapshot) => wire::frame_v2(
                         wire::kind::SNAPSHOT,
                         codec,
                         frame.tick,
                         frame.ack,
                         &frame.bytes,
                     ),
-                    (2, FrameKind::InputRejected) => wire::frame_v2(
+                    (2 | 3, FrameKind::InputRejected) => wire::frame_v2(
                         wire::kind::INPUT_REJECTED,
                         codec,
                         frame.tick,
                         frame.ack,
                         &frame.bytes,
                     ),
-                    (2, FrameKind::Replication) => wire::frame_v2(
+                    (2 | 3, FrameKind::Replication) => wire::frame_v2(
                         wire::kind::REPLICATION,
                         wire::codec::REPLICATION,
                         frame.tick,
                         frame.ack,
                         &frame.bytes,
                     ),
-                    (2, FrameKind::Transfer) => wire::frame_v2(
+                    (2 | 3, FrameKind::Transfer) => wire::frame_v2(
                         wire::kind::TRANSFER,
                         wire::codec::JSON,
                         frame.tick,
                         frame.ack,
                         &frame.bytes,
                     ),
+                    (3, FrameKind::Datagram) => wire::frame_v2(
+                        wire::kind::DATAGRAM,
+                        wire::codec::REPLICATION,
+                        frame.tick,
+                        frame.ack,
+                        &frame.bytes,
+                    ),
+                    // Only a version 3 subscription gets datagrams.
+                    (_, FrameKind::Datagram) => continue,
                     // Version 1 has no transfer frame: the close below says
                     // why the connection ends.
                     (_, FrameKind::Transfer) => continue,
@@ -750,6 +778,27 @@ async fn run_connection(
             }
             // Binary frames are in the shard's codec in version 2, JSON in
             // version 1.
+            // Version 3: a type byte, then acks or an input in the shard's
+            // codec.
+            Message::Binary(bytes) if version == 3 => match bytes.first() {
+                Some(&wire::client::ACKS) => match wire::decode_datagram_acks(&bytes) {
+                    Some(acks) => queue.push_datagram_acks(&acks),
+                    None => break ConnectionEnd::Closed("malformed datagram acks".into()),
+                },
+                Some(&wire::client::INPUT) => {
+                    process_input(
+                        &shard,
+                        &queue,
+                        &subscriber_id,
+                        &shard_auth,
+                        shard.snapshot_format(),
+                        bytes[1..].to_vec(),
+                        version,
+                    )
+                    .await;
+                }
+                _ => break ConnectionEnd::Closed("unknown client message type".into()),
+            },
             Message::Binary(bytes) => {
                 let format = if version == 2 {
                     shard.snapshot_format()
@@ -824,7 +873,7 @@ async fn process_input(
             return;
         }
     };
-    if version != 2 {
+    if version < 2 {
         return;
     }
     match pylon_realtime::encode_snapshot(&rejection, shard.snapshot_format()) {

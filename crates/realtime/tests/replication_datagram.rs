@@ -7,7 +7,7 @@
 //! byte budget. When the network turns clean and the store holds still, the
 //! client's table must equal the store for everything in view.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 
 use pylon_realtime::replication::{
     DatagramInput, FrameInput, Plane, ReplicationConfig, Replicator,
@@ -297,7 +297,7 @@ fn an_ack_of_an_older_datagram_does_not_hide_a_newer_state() {
         max_size: 1200,
         input_ack: 0,
     });
-    let mut frame = |rep: &mut Replicator, store: &Replicated, tick: u64| {
+    let frame = |rep: &mut Replicator, store: &Replicated, tick: u64| {
         rep.begin_tick(store);
         rep.frame(
             store,
@@ -396,7 +396,7 @@ fn an_update_that_beat_its_spawn_is_sent_again() {
     let mut store = Replicated::new();
     let mut rep = Replicator::new();
     let mut table = ReplicaTable::new();
-    let mut frame = |rep: &mut Replicator, store: &Replicated, tick: u64| {
+    let frame = |rep: &mut Replicator, store: &Replicated, tick: u64| {
         rep.begin_tick(store);
         rep.frame(
             store,

@@ -206,6 +206,17 @@ impl<T: EncodeSnapshot> Subscriber<T> {
         }
     }
 
+    /// Send a replication datagram (see `OutboundQueue::push_datagram`). A
+    /// subscriber without a queue has no datagram transport; it gets none.
+    pub fn send_datagram(&self, tick: u64, datagram: Arc<[u8]>) {
+        if let Delivery::Queue(q) = &self.delivery {
+            let len = datagram.len();
+            if q.push_datagram(tick, datagram) == PushOutcome::Queued {
+                self.count_pushed(len, PushOutcome::Queued);
+            }
+        }
+    }
+
     /// Send a snapshot encoded elsewhere (one encoding shared by several
     /// subscribers). A delta-mode subscriber diffs it like `send` does.
     pub fn send_encoded(&self, tick: u64, encoded: Arc<[u8]>, ack: u64) {

@@ -17,7 +17,7 @@
 //! gets the newest snapshots.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -55,6 +55,10 @@ pub enum FrameKind {
     /// A [`crate::wire::TransferNotice`]: the subscriber moved to another
     /// shard. The last frame on a queue; never dropped.
     Transfer,
+    /// A replication datagram (`pylon_replication::datagram`), for a queue
+    /// in datagram mode. Lossy by design: a full queue drops datagrams
+    /// first, and a dropped one only delays what it held.
+    Datagram,
 }
 
 /// One frame for the transport to write.
@@ -97,6 +101,11 @@ type Notifier = Box<dyn Fn() + Send + Sync>;
 /// A bounded frame queue between the tick thread and one client's writer.
 pub struct OutboundQueue {
     config: OutboundConfig,
+    /// The largest datagram the transport carries; 0 when it carries none.
+    datagram_max: AtomicUsize,
+    /// Datagram acks from the client, for the shard to take on its next
+    /// tick: (datagram number, frames the client had applied then).
+    datagram_acks: Mutex<Vec<(u64, u64)>>,
     state: Mutex<State>,
     ready: Condvar,
     closed: AtomicBool,
@@ -112,6 +121,8 @@ impl OutboundQueue {
                 max_frames: config.max_frames.max(1),
                 ..config
             },
+            datagram_max: AtomicUsize::new(0),
+            datagram_acks: Mutex::new(Vec::new()),
             state: Mutex::new(State {
                 frames: VecDeque::new(),
                 full_since: None,
@@ -133,6 +144,35 @@ impl OutboundQueue {
         self.config
     }
 
+    /// Put the queue in datagram mode (a transport that carries datagrams
+    /// of up to `max_size` bytes), or back out of it with 0. A replicating
+    /// shard then sends this subscription's updates as datagrams.
+    pub fn set_datagram_max(&self, max_size: usize) {
+        self.datagram_max.store(max_size, Ordering::Release);
+    }
+
+    /// The largest datagram the transport carries, in datagram mode.
+    pub fn datagram_max(&self) -> Option<usize> {
+        match self.datagram_max.load(Ordering::Acquire) {
+            0 => None,
+            n => Some(n),
+        }
+    }
+
+    /// Hand the shard the client's datagram acks.
+    pub fn push_datagram_acks(&self, acks: &[(u64, u64)]) {
+        // Bounded: a client flooding acks cannot grow this without limit.
+        const MAX_PENDING: usize = 4096;
+        let mut pending = self.datagram_acks.lock().unwrap();
+        let room = MAX_PENDING.saturating_sub(pending.len());
+        pending.extend(acks.iter().take(room).copied());
+    }
+
+    /// The acks received since the last call.
+    pub fn take_datagram_acks(&self) -> Vec<(u64, u64)> {
+        std::mem::take(&mut *self.datagram_acks.lock().unwrap())
+    }
+
     pub fn len(&self) -> usize {
         self.state.lock().unwrap().frames.len()
     }
@@ -142,8 +182,18 @@ impl OutboundQueue {
     }
 
     /// True when the next snapshot push would drop queued snapshots.
+    /// Queued datagrams do not count: a push drops them first.
     pub fn is_full(&self) -> bool {
-        self.len() >= self.config.max_frames
+        let st = self.state.lock().unwrap();
+        Self::reliable_len(&st) >= self.config.max_frames
+    }
+
+    /// Frames other than datagrams.
+    fn reliable_len(st: &State) -> usize {
+        st.frames
+            .iter()
+            .filter(|f| f.kind != FrameKind::Datagram)
+            .count()
     }
 
     /// Snapshot frames dropped so far because the queue was full.
@@ -196,10 +246,20 @@ impl OutboundQueue {
         delta_of: Option<u64>,
     ) -> PushOutcome {
         if let Some(expected_dropped) = delta_of {
-            let st = self.state.lock().unwrap();
-            if st.dropped_snapshots != expected_dropped || st.frames.len() >= self.config.max_frames
+            let mut st = self.state.lock().unwrap();
+            if st.dropped_snapshots != expected_dropped
+                || Self::reliable_len(&st) >= self.config.max_frames
             {
                 return PushOutcome::NeedsBaseline;
+            }
+            // Datagrams make room for a delta; they are lossy anyway.
+            while st.frames.len() >= self.config.max_frames {
+                match st.frames.iter().position(|f| f.kind == FrameKind::Datagram) {
+                    Some(i) => {
+                        st.frames.remove(i);
+                    }
+                    None => break,
+                }
             }
             // Room, and nothing dropped: `push` will not coalesce. Keep the
             // lock so no other push fills the queue first.
@@ -219,6 +279,36 @@ impl OutboundQueue {
             ack,
             bytes,
         })
+    }
+
+    /// Queue a replication datagram. It never closes the queue, never counts
+    /// as a dropped frame, and never displaces another kind of frame: a
+    /// full queue drops its oldest datagram, or this one when it holds none.
+    /// Returns `Queued` when this datagram was queued, `Coalesced` when it
+    /// was dropped.
+    pub fn push_datagram(&self, tick: u64, bytes: Arc<[u8]>) -> PushOutcome {
+        if self.is_closed() {
+            return PushOutcome::Closed;
+        }
+        let mut st = self.state.lock().unwrap();
+        if st.frames.len() >= self.config.max_frames {
+            match st.frames.iter().position(|f| f.kind == FrameKind::Datagram) {
+                Some(i) => {
+                    st.frames.remove(i);
+                }
+                None => return PushOutcome::Coalesced,
+            }
+        }
+        st.frames.push_back(Frame {
+            tick,
+            kind: FrameKind::Datagram,
+            ack: 0,
+            bytes,
+        });
+        drop(st);
+        self.ready.notify_one();
+        self.notify();
+        PushOutcome::Queued
     }
 
     /// Queue an input-rejected frame. It is never dropped; a queue that
@@ -245,6 +335,7 @@ impl OutboundQueue {
             st.frames
                 .retain(|f| !matches!(f.kind, FrameKind::Snapshot | FrameKind::Replication));
             st.dropped_snapshots += (before - st.frames.len()) as u64;
+            st.frames.retain(|f| f.kind != FrameKind::Datagram);
             st.frames.push_back(Frame {
                 tick,
                 kind: FrameKind::Transfer,
@@ -284,6 +375,10 @@ impl OutboundQueue {
             }
             if st.frames.len() >= self.config.max_frames {
                 st.full_since.get_or_insert(now);
+                // Datagrams go first, and do not count as dropped frames.
+                st.frames.retain(|f| f.kind != FrameKind::Datagram);
+            }
+            if st.frames.len() >= self.config.max_frames {
                 let before = st.frames.len();
                 st.frames
                     .retain(|f| matches!(f.kind, FrameKind::InputRejected | FrameKind::Transfer));
@@ -343,6 +438,61 @@ mod tests {
 
     fn bytes(s: &str) -> Arc<[u8]> {
         Arc::from(s.as_bytes())
+    }
+
+    #[test]
+    fn datagrams_give_way_and_never_count_as_dropped_frames() {
+        let q = OutboundQueue::new(OutboundConfig {
+            max_frames: 3,
+            disconnect_after: Duration::from_secs(60),
+        });
+        q.set_datagram_max(1200);
+        assert_eq!(q.datagram_max(), Some(1200));
+        assert_eq!(
+            q.push_replication(1, 0, bytes("base"), None),
+            PushOutcome::Queued
+        );
+        assert_eq!(q.push_datagram(1, bytes("d1")), PushOutcome::Queued);
+        assert_eq!(q.push_datagram(2, bytes("d2")), PushOutcome::Queued);
+        // Full, but of datagrams: not full for a delta or a snapshot.
+        assert!(!q.is_full());
+        // A new datagram replaces the oldest datagram.
+        assert_eq!(q.push_datagram(3, bytes("d3")), PushOutcome::Queued);
+        // A delta makes room by dropping datagrams, and needs no baseline.
+        assert_eq!(
+            q.push_replication(4, 0, bytes("delta"), Some(0)),
+            PushOutcome::Queued
+        );
+        assert_eq!(q.dropped_snapshots(), 0);
+        let kinds: Vec<(FrameKind, Vec<u8>)> = std::iter::from_fn(|| q.pop())
+            .map(|f| (f.kind, f.bytes.to_vec()))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (FrameKind::Replication, b"base".to_vec()),
+                (FrameKind::Datagram, b"d3".to_vec()),
+                (FrameKind::Replication, b"delta".to_vec()),
+            ]
+        );
+        // A queue full of frames that are not datagrams drops the datagram.
+        for i in 0..3 {
+            q.push_rejection(i, 0, bytes("r"));
+        }
+        assert_eq!(q.push_datagram(9, bytes("late")), PushOutcome::Coalesced);
+        assert!(!q.is_closed());
+    }
+
+    #[test]
+    fn datagram_acks_are_handed_over_once_and_bounded() {
+        let q = OutboundQueue::new(OutboundConfig::default());
+        q.push_datagram_acks(&[(1, 1), (2, 1)]);
+        q.push_datagram_acks(&[(3, 2)]);
+        assert_eq!(q.take_datagram_acks(), vec![(1, 1), (2, 1), (3, 2)]);
+        assert!(q.take_datagram_acks().is_empty());
+        let flood: Vec<(u64, u64)> = (0..10_000).map(|i| (i, 0)).collect();
+        q.push_datagram_acks(&flood);
+        assert_eq!(q.take_datagram_acks().len(), 4096);
     }
 
     #[test]

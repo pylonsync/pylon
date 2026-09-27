@@ -71,6 +71,18 @@ pub trait DynShard: Send + Sync {
         auth: &ShardAuth,
     ) -> Result<Arc<OutboundQueue>, ShardError>;
 
+    /// [`DynShard::add_queued_subscriber`] for a transport that also carries
+    /// datagrams of up to `datagram_max` bytes (WebTransport, or a relay of
+    /// it). A replicating shard sends this subscription's updates as
+    /// datagrams from its first frame on; the transport returns the client's
+    /// acks with `OutboundQueue::push_datagram_acks`.
+    fn add_queued_datagram_subscriber(
+        &self,
+        id: SubscriberId,
+        auth: &ShardAuth,
+        datagram_max: usize,
+    ) -> Result<Arc<OutboundQueue>, ShardError>;
+
     /// Subscribe through a direct sink, after running
     /// `SimState::authorize_subscribe`. The sink runs on the tick thread and
     /// must not block; see [`SnapshotSink`].
@@ -162,6 +174,15 @@ impl<S: SimState> DynShard for Shard<S> {
         auth: &ShardAuth,
     ) -> Result<Arc<OutboundQueue>, ShardError> {
         Shard::add_queued_subscriber_authorized(self, id, auth)
+    }
+
+    fn add_queued_datagram_subscriber(
+        &self,
+        id: SubscriberId,
+        auth: &ShardAuth,
+        datagram_max: usize,
+    ) -> Result<Arc<OutboundQueue>, ShardError> {
+        Shard::add_queued_subscriber_with(self, id, auth, Some(datagram_max))
     }
 
     fn add_subscriber(

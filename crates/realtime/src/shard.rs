@@ -10,7 +10,7 @@ use crate::interest::{
 };
 use crate::outbound::{OutboundConfig, OutboundQueue};
 use crate::replication::{
-    entity_positions, FrameInput, ReplicatedRef, ReplicationConfig, Replicator,
+    entity_positions, DatagramInput, FrameInput, ReplicatedRef, ReplicationConfig, Replicator,
 };
 use crate::snapshot::EncodeSnapshot;
 use crate::stats::{Phases, ShardStats, StatsRecorder, TickSample};
@@ -510,9 +510,11 @@ pub struct Shard<S: SimState> {
 enum TickSnapshot<T> {
     Own(T),
     Shared(usize),
-    /// An entity replication frame, built for this subscription, and for a
-    /// delta the dropped-frame count its baseline assumed.
-    Replication(Arc<[u8]>, Option<u64>),
+    /// An entity replication frame, built for this subscription (empty for
+    /// a datagram subscription with nothing on its stream this tick), for a
+    /// delta the dropped-frame count its baseline assumed, and the
+    /// subscription's datagrams.
+    Replication(Arc<[u8]>, Option<u64>, Vec<Arc<[u8]>>),
 }
 
 impl<S: SimState> Shard<S> {
@@ -984,7 +986,22 @@ impl<S: SimState> Shard<S> {
         id: SubscriberId,
         auth: &ShardAuth,
     ) -> Result<Arc<OutboundQueue>, ShardError> {
+        self.add_queued_subscriber_with(id, auth, None)
+    }
+
+    /// [`Shard::add_queued_subscriber_authorized`], with the queue in
+    /// datagram mode (`OutboundQueue::set_datagram_max`) from the start
+    /// when `datagram_max` is set.
+    pub fn add_queued_subscriber_with(
+        &self,
+        id: SubscriberId,
+        auth: &ShardAuth,
+        datagram_max: Option<usize>,
+    ) -> Result<Arc<OutboundQueue>, ShardError> {
         let queue = OutboundQueue::new(self.config.outbound());
+        if let Some(max) = datagram_max {
+            queue.set_datagram_max(max);
+        }
         let moved = self
             .moved
             .lock()
@@ -1263,6 +1280,9 @@ impl<S: SimState> Shard<S> {
         frames_time: &mut Duration,
     ) -> Vec<TickSnapshot<S::Snapshot>> {
         let config = state.replication_config();
+        // Each subscriber's input ack, for its datagrams. Lock order: state,
+        // acks (as the tick takes them), then the replicator.
+        let input_acks = self.acks.lock().unwrap().clone();
         let mut replicator = self.replicator.lock().unwrap();
         let live: std::collections::HashSet<u64> = subs.iter().map(|s| s.instance()).collect();
         replicator.retain(|k| live.contains(&k));
@@ -1314,6 +1334,19 @@ impl<S: SimState> Shard<S> {
                 .queue()
                 .map_or((0, false), |q| (q.dropped_snapshots(), q.is_full()));
             let started = Instant::now();
+            let datagram = match sub.queue().and_then(|q| q.datagram_max().map(|m| (q, m))) {
+                Some((q, max_size)) => {
+                    let acks = q.take_datagram_acks();
+                    if !acks.is_empty() {
+                        replicator.ack_datagrams(sub.instance(), &acks);
+                    }
+                    Some(DatagramInput {
+                        max_size,
+                        input_ack: input_acks.get(id).copied().unwrap_or(0),
+                    })
+                }
+                None => None,
+            };
             let frame = replicator.frame(
                 store,
                 &config,
@@ -1324,13 +1357,14 @@ impl<S: SimState> Shard<S> {
                     area,
                     dropped,
                     queue_full,
-                    datagram: None,
+                    datagram,
                 },
             );
             *frames_time += started.elapsed();
             out.push(TickSnapshot::Replication(
                 Arc::from(frame.bytes),
                 frame.delta_of,
+                frame.datagrams.into_iter().map(Arc::from).collect(),
             ));
         }
         out
@@ -1360,7 +1394,17 @@ impl<S: SimState> Shard<S> {
         };
         ids.retain(|e| store.contains(*e));
         let dropped = sub.queue().map_or(0, |q| q.dropped_snapshots());
+        let input_ack = self.acks.lock().unwrap().get(id).copied().unwrap_or(0);
+        let datagram = sub
+            .queue()
+            .and_then(|q| q.datagram_max())
+            .map(|max_size| DatagramInput {
+                max_size,
+                input_ack,
+            });
         let mut replicator = self.replicator.lock().unwrap();
+        // A full frame: every entity in view spawns; there are no updates,
+        // so no datagrams.
         let out = replicator.frame(
             &store,
             &config,
@@ -1371,7 +1415,7 @@ impl<S: SimState> Shard<S> {
                 area,
                 dropped,
                 queue_full: true,
-                datagram: None,
+                datagram,
             },
         );
         Some(out.bytes)
@@ -1575,14 +1619,25 @@ impl<S: SimState> Shard<S> {
                 TickSnapshot::Own(snap) => {
                     sub.send(tick_number, snap, self.config.snapshot_format, ack)
                 }
-                TickSnapshot::Replication(bytes, delta_of) => {
-                    let outcome =
-                        sub.send_replication(tick_number, Arc::clone(bytes), ack, *delta_of);
-                    if outcome == crate::outbound::PushOutcome::NeedsBaseline {
-                        // The queue filled or dropped frames since this
-                        // delta's baseline was chosen: send a full frame.
-                        if let Some(full) = self.full_replication_frame(sub, tick_number) {
-                            sub.send_replication(tick_number, Arc::from(full), ack, None);
+                TickSnapshot::Replication(bytes, delta_of, datagrams) => {
+                    let mut rebased = false;
+                    if !bytes.is_empty() {
+                        let outcome =
+                            sub.send_replication(tick_number, Arc::clone(bytes), ack, *delta_of);
+                        if outcome == crate::outbound::PushOutcome::NeedsBaseline {
+                            // The queue filled or dropped frames since this
+                            // delta's baseline was chosen: send a full frame.
+                            if let Some(full) = self.full_replication_frame(sub, tick_number) {
+                                sub.send_replication(tick_number, Arc::from(full), ack, None);
+                            }
+                            rebased = true;
+                        }
+                    }
+                    // A full frame replaced this tick's baseline; datagrams
+                    // built against the old one would be skipped anyway.
+                    if !rebased {
+                        for d in datagrams {
+                            sub.send_datagram(tick_number, Arc::clone(d));
                         }
                     }
                 }
