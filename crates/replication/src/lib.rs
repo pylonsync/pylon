@@ -20,6 +20,7 @@
 
 use std::collections::BTreeMap;
 
+pub mod datagram;
 pub mod frame;
 pub mod varint;
 

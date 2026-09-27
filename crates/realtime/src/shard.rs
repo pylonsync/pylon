@@ -1324,6 +1324,7 @@ impl<S: SimState> Shard<S> {
                     area,
                     dropped,
                     queue_full,
+                    datagram: None,
                 },
             );
             *frames_time += started.elapsed();
@@ -1370,6 +1371,7 @@ impl<S: SimState> Shard<S> {
                 area,
                 dropped,
                 queue_full: true,
+                datagram: None,
             },
         );
         Some(out.bytes)

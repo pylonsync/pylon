@@ -242,6 +242,14 @@ pub struct FrameSummary {
 pub struct ReplicaTable {
     pub entities: BTreeMap<EntityId, ReplicaEntity>,
     pub precision: f32,
+    /// Spawns of each id so far, mod 256: the generation a datagram update
+    /// names (see [`crate::datagram`]). Kept across despawns and full frames.
+    pub generations: BTreeMap<EntityId, u8>,
+    /// The last datagram applied to each entity (see [`crate::datagram`]).
+    pub datagram_frames: BTreeMap<EntityId, u64>,
+    /// Frames applied so far. A client on an unreliable transport acks each
+    /// datagram with this count, so the server knows which spawns it had.
+    pub frames_applied: u64,
 }
 
 /// Longest id list a frame may declare, so a hostile count cannot make a
@@ -281,6 +289,7 @@ impl ReplicaTable {
         }
         if full {
             self.entities.clear();
+            self.datagram_frames.clear();
         }
         self.precision = precision;
         let mut summary = FrameSummary {
@@ -313,6 +322,7 @@ impl ReplicaTable {
         for _ in 0..n {
             let id = next_id(&mut b, &mut last)?;
             self.entities.remove(&id);
+            self.datagram_frames.remove(&id);
             summary.despawned.push(id);
         }
 
@@ -330,6 +340,9 @@ impl ReplicaTable {
             };
             read_components(&mut b, &mut entity.components)?;
             self.entities.insert(id, entity);
+            self.datagram_frames.remove(&id);
+            let generation = self.generations.entry(id).or_insert(0);
+            *generation = generation.wrapping_add(1);
             summary.spawned.push(id);
         }
 
@@ -357,6 +370,7 @@ impl ReplicaTable {
         if !b.is_empty() {
             return Err(err("trailing bytes"));
         }
+        self.frames_applied += 1;
         Ok(summary)
     }
 }

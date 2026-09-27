@@ -59,6 +59,7 @@ fn fixtures() -> Value {
                     area: None,
                     dropped: 0,
                     queue_full: false,
+                    datagram: None,
                 },
             );
             table.apply(&out.bytes).unwrap();
