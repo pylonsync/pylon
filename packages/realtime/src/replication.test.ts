@@ -35,6 +35,49 @@ describe("the Rust encoder's frames (replication.fixtures.json)", () => {
   });
 });
 
+describe("the Rust encoder's datagrams (replication.fixtures.json)", () => {
+  test("apply, and skip, exactly as the Rust table does", () => {
+    const table = new EntityTable();
+    const tableJson = () =>
+      [...table.entities.values()]
+        .sort((a, b) => a.id - b.id)
+        .map((e) => ({
+          id: e.id,
+          q: [e.qx, e.qy, e.qz],
+          components: Object.fromEntries(
+            [...e.components.entries()].map(([k, v]) => [String(k), hex(v)]),
+          ),
+        }));
+    for (const [i, event] of fixtures.datagrams.entries()) {
+      if ("stream" in event && event.stream) {
+        table.apply(bytes(event.stream));
+      } else if ("datagram" in event && event.datagram) {
+        const s = table.applyDatagram(bytes(event.datagram));
+        expect(s.frame, `event ${i}`).toBe(event.frame);
+        expect(s.tick).toBe(event.tick);
+        expect(s.ack).toBe(event.ack);
+        expect(s.updated, `event ${i}`).toEqual(event.updated);
+        expect(s.skipped, `event ${i}`).toBe(event.skipped);
+        expect(table.framesApplied).toBe(event.framesApplied);
+      }
+      expect(tableJson(), `after event ${i}`).toEqual(event.table as unknown as ReturnType<typeof tableJson>);
+    }
+  });
+
+  test("hostile datagrams are refused, not half-applied", () => {
+    const t = new EntityTable();
+    expect(() => t.applyDatagram(new Uint8Array())).toThrow(ReplicationError);
+    expect(() => t.applyDatagram(new Uint8Array([1]))).toThrow("datagram version 1");
+    // version, frame 1, tick 1, ack 0, precision 1.0, count 1, id 0, then nothing.
+    expect(() => t.applyDatagram(new Uint8Array([2, 1, 1, 0, 0, 0, 0x80, 0x3f, 1, 0]))).toThrow(
+      "ends early",
+    );
+    expect(() => t.applyDatagram(new Uint8Array([2, 1, 1, 0, 0, 0, 0x80, 0x3f, 0, 7]))).toThrow(
+      "trailing bytes",
+    );
+  });
+});
+
 describe("hostile frames", () => {
   const head = (...rest: number[]) => {
     const f = new Uint8Array(6 + rest.length);

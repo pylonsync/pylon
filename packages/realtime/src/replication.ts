@@ -23,9 +23,27 @@
  * JavaScript numbers hold integers exactly up to 2^53. Entity ids and
  * quantized positions must stay below that; a frame that exceeds it is
  * refused rather than rounded.
+ *
+ * **Datagrams** (`pylon_replication::datagram`): on WebTransport, spawns,
+ * despawns, and full frames come as frames on the stream, and updates as
+ * datagrams that may be lost, duplicated, or reordered. A datagram update
+ * carries the entity's absolute position and the generation (spawn count
+ * of its id) it is for. {@link EntityTable.applyDatagram} applies an update
+ * only to the entity's current generation and only when it is newer than
+ * the entity's last datagram, and skips it otherwise.
+ *
+ * ```text
+ * u8      version (2)
+ * varint  frame number, tick, input ack
+ * f32 LE  precision
+ * varint  update count, per entity (ids ascending, delta-coded): id,
+ *         u8 generation, u8 mask, the masked axes (zigzag, absolute),
+ *         components if bit 8
+ * ```
  */
 
 export const REPLICATION_VERSION = 1;
+export const DATAGRAM_VERSION = 2;
 
 const FLAG_FULL = 1;
 const MASK_X = 1;
@@ -57,12 +75,41 @@ export interface ReplicatedEntity {
   components: Map<number, Uint8Array>;
 }
 
+/** What one datagram did. */
+export interface DatagramSummary {
+  frame: number;
+  tick: number;
+  ack: number;
+  /** Entities it updated. */
+  updated: number[];
+  /**
+   * Updates it skipped: an unknown entity, another generation, an older
+   * datagram than the entity's last, or another precision.
+   */
+  skipped: number;
+}
+
 /** What one frame did. */
 export interface ReplicationSummary {
   full: boolean;
   spawned: number[];
   updated: number[];
   despawned: number[];
+}
+
+/**
+ * A datagram's frame number, tick, and input ack, without applying it.
+ * Throws on bytes that are not a datagram.
+ */
+export function readDatagramHeader(datagram: Uint8Array): { frame: number; tick: number; ack: number } {
+  const r = new Reader(datagram);
+  const version = r.u8();
+  if (version !== DATAGRAM_VERSION) throw new ReplicationError(`datagram version ${version}`);
+  return {
+    frame: toSafe(r.varint(), "frame number"),
+    tick: toSafe(r.varint(), "tick"),
+    ack: toSafe(r.varint(), "ack"),
+  };
 }
 
 class Reader {
@@ -161,6 +208,15 @@ export class EntityTable {
   readonly entities = new Map<number, ReplicatedEntity>();
   /** World units per quantization step, from the last frame. */
   precision = 0.01;
+  /** Spawns of each id so far, mod 256: the generation a datagram names. */
+  readonly generations = new Map<number, number>();
+  /** The last datagram applied to each entity. */
+  readonly datagramFrames = new Map<number, number>();
+  /**
+   * Frames applied so far. A client acks each datagram with this count,
+   * so the server knows which spawns it had.
+   */
+  framesApplied = 0;
 
   get size(): number {
     return this.entities.size;
@@ -170,8 +226,15 @@ export class EntityTable {
     return this.entities.get(id);
   }
 
+  /**
+   * Forget everything: a new connection starts over, and its server counts
+   * generations and frames from zero.
+   */
   clear(): void {
     this.entities.clear();
+    this.generations.clear();
+    this.datagramFrames.clear();
+    this.framesApplied = 0;
   }
 
   apply(frame: Uint8Array): ReplicationSummary {
@@ -181,7 +244,10 @@ export class EntityTable {
     const full = (r.u8() & FLAG_FULL) !== 0;
     const precision = r.f32();
     if (!Number.isFinite(precision) || precision <= 0) throw new ReplicationError("bad precision");
-    if (full) this.entities.clear();
+    if (full) {
+      this.entities.clear();
+      this.datagramFrames.clear();
+    }
     this.precision = precision;
     const summary: ReplicationSummary = { full, spawned: [], updated: [], despawned: [] };
 
@@ -190,6 +256,7 @@ export class EntityTable {
     for (let i = 0; i < n; i++) {
       last = nextId(r, last);
       this.entities.delete(last);
+      this.datagramFrames.delete(last);
       summary.despawned.push(last);
     }
 
@@ -212,6 +279,8 @@ export class EntityTable {
         z: qz * precision,
         components,
       });
+      this.datagramFrames.delete(last);
+      this.generations.set(last, ((this.generations.get(last) ?? 0) + 1) & 0xff);
       summary.spawned.push(last);
     }
 
@@ -236,6 +305,76 @@ export class EntityTable {
       e.y = e.qy * precision;
       e.z = e.qz * precision;
     }
+    this.framesApplied += 1;
+    return summary;
+  }
+
+  /**
+   * Apply one datagram. It changes nothing it cannot apply exactly (see
+   * `DatagramSummary.skipped`). Throws only on bytes that are not a
+   * datagram.
+   */
+  applyDatagram(datagram: Uint8Array): DatagramSummary {
+    const r = new Reader(datagram);
+    const version = r.u8();
+    if (version !== DATAGRAM_VERSION) throw new ReplicationError(`datagram version ${version}`);
+    const frame = toSafe(r.varint(), "frame number");
+    const tick = toSafe(r.varint(), "tick");
+    const ack = toSafe(r.varint(), "ack");
+    const precision = r.f32();
+    const n = r.varint();
+    if (n > 1n << 16n) throw new ReplicationError("count too large");
+    const summary: DatagramSummary = { frame, tick, ack, updated: [], skipped: 0 };
+    // Positions in another precision mean nothing to this table: the full
+    // frame of the new precision is still on its way.
+    const usable = precision === Math.fround(this.precision);
+    let last: number | null = null;
+    for (let i = 0; i < Number(n); i++) {
+      last = nextId(r, last);
+      const generation = r.u8();
+      const mask = r.u8();
+      const qx = mask & MASK_X ? toSafe(r.zigzag(), "position") : null;
+      const qy = mask & MASK_Y ? toSafe(r.zigzag(), "position") : null;
+      const qz = mask & MASK_Z ? toSafe(r.zigzag(), "position") : null;
+      const changes = new Map<number, Uint8Array>();
+      const removed: number[] = [];
+      if (mask & MASK_COMPONENTS) {
+        const count = r.varint();
+        if (count > 256n) throw new ReplicationError("more than 256 components");
+        for (let c = 0; c < Number(count); c++) {
+          const id = r.u8();
+          const len = r.varint();
+          if (len === 0n) {
+            removed.push(id);
+            continue;
+          }
+          if (len - 1n > BigInt(Number.MAX_SAFE_INTEGER)) throw new ReplicationError("component too large");
+          changes.set(id, r.take(Number(len - 1n)));
+        }
+      }
+      const e = this.entities.get(last);
+      const lastFrame = this.datagramFrames.get(last);
+      const current =
+        usable &&
+        e !== undefined &&
+        this.generations.get(last) === generation &&
+        (lastFrame === undefined || frame > lastFrame);
+      if (!current || !e) {
+        summary.skipped += 1;
+        continue;
+      }
+      if (qx !== null) e.qx = qx;
+      if (qy !== null) e.qy = qy;
+      if (qz !== null) e.qz = qz;
+      e.x = e.qx * this.precision;
+      e.y = e.qy * this.precision;
+      e.z = e.qz * this.precision;
+      for (const id of removed) e.components.delete(id);
+      for (const [id, bytes] of changes) e.components.set(id, bytes);
+      this.datagramFrames.set(last, frame);
+      summary.updated.push(last);
+    }
+    if (!r.done) throw new ReplicationError("trailing bytes");
     return summary;
   }
 }

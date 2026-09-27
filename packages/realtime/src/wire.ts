@@ -13,6 +13,12 @@
  *
  * Inputs go up as `{ input, client_seq }`: JSON in a text frame, or the
  * shard's codec in a binary frame.
+ *
+ * Over WebTransport (wire version 3 in Rust) the same frames travel on one
+ * bidirectional stream, each after a 4-byte big-endian length, and entity
+ * updates travel as QUIC datagrams (`EntityTable.applyDatagram`). The
+ * client's hello, its inputs, and its datagram acks are described at
+ * `encodeWebTransportHello`, `ShardClientMessage`, and `encodeDatagramAcks`.
  */
 
 import { decode as msgpackDecode, encode as msgpackEncode } from "@msgpack/msgpack";
@@ -141,4 +147,171 @@ export function encodeShardInput(
   const envelope = { input, client_seq: clientSeq };
   if (codec === ShardCodec.MessagePack) return msgpackEncode(envelope);
   return JSON.stringify(envelope);
+}
+
+/**
+ * Type bytes of the client's messages on a WebTransport stream (the first
+ * byte; the rest is the message).
+ */
+export const ShardClientMessage = {
+  /** An input envelope in the shard's codec (MessagePack shards). */
+  Input: 0,
+  /** Datagram acks (`encodeDatagramAcks`). */
+  Acks: 1,
+  /** An input envelope as JSON. */
+  JsonInput: 2,
+} as const;
+
+/** WebTransport session close codes the server uses. */
+export const WEBTRANSPORT_CLOSE = {
+  Normal: 0,
+  /** Refused: bad credentials, an unknown shard. */
+  Policy: 1,
+  /** The client broke the protocol. */
+  Protocol: 2,
+  /** Try again: the client was too slow, or the server was busy. */
+  Again: 3,
+} as const;
+
+/** What `GET /_pylon/shard/webtransport` returns. */
+export interface WebTransportInfo {
+  /** The `https://` URL of the WebTransport endpoint. */
+  url: string;
+  /**
+   * SHA-256 hashes of the server's self-signed certificates, for
+   * `serverCertificateHashes`. Empty when the certificate has a public CA.
+   */
+  certHashes: Uint8Array[];
+}
+
+/** Parse the body of `GET /_pylon/shard/webtransport`. */
+export function decodeWebTransportInfo(body: unknown): WebTransportInfo {
+  const raw = body as { url?: unknown; certHashes?: unknown };
+  if (typeof raw?.url !== "string") throw new Error("WebTransport info without a url");
+  const hashes = Array.isArray(raw.certHashes) ? raw.certHashes : [];
+  return {
+    url: raw.url,
+    certHashes: hashes.map((h) => {
+      if (typeof h !== "string") throw new Error("a WebTransport certificate hash is not a string");
+      const bin = atob(h);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      if (bytes.length !== 32) throw new Error(`a ${bytes.length}-byte certificate hash`);
+      return bytes;
+    }),
+  };
+}
+
+function pushVarint(out: number[], v: number): void {
+  if (!Number.isSafeInteger(v) || v < 0) throw new Error(`varint out of range: ${v}`);
+  while (v >= 0x80) {
+    out.push((v % 0x80) | 0x80);
+    v = Math.floor(v / 0x80);
+  }
+  out.push(v);
+}
+
+/**
+ * Datagram acks: the type byte `ShardClientMessage.Acks`, a varint count,
+ * then per ack the datagram's frame number and `EntityTable.framesApplied`
+ * when the client applied it, both varints. Sent as a datagram, or on the
+ * stream.
+ */
+export function encodeDatagramAcks(acks: ReadonlyArray<readonly [number, number]>): Uint8Array {
+  const out: number[] = [ShardClientMessage.Acks];
+  pushVarint(out, acks.length);
+  for (const [frame, applied] of acks) {
+    pushVarint(out, frame);
+    pushVarint(out, applied);
+  }
+  return Uint8Array.from(out);
+}
+
+/** A message for a WebTransport stream: a 4-byte big-endian length, then `bytes`. */
+export function lengthPrefixed(bytes: Uint8Array): Uint8Array {
+  const out = new Uint8Array(4 + bytes.length);
+  new DataView(out.buffer).setUint32(0, bytes.length);
+  out.set(bytes, 4);
+  return out;
+}
+
+/** The first message on a WebTransport stream: who connects to which shard. */
+export function encodeWebTransportHello(hello: {
+  shard: string;
+  sid: string;
+  ticket?: string;
+  token?: string;
+}): Uint8Array {
+  return lengthPrefixed(new TextEncoder().encode(JSON.stringify(hello)));
+}
+
+/**
+ * An input as a WebTransport stream message: `encodeShardInput`'s output
+ * after its type byte.
+ */
+export function encodeWebTransportInput(encoded: string | Uint8Array): Uint8Array {
+  const body = typeof encoded === "string" ? new TextEncoder().encode(encoded) : encoded;
+  const msg = new Uint8Array(1 + body.length);
+  msg[0] = typeof encoded === "string" ? ShardClientMessage.JsonInput : ShardClientMessage.Input;
+  msg.set(body, 1);
+  return lengthPrefixed(msg);
+}
+
+/** A frame on a WebTransport stream larger than this ends the session. */
+const MAX_STREAM_FRAME = 64 * 1024 * 1024;
+
+/**
+ * Splits a WebTransport stream's bytes into its length-prefixed frames.
+ * Chunks can end anywhere: in a length, in a frame.
+ */
+export class StreamFrames {
+  private chunks: Uint8Array[] = [];
+  private buffered = 0;
+
+  /** Add a chunk and return the frames it completed. */
+  push(chunk: Uint8Array): ArrayBuffer[] {
+    this.chunks.push(chunk);
+    this.buffered += chunk.length;
+    const frames: ArrayBuffer[] = [];
+    while (this.buffered >= 4) {
+      const head = this.peek(4);
+      const len = new DataView(head.buffer, head.byteOffset, 4).getUint32(0);
+      if (len > MAX_STREAM_FRAME) throw new Error(`a ${len}-byte stream frame`);
+      if (this.buffered < 4 + len) break;
+      this.take(4);
+      const frame = this.take(len);
+      frames.push(frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.length) as ArrayBuffer);
+    }
+    return frames;
+  }
+
+  private peek(n: number): Uint8Array {
+    if (this.chunks[0].length >= n) return this.chunks[0].subarray(0, n);
+    const out = new Uint8Array(n);
+    let at = 0;
+    for (const c of this.chunks) {
+      const part = c.subarray(0, n - at);
+      out.set(part, at);
+      at += part.length;
+      if (at === n) break;
+    }
+    return out;
+  }
+
+  private take(n: number): Uint8Array {
+    const out = this.peek(n);
+    let left = n;
+    while (left > 0) {
+      const c = this.chunks[0];
+      if (c.length <= left) {
+        this.chunks.shift();
+        left -= c.length;
+      } else {
+        this.chunks[0] = c.subarray(left);
+        left = 0;
+      }
+    }
+    this.buffered -= n;
+    return out;
+  }
 }
