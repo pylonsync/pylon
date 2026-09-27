@@ -1159,7 +1159,7 @@ impl DataStore for Runtime {
             // post-merge state.
             let (before_push, touched) = self
                 .crdt_store()
-                .apply_client_update(&conn, entity, row_id, &crdt_fields, update, !has_doc)
+                .apply_client_update(&conn, entity, row_id, &crdt_fields, update)
                 .map_err(|e| crate::RuntimeError {
                     code: "CRDT_APPLY_FAILED".into(),
                     message: format!("apply the update to {entity}/{row_id}: {e}"),

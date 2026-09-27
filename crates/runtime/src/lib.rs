@@ -1675,11 +1675,7 @@ impl Runtime {
             let _ = conn.execute(&fts_sql, []);
         }
         let _ = conn.execute("DELETE FROM _pylon_crdt_snapshots", []);
-        for table in [
-            "_pylon_crdt_synthetic",
-            "_pylon_crdt_written",
-            "_pylon_crdt_merged",
-        ] {
+        for table in crate::loro_store::ROW_SIDE_TABLES {
             let _ = conn.execute(&format!("DELETE FROM {table}"), []);
         }
         self.crdt_store().clear_cache();
@@ -7118,7 +7114,7 @@ mod tests {
             rt.crdt_snapshot("Doc", &id).unwrap();
             rt.crdt_apply_update("Doc", &id, &update).unwrap();
             assert_eq!(
-                likes_owner(&rt, &id) == peer,
+                key_owner(&rt, &id, "likes") == peer,
                 earlier_ops > 0,
                 "which counter holds the key (peer {peer}, {earlier_ops} ops)"
             );
@@ -7132,8 +7128,8 @@ mod tests {
         }
     }
 
-    /// The peer that made the counter holding the `likes` key.
-    fn likes_owner(rt: &Runtime, id: &str) -> u64 {
+    /// The peer that made the container holding `field`'s key.
+    fn key_owner(rt: &Runtime, id: &str, field: &str) -> u64 {
         use pylon_crdt::loro::{ContainerID, ContainerTrait, ValueOrContainer};
         let bytes = {
             let conn = rt.lock_write_conn().unwrap();
@@ -7141,7 +7137,7 @@ mod tests {
         };
         let doc = pylon_crdt::loro::LoroDoc::new();
         pylon_crdt::apply_update(&doc, &bytes).unwrap();
-        match pylon_crdt::root_map(&doc).get("likes") {
+        match pylon_crdt::root_map(&doc).get(field) {
             Some(ValueOrContainer::Container(c)) => match c.id() {
                 ContainerID::Normal { peer, .. } => peer,
                 other => panic!("{other:?}"),
@@ -7177,12 +7173,10 @@ mod tests {
             let first = offline
                 .export(pylon_crdt::loro::ExportMode::all_updates())
                 .unwrap();
-            let pushed = offline.oplog_vv();
             rt.crdt_apply_update("Doc", &id, &first).unwrap();
             pylon_crdt::apply_patch(&offline, &fields, &serde_json::json!({"likes": 1})).unwrap();
             // Sent again from the start (its first push's answer was lost):
             // it repeats the op the server holds.
-            let _ = &pushed;
             let second = offline
                 .export(pylon_crdt::loro::ExportMode::all_updates())
                 .unwrap();
@@ -7280,6 +7274,320 @@ mod tests {
             .unwrap()
             .to_string();
         assert_eq!(body, "firstsecond");
+    }
+
+    /// The text container holding `field`'s key in a client's doc.
+    fn text_in(doc: &pylon_crdt::loro::LoroDoc, field: &str) -> pylon_crdt::loro::LoroText {
+        match pylon_crdt::root_map(doc).get(field) {
+            Some(pylon_crdt::loro::ValueOrContainer::Container(
+                pylon_crdt::loro::Container::Text(t),
+            )) => t,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A client doc with `earlier_ops` ops of its own first: enough raise
+    /// its next ops' Lamport clock over the seed's, so its containers take
+    /// their keys.
+    fn client_doc(peer: u64, earlier_ops: i32) -> pylon_crdt::loro::LoroDoc {
+        let doc = pylon_crdt::loro::LoroDoc::new();
+        doc.set_peer_id(peer).unwrap();
+        let scratch = doc.get_map("scratch");
+        for i in 0..earlier_ops {
+            scratch.insert(&i.to_string(), i).unwrap();
+        }
+        doc.commit();
+        doc
+    }
+
+    fn push_since(
+        rt: &Runtime,
+        id: &str,
+        doc: &pylon_crdt::loro::LoroDoc,
+        since: &pylon_crdt::loro::VersionVector,
+    ) {
+        use pylon_http::DataStore;
+        let update = doc
+            .export(pylon_crdt::loro::ExportMode::updates(since))
+            .unwrap();
+        rt.crdt_apply_update("Doc", id, &update).unwrap();
+    }
+
+    fn body_of(rt: &Runtime, id: &str) -> String {
+        rt.get_by_id("Doc", id).unwrap().unwrap()["body"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// An online client edited the seed's text; an offline client's text
+    /// then arrives. Whichever container takes the key, both edits stay.
+    #[test]
+    fn a_client_text_that_takes_the_key_keeps_the_edits_to_the_seed() {
+        use pylon_http::DataStore;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        for (peer, earlier_ops, want) in [
+            (1u64, 0, "hello worldtyped"),
+            (u64::MAX - 1, 40, "typedhello world"),
+        ] {
+            let (id, fields) = bare_doc_row(&rt);
+            let seeded = rt.crdt_snapshot("Doc", &id).unwrap().unwrap();
+            let online = client_doc(9, 0);
+            pylon_crdt::apply_update(&online, &seeded).unwrap();
+            let before = online.oplog_vv();
+            let body = text_in(&online, "body");
+            body.insert(body.len_unicode(), " world").unwrap();
+            online.commit();
+            push_since(&rt, &id, &online, &before);
+            let offline = client_doc(peer, earlier_ops);
+            pylon_crdt::apply_patch(&offline, &fields, &serde_json::json!({"body": "typed"}))
+                .unwrap();
+            push_since(&rt, &id, &offline, &Default::default());
+            assert_eq!(key_owner(&rt, &id, "body") == peer, earlier_ops > 0);
+            assert_eq!(body_of(&rt, &id), want, "peer {peer}");
+        }
+    }
+
+    /// A later push from an offline client whose text lost its key: an
+    /// insert and a delete inside it reach the text holding the key where
+    /// the client made them. A list the same.
+    #[test]
+    fn a_later_push_edits_the_merged_text_where_the_client_edited() {
+        use pylon_http::DataStore;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        let (id, fields) = bare_doc_row(&rt);
+        let seeded = rt.crdt_snapshot("Doc", &id).unwrap().unwrap();
+        let online = client_doc(9, 0);
+        pylon_crdt::apply_update(&online, &seeded).unwrap();
+        let before = online.oplog_vv();
+        let body = text_in(&online, "body");
+        body.insert(body.len_unicode(), " world").unwrap();
+        online.commit();
+        push_since(&rt, &id, &online, &before);
+        let offline = client_doc(1, 0);
+        pylon_crdt::apply_patch(
+            &offline,
+            &fields,
+            &serde_json::json!({"body": "typed", "tags": ["a", "b"]}),
+        )
+        .unwrap();
+        push_since(&rt, &id, &offline, &Default::default());
+        assert_eq!(body_of(&rt, &id), "hello worldtyped");
+        let row = rt.get_by_id("Doc", &id).unwrap().unwrap();
+        assert_eq!(row["tags"], serde_json::json!(["a", "b"]));
+        // The client, still offline, edits its own containers.
+        let pushed = offline.oplog_vv();
+        let body = text_in(&offline, "body");
+        body.insert(0, "!").unwrap();
+        body.delete(2, 1).unwrap();
+        match pylon_crdt::root_map(&offline).get("tags") {
+            Some(pylon_crdt::loro::ValueOrContainer::Container(
+                pylon_crdt::loro::Container::List(l),
+            )) => {
+                l.delete(0, 1).unwrap();
+                l.push("c").unwrap();
+            }
+            other => panic!("{other:?}"),
+        }
+        offline.commit();
+        push_since(&rt, &id, &offline, &pushed);
+        assert_eq!(body_of(&rt, &id), "hello world!tped");
+        let row = rt.get_by_id("Doc", &id).unwrap().unwrap();
+        assert_eq!(row["tags"], serde_json::json!(["b", "c"]));
+    }
+
+    /// An offline client that pulled the server's doc before it pushed: its
+    /// push holds its offline ops and ops made after the pull (which depend
+    /// on the server's). Its offline increment counts, and its text stands.
+    #[test]
+    fn an_offline_client_that_pulled_before_pushing_keeps_its_edits() {
+        use pylon_http::DataStore;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        let (id, fields) = bare_doc_row(&rt);
+        let seeded = rt.crdt_snapshot("Doc", &id).unwrap().unwrap();
+        let client = client_doc(1, 0);
+        pylon_crdt::apply_patch(
+            &client,
+            &fields,
+            &serde_json::json!({"likes": 1, "body": "typed"}),
+        )
+        .unwrap();
+        pylon_crdt::apply_update(&client, &seeded).unwrap();
+        let server_vv = {
+            let doc = pylon_crdt::loro::LoroDoc::new();
+            pylon_crdt::apply_update(&doc, &seeded).unwrap();
+            doc.oplog_vv()
+        };
+        pylon_crdt::apply_patch(&client, &fields, &serde_json::json!({"likes": 1})).unwrap();
+        push_since(&rt, &id, &client, &server_vv);
+        let row = rt.get_by_id("Doc", &id).unwrap().unwrap();
+        assert_eq!(row["likes"], 5);
+        // Nobody edited the seed's text: the client's replaces it.
+        assert_eq!(row["body"], "typed");
+    }
+
+    /// A server write of a text is the value a client's text replaces while
+    /// nobody has edited it since, whichever container takes the key.
+    #[test]
+    fn a_client_text_replaces_the_last_server_write() {
+        use pylon_http::DataStore;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        for (peer, earlier_ops) in [(1u64, 0), (u64::MAX - 1, 40)] {
+            let (id, fields) = bare_doc_row(&rt);
+            rt.crdt_snapshot("Doc", &id).unwrap();
+            rt.update("Doc", &id, &serde_json::json!({"body": "server"}))
+                .unwrap();
+            let offline = client_doc(peer, earlier_ops);
+            pylon_crdt::apply_patch(&offline, &fields, &serde_json::json!({"body": "typed"}))
+                .unwrap();
+            push_since(&rt, &id, &offline, &Default::default());
+            assert_eq!(key_owner(&rt, &id, "body") == peer, earlier_ops > 0);
+            assert_eq!(body_of(&rt, &id), "typed", "peer {peer}");
+        }
+    }
+
+    /// A later push that sets and inserts items in an offline client's
+    /// movable list, merged into the one holding the key, after another
+    /// client added to that one.
+    #[test]
+    fn a_later_push_sets_and_inserts_in_a_merged_movable_list() {
+        use pylon_http::DataStore;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        let (id, fields) = bare_doc_row(&rt);
+        rt.crdt_snapshot("Doc", &id).unwrap();
+        let offline = client_doc(1, 0);
+        pylon_crdt::apply_patch(&offline, &fields, &serde_json::json!({"order": ["p", "q"]}))
+            .unwrap();
+        push_since(&rt, &id, &offline, &Default::default());
+        let order = || rt.get_by_id("Doc", &id).unwrap().unwrap()["order"].clone();
+        assert_eq!(order(), serde_json::json!(["p", "q"]));
+        // An online client adds an item to the list holding the key.
+        let online = client_doc(9, 0);
+        pylon_crdt::apply_update(&online, &rt.crdt_snapshot("Doc", &id).unwrap().unwrap()).unwrap();
+        let before = online.oplog_vv();
+        match pylon_crdt::root_map(&online).get("order") {
+            Some(pylon_crdt::loro::ValueOrContainer::Container(
+                pylon_crdt::loro::Container::MovableList(l),
+            )) => l.push("z").unwrap(),
+            other => panic!("{other:?}"),
+        }
+        online.commit();
+        push_since(&rt, &id, &online, &before);
+        let pushed = offline.oplog_vv();
+        match pylon_crdt::root_map(&offline).get("order") {
+            Some(pylon_crdt::loro::ValueOrContainer::Container(
+                pylon_crdt::loro::Container::MovableList(l),
+            )) => {
+                l.set(0, "P").unwrap();
+                l.insert(1, "r").unwrap();
+            }
+            other => panic!("{other:?}"),
+        }
+        offline.commit();
+        push_since(&rt, &id, &offline, &pushed);
+        assert_eq!(order(), serde_json::json!(["P", "r", "q", "z"]));
+    }
+
+    /// An offline client's tree, on a seed another client added a node to:
+    /// both sides' nodes stay. A later push that deletes one of its nodes
+    /// and adds another reaches the tree holding the key.
+    #[test]
+    fn an_offline_tree_joins_the_seed_tree_by_node_id() {
+        use pylon_http::DataStore;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        let (id, fields) = bare_doc_row(&rt);
+        let seeded = rt.crdt_snapshot("Doc", &id).unwrap().unwrap();
+        let online = client_doc(9, 0);
+        pylon_crdt::apply_update(&online, &seeded).unwrap();
+        let before = online.oplog_vv();
+        pylon_crdt::apply_patch(
+            &online,
+            &fields,
+            &serde_json::json!({"outline": [
+                {"id": "root", "parent": null},
+                {"id": "x", "parent": "root"},
+            ]}),
+        )
+        .unwrap();
+        push_since(&rt, &id, &online, &before);
+        let offline = client_doc(1, 0);
+        pylon_crdt::apply_patch(
+            &offline,
+            &fields,
+            &serde_json::json!({"outline": [{"id": "c", "parent": null}]}),
+        )
+        .unwrap();
+        push_since(&rt, &id, &offline, &Default::default());
+        let ids = || -> Vec<String> {
+            let mut ids: Vec<String> = rt.get_by_id("Doc", &id).unwrap().unwrap()["outline"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|n| n["id"].as_str().unwrap().to_string())
+                .collect();
+            ids.sort();
+            ids
+        };
+        assert_eq!(ids(), ["c", "root", "x"]);
+        let pushed = offline.oplog_vv();
+        pylon_crdt::apply_patch(
+            &offline,
+            &fields,
+            &serde_json::json!({"outline": [{"id": "d", "parent": null}]}),
+        )
+        .unwrap();
+        push_since(&rt, &id, &offline, &pushed);
+        assert_eq!(ids(), ["d", "root", "x"]);
+    }
+
+    /// Pruning a row's snapshot removes its server-side records, and only
+    /// its own.
+    #[test]
+    fn prune_removes_the_side_records_of_the_rows_it_prunes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        let gone = rt.insert("Doc", &fresh_doc()).unwrap();
+        let kept = rt.insert("Doc", &fresh_doc()).unwrap();
+        let conn = rt.lock_write_conn().unwrap();
+        let count = |table: &str, id: &str| -> i64 {
+            conn.query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE entity = 'Doc' AND row_id = ?1"),
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert!(count("_pylon_crdt_base", &gone) > 0);
+        conn.execute("DELETE FROM \"Doc\" WHERE \"id\" = ?1", [&gone])
+            .unwrap();
+        let pruned = crate::loro_store::prune_batch(
+            &conn,
+            "Doc",
+            crate::loro_store::PruneScope::Orphans,
+            10,
+        )
+        .unwrap();
+        assert_eq!(pruned, 1);
+        for table in
+            std::iter::once("_pylon_crdt_snapshots").chain(crate::loro_store::ROW_SIDE_TABLES)
+        {
+            assert_eq!(count(table, &gone), 0, "{table}");
+        }
+        assert_eq!(count("_pylon_crdt_snapshots", &kept), 1);
+        assert!(count("_pylon_crdt_base", &kept) > 0);
     }
 
     /// Each synthetic write takes its own peer (one for all its fields),

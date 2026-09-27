@@ -96,8 +96,9 @@ pub enum PruneScope {
     All,
 }
 
-/// Delete up to `batch` snapshots of `entity` in `scope`; returns how many.
-/// Callers loop until it returns 0, taking the write lock per batch.
+/// Delete up to `batch` snapshots of `entity` in `scope`, with the rows'
+/// server-side records; returns how many. Callers loop until it returns 0,
+/// taking the write lock per batch.
 pub fn prune_batch(
     conn: &Connection,
     entity: &str,
@@ -106,33 +107,37 @@ pub fn prune_batch(
 ) -> Result<usize, LoroStoreError> {
     let sql = match scope {
         PruneScope::Orphans => format!(
-            "DELETE FROM _pylon_crdt_snapshots WHERE rowid IN (
-                SELECT s.rowid FROM _pylon_crdt_snapshots s
-                WHERE s.entity = ?1
-                  AND NOT EXISTS (SELECT 1 FROM {} t WHERE t.\"id\" = s.row_id)
-                LIMIT ?2)",
+            "SELECT s.row_id FROM _pylon_crdt_snapshots s
+             WHERE s.entity = ?1
+               AND NOT EXISTS (SELECT 1 FROM {} t WHERE t.\"id\" = s.row_id)
+             LIMIT ?2",
             quote_sqlite_ident(entity)
         ),
-        PruneScope::All => "DELETE FROM _pylon_crdt_snapshots WHERE rowid IN (
-                SELECT rowid FROM _pylon_crdt_snapshots WHERE entity = ?1 LIMIT ?2)"
-            .to_string(),
+        PruneScope::All => {
+            "SELECT row_id FROM _pylon_crdt_snapshots WHERE entity = ?1 LIMIT ?2".to_string()
+        }
     };
-    let pruned = conn
-        .execute(&sql, params![entity, batch as i64])
-        .map_err(|e| LoroStoreError::Storage(format!("prune snapshots of {entity}: {e}")))?;
-    // The rows' server-side records go with their snapshots.
-    for table in ROW_SIDE_TABLES {
-        conn.execute(
-            &format!(
-                "DELETE FROM {table} WHERE entity = ?1 AND NOT EXISTS (
-                    SELECT 1 FROM _pylon_crdt_snapshots s
-                    WHERE s.entity = {table}.entity AND s.row_id = {table}.row_id)"
-            ),
-            params![entity],
-        )
-        .map_err(|e| LoroStoreError::Storage(format!("prune {table} of {entity}: {e}")))?;
+    let err =
+        |e: rusqlite::Error| LoroStoreError::Storage(format!("prune snapshots of {entity}: {e}"));
+    let row_ids: Vec<String> = conn
+        .prepare(&sql)
+        .map_err(err)?
+        .query_map(params![entity, batch as i64], |r| r.get(0))
+        .map_err(err)?
+        .collect::<Result<_, _>>()
+        .map_err(err)?;
+    let tx = conn.unchecked_transaction().map_err(err)?;
+    for row_id in &row_ids {
+        for table in std::iter::once("_pylon_crdt_snapshots").chain(ROW_SIDE_TABLES) {
+            tx.prepare_cached(&format!(
+                "DELETE FROM {table} WHERE entity = ?1 AND row_id = ?2"
+            ))
+            .and_then(|mut stmt| stmt.execute(params![entity, row_id]))
+            .map_err(|e| LoroStoreError::Storage(format!("prune {table} of {entity}: {e}")))?;
+        }
     }
-    Ok(pruned)
+    tx.commit().map_err(err)?;
+    Ok(row_ids.len())
 }
 
 /// Entities that have at least one snapshot.
@@ -170,45 +175,41 @@ pub fn ensure_sidecar(conn: &Connection) -> Result<(), LoroStoreError> {
     )
     .map(|_| ())
     .map_err(|e| LoroStoreError::Storage(format!("create the synthetic peer table: {e}")))?;
-    // Per text, list, or tree field: the value the server last wrote into
-    // the container holding the key, and whose value it was (a seed: "",
-    // or a client's container). A client's value replaces the container's
-    // only while it still holds exactly that write.
+    // Per text, list, or tree field: the server's last whole write of it
+    // (`pylon_crdt::merge::BaseWrite`, JSON).
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS _pylon_crdt_written (
+        "CREATE TABLE IF NOT EXISTS _pylon_crdt_base (
             entity TEXT NOT NULL,
             row_id TEXT NOT NULL,
             field TEXT NOT NULL,
-            container TEXT NOT NULL,
-            value TEXT NOT NULL,
-            source TEXT NOT NULL,
+            base TEXT NOT NULL,
             PRIMARY KEY (entity, row_id, field)
         )",
         [],
     )
     .map(|_| ())
-    .map_err(|e| LoroStoreError::Storage(format!("create the written-value table: {e}")))?;
-    // Per client container that lost its key: its content already merged
-    // into the one holding the key, so a later push adds only what is new.
+    .map_err(|e| LoroStoreError::Storage(format!("create the base write table: {e}")))?;
+    // Per container merged into the one holding its field's key: its links
+    // into that one (`pylon_crdt::merge::Links`, JSON).
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS _pylon_crdt_merged (
+        "CREATE TABLE IF NOT EXISTS _pylon_crdt_links (
             entity TEXT NOT NULL,
             row_id TEXT NOT NULL,
             source TEXT NOT NULL,
-            value TEXT NOT NULL,
+            links TEXT NOT NULL,
             PRIMARY KEY (entity, row_id, source)
         )",
         [],
     )
     .map(|_| ())
-    .map_err(|e| LoroStoreError::Storage(format!("create the merged-value table: {e}")))
+    .map_err(|e| LoroStoreError::Storage(format!("create the link table: {e}")))
 }
 
 /// The server-side tables kept per CRDT row beside its snapshot.
-const ROW_SIDE_TABLES: [&str; 3] = [
+pub(crate) const ROW_SIDE_TABLES: [&str; 3] = [
     "_pylon_crdt_synthetic",
-    "_pylon_crdt_written",
-    "_pylon_crdt_merged",
+    "_pylon_crdt_base",
+    "_pylon_crdt_links",
 ];
 
 // ---------------------------------------------------------------------------
@@ -280,261 +281,6 @@ fn as_synthetic(doc: &LoroDoc, write: impl FnOnce() -> Result<(), String>) -> Re
     written?;
     reset.map_err(|e| format!("reset the peer: {e}"))?;
     Ok(peer)
-}
-
-/// The start of an update, limited to ops the doc holds: an update of
-/// several changes lists its own earlier changes among its dependencies,
-/// which the doc does not have until it imports them.
-fn update_base(doc: &LoroDoc, update: &[u8]) -> Option<pylon_crdt::loro::Frontiers> {
-    let meta = LoroDoc::decode_import_blob_meta(update, false).ok()?;
-    let held = doc.oplog_vv();
-    Some(
-        meta.start_frontiers
-            .iter()
-            .filter(|id| held.get(&id.peer).is_some_and(|&n| id.counter < n))
-            .collect(),
-    )
-}
-
-/// Whether `doc` holds synthetic ops (by `peers`) the update's author had
-/// not seen: only then can the update have lost to one.
-fn unseen_synthetic_ops(
-    doc: &LoroDoc,
-    peers: &std::collections::HashSet<u64>,
-    update: &[u8],
-) -> bool {
-    if peers.is_empty() {
-        return false;
-    }
-    let Some(base) = update_base(doc, update) else {
-        return true;
-    };
-    let Some(seen) = doc.frontiers_to_vv(&base) else {
-        return true;
-    };
-    let held = doc.oplog_vv();
-    peers
-        .iter()
-        .any(|p| held.get(p).copied().unwrap_or(0) > seen.get(p).copied().unwrap_or(0))
-}
-
-/// A counter's value, 0 for one the doc does not hold (Loro asserts the
-/// container exists).
-fn counter_value(doc: &LoroDoc, id: &pylon_crdt::loro::ContainerID) -> f64 {
-    if doc.has_container(id) {
-        doc.get_counter(id.clone()).get_value()
-    } else {
-        0.0
-    }
-}
-
-/// What a client's update set, read from a copy of the doc at the
-/// update's start: the fields it changed, their values after it, and the
-/// container it left under each key (for a counter, where its increments
-/// are).
-struct ClientIntent {
-    touched: Vec<String>,
-    after: Value,
-    containers: std::collections::HashMap<String, pylon_crdt::loro::ContainerID>,
-}
-
-fn field_containers(
-    doc: &LoroDoc,
-    fields: &[CrdtField],
-) -> std::collections::HashMap<String, pylon_crdt::loro::ContainerID> {
-    use pylon_crdt::loro::{ContainerTrait, ValueOrContainer};
-    let map = pylon_crdt::root_map(doc);
-    fields
-        .iter()
-        .filter_map(|f| match map.get(&f.name) {
-            Some(ValueOrContainer::Container(c)) => Some((f.name.clone(), c.id())),
-            _ => None,
-        })
-        .collect()
-}
-
-fn client_intent(doc: &LoroDoc, fields: &[CrdtField], update: &[u8]) -> Option<ClientIntent> {
-    let base = update_base(doc, update)?;
-    let scratch = doc.fork_at(&base).ok()?;
-    let before = project_doc_to_json(&scratch, fields);
-    let before_containers = field_containers(&scratch, fields);
-    let editors = |doc: &LoroDoc| -> Vec<Option<u64>> {
-        let map = pylon_crdt::root_map(doc);
-        fields
-            .iter()
-            .map(|f| map.get_last_editor(&f.name))
-            .collect()
-    };
-    let before_editors = editors(&scratch);
-    let status = scratch.import(update).ok()?;
-    // Ops the copy could not place (the update depends on others): what
-    // it set cannot be read.
-    if status.pending.is_some() {
-        return None;
-    }
-    let after = project_doc_to_json(&scratch, fields);
-    let containers = field_containers(&scratch, fields);
-    let after_editors = editors(&scratch);
-    let null = Value::Null;
-    // A field the update wrote, deleted (the value may not change: a key
-    // an empty doc never held), or moved to a new container.
-    let touched = fields
-        .iter()
-        .enumerate()
-        .filter(|(i, f)| {
-            before.get(&f.name).unwrap_or(&null) != after.get(&f.name).unwrap_or(&null)
-                || before_containers.get(&f.name) != containers.get(&f.name)
-                || before_editors[*i] != after_editors[*i]
-        })
-        .map(|(_, f)| f.name.clone())
-        .collect();
-    Some(ClientIntent {
-        touched,
-        after,
-        containers,
-    })
-}
-
-/// What `steps_after_import` returns: the steps, the values the server
-/// writes (field, value, source), and the client values merged (source,
-/// value).
-type AfterImport = (
-    Vec<Step>,
-    Vec<(String, Value, String)>,
-    Vec<(String, Value)>,
-);
-
-/// A value the server last wrote into a text, list, or tree container.
-struct Written {
-    container: String,
-    value: Value,
-    source: String,
-}
-
-/// What to do after a client's update was imported.
-enum Step {
-    /// Patch a field (a register's value, a counter's increment, or a
-    /// text, list, or tree replaced whole).
-    Patch(String, Value),
-    /// Append to the text or list holding a field's key.
-    Append(String, Value),
-}
-
-/// The part of `now` past its common start with `was`: the text or items
-/// a client container gained since it was last merged.
-fn gained(was: &Value, now: &Value) -> Option<Value> {
-    match (was, now) {
-        (Value::String(a), Value::String(b)) => {
-            let common = a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
-            let rest: String = b.chars().skip(common).collect();
-            (!rest.is_empty()).then_some(Value::String(rest))
-        }
-        (Value::Array(a), Value::Array(b)) => {
-            let common = a.iter().zip(b).take_while(|(x, y)| x == y).count();
-            (common < b.len()).then(|| Value::Array(b[common..].to_vec()))
-        }
-        (Value::Null, now) if !now.is_null() => gained(
-            &match now {
-                Value::String(_) => Value::String(String::new()),
-                _ => Value::Array(Vec::new()),
-            },
-            now,
-        ),
-        _ => None,
-    }
-}
-
-/// After a client's update was imported: what to apply so the client's
-/// values that lost to synthetic ops still count.
-///
-/// - A register whose winning op is synthetic takes the client's value.
-/// - A text, list, or tree the client made under a key another container
-///   holds: while that container still holds exactly what the server last
-///   wrote there (from a seed, or from this same client container), the
-///   client's value replaces it. Otherwise clients have edited it, and the
-///   client's text or items it gained since its last merge are appended (a
-///   tree is left as it is).
-/// - A counter: `counted` is what this update added, per field; when those
-///   increments are in a counter not holding the key, they are added to
-///   the one that does. A counter the client made that took the key from
-///   another adds that one's total.
-///
-/// Returns the steps, and the written and merged values to record.
-#[allow(clippy::too_many_arguments)]
-fn steps_after_import(
-    doc: &LoroDoc,
-    fields: &[CrdtField],
-    intent: &ClientIntent,
-    prior: &std::collections::HashMap<String, pylon_crdt::loro::ContainerID>,
-    counted: &std::collections::HashMap<String, f64>,
-    peers: &std::collections::HashSet<u64>,
-    written: &std::collections::HashMap<String, Written>,
-    merged_before: &std::collections::HashMap<String, Value>,
-) -> AfterImport {
-    use pylon_crdt::CrdtFieldKind as K;
-    let map = pylon_crdt::root_map(doc);
-    let projected = project_doc_to_json(doc, fields);
-    let now = field_containers(doc, fields);
-    let null = Value::Null;
-    let (mut steps, mut writes, mut merges) = (Vec::new(), Vec::new(), Vec::new());
-    for f in fields.iter().filter(|f| intent.touched.contains(&f.name)) {
-        let wanted = intent.after.get(&f.name).unwrap_or(&null);
-        let client_container = intent.containers.get(&f.name);
-        let winner = now.get(&f.name);
-        match f.kind {
-            K::LwwString | K::LwwNumber | K::LwwBool | K::LwwJson => {
-                if projected.get(&f.name).unwrap_or(&null) != wanted
-                    && map
-                        .get_last_editor(&f.name)
-                        .is_some_and(|p| peers.contains(&p))
-                {
-                    steps.push(Step::Patch(f.name.clone(), wanted.clone()));
-                }
-            }
-            K::Text | K::List | K::MovableList | K::Tree => {
-                let (Some(client), Some(winner)) = (client_container, winner) else {
-                    continue;
-                };
-                if client == winner {
-                    continue;
-                }
-                let source = client.to_string();
-                let holds_our_write = written.get(&f.name).is_some_and(|w| {
-                    w.container == winner.to_string()
-                        && projected.get(&f.name).unwrap_or(&null) == &w.value
-                        && (w.source.is_empty() || w.source == source)
-                });
-                if holds_our_write {
-                    steps.push(Step::Patch(f.name.clone(), wanted.clone()));
-                    writes.push((f.name.clone(), wanted.clone(), source.clone()));
-                    merges.push((source, wanted.clone()));
-                } else if f.kind != K::Tree {
-                    let was = merged_before.get(&source).unwrap_or(&null);
-                    if let Some(rest) = gained(was, wanted) {
-                        steps.push(Step::Append(f.name.clone(), rest));
-                        merges.push((source, wanted.clone()));
-                    }
-                }
-            }
-            K::Counter => {
-                let mut add = 0.0;
-                if let (Some(sum), Some(client)) = (counted.get(&f.name), client_container) {
-                    if winner != Some(client) {
-                        add += sum;
-                    }
-                }
-                if let (Some(old), Some(winner)) = (prior.get(&f.name), winner) {
-                    if old != winner && Some(winner) == client_container {
-                        add += counter_value(doc, old);
-                    }
-                }
-                if add != 0.0 {
-                    steps.push(Step::Patch(f.name.clone(), serde_json::json!(add)));
-                }
-            }
-        }
-    }
-    (steps, writes, merges)
 }
 
 thread_local! {
@@ -658,14 +404,21 @@ impl LoroStore {
         patch: &Value,
     ) -> Result<Value, LoroStoreError> {
         let handle = self.get_or_hydrate(conn, entity, row_id)?;
-        let projected = {
-            let doc = handle.lock().unwrap();
-            note_changed(entity, row_id);
-            apply_patch(&doc, fields, patch).map_err(LoroStoreError::Apply)?;
-            self.persist_snapshot(conn, entity, row_id, &doc)?;
-            project_doc_to_json(&doc, fields)
-        };
-        Ok(projected)
+        let doc = handle.lock().unwrap();
+        note_changed(entity, row_id);
+        let peer = doc.peer_id();
+        let start = doc.oplog_vv().get(&peer).copied().unwrap_or(0);
+        apply_patch(&doc, fields, patch).map_err(LoroStoreError::Apply)?;
+        let written: Vec<&str> = patch
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(_, v)| !v.is_null())
+            .map(|(k, _)| k.as_str())
+            .collect();
+        self.record_bases(conn, entity, row_id, &doc, fields, &written, peer, start)?;
+        self.persist_snapshot(conn, entity, row_id, &doc)?;
+        Ok(project_doc_to_json(&doc, fields))
     }
 
     /// The peers of the row's synthetic ops.
@@ -705,115 +458,115 @@ impl LoroStore {
         .map_err(|e| LoroStoreError::Storage(format!("record a synthetic peer: {e}")))
     }
 
-    fn record_written(
+    /// Record the server's whole write of `written` (text, list, and tree
+    /// fields): `peer`'s ops from `start` to now.
+    #[allow(clippy::too_many_arguments)]
+    fn record_bases(
         &self,
         conn: &Connection,
         entity: &str,
         row_id: &str,
-        field: &str,
-        written: &Written,
+        doc: &LoroDoc,
+        fields: &[CrdtField],
+        written: &[&str],
+        peer: u64,
+        start: i32,
     ) -> Result<(), LoroStoreError> {
-        conn.execute(
-            "INSERT INTO _pylon_crdt_written (entity, row_id, field, container, value, source)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT (entity, row_id, field) DO UPDATE SET
-                container = excluded.container, value = excluded.value,
-                source = excluded.source",
-            params![
-                entity,
-                row_id,
-                field,
-                written.container,
-                written.value.to_string(),
-                written.source
-            ],
+        let end = doc.oplog_vv().get(&peer).copied().unwrap_or(0);
+        for f in fields.iter().filter(|f| written.contains(&f.name.as_str())) {
+            let Some(base) = pylon_crdt::merge::base_write(doc, f, peer, start, end) else {
+                continue;
+            };
+            let base = serde_json::to_string(&base)
+                .map_err(|e| LoroStoreError::Storage(format!("encode a base write: {e}")))?;
+            conn.prepare_cached(
+                "INSERT INTO _pylon_crdt_base (entity, row_id, field, base)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (entity, row_id, field) DO UPDATE SET base = excluded.base",
+            )
+            .and_then(|mut stmt| stmt.execute(params![entity, row_id, f.name, base]))
+            .map_err(|e| LoroStoreError::Storage(format!("record a base write: {e}")))?;
+        }
+        Ok(())
+    }
+
+    fn bases(
+        &self,
+        conn: &Connection,
+        entity: &str,
+        row_id: &str,
+    ) -> Result<std::collections::HashMap<String, pylon_crdt::merge::BaseWrite>, LoroStoreError>
+    {
+        self.read_json_side(
+            conn,
+            "SELECT field, base FROM _pylon_crdt_base WHERE entity = ?1 AND row_id = ?2",
+            entity,
+            row_id,
         )
-        .map(|_| ())
-        .map_err(|e| LoroStoreError::Storage(format!("record a written value: {e}")))
     }
 
-    fn written_values(
+    fn links(
         &self,
         conn: &Connection,
         entity: &str,
         row_id: &str,
-    ) -> Result<std::collections::HashMap<String, Written>, LoroStoreError> {
-        let mut stmt = conn
-            .prepare_cached(
-                "SELECT field, container, value, source FROM _pylon_crdt_written
-                 WHERE entity = ?1 AND row_id = ?2",
-            )
-            .map_err(|e| LoroStoreError::Storage(format!("read written values: {e}")))?;
-        let rows = stmt
-            .query_map(params![entity, row_id], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                ))
-            })
-            .map_err(|e| LoroStoreError::Storage(format!("read written values: {e}")))?;
-        Ok(rows
-            .filter_map(Result::ok)
-            .filter_map(|(field, container, value, source)| {
-                Some((
-                    field,
-                    Written {
-                        container,
-                        value: serde_json::from_str(&value).ok()?,
-                        source,
-                    },
-                ))
-            })
-            .collect())
+    ) -> Result<std::collections::HashMap<String, pylon_crdt::merge::Links>, LoroStoreError> {
+        self.read_json_side(
+            conn,
+            "SELECT source, links FROM _pylon_crdt_links WHERE entity = ?1 AND row_id = ?2",
+            entity,
+            row_id,
+        )
     }
 
-    fn merged_values(
+    /// A row's (key, JSON value) side records, decoded. A record that no
+    /// longer decodes is skipped: the merge then starts over for it.
+    fn read_json_side<T: serde::de::DeserializeOwned>(
         &self,
         conn: &Connection,
+        sql: &str,
         entity: &str,
         row_id: &str,
-    ) -> Result<std::collections::HashMap<String, Value>, LoroStoreError> {
-        let mut stmt = conn
-            .prepare_cached(
-                "SELECT source, value FROM _pylon_crdt_merged WHERE entity = ?1 AND row_id = ?2",
-            )
-            .map_err(|e| LoroStoreError::Storage(format!("read merged values: {e}")))?;
+    ) -> Result<std::collections::HashMap<String, T>, LoroStoreError> {
+        let err = |e: rusqlite::Error| LoroStoreError::Storage(format!("read {sql}: {e}"));
+        let mut stmt = conn.prepare_cached(sql).map_err(err)?;
         let rows = stmt
             .query_map(params![entity, row_id], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
             })
-            .map_err(|e| LoroStoreError::Storage(format!("read merged values: {e}")))?;
+            .map_err(err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(err)?;
         Ok(rows
-            .filter_map(Result::ok)
-            .filter_map(|(source, value)| Some((source, serde_json::from_str(&value).ok()?)))
+            .into_iter()
+            .filter_map(|(key, json)| Some((key, serde_json::from_str(&json).ok()?)))
             .collect())
     }
 
-    fn record_merged(
+    fn record_links(
         &self,
         conn: &Connection,
         entity: &str,
         row_id: &str,
         source: &str,
-        value: &Value,
+        links: &pylon_crdt::merge::Links,
     ) -> Result<(), LoroStoreError> {
-        conn.execute(
-            "INSERT INTO _pylon_crdt_merged (entity, row_id, source, value)
+        let links = serde_json::to_string(links)
+            .map_err(|e| LoroStoreError::Storage(format!("encode links: {e}")))?;
+        conn.prepare_cached(
+            "INSERT INTO _pylon_crdt_links (entity, row_id, source, links)
              VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT (entity, row_id, source) DO UPDATE SET value = excluded.value",
-            params![entity, row_id, source, value.to_string()],
+             ON CONFLICT (entity, row_id, source) DO UPDATE SET links = excluded.links",
         )
+        .and_then(|mut stmt| stmt.execute(params![entity, row_id, source, links]))
         .map(|_| ())
-        .map_err(|e| LoroStoreError::Storage(format!("record a merged value: {e}")))
+        .map_err(|e| LoroStoreError::Storage(format!("record links: {e}")))
     }
 
     /// Apply `values` as one synthetic write (a doc created or brought in
     /// line from its row: seed, reconcile, fill), one field at a time under
-    /// one peer. A text, list, or tree it writes is recorded as the
-    /// server's write (source ""). Returns the fields the doc could not
-    /// take, with why.
+    /// one peer, and record it as the server's write of those fields.
+    /// Returns the fields the doc could not take, with why.
     pub fn apply_seed_fields(
         &self,
         conn: &Connection,
@@ -822,7 +575,6 @@ impl LoroStore {
         fields: &[CrdtField],
         values: Vec<(String, Value)>,
     ) -> Result<Vec<(String, String)>, LoroStoreError> {
-        use pylon_crdt::CrdtFieldKind as K;
         if values.is_empty() {
             return Ok(Vec::new());
         }
@@ -846,31 +598,24 @@ impl LoroStore {
         if failed.len() < tried {
             self.record_synthetic(conn, entity, row_id, peer)?;
         }
-        let projected = project_doc_to_json(&doc, fields);
-        let containers = field_containers(&doc, fields);
-        for f in fields.iter().filter(|f| {
-            matches!(f.kind, K::Text | K::List | K::MovableList | K::Tree)
-                && written.contains(&f.name)
-        }) {
-            if let Some(container) = containers.get(&f.name) {
-                let written = Written {
-                    container: container.to_string(),
-                    value: projected.get(&f.name).cloned().unwrap_or(Value::Null),
-                    source: String::new(),
-                };
-                self.record_written(conn, entity, row_id, &f.name, &written)?;
-            }
-        }
+        let written: Vec<&str> = written.iter().map(String::as_str).collect();
+        self.record_bases(conn, entity, row_id, &doc, fields, &written, peer, 0)?;
         self.persist_snapshot(conn, entity, row_id, &doc)?;
         Ok(failed)
     }
 
-    /// Import a client's update into the row's doc and persist it, keeping
-    /// the client's values that lost to synthetic ops it had not seen (see
-    /// `steps_after_import`). An update that adds no ops (a push sent
-    /// again) changes nothing. Returns the projection before the import and
-    /// the fields the update set (deletes included) when they could be read
-    /// from it.
+    /// Import a client's update into the row's doc and persist it. Then, as
+    /// one synthetic write:
+    ///
+    /// - A register the update wrote whose winning op is synthetic takes
+    ///   the update's value again: the client had not seen that op.
+    /// - Per text, list, tree, or counter field, the other containers the
+    ///   update changed, and the one the key moved from, are merged into
+    ///   the one holding the key (`pylon_crdt::merge`).
+    ///
+    /// An update that adds no ops (a push sent again) changes nothing.
+    /// Returns the projection before the import and the fields the update
+    /// changed (deletes included), none when it added no ops.
     pub fn apply_client_update(
         &self,
         conn: &Connection,
@@ -878,7 +623,6 @@ impl LoroStore {
         row_id: &str,
         fields: &[CrdtField],
         update: &[u8],
-        always_read_intent: bool,
     ) -> Result<(Value, Option<Vec<String>>), LoroStoreError> {
         let peers = self.synthetic_peers(conn, entity, row_id)?;
         let handle = self.get_or_hydrate(conn, entity, row_id)?;
@@ -886,82 +630,49 @@ impl LoroStore {
         note_changed(entity, row_id);
         let before = project_doc_to_json(&doc, fields);
         let held_before = doc.oplog_vv();
-        let prior = field_containers(&doc, fields);
-        let intent = if always_read_intent || unseen_synthetic_ops(&doc, &peers, update) {
-            client_intent(&doc, fields, update)
-        } else {
-            None
-        };
-        // A counter's increments in this update, measured on the doc itself
-        // (the ops it did not hold yet), in the container the update counts
-        // in.
-        let counter_before: std::collections::HashMap<String, f64> = intent
-            .iter()
-            .flat_map(|i| {
-                fields
-                    .iter()
-                    .filter(|f| f.kind == pylon_crdt::CrdtFieldKind::Counter)
-                    .filter_map(|f| {
-                        let id = i.containers.get(&f.name)?;
-                        Some((f.name.clone(), counter_value(&doc, id)))
-                    })
-            })
-            .collect();
+        let prior = pylon_crdt::merge::holders(&doc, fields);
         crdt_apply_update(&doc, update).map_err(LoroStoreError::Decode)?;
         if doc.oplog_vv() == held_before {
             return Ok((before, None));
         }
-        if let Some(intent) = &intent {
-            let counted: std::collections::HashMap<String, f64> = counter_before
-                .iter()
-                .filter_map(|(name, was)| {
-                    let id = intent.containers.get(name)?;
-                    Some((name.clone(), counter_value(&doc, id) - was))
-                })
-                .collect();
-            let written = self.written_values(conn, entity, row_id)?;
-            let merged = self.merged_values(conn, entity, row_id)?;
-            let (steps, writes, merges) = steps_after_import(
-                &doc, fields, intent, &prior, &counted, &peers, &written, &merged,
-            );
-            if !steps.is_empty() {
-                let peer = as_synthetic(&doc, || {
-                    for step in &steps {
-                        match step {
-                            Step::Patch(name, value) => {
-                                apply_patch(&doc, fields, &serde_json::json!({ name: value }))?
-                            }
-                            Step::Append(name, value) => {
-                                let field = fields
-                                    .iter()
-                                    .find(|f| &f.name == name)
-                                    .ok_or_else(|| format!("no field {name}"))?;
-                                pylon_crdt::append_to_field(&doc, field, value)?
-                            }
-                        }
-                    }
-                    Ok(())
-                })
-                .map_err(LoroStoreError::Apply)?;
-                self.record_synthetic(conn, entity, row_id, peer)?;
-                let containers = field_containers(&doc, fields);
-                for (field, value, source) in writes {
-                    if let Some(container) = containers.get(&field) {
-                        let written = Written {
-                            container: container.to_string(),
-                            value,
-                            source,
-                        };
-                        self.record_written(conn, entity, row_id, &field, &written)?;
-                    }
-                }
-                for (source, value) in merges {
-                    self.record_merged(conn, entity, row_id, &source, &value)?;
-                }
+        let imported = pylon_crdt::merge::read_import(&doc, fields, &held_before);
+        let projected = project_doc_to_json(&doc, fields);
+        let map = pylon_crdt::root_map(&doc);
+        let null = Value::Null;
+        let registers: Vec<(&String, &Value)> = imported
+            .registers
+            .iter()
+            .filter(|(name, wanted)| {
+                !crate::same_json_value(projected.get(name.as_str()).unwrap_or(&null), wanted)
+                    && map
+                        .get_last_editor(name)
+                        .is_some_and(|p| peers.contains(&p))
+            })
+            .collect();
+        let bases = self.bases(conn, entity, row_id)?;
+        let mut links = self.links(conn, entity, row_id)?;
+        let held = doc.oplog_vv();
+        let mut linked = Vec::new();
+        let peer = as_synthetic(&doc, || {
+            for (name, value) in &registers {
+                apply_patch(&doc, fields, &serde_json::json!({ *name: value }))?;
+            }
+            linked = pylon_crdt::merge::merge_after_import(
+                &doc, fields, &imported, &prior, &bases, &mut links,
+            )?;
+            Ok(())
+        })
+        .map_err(LoroStoreError::Apply)?;
+        if doc.oplog_vv() != held {
+            self.record_synthetic(conn, entity, row_id, peer)?;
+        }
+        for source in linked {
+            if let Some(l) = links.get(&source) {
+                self.record_links(conn, entity, row_id, &source, l)?;
             }
         }
         self.persist_snapshot(conn, entity, row_id, &doc)?;
-        Ok((before, intent.map(|i| i.touched)))
+        Ok((before, Some(imported.touched)))
     }
 
     /// Apply a binary update from a peer (typed-protocol client push or
