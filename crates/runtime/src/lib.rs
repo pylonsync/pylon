@@ -75,6 +75,7 @@ pub mod shard_route;
 pub mod shard_tickets;
 pub mod shard_wasm;
 pub mod shard_ws;
+pub mod shard_wt;
 pub mod sse;
 pub mod ssr_cache;
 pub mod stream_hub;

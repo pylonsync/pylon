@@ -1,0 +1,509 @@
+//! Shard connections over WebTransport (HTTP/3 over QUIC).
+//!
+//! A replicating shard's updates travel as QUIC datagrams, which a lost
+//! packet delays by nothing but itself; over a WebSocket (TCP) one lost
+//! packet holds back everything behind it. See `pylon_realtime::wire`
+//! (version 3) and `pylon_realtime::replication` for the protocol.
+//!
+//! A session at `/shard`:
+//!
+//! 1. The client opens one bidirectional stream and sends its hello: a
+//!    4-byte big-endian length, then JSON `{shard, sid, ticket?, token?}`.
+//!    Credentials travel here, never in the URL.
+//! 2. The server sends frames on that stream: each a 4-byte big-endian
+//!    length, then a wire version 2 frame (18-byte header, payload). It
+//!    sends the subscription's replication updates as bare QUIC datagrams
+//!    (`pylon_replication::datagram`).
+//! 3. The client sends messages on the stream (length, then a version 3
+//!    message, see `wire::client`) and acks as bare datagrams.
+//!
+//! **Certificates.** The server makes its own self-signed certificate (no
+//! public CA), and the client pins it with `serverCertificateHashes`, which
+//! allows a validity of 14 days at most. The server keeps a current and a
+//! next certificate, each valid for 13 days, serves the current one, and
+//! every 6 days makes the next one current. `GET /_pylon/shard/webtransport`
+//! gives the URL and both hashes, so a client that fetched them just before
+//! a rotation still gets in.
+//!
+//! **Configuration.** `PYLON_WEBTRANSPORT_PORT` turns it on (a UDP port).
+//! `PYLON_WEBTRANSPORT_BIND` is the address to bind (default: every
+//! address; on Fly, `fly-global-services`). `PYLON_WEBTRANSPORT_URL` is what
+//! clients connect to (default `https://localhost:<port>/shard`).
+
+use std::net::ToSocketAddrs;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+use pylon_auth::SessionStore;
+use pylon_realtime::{
+    wire, DynShardRegistry, FrameKind, ShardAuth, ShardError, SnapshotFormat, SubscriberId,
+};
+use serde::Deserialize;
+use wtransport::endpoint::endpoint_side::Server;
+use wtransport::{Connection, Endpoint, Identity, RecvStream, SendStream, ServerConfig, VarInt};
+
+use crate::shard_ws::{frame_v2_of, log_connection_end_as, process_input, ConnectionEnd};
+
+/// How long a certificate is valid. Browsers accept at most 14 days.
+const CERT_VALIDITY_DAYS: u32 = 13;
+/// How often the next certificate becomes the current one.
+const ROTATE_EVERY: Duration = Duration::from_secs(6 * 24 * 3600);
+/// A hello larger than this is refused.
+const MAX_HELLO: usize = 16 * 1024;
+/// A client message on the stream larger than this closes the session.
+const MAX_CLIENT_MESSAGE: usize = 1 << 20;
+/// The client must open its stream and send its hello within this.
+const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+/// Smallest datagram a session must carry: a datagram header and an update.
+const MIN_DATAGRAM: usize = 128;
+
+/// Session close codes (WebTransport application error codes).
+mod close_code {
+    pub const NORMAL: u32 = 0;
+    /// Refused: bad credentials, an unknown shard.
+    pub const POLICY: u32 = 1;
+    /// The client broke the protocol.
+    pub const PROTOCOL: u32 = 2;
+    /// Try again: the client was too slow.
+    pub const AGAIN: u32 = 3;
+}
+
+/// Where WebTransport listens and what clients connect to.
+#[derive(Debug, Clone)]
+pub struct WebTransportConfig {
+    pub port: u16,
+    /// Host to bind; None binds every address (IPv4 and IPv6).
+    pub bind: Option<String>,
+    /// The URL clients connect to.
+    pub url: String,
+}
+
+impl WebTransportConfig {
+    /// From `PYLON_WEBTRANSPORT_*`; None when WebTransport is off.
+    pub fn from_env() -> Option<Self> {
+        let port: u16 = std::env::var("PYLON_WEBTRANSPORT_PORT")
+            .ok()?
+            .parse()
+            .ok()?;
+        let bind = std::env::var("PYLON_WEBTRANSPORT_BIND")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let url = std::env::var("PYLON_WEBTRANSPORT_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("https://localhost:{port}/shard"));
+        Some(Self { port, bind, url })
+    }
+
+    /// The certificate's subject names: the URL's host, and localhost.
+    fn subject_alt_names(&self) -> Vec<String> {
+        let mut names = vec!["localhost".to_string(), "127.0.0.1".to_string()];
+        let host = self
+            .url
+            .split_once("://")
+            .map(|(_, rest)| rest)
+            .unwrap_or(&self.url)
+            .split('/')
+            .next()
+            .unwrap_or("");
+        // Strip a port, and IPv6 brackets.
+        let host = match host.strip_prefix('[') {
+            Some(v6) => v6.split(']').next().unwrap_or(""),
+            None => host.rsplit_once(':').map_or(host, |(h, _)| h),
+        };
+        if !host.is_empty() && !names.iter().any(|n| n == host) {
+            names.push(host.to_string());
+        }
+        names
+    }
+}
+
+struct Certs {
+    current: Identity,
+    next: Identity,
+    current_since: Instant,
+}
+
+/// The running server: its URL and certificates.
+pub struct WebTransport {
+    config: WebTransportConfig,
+    certs: Mutex<Certs>,
+}
+
+static RUNNING: OnceLock<Arc<WebTransport>> = OnceLock::new();
+
+/// The URL and certificate hashes clients need, when WebTransport runs
+/// here.
+pub fn endpoint_info() -> Option<(String, Vec<[u8; 32]>)> {
+    let wt = RUNNING.get()?;
+    let certs = wt.certs.lock().unwrap();
+    let hash = |id: &Identity| *id.certificate_chain().as_slice()[0].hash().as_ref();
+    Some((
+        wt.config.url.clone(),
+        vec![hash(&certs.current), hash(&certs.next)],
+    ))
+}
+
+/// The body of `GET /_pylon/shard/webtransport`: `{"url", "certHashes"}`,
+/// the hashes base64 (standard, padded), or None when WebTransport is off.
+pub fn endpoint_info_json() -> Option<String> {
+    use base64::Engine;
+    let (url, hashes) = endpoint_info()?;
+    let hashes: Vec<String> = hashes
+        .iter()
+        .map(|h| base64::engine::general_purpose::STANDARD.encode(h))
+        .collect();
+    Some(serde_json::json!({ "url": url, "certHashes": hashes }).to_string())
+}
+
+fn self_signed(config: &WebTransportConfig) -> Result<Identity, String> {
+    Identity::self_signed_builder()
+        .subject_alt_names(config.subject_alt_names())
+        .from_now_utc()
+        .validity_days(CERT_VALIDITY_DAYS)
+        .build()
+        .map_err(|e| format!("self-signed certificate: {e}"))
+}
+
+fn server_config(config: &WebTransportConfig, identity: Identity) -> Result<ServerConfig, String> {
+    let builder = ServerConfig::builder();
+    let builder = match &config.bind {
+        None => builder.with_bind_default(config.port),
+        Some(host) => {
+            let addr = (host.as_str(), config.port)
+                .to_socket_addrs()
+                .map_err(|e| format!("resolve {host}: {e}"))?
+                .next()
+                .ok_or_else(|| format!("{host} resolves to no address"))?;
+            builder.with_bind_address(addr)
+        }
+    };
+    Ok(builder
+        .with_identity(identity)
+        .keep_alive_interval(Some(Duration::from_secs(5)))
+        .max_idle_timeout(Some(Duration::from_secs(30)))
+        .map_err(|e| format!("idle timeout: {e}"))?
+        .build())
+}
+
+/// Start serving shard sessions over WebTransport. Returns the bound
+/// server, or why it could not start.
+pub fn start(
+    config: WebTransportConfig,
+    registry: Arc<dyn DynShardRegistry>,
+    sessions: Arc<SessionStore>,
+) -> Result<Arc<WebTransport>, String> {
+    let rt = crate::shard_ws::runtime().ok_or("no connection runtime")?;
+    let current = self_signed(&config)?;
+    let next = self_signed(&config)?;
+    let server_cfg = server_config(&config, current.clone_identity())?;
+    let _guard = rt.enter();
+    let endpoint =
+        Endpoint::server(server_cfg).map_err(|e| format!("bind UDP port {}: {e}", config.port))?;
+    let wt = Arc::new(WebTransport {
+        config,
+        certs: Mutex::new(Certs {
+            current,
+            next,
+            current_since: Instant::now(),
+        }),
+    });
+    let _ = RUNNING.set(Arc::clone(&wt));
+    tracing::warn!(
+        "[shard-wt] WebTransport on UDP port {} ({})",
+        wt.config.port,
+        wt.config.url
+    );
+    let endpoint = Arc::new(endpoint);
+    rt.spawn(rotate(Arc::clone(&wt), Arc::clone(&endpoint)));
+    rt.spawn(accept_loop(endpoint, registry, sessions));
+    Ok(wt)
+}
+
+/// Make the next certificate current every [`ROTATE_EVERY`].
+async fn rotate(wt: Arc<WebTransport>, endpoint: Arc<Endpoint<Server>>) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+        let identity = {
+            let mut certs = wt.certs.lock().unwrap();
+            if certs.current_since.elapsed() < ROTATE_EVERY {
+                continue;
+            }
+            let fresh = match self_signed(&wt.config) {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::warn!("[shard-wt] certificate rotation: {e}");
+                    continue;
+                }
+            };
+            let next = std::mem::replace(&mut certs.next, fresh);
+            certs.current = next;
+            certs.current_since = Instant::now();
+            certs.current.clone_identity()
+        };
+        match server_config(&wt.config, identity)
+            .and_then(|c| endpoint.reload_config(c, false).map_err(|e| e.to_string()))
+        {
+            Ok(()) => tracing::info!("[shard-wt] rotated the certificate"),
+            Err(e) => tracing::warn!("[shard-wt] certificate rotation: {e}"),
+        }
+    }
+}
+
+async fn accept_loop(
+    endpoint: Arc<Endpoint<Server>>,
+    registry: Arc<dyn DynShardRegistry>,
+    sessions: Arc<SessionStore>,
+) {
+    loop {
+        let incoming = endpoint.accept().await;
+        let (registry, sessions) = (Arc::clone(&registry), Arc::clone(&sessions));
+        tokio::spawn(async move {
+            let request = match incoming.await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::debug!("[shard-wt] handshake: {e}");
+                    return;
+                }
+            };
+            if request.path().split('?').next() != Some("/shard") {
+                request.not_found().await;
+                return;
+            }
+            let conn = match request.accept().await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::debug!("[shard-wt] accept: {e}");
+                    return;
+                }
+            };
+            let started = Instant::now();
+            let end = run_session(&conn, registry, sessions).await;
+            log_connection_end_as("WT", started, &end);
+        });
+    }
+}
+
+#[derive(Deserialize)]
+struct Hello {
+    shard: String,
+    sid: String,
+    #[serde(default)]
+    ticket: Option<String>,
+    #[serde(default)]
+    token: Option<String>,
+}
+
+/// Read one length-prefixed message; None at a clean end of the stream.
+async fn read_message(recv: &mut RecvStream, max: usize) -> Result<Option<Vec<u8>>, String> {
+    let mut len = [0u8; 4];
+    match recv.read_exact(&mut len).await {
+        Ok(()) => {}
+        Err(wtransport::error::StreamReadExactError::FinishedEarly(0)) => return Ok(None),
+        Err(e) => return Err(format!("stream read: {e}")),
+    }
+    let len = u32::from_be_bytes(len) as usize;
+    if len > max {
+        return Err(format!("a {len}-byte message (at most {max})"));
+    }
+    let mut buf = vec![0u8; len];
+    recv.read_exact(&mut buf)
+        .await
+        .map_err(|e| format!("stream read: {e}"))?;
+    Ok(Some(buf))
+}
+
+async fn write_message(send: &mut SendStream, bytes: &[u8]) -> Result<(), String> {
+    let len = u32::try_from(bytes.len()).map_err(|_| "a frame over 4 GiB".to_string())?;
+    send.write_all(&len.to_be_bytes())
+        .await
+        .map_err(|e| format!("stream write: {e}"))?;
+    send.write_all(bytes)
+        .await
+        .map_err(|e| format!("stream write: {e}"))
+}
+
+fn close(conn: &Connection, code: u32, reason: &str) -> ConnectionEnd {
+    // A close reason is at most 1024 bytes in WebTransport.
+    let mut end = reason.len().min(1024);
+    while !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    conn.close(VarInt::from_u32(code), reason[..end].as_bytes());
+    ConnectionEnd::Closed(reason.to_string())
+}
+
+async fn run_session(
+    conn: &Connection,
+    registry: Arc<dyn DynShardRegistry>,
+    sessions: Arc<SessionStore>,
+) -> ConnectionEnd {
+    let opened = tokio::time::timeout(HELLO_TIMEOUT, async {
+        let (send, mut recv) = conn
+            .accept_bi()
+            .await
+            .map_err(|e| format!("no stream: {e}"))?;
+        let hello = read_message(&mut recv, MAX_HELLO)
+            .await?
+            .ok_or("the stream ended before the hello")?;
+        let hello: Hello =
+            serde_json::from_slice(&hello).map_err(|e| format!("a bad hello: {e}"))?;
+        Ok::<_, String>((send, recv, hello))
+    })
+    .await;
+    let (mut send, mut recv, hello) = match opened {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => return close(conn, close_code::PROTOCOL, &e),
+        Err(_) => return close(conn, close_code::PROTOCOL, "no hello in time"),
+    };
+
+    let auth_ctx = sessions.resolve(hello.token.as_deref());
+    let shard_auth: ShardAuth =
+        match crate::shard_tickets::shard_auth(&auth_ctx, hello.ticket.as_deref()) {
+            Ok(a) => a,
+            Err(e) => return close(conn, close_code::POLICY, &format!("unauthorized: {e}")),
+        };
+    let Some(shard) = registry.get(&hello.shard) else {
+        return close(
+            conn,
+            close_code::POLICY,
+            &format!("shard \"{}\" not found", hello.shard),
+        );
+    };
+    let datagram_max = conn.max_datagram_size().unwrap_or(0);
+    if datagram_max < MIN_DATAGRAM {
+        return close(
+            conn,
+            close_code::PROTOCOL,
+            "the connection carries no datagrams",
+        );
+    }
+
+    let subscriber_id = SubscriberId::new(hello.sid);
+    let joined = {
+        let (shard, sid, auth) = (
+            Arc::clone(&shard),
+            subscriber_id.clone(),
+            shard_auth.clone(),
+        );
+        tokio::task::spawn_blocking(move || {
+            shard.add_queued_datagram_subscriber(sid, &auth, datagram_max)
+        })
+        .await
+        .unwrap_or_else(|e| Err(ShardError::Other(format!("subscribe task failed: {e}"))))
+    };
+    let queue = match joined {
+        Ok(q) => q,
+        Err(ShardError::Unauthorized(reason)) => {
+            return close(conn, close_code::POLICY, &format!("unauthorized: {reason}"));
+        }
+        Err(e) => return close(conn, close_code::AGAIN, &e.to_string()),
+    };
+
+    let wake = Arc::new(tokio::sync::Notify::new());
+    {
+        let wake = Arc::clone(&wake);
+        queue.set_notifier(move || wake.notify_one());
+    }
+    let codec = wire::codec_byte(shard.snapshot_format());
+    let writer = {
+        let (queue, shard, conn) = (Arc::clone(&queue), Arc::clone(&shard), conn.clone());
+        async move {
+            let mut transferred: Option<String> = None;
+            loop {
+                while let Some(frame) = queue.pop() {
+                    if frame.kind == FrameKind::Datagram {
+                        // A datagram the connection cannot take now is lost,
+                        // like one the network drops; the replicator sends
+                        // its changes again.
+                        if let Err(wtransport::error::SendDatagramError::NotConnected) =
+                            conn.send_datagram(&frame.bytes[..])
+                        {
+                            return "the connection closed".to_string();
+                        }
+                        continue;
+                    }
+                    if frame.kind == FrameKind::Transfer {
+                        transferred = serde_json::from_slice::<wire::TransferNotice>(&frame.bytes)
+                            .map(|n| n.shard)
+                            .ok()
+                            .or(Some(String::new()));
+                    }
+                    if let Err(e) = write_message(&mut send, &frame_v2_of(&frame, codec)).await {
+                        return e;
+                    }
+                }
+                if queue.is_closed() {
+                    let (code, reason) = match &transferred {
+                        Some(to) => (close_code::NORMAL, format!("moved to shard {to}")),
+                        None if shard.is_running() => {
+                            (close_code::AGAIN, "client too slow".to_string())
+                        }
+                        None => (close_code::NORMAL, "shard stopped".to_string()),
+                    };
+                    let _ = send.finish().await;
+                    close(&conn, code, &reason);
+                    return reason;
+                }
+                wake.notified().await;
+            }
+        }
+    };
+    let mut writer = tokio::spawn(writer);
+
+    let reader = async {
+        loop {
+            tokio::select! {
+                message = read_message(&mut recv, MAX_CLIENT_MESSAGE) => {
+                    let bytes = match message {
+                        Ok(Some(b)) => b,
+                        Ok(None) => return ConnectionEnd::ClientClosed,
+                        Err(e) => return ConnectionEnd::Closed(e),
+                    };
+                    match bytes.first() {
+                        Some(&wire::client::ACKS) => match wire::decode_datagram_acks(&bytes) {
+                            Some(acks) => queue.push_datagram_acks(&acks),
+                            None => return close(conn, close_code::PROTOCOL, "malformed datagram acks"),
+                        },
+                        Some(&wire::client::INPUT) => {
+                            process_input(&shard, &queue, &subscriber_id, &shard_auth,
+                                shard.snapshot_format(), bytes[1..].to_vec(), 3).await;
+                        }
+                        Some(&wire::client::JSON_INPUT) => {
+                            process_input(&shard, &queue, &subscriber_id, &shard_auth,
+                                SnapshotFormat::Json, bytes[1..].to_vec(), 3).await;
+                        }
+                        _ => return close(conn, close_code::PROTOCOL, "unknown client message type"),
+                    }
+                }
+                datagram = conn.receive_datagram() => {
+                    let Ok(datagram) = datagram else {
+                        return ConnectionEnd::ClientClosed;
+                    };
+                    // Acks are the only datagrams a client sends; anything
+                    // else is ignored, like a corrupt packet.
+                    if let Some(acks) = wire::decode_datagram_acks(&datagram) {
+                        queue.push_datagram_acks(&acks);
+                    }
+                }
+                stopped = &mut writer => {
+                    return ConnectionEnd::Closed(
+                        stopped.unwrap_or_else(|e| format!("writer task failed: {e}")),
+                    );
+                }
+            }
+        }
+    };
+    let end = reader.await;
+    shard.remove_queued_subscriber(&queue);
+    writer.abort();
+    end
+}
+
+/// Close codes, for tests and clients: (normal, policy, protocol, again).
+pub const CLOSE_CODES: (u32, u32, u32, u32) = (
+    close_code::NORMAL,
+    close_code::POLICY,
+    close_code::PROTOCOL,
+    close_code::AGAIN,
+);

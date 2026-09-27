@@ -102,7 +102,7 @@ fn worker_threads() -> usize {
 
 /// The runtime every shard connection runs on, whichever port it came in
 /// on. Built on first use.
-fn runtime() -> Option<&'static tokio::runtime::Runtime> {
+pub(crate) fn runtime() -> Option<&'static tokio::runtime::Runtime> {
     static RT: std::sync::OnceLock<Option<tokio::runtime::Runtime>> = std::sync::OnceLock::new();
     RT.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
@@ -436,7 +436,7 @@ async fn handle_connection(
 
 /// How a shard connection ended. Written to the request log when the
 /// connection closes.
-enum ConnectionEnd {
+pub(crate) enum ConnectionEnd {
     /// The client closed the connection.
     ClientClosed,
     /// The server closed the connection, or the connection failed. The text
@@ -449,6 +449,12 @@ enum ConnectionEnd {
 /// nothing about a connection that the server rejects right after the
 /// upgrade. This row shows the reason.
 fn log_connection_end(started: Instant, end: &ConnectionEnd) {
+    log_connection_end_as("WS", started, end);
+}
+
+/// [`log_connection_end`] for a transport named `method` in the request
+/// log ("WS", "WT").
+pub(crate) fn log_connection_end_as(method: &str, started: Instant, end: &ConnectionEnd) {
     let ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
     let reason = match end {
         ConnectionEnd::ClientClosed => None,
@@ -457,7 +463,7 @@ fn log_connection_end(started: Instant, end: &ConnectionEnd) {
             Some(reason.as_str())
         }
     };
-    crate::metrics::record_log_row("WS", "/shard", 101, ms, 0, 0, reason);
+    crate::metrics::record_log_row(method, "/shard", 101, ms, 0, 0, reason);
 }
 
 /// Read the shard parameters from an upgrade request's URI and headers.
@@ -632,49 +638,16 @@ async fn run_connection(
                         .or(Some(String::new()));
                 }
                 let payload = match (version, frame.kind) {
-                    (2 | 3, FrameKind::Snapshot) => wire::frame_v2(
-                        wire::kind::SNAPSHOT,
-                        codec,
-                        frame.tick,
-                        frame.ack,
-                        &frame.bytes,
-                    ),
-                    (2 | 3, FrameKind::InputRejected) => wire::frame_v2(
-                        wire::kind::INPUT_REJECTED,
-                        codec,
-                        frame.tick,
-                        frame.ack,
-                        &frame.bytes,
-                    ),
-                    (2 | 3, FrameKind::Replication) => wire::frame_v2(
-                        wire::kind::REPLICATION,
-                        wire::codec::REPLICATION,
-                        frame.tick,
-                        frame.ack,
-                        &frame.bytes,
-                    ),
-                    (2 | 3, FrameKind::Transfer) => wire::frame_v2(
-                        wire::kind::TRANSFER,
-                        wire::codec::JSON,
-                        frame.tick,
-                        frame.ack,
-                        &frame.bytes,
-                    ),
-                    (3, FrameKind::Datagram) => wire::frame_v2(
-                        wire::kind::DATAGRAM,
-                        wire::codec::REPLICATION,
-                        frame.tick,
-                        frame.ack,
-                        &frame.bytes,
-                    ),
                     // Only a version 3 subscription gets datagrams.
-                    (_, FrameKind::Datagram) => continue,
+                    (2, FrameKind::Datagram) => continue,
+                    (2 | 3, _) => frame_v2_of(&frame, codec),
                     // Version 1 has no transfer frame: the close below says
                     // why the connection ends.
                     (_, FrameKind::Transfer) => continue,
                     (_, FrameKind::Snapshot) => wire::frame_v1(frame.tick, &frame.bytes),
                     // Version 1 has no rejection frame.
                     (_, FrameKind::InputRejected) => continue,
+                    (_, FrameKind::Datagram) => continue,
                     // Version 1 cannot mark a frame as replication.
                     (_, FrameKind::Replication) => {
                         let reason =
@@ -797,6 +770,18 @@ async fn run_connection(
                     )
                     .await;
                 }
+                Some(&wire::client::JSON_INPUT) => {
+                    process_input(
+                        &shard,
+                        &queue,
+                        &subscriber_id,
+                        &shard_auth,
+                        SnapshotFormat::Json,
+                        bytes[1..].to_vec(),
+                        version,
+                    )
+                    .await;
+                }
                 _ => break ConnectionEnd::Closed("unknown client message type".into()),
             },
             Message::Binary(bytes) => {
@@ -850,8 +835,21 @@ async fn close_with(sink: &mut WsSink, code: CloseCode, reason: String) {
 /// The push runs the authorize hook under the shard's state lock, which a
 /// tick holds, and it may run module code: it runs on a blocking thread, so
 /// a slow shard does not stall the async workers every connection shares.
+/// A queued frame as a wire version 2 (or 3) frame: the 18-byte header and
+/// the payload. `codec` is the shard's snapshot codec byte.
+pub(crate) fn frame_v2_of(frame: &pylon_realtime::Frame, codec: u8) -> Vec<u8> {
+    let (kind, codec) = match frame.kind {
+        FrameKind::Snapshot => (wire::kind::SNAPSHOT, codec),
+        FrameKind::InputRejected => (wire::kind::INPUT_REJECTED, codec),
+        FrameKind::Replication => (wire::kind::REPLICATION, wire::codec::REPLICATION),
+        FrameKind::Transfer => (wire::kind::TRANSFER, wire::codec::JSON),
+        FrameKind::Datagram => (wire::kind::DATAGRAM, wire::codec::REPLICATION),
+    };
+    wire::frame_v2(kind, codec, frame.tick, frame.ack, &frame.bytes)
+}
+
 /// The reader awaits it, so one connection's inputs stay in order.
-async fn process_input(
+pub(crate) async fn process_input(
     shard: &Arc<dyn pylon_realtime::DynShard>,
     queue: &Arc<OutboundQueue>,
     subscriber_id: &SubscriberId,

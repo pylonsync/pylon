@@ -3242,6 +3242,15 @@ fn start_server(
             crate::shard_ws::start_shard_ws_server(reg, sessions, shard_ws_port);
         });
     }
+    // Shard connections over WebTransport (UDP), when configured.
+    if let (Some(reg), Some(wt)) = (
+        shard_registry.clone(),
+        crate::shard_wt::WebTransportConfig::from_env(),
+    ) {
+        if let Err(e) = crate::shard_wt::start(wt, reg, Arc::clone(&session_store)) {
+            tracing::warn!("[shard-wt] WebTransport did not start: {e}");
+        }
+    }
 
     // Every backend that bootstraps tables has run by now — release the
     // cluster boot-DDL lock so a peer machine's boot can proceed.
@@ -3863,6 +3872,28 @@ fn start_server(
                     return;
                 }
             }
+        }
+
+        // Where a shard client connects over WebTransport, and the hashes of
+        // the certificates it may present. Public: they are no secret, and
+        // a client asks before it has a session.
+        if url == "/_pylon/shard/webtransport" && method == Method::Get {
+            let (status, body) = match crate::shard_wt::endpoint_info_json() {
+                Some(body) => (200, body),
+                None => (
+                    404,
+                    json_error("WEBTRANSPORT_OFF", "this app does not serve WebTransport"),
+                ),
+            };
+            let response = with_security_headers(
+                Response::from_string(body)
+                    .with_status_code(status)
+                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+                    .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap()),
+            );
+            let _ = request.respond(response);
+            mt.record_request("GET", status);
+            return;
         }
 
         if (url == "/shard" || url.starts_with("/shard?")) && method == Method::Get {

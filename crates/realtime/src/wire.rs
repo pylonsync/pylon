@@ -43,9 +43,10 @@
 //!
 //! - Frame kind `5` carries one datagram (codec byte `4`). Over WebSocket
 //!   it arrives in order; the client handles it as if it could not.
-//! - A client binary message starts with a type byte: `0` an input envelope
-//!   in the shard's codec, `1` datagram acks ([`encode_datagram_acks`]).
-//!   A text message is a JSON input envelope, as in version 2.
+//! - A client binary message starts with a type byte ([`client`]): `0` an
+//!   input envelope in the shard's codec, `1` datagram acks
+//!   ([`encode_datagram_acks`]), `2` an input envelope as JSON. A text
+//!   message is a JSON input envelope, as in version 2.
 //! - Over WebTransport, a datagram travels as a bare QUIC datagram (no
 //!   header) and acks as a bare QUIC datagram from the client: the type
 //!   byte `1` and the acks.
@@ -84,6 +85,9 @@ pub mod client {
     pub const INPUT: u8 = 0;
     /// Datagram acks ([`super::encode_datagram_acks`]).
     pub const ACKS: u8 = 1;
+    /// An input envelope as JSON: on a WebTransport stream, where a
+    /// WebSocket client would send a text message.
+    pub const JSON_INPUT: u8 = 2;
 }
 
 /// Acks one message may carry.
