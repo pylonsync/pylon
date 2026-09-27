@@ -420,3 +420,124 @@ test("closing the client stops the endpoint request", async () => {
   expect(sockets.length).toBe(0);
   expect(FakeWebTransport.sessions.length).toBe(0);
 });
+
+const varint = (v: number): number[] => {
+  const out: number[] = [];
+  while (v >= 0x80) {
+    out.push((v % 0x80) | 0x80);
+    v = Math.floor(v / 0x80);
+  }
+  out.push(v);
+  return out;
+};
+
+/**
+ * A datagram for the fixture's full frame (precision 0.01, entities 1-3
+ * spawned at tick 1): each update sets x.
+ */
+function dg(h: { frame: number; tick: number; ack: number; streamTick?: number; parts: number }, xs: Array<[number, number]>) {
+  const precision = new Uint8Array(new Float32Array([0.01]).buffer);
+  const out = [
+    2,
+    ...varint(h.frame),
+    ...varint(h.tick),
+    ...varint(h.ack),
+    ...varint(h.streamTick ?? 1),
+    ...precision,
+    ...varint(h.parts),
+    ...varint(xs.length),
+  ];
+  let last: number | null = null;
+  for (const [id, x] of xs) {
+    out.push(...varint(last === null ? id : id - last), 1, 0, 1, ...varint(x * 2));
+    last = id;
+  }
+  return Uint8Array.from(out);
+}
+
+async function openWithBaseline() {
+  const acks: number[] = [];
+  const client = connectShard("field", {
+    subscriberId: "p1",
+    baseUrl: "h",
+    ticket: "t1",
+    transport: "webtransport",
+  });
+  client.onReplication((_, summary, _tick, ack) => {
+    if (!summary.full) acks.push(ack);
+  });
+  await until("the session", () => client.connected);
+  const wt = FakeWebTransport.sessions[FakeWebTransport.sessions.length - 1];
+  wt.sendFrames([frame(3, 4, 1, 0, fullFrame)]);
+  await until("the full frame", () => client.entities.size === 3);
+  return { client, wt, acks };
+}
+
+const settleSoon = () => new Promise((r) => setTimeout(r, 20));
+
+test("a tick's datagrams and its ack apply together, once the tick is whole", async () => {
+  const { client, wt, acks } = await openWithBaseline();
+
+  // Tick 2 in two parts: the first alone changes nothing yet.
+  wt.sendDatagram(dg({ frame: 1, tick: 2, ack: 5, parts: 2 }, [[1, 500]]));
+  await settleSoon();
+  expect(client.entities.get(1)?.qx).toBe(100);
+  expect(client.ack).toBe(0);
+  expect(wt.datagramsIn.length).toBe(0);
+
+  wt.sendDatagram(dg({ frame: 2, tick: 2, ack: 5, parts: 2 }, [[2, 600]]));
+  await until("tick 2", () => client.ack === 5);
+  expect(client.entities.get(1)?.qx).toBe(500);
+  expect(client.entities.get(2)?.qx).toBe(600);
+  expect(acks).toEqual([5]);
+  expect([...wt.datagramsIn[0]]).toEqual([1, 2, 1, 1, 2, 1]);
+
+  // Tick 3 loses a part; tick 4 is whole, so tick 3's part applies first.
+  wt.sendDatagram(dg({ frame: 3, tick: 3, ack: 6, parts: 2 }, [[1, 700]]));
+  wt.sendDatagram(dg({ frame: 5, tick: 4, ack: 7, parts: 1 }, [[3, 800]]));
+  await until("tick 4", () => client.ack === 7);
+  expect(client.entities.get(1)?.qx).toBe(700);
+  expect(client.entities.get(3)?.qx).toBe(800);
+  expect(acks).toEqual([5, 7]);
+
+  // The lost part turns up late: dropped, not acked.
+  const acked = wt.datagramsIn.length;
+  wt.sendDatagram(dg({ frame: 4, tick: 3, ack: 6, parts: 2 }, [[2, 900]]));
+  await settleSoon();
+  expect(client.entities.get(2)?.qx).toBe(600);
+  expect(wt.datagramsIn.length).toBe(acked);
+  client.close();
+});
+
+test("a tick waits for the stream frames sent by then", async () => {
+  const { client, wt } = await openWithBaseline();
+  wt.sendDatagram(dg({ frame: 1, tick: 5, ack: 9, streamTick: 5, parts: 1 }, [[1, 300]]));
+  await settleSoon();
+  expect(client.ack).toBe(0);
+  // Tick 5's stream frame: nothing spawned or despawned, one empty update list.
+  wt.sendFrames([frame(3, 4, 5, 9, Uint8Array.from([1, 0, ...new Uint8Array(new Float32Array([0.01]).buffer), 0, 0, 0]))]);
+  await until("tick 5", () => client.ack === 9);
+  expect(client.entities.get(1)?.qx).toBe(300);
+  client.close();
+});
+
+test("a closing frame refuses fixed credentials, though the browser gets no code", async () => {
+  const errors: string[] = [];
+  const client = connectShard("field", {
+    subscriberId: "p1",
+    baseUrl: "h",
+    ticket: "expired",
+    transport: "webtransport",
+    reconnectBackoffMs: 1,
+  });
+  client.onError((e) => errors.push(e.message));
+  await until("the session", () => client.connected);
+  const wt = FakeWebTransport.sessions[0];
+  wt.sendFrames([frame(6, 0, 0, 0, json({ code: 1, reason: "unauthorized: ticket expired" }))]);
+  await until("the refusal", () => errors.length === 1);
+  expect(wt.clientClose).not.toBeNull();
+  expect(errors[0]).toContain("refused the connection (unauthorized: ticket expired)");
+  await settleSoon();
+  expect(FakeWebTransport.sessions.length).toBe(1);
+  client.close();
+});

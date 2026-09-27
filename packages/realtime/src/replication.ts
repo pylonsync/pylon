@@ -36,8 +36,10 @@
  *
  * ```text
  * u8      version (2)
- * varint  frame number, tick, input ack
+ * varint  frame number, tick, input ack, stream tick (of the last stream
+ *         frame sent by this tick)
  * f32 LE  precision
+ * varint  parts (datagrams sent for this tick)
  * varint  update count, per entity (ids ascending, delta-coded): id,
  *         u16 LE spawn tick, u8 mask, the masked axes (zigzag, absolute),
  *         components if bit 8
@@ -82,6 +84,10 @@ export interface DatagramSummary {
   frame: number;
   tick: number;
   ack: number;
+  /** The tick of the last stream frame the server had sent by `tick`. */
+  streamTick: number;
+  /** Datagrams the server sent for `tick`. */
+  parts: number;
   /** Entities it updated. */
   updated: number[];
   /**
@@ -103,15 +109,17 @@ export interface ReplicationSummary {
  * A datagram's frame number, tick, and input ack, without applying it.
  * Throws on bytes that are not a datagram.
  */
-export function readDatagramHeader(datagram: Uint8Array): { frame: number; tick: number; ack: number } {
+export function readDatagramHeader(datagram: Uint8Array): Omit<DatagramSummary, "updated" | "skipped"> {
   const r = new Reader(datagram);
   const version = r.u8();
   if (version !== DATAGRAM_VERSION) throw new ReplicationError(`datagram version ${version}`);
-  return {
-    frame: toSafe(r.varint(), "frame number"),
-    tick: toSafe(r.varint(), "tick"),
-    ack: toSafe(r.varint(), "ack"),
-  };
+  const frame = toSafe(r.varint(), "frame number");
+  const tick = toSafe(r.varint(), "tick");
+  const ack = toSafe(r.varint(), "ack");
+  const streamTick = toSafe(r.varint(), "stream tick");
+  r.f32();
+  const parts = toSafe(r.varint(), "parts");
+  return { frame, tick, ack, streamTick, parts };
 }
 
 /** The low 16 bits of a spawn tick, as a datagram update carries them. */
@@ -337,10 +345,12 @@ export class EntityTable {
     const frame = toSafe(r.varint(), "frame number");
     const tick = toSafe(r.varint(), "tick");
     const ack = toSafe(r.varint(), "ack");
+    const streamTick = toSafe(r.varint(), "stream tick");
     const precision = r.f32();
+    const parts = toSafe(r.varint(), "parts");
     const n = r.varint();
     if (n > 1n << 16n) throw new ReplicationError("count too large");
-    const summary: DatagramSummary = { frame, tick, ack, updated: [], skipped: 0 };
+    const summary: DatagramSummary = { frame, tick, ack, streamTick, parts, updated: [], skipped: 0 };
     // Positions in another precision mean nothing to this table: the full
     // frame of the new precision is still on its way.
     const usable = precision === Math.fround(this.precision);

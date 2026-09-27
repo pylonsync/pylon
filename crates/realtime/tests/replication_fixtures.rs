@@ -163,6 +163,8 @@ fn datagram_fixtures() -> Value {
             "frame": s.frame,
             "tick": s.tick,
             "ack": s.ack,
+            "sentStreamTick": s.stream_tick,
+            "parts": s.parts,
             "updated": s.updated,
             "skipped": s.skipped,
             "streamTick": table.stream_tick,
@@ -211,7 +213,7 @@ fn datagram_fixtures() -> Value {
     for id in 10..40u64 {
         store.set_pos(id, [id as f32, 2.0, 0.0]);
     }
-    let out = build(&store, &mut rep, 7, 60, 0);
+    let out = build(&store, &mut rep, 7, 100, 0);
     assert!(out.datagrams.len() > 2, "the tick splits");
     for d in &out.datagrams {
         datagram(&mut table, &mut events, d);

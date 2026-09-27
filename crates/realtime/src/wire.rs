@@ -10,7 +10,7 @@
 //!
 //! | Offset | Size | Field |
 //! | --- | --- | --- |
-//! | 0 | 1 | Frame kind: `1` snapshot, `2` input rejected, `3` replication |
+//! | 0 | 1 | Frame kind: `1` snapshot, `2` input rejected, `3` replication, `4` transfer, `5` datagram (version 3), `6` closing (WebTransport) |
 //! | 1 | 1 | Codec of the payload: `0` JSON, `1` MessagePack, `2` bincode, `3` custom, `4` replication |
 //! | 2 | 8 | Tick number, u64 big-endian |
 //! | 10 | 8 | Ack: the highest `client_seq` the shard has processed for this subscriber, u64 big-endian, `0` when none |
@@ -77,6 +77,11 @@ pub mod kind {
     /// A replication datagram, version 3 only. Its codec byte is
     /// [`super::codec::REPLICATION`].
     pub const DATAGRAM: u8 = 5;
+    /// WebTransport only: the server is about to close the session. JSON
+    /// `{ code, reason }` with the session close code. The client closes
+    /// the session when it reads it: wtransport closes the QUIC connection
+    /// without a session-close capsule, so a browser would not see the code.
+    pub const CLOSING: u8 = 6;
 }
 
 /// The type byte of a version 3 client binary message.

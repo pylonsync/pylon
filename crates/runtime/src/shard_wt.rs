@@ -441,6 +441,41 @@ async fn read_failed(conn: &Connection, error: String) -> ConnectionEnd {
     }
 }
 
+/// How long a closing notice may take to reach the client, and how long
+/// the client then has to close the session itself.
+const NOTICE_WAIT: Duration = Duration::from_secs(1);
+
+/// Close the session with `code` and `reason`, telling the client first.
+/// wtransport closes the QUIC connection without a WebTransport
+/// session-close capsule, so a browser's `closed` never sees the code or
+/// the reason. A closing frame on the stream carries them, and the client
+/// closes the session when it reads it; the server closes it regardless
+/// after [`NOTICE_WAIT`].
+async fn close_after_notice(
+    conn: &Connection,
+    send: &mut SendStream,
+    code: u32,
+    reason: &str,
+) -> ConnectionEnd {
+    let body = serde_json::json!({ "code": code, "reason": reason }).to_string();
+    let notice = wire::frame_v2(
+        wire::kind::CLOSING,
+        wire::codec::JSON,
+        0,
+        0,
+        body.as_bytes(),
+    );
+    // `finish` completes when the client has acknowledged the data.
+    let told = async {
+        write_message(send, &notice).await.ok()?;
+        send.finish().await.ok()
+    };
+    if let Ok(Some(())) = tokio::time::timeout(NOTICE_WAIT, told).await {
+        let _ = tokio::time::timeout(NOTICE_WAIT, conn.closed()).await;
+    }
+    close(conn, code, reason)
+}
+
 fn close(conn: &Connection, code: u32, reason: &str) -> ConnectionEnd {
     // A close reason is at most 1024 bytes in WebTransport.
     let mut end = reason.len().min(1024);
@@ -479,15 +514,25 @@ async fn run_session(
     let shard_auth: ShardAuth =
         match crate::shard_tickets::shard_auth(&auth_ctx, hello.ticket.as_deref()) {
             Ok(a) => a,
-            Err(e) => return close(conn, close_code::POLICY, &format!("unauthorized: {e}")),
+            Err(e) => {
+                return close_after_notice(
+                    conn,
+                    &mut send,
+                    close_code::POLICY,
+                    &format!("unauthorized: {e}"),
+                )
+                .await
+            }
         };
     let datagram_max = conn.max_datagram_size().unwrap_or(0);
     if datagram_max < MIN_DATAGRAM {
-        return close(
+        return close_after_notice(
             conn,
+            &mut send,
             close_code::PROTOCOL,
             "the connection carries no datagrams",
-        );
+        )
+        .await;
     }
     // The lookup may read the shard directory with a blocking Postgres
     // client, which must not run on an async worker.
@@ -520,13 +565,23 @@ async fn run_session(
             .await;
         }
         Ok(Err(_)) => {
-            return close(
+            return close_after_notice(
                 conn,
+                &mut send,
                 close_code::POLICY,
                 &format!("shard \"{}\" not found", hello.shard),
-            );
+            )
+            .await;
         }
-        Err(e) => return close(conn, close_code::AGAIN, &format!("lookup task failed: {e}")),
+        Err(e) => {
+            return close_after_notice(
+                conn,
+                &mut send,
+                close_code::AGAIN,
+                &format!("lookup task failed: {e}"),
+            )
+            .await
+        }
     };
 
     let subscriber_id = SubscriberId::new(hello.sid);
@@ -545,9 +600,17 @@ async fn run_session(
     let queue = match joined {
         Ok(q) => q,
         Err(ShardError::Unauthorized(reason)) => {
-            return close(conn, close_code::POLICY, &format!("unauthorized: {reason}"));
+            return close_after_notice(
+                conn,
+                &mut send,
+                close_code::POLICY,
+                &format!("unauthorized: {reason}"),
+            )
+            .await;
         }
-        Err(e) => return close(conn, close_code::AGAIN, &e.to_string()),
+        Err(e) => {
+            return close_after_notice(conn, &mut send, close_code::AGAIN, &e.to_string()).await
+        }
     };
 
     let wake = Arc::new(tokio::sync::Notify::new());
@@ -591,8 +654,7 @@ async fn run_session(
                         }
                         None => (close_code::NORMAL, "shard stopped".to_string()),
                     };
-                    let _ = send.finish().await;
-                    close(&conn, code, &reason);
+                    close_after_notice(&conn, &mut send, code, &reason).await;
                     return reason;
                 }
                 wake.notified().await;
@@ -688,15 +750,25 @@ async fn relay(
     let Some(forwarded) =
         crate::shard_route::forwarded_value(&client_ip, "GET", &target, machine_id)
     else {
-        return close(
+        return close_after_notice(
             conn,
+            &mut send,
             close_code::AGAIN,
             "this machine is not in the shard directory",
-        );
+        )
+        .await;
     };
     let mut request = match format!("ws://{host}{target}").into_client_request() {
         Ok(r) => r,
-        Err(e) => return close(conn, close_code::AGAIN, &format!("relay request: {e}")),
+        Err(e) => {
+            return close_after_notice(
+                conn,
+                &mut send,
+                close_code::AGAIN,
+                &format!("relay request: {e}"),
+            )
+            .await
+        }
     };
     let headers = request.headers_mut();
     let mut header = |name: &'static str, value: &str| {
@@ -723,18 +795,22 @@ async fn relay(
         Ok(Ok(ws)) => ws,
         Ok(Err(e)) => {
             tracing::warn!("[shard-wt] relay to machine {machine_id} at {address}: {e}");
-            return close(
+            return close_after_notice(
                 conn,
+                &mut send,
                 close_code::AGAIN,
                 "could not reach the shard's machine",
-            );
+            )
+            .await;
         }
         Err(_) => {
-            return close(
+            return close_after_notice(
                 conn,
+                &mut send,
                 close_code::AGAIN,
                 "the shard's machine did not answer",
             )
+            .await
         }
     };
     let (mut up_tx, mut up_rx) = ws.split();
@@ -764,19 +840,33 @@ async fn relay(
                         }
                         None => (close_code::NORMAL, "the shard's machine closed".to_string()),
                     };
-                    let _ = send.finish().await;
-                    return close(conn, code, &reason);
+                    return close_after_notice(conn, &mut send, code, &reason).await;
                 }
                 Some(Ok(_)) => {}
                 Some(Err(e)) => {
-                    return close(conn, close_code::AGAIN, &format!("relay: {e}"));
+                    return close_after_notice(conn, &mut send, close_code::AGAIN, &format!("relay: {e}"))
+                        .await;
                 }
-                None => return close(conn, close_code::AGAIN, "the shard's machine closed"),
+                None => {
+                    return close_after_notice(
+                        conn,
+                        &mut send,
+                        close_code::AGAIN,
+                        "the shard's machine closed",
+                    )
+                    .await
+                }
             },
             message = messages.next() => match message {
                 Ok(Some(bytes)) => {
                     if up_tx.send(Message::Binary(bytes)).await.is_err() {
-                        return close(conn, close_code::AGAIN, "the shard's machine closed");
+                        return close_after_notice(
+                            conn,
+                            &mut send,
+                            close_code::AGAIN,
+                            "the shard's machine closed",
+                        )
+                        .await;
                     }
                 }
                 Ok(None) => {
@@ -793,7 +883,13 @@ async fn relay(
                     if wire::decode_datagram_acks(&d).is_some()
                         && up_tx.send(Message::Binary(d.payload().to_vec())).await.is_err()
                     {
-                        return close(conn, close_code::AGAIN, "the shard's machine closed");
+                        return close_after_notice(
+                            conn,
+                            &mut send,
+                            close_code::AGAIN,
+                            "the shard's machine closed",
+                        )
+                        .await;
                     }
                 }
                 Err(e) => {

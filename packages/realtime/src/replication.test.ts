@@ -56,6 +56,8 @@ describe("the Rust encoder's datagrams (replication.fixtures.json)", () => {
         expect(s.frame, `event ${i}`).toBe(event.frame);
         expect(s.tick).toBe(event.tick);
         expect(s.ack).toBe(event.ack);
+        expect(s.streamTick).toBe(event.sentStreamTick);
+        expect(s.parts).toBe(event.parts);
         expect(s.updated, `event ${i}`).toEqual(event.updated);
         expect(s.skipped, `event ${i}`).toBe(event.skipped);
         expect(table.streamTick).toBe(event.streamTick);
@@ -68,13 +70,14 @@ describe("the Rust encoder's datagrams (replication.fixtures.json)", () => {
     const t = new EntityTable();
     expect(() => t.applyDatagram(new Uint8Array())).toThrow(ReplicationError);
     expect(() => t.applyDatagram(new Uint8Array([1]))).toThrow("datagram version 1");
-    // version, frame 1, tick 1, ack 0, precision 1.0, count 1, id 0, then nothing.
-    expect(() => t.applyDatagram(new Uint8Array([2, 1, 1, 0, 0, 0, 0x80, 0x3f, 1, 0]))).toThrow(
-      "ends early",
-    );
-    expect(() => t.applyDatagram(new Uint8Array([2, 1, 1, 0, 0, 0, 0x80, 0x3f, 0, 7]))).toThrow(
-      "trailing bytes",
-    );
+    // version, frame 1, tick 1, ack 0, stream tick 1, precision 1.0,
+    // parts 1, count 1, id 0, then nothing.
+    expect(() =>
+      t.applyDatagram(new Uint8Array([2, 1, 1, 0, 1, 0, 0, 0x80, 0x3f, 1, 1, 0])),
+    ).toThrow("ends early");
+    expect(() =>
+      t.applyDatagram(new Uint8Array([2, 1, 1, 0, 1, 0, 0, 0x80, 0x3f, 1, 0, 7])),
+    ).toThrow("trailing bytes");
   });
 });
 

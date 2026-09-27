@@ -14,7 +14,9 @@
 //! varint  frame number (per subscription, from 1)
 //! varint  tick
 //! varint  input ack: the highest client_seq the shard has processed
+//! varint  stream tick: the tick of the last stream frame sent by this tick
 //! f32 LE  precision
+//! varint  parts: datagrams sent for this tick
 //! varint  update count, then per entity (ids ascend, delta-coded):
 //!           id, u16 LE spawn tick, u8 mask (1 x, 2 y, 4 z, 8 components),
 //!           the axes in the mask (zigzag, absolute quantized),
@@ -35,6 +37,15 @@
 //!
 //! **Order.** The client keeps, per entity, the number of the last datagram
 //! it applied, and skips an update from an older one.
+//!
+//! **Whole ticks.** Every tick without a full frame sends at least one
+//! datagram, and each names how many the tick has and the tick of the last
+//! stream frame sent by then. A tick is whole on the client when it has
+//! all of its datagrams and that stream frame. Only then does the client's
+//! table hold the server's state as of the tick, so only then does the
+//! input ack describe the table (prediction depends on that): the client
+//! applies a tick's datagrams, and takes its ack, when the tick is whole or
+//! a later tick is.
 
 use crate::frame::{mask, ComponentChange, DecodeError, ReplicaTable};
 use crate::varint;
@@ -42,9 +53,13 @@ use crate::EntityId;
 
 pub const VERSION: u8 = 2;
 
-/// Bytes before the first update, at most: version, three varints, the
-/// precision, and the update count.
-pub const MAX_HEADER_LEN: usize = 1 + 10 + 10 + 10 + 4 + 3;
+/// Bytes before the first update, at most: version, four varints, the
+/// precision, the parts, and the update count.
+pub const MAX_HEADER_LEN: usize = 1 + 10 + 10 + 10 + 10 + 4 + PARTS_LEN + 3;
+
+/// Bytes kept for the parts count, which is known only when the tick's
+/// last datagram is built (up to 2^21 parts).
+const PARTS_LEN: usize = 3;
 
 /// The part of a spawn tick an update carries.
 pub fn spawn_tag(spawn_tick: u64) -> u16 {
@@ -97,12 +112,13 @@ pub struct DatagramBuilder {
 }
 
 impl DatagramBuilder {
-    pub fn new(frame: u64, tick: u64, ack: u64, precision: f32) -> Self {
+    pub fn new(frame: u64, tick: u64, ack: u64, stream_tick: u64, precision: f32) -> Self {
         let mut header = Vec::with_capacity(MAX_HEADER_LEN);
         header.push(VERSION);
         varint::write_u64(&mut header, frame);
         varint::write_u64(&mut header, tick);
         varint::write_u64(&mut header, ack);
+        varint::write_u64(&mut header, stream_tick);
         header.extend_from_slice(&precision.to_le_bytes());
         Self {
             header,
@@ -119,7 +135,12 @@ impl DatagramBuilder {
             Some(prev) => varint::len_u64(id.wrapping_sub(prev)),
             None => varint::len_u64(id),
         };
-        self.header.len() + varint::len_u64(self.count + 1) + self.body.len() + id_len + entry.len()
+        self.header.len()
+            + PARTS_LEN
+            + varint::len_u64(self.count + 1)
+            + self.body.len()
+            + id_len
+            + entry.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -140,7 +161,10 @@ impl DatagramBuilder {
         self.count += 1;
     }
 
-    pub fn finish(mut self) -> Vec<u8> {
+    /// The datagram, as one of `parts` for its tick.
+    pub fn finish(mut self, parts: u64) -> Vec<u8> {
+        debug_assert!(parts < 1 << 21, "parts must fit PARTS_LEN");
+        varint::write_u64(&mut self.header, parts);
         varint::write_u64(&mut self.header, self.count);
         self.header.extend_from_slice(&self.body);
         self.header
@@ -153,6 +177,10 @@ pub struct DatagramSummary {
     pub frame: u64,
     pub tick: u64,
     pub ack: u64,
+    /// The tick of the last stream frame the server had sent by `tick`.
+    pub stream_tick: u64,
+    /// Datagrams the server sent for `tick`.
+    pub parts: u64,
     /// Entities it updated.
     pub updated: Vec<EntityId>,
     /// Updates it skipped: an unknown entity, another spawn, an older
@@ -178,11 +206,13 @@ impl ReplicaTable {
         let frame = varint::read_u64(&mut b).ok_or_else(|| err("bad frame number"))?;
         let tick = varint::read_u64(&mut b).ok_or_else(|| err("bad tick"))?;
         let ack = varint::read_u64(&mut b).ok_or_else(|| err("bad ack"))?;
+        let stream_tick = varint::read_u64(&mut b).ok_or_else(|| err("bad stream tick"))?;
         if b.len() < 4 {
             return Err(err("datagram ends early"));
         }
         let precision = f32::from_le_bytes(b[..4].try_into().unwrap());
         b = &b[4..];
+        let parts = varint::read_u64(&mut b).ok_or_else(|| err("bad parts"))?;
         let n = varint::read_u64(&mut b).ok_or_else(|| err("bad count"))?;
         if n > MAX_COUNT {
             return Err(err("count too large"));
@@ -191,6 +221,8 @@ impl ReplicaTable {
             frame,
             tick,
             ack,
+            stream_tick,
+            parts,
             ..DatagramSummary::default()
         };
         // Positions in another precision mean nothing to this table: the
@@ -296,13 +328,13 @@ mod tests {
         precision: f32,
         updates: &[(EntityId, u64, [Option<i64>; 3])],
     ) -> Vec<u8> {
-        let mut d = DatagramBuilder::new(frame, 40 + frame, 3, precision);
+        let mut d = DatagramBuilder::new(frame, 40 + frame, 3, 1, precision);
         for (id, spawn_tick, axes) in updates {
             let mut e = Vec::new();
             encode_entry_into(&mut e, *spawn_tick, *axes, &[]);
             d.update(*id, &e);
         }
-        d.finish()
+        d.finish(1)
     }
 
     #[test]
@@ -310,7 +342,7 @@ mod tests {
         let mut t = table();
         assert_eq!(t.spawn_ticks.get(&2), Some(&1));
         assert_eq!(t.stream_tick, 1);
-        let mut d = DatagramBuilder::new(1, 41, 9, 0.5);
+        let mut d = DatagramBuilder::new(1, 41, 9, 1, 0.5);
         let mut e = Vec::new();
         encode_entry_into(
             &mut e,
@@ -320,10 +352,13 @@ mod tests {
         );
         let predicted = d.len_with(2, &e);
         d.update(2, &e);
-        let bytes = d.finish();
-        assert_eq!(bytes.len(), predicted);
+        let bytes = d.finish(2);
+        assert!(bytes.len() <= predicted && bytes.len() + 2 >= predicted);
         let s = t.apply_datagram(&bytes).unwrap();
-        assert_eq!((s.frame, s.tick, s.ack), (1, 41, 9));
+        assert_eq!(
+            (s.frame, s.tick, s.ack, s.stream_tick, s.parts),
+            (1, 41, 9, 1, 2)
+        );
         assert_eq!(s.updated, vec![2]);
         let e = &t.entities[&2];
         assert_eq!(e.q, [12, 10, -3]);

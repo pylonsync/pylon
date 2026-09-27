@@ -1269,6 +1269,19 @@ impl Link {
             },
             Link::Wt { conn, frames, .. } => tokio::select! {
                 frame = frames.recv() => match frame {
+                    // The server is closing the session and says why.
+                    Some(Ok(f)) if f.first() == Some(&wire::kind::CLOSING) => {
+                        let notice: serde_json::Value = serde_json::from_slice(
+                            f.get(wire::HEADER_LEN..).unwrap_or_default(),
+                        )
+                        .unwrap_or_default();
+                        conn.close(wtransport::VarInt::from_u32(0), b"");
+                        Incoming::Closed(format!(
+                            "the server closed the session ({}): {}",
+                            notice["code"],
+                            notice["reason"].as_str().unwrap_or("")
+                        ))
+                    }
                     Some(Ok(f)) => Incoming::Frame(f),
                     // The session closed: its close reason says more than the
                     // stream's end.

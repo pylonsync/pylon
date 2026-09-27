@@ -347,9 +347,17 @@ acks, `2` input as JSON) and the body. The server sends updates as bare
 datagrams (`EntityTable.applyDatagram` reads them; apply stream frames
 with `apply(payload, tick)` so the table knows their ticks), and the
 client acks each one with a datagram: type byte `1`, a varint count, then
-per ack the datagram's frame number and `EntityTable.streamTick`. A tick
-with nothing new for the client still sends an empty datagram with the
-tick and the input ack.
+per ack the datagram's frame number and `EntityTable.streamTick`.
+
+Each datagram names how many datagrams its tick has and the tick of the
+last stream frame sent by then. Every tick without a full frame sends at
+least one. The client applies a tick's datagrams, and takes its input
+ack, only when it has all of them and that stream frame, or when a later
+tick is whole. So the ack always describes the table, which prediction
+needs. Before the server closes a session it sends a closing frame (kind
+`6`, JSON `{ code, reason }`), because a browser's `closed` does not get
+the code from a server close; the client closes the session when it
+reads it.
 
 ## Declare the shard kind
 

@@ -147,14 +147,24 @@ async fn a_session_converges_through_dropped_datagrams() {
         serde_json::from_str(&shard_wt::endpoint_info_json().unwrap()).unwrap();
     assert_eq!(json["certHashes"].as_array().unwrap().len(), 2);
 
-    // A bad ticket is refused with the reason.
+    // A bad ticket is refused with the reason: first in a closing frame on
+    // the stream (a browser gets no code from a server close), then in the
+    // close itself when the client does not close first.
     let refused = connect(&url, &hashes).await;
-    let (mut send, _recv) = refused.open_bi().await.unwrap().await.unwrap();
+    let (mut send, mut recv) = refused.open_bi().await.unwrap().await.unwrap();
     write(
         &mut send,
         br#"{"shard":"field","sid":"c2","ticket":"v1.bad.bad"}"#,
     )
     .await;
+    let notice = read(&mut recv).await.expect("a closing frame");
+    assert_eq!(notice[0], kind::CLOSING);
+    let notice: serde_json::Value = serde_json::from_slice(&notice[wire::HEADER_LEN..]).unwrap();
+    assert_eq!(notice["code"], shard_wt::CLOSE_CODES.1);
+    assert!(notice["reason"]
+        .as_str()
+        .unwrap()
+        .starts_with("unauthorized"));
     match tokio::time::timeout(Duration::from_secs(5), refused.closed()).await {
         Ok(ConnectionError::ApplicationClosed(close)) => {
             let reason = String::from_utf8_lossy(close.reason()).into_owned();

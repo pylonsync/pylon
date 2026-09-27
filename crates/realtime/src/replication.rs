@@ -221,6 +221,8 @@ struct DatagramBaseline {
     started: bool,
     /// The last datagram number used.
     last_datagram: u64,
+    /// The tick of the last stream frame built for the subscription.
+    last_stream_tick: u64,
     /// Recent datagrams and the entities (and their spawn ticks) each held.
     sent: VecDeque<(u64, Vec<(EntityId, u64)>)>,
 }
@@ -803,36 +805,68 @@ impl Replicator {
             }
         }
 
+        // The stream frame this tick, if any, goes out before its datagrams.
+        let stream_tick = if stream_has_changes {
+            tick
+        } else {
+            base.last_stream_tick
+        };
+        base.last_stream_tick = stream_tick;
+
         // Pack the chosen updates, in id order, into datagrams that fit.
-        let mut datagrams = Vec::new();
-        let mut open: Option<OpenDatagram> = None;
+        // Each names how many the tick has, known once all are packed.
+        let mut packed: Vec<OpenDatagram> = Vec::new();
         for c in candidates.iter().filter(|c| c.chosen) {
             let body = &bodies[c.body.0..c.body.1];
-            if open
-                .as_ref()
-                .is_some_and(|(b, _, _)| b.len_with(c.id, body) > dg.max_size)
-            {
-                let (b, number, held) = open.take().expect("checked above");
-                datagrams.push(b.finish());
-                base.sent.push_back((number, held));
-            }
-            let (b, number, held) = open.get_or_insert_with(|| {
+            let fits = packed
+                .last()
+                .is_some_and(|(b, _, _)| b.len_with(c.id, body) <= dg.max_size);
+            if !fits {
                 base.last_datagram += 1;
-                (
-                    DatagramBuilder::new(base.last_datagram, tick, dg.input_ack, precision),
+                packed.push((
+                    DatagramBuilder::new(
+                        base.last_datagram,
+                        tick,
+                        dg.input_ack,
+                        stream_tick,
+                        precision,
+                    ),
                     base.last_datagram,
                     Vec::new(),
-                )
-            });
+                ));
+            }
+            let (b, number, held) = packed.last_mut().expect("pushed above");
             b.update(c.id, body);
             let sent = &mut entities[c.slot].1;
             held.push((c.id, sent.spawn_tick));
             sent.unacked.push((*number, c.seq, c.delta));
             sent.sent_tick = tick;
         }
-        if let Some((b, number, held)) = open {
-            datagrams.push(b.finish());
-            base.sent.push_back((number, held));
+        if packed.is_empty() && !full {
+            // Nothing new in datagrams: one empty datagram still carries
+            // the tick, the input ack, and the stream tick, so the client
+            // can take the tick as whole (a full frame is whole by itself).
+            // A lost one is followed by the next tick's.
+            base.last_datagram += 1;
+            packed.push((
+                DatagramBuilder::new(
+                    base.last_datagram,
+                    tick,
+                    dg.input_ack,
+                    stream_tick,
+                    precision,
+                ),
+                base.last_datagram,
+                Vec::new(),
+            ));
+        }
+        let parts = packed.len() as u64;
+        let mut datagrams = Vec::with_capacity(packed.len());
+        for (b, number, held) in packed {
+            datagrams.push(b.finish(parts));
+            if !held.is_empty() {
+                base.sent.push_back((number, held));
+            }
         }
         while base.sent.len() > DATAGRAMS_REMEMBERED {
             base.sent.pop_front();
@@ -843,16 +877,6 @@ impl Replicator {
         } else {
             Vec::new()
         };
-        if bytes.is_empty() && datagrams.is_empty() {
-            // Nothing changed for this client: an empty datagram still
-            // carries the tick and the input ack each tick, as an empty
-            // frame does on a reliable transport. A lost one is followed
-            // by the next.
-            base.last_datagram += 1;
-            datagrams.push(
-                DatagramBuilder::new(base.last_datagram, tick, dg.input_ack, precision).finish(),
-            );
-        }
         FrameOutput {
             bytes,
             delta_of: (!full).then_some(input.dropped),

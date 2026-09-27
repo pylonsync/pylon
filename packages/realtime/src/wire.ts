@@ -5,7 +5,8 @@
  * message is a binary frame with an 18-byte header:
  *
  *   0   1  frame kind: 1 snapshot, 2 input rejected, 3 entity replication,
- *            4 transfer (JSON `{ shard, ticket }`: the last frame; reconnect there)
+ *            4 transfer (JSON `{ shard, ticket }`: the last frame; reconnect there),
+ *            6 closing (WebTransport only, JSON `{ code, reason }`)
  *   1   1  codec: 0 JSON, 1 MessagePack, 2 bincode, 3 custom, 4 replication
  *   2   8  tick (u64 big-endian)
  *   10  8  ack: highest client_seq the shard processed for this subscriber (0 = none)
@@ -36,6 +37,13 @@ export const ShardFrameKind = {
    * last frame on the connection.
    */
   Transfer: 4,
+  /** A datagram frame (wire version 3 WebSocket only). */
+  Datagram: 5,
+  /**
+   * WebTransport only: the server is about to close the session, with
+   * JSON `{ code, reason }` (`WEBTRANSPORT_CLOSE`). The client closes it.
+   */
+  Closing: 6,
 } as const;
 
 /** Where the subscriber went: connect to `shard` with `ticket`. */
@@ -148,6 +156,9 @@ export function encodeShardInput(
   if (codec === ShardCodec.MessagePack) return msgpackEncode(envelope);
   return JSON.stringify(envelope);
 }
+
+/** Acks one message may carry (the server refuses more). */
+export const MAX_ACKS_PER_MESSAGE = 512;
 
 /**
  * Type bytes of the client's messages on a WebTransport stream (the first
