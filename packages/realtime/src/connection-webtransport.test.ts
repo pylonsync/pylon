@@ -577,3 +577,28 @@ test("a session whose datagrams stop arriving closes", async () => {
   expect(errors).toContain("WebTransport to shard field: datagrams stopped arriving");
   client.close();
 });
+
+test("a session with no whole tick for 5 s closes, even when nothing arrives", async () => {
+  let clock = 1000;
+  const errors: string[] = [];
+  const client = connectShard("field", {
+    subscriberId: "p1",
+    baseUrl: "h",
+    ticket: "t1",
+    transport: "webtransport",
+    now: () => clock,
+  });
+  client.onError((e) => errors.push(e.message));
+  await until("the session", () => client.connected);
+  const wt = FakeWebTransport.sessions[FakeWebTransport.sessions.length - 1];
+  wt.sendFrames([frame(3, 4, 1, 0, fullFrame)]);
+  await until("the full frame", () => client.entities.size === 3);
+  // Silence: no stream frame, no datagram. The watchdog runs each second.
+  clock += 4000;
+  await new Promise((r) => setTimeout(r, 1100));
+  expect(wt.clientClose).toBeNull();
+  clock += 2000;
+  await until("the close", () => wt.clientClose !== null);
+  expect(errors).toContain("WebTransport to shard field: datagrams stopped arriving");
+  client.close();
+});

@@ -213,9 +213,13 @@ interface PendingFrame {
 }
 
 /**
- * Ticks that may pass with none of them whole (5 s at 20 Hz). Past that,
- * the session's datagrams have stopped arriving: the client closes it.
+ * How long a WebTransport session may go without a whole tick (ms). Past
+ * that, its datagrams have stopped arriving: the client closes it. The
+ * server sends at least one datagram every tick.
  */
+const STALL_MS = 5000;
+
+/** Ticks kept waiting at most; more means the datagrams have stopped. */
 const MAX_PENDING_TICKS = 100;
 
 /** The parts of the browser's `WebTransport` the client uses. */
@@ -300,6 +304,8 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
   // order, and the tick of the newest one.
   const pendingStream: PendingFrame[] = [];
   let receivedStreamTick = -1;
+  // When the table last held a whole tick (or the session opened).
+  let lastWholeAt = 0;
   let lastKind: Link["kind"] | null = null;
   let clientSeq = 0;
   let closed = false;
@@ -438,6 +444,7 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
     pending.clear();
     pendingStream.length = 0;
     receivedStreamTick = -1;
+    lastWholeAt = now();
     // Inputs sent on the old connection are never acknowledged on this
     // one (acks restart with the connection).
     sentAt.clear();
@@ -525,6 +532,7 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
     }
     for (const id of spawned) updated.delete(id);
     wholeTick = whole;
+    lastWholeAt = at;
     takeAck(ack, at);
     backoff = options.reconnectBackoffMs ?? 500;
     report(
@@ -540,7 +548,14 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
    * from then on.
    */
   const stalled = (from: Link) => {
-    if (pending.size <= MAX_PENDING_TICKS && pendingStream.length <= MAX_PENDING_TICKS) return false;
+    if (
+      from !== link ||
+      (now() - lastWholeAt <= STALL_MS &&
+        pending.size <= MAX_PENDING_TICKS &&
+        pendingStream.length <= MAX_PENDING_TICKS)
+    ) {
+      return false;
+    }
     dispatchError(new Error(`WebTransport to shard ${currentShard}: datagrams stopped arriving`));
     if ((options.transport ?? "websocket") === "auto") webSocketOnly = true;
     from.close();
@@ -615,6 +630,7 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
         if (from.kind === "webtransport") {
           // What was built before it describes a table that is gone.
           wholeTick = Math.max(wholeTick, frame.tick);
+          lastWholeAt = at;
           receivedStreamTick = Math.max(receivedStreamTick, frame.tick);
           for (const t of [...pending.keys()]) if (t <= frame.tick) pending.delete(t);
           while (pendingStream.length > 0 && pendingStream[0].tick <= frame.tick) pendingStream.shift();
@@ -865,6 +881,10 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
       },
     };
     began(l);
+    // Checks for a stall also while nothing arrives at all.
+    const watchdog = setInterval(() => {
+      if (link === l) stalled(l);
+    }, 1000);
 
     void (async () => {
       const reader = stream.readable.getReader();
@@ -904,6 +924,7 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
     // `closed` does not get them from a server close.
     const closedWith = (info: { closeCode?: number; reason?: string } | null) => {
       isOpen = false;
+      clearInterval(watchdog);
       const code = l.notice?.code ?? info?.closeCode;
       const reason = l.notice?.reason ?? info?.reason ?? "";
       const refused = code === WEBTRANSPORT_CLOSE.Policy && reason.startsWith("unauthorized");
