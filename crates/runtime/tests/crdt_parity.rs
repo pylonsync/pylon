@@ -220,7 +220,9 @@ impl Env {
 
     fn push(&self, id: &str, doc: &LoroDoc, since: &VersionVector) {
         let update = doc.export(ExportMode::updates(since)).unwrap();
-        self.rt.crdt_apply_update("Doc", id, &update).unwrap();
+        self.rt
+            .crdt_apply_update("Doc", id, &update, &|_| Ok(()))
+            .unwrap();
     }
 
     /// The peer that made the container holding `field`'s key.
@@ -534,6 +536,7 @@ fn a_container_of_the_wrong_type_under_a_key_does_not_break_writes() {
                     "Doc",
                     &id,
                     &client.export(ExportMode::all_updates()).unwrap(),
+                    &|_| Ok(()),
                 );
             }
             env.rt
@@ -623,7 +626,7 @@ fn a_push_racing_a_delete_commits_no_orphan_snapshot() {
     tx.execute("DELETE FROM \"Doc\" WHERE id = $1", &[&id])
         .unwrap();
     std::thread::scope(|s| {
-        let push = s.spawn(|| env.rt.crdt_apply_update("Doc", &id, &update));
+        let push = s.spawn(|| env.rt.crdt_apply_update("Doc", &id, &update, &|_| Ok(())));
         std::thread::sleep(std::time::Duration::from_millis(500));
         tx.commit().unwrap();
         let pushed = push.join().unwrap();
@@ -764,7 +767,10 @@ fn a_push_to_a_deleted_row_is_refused() {
         patch(&client, json!({"done": true}));
         assert!(env.rt.delete("Doc", &id).unwrap());
         let update = client.export(ExportMode::updates(&before)).unwrap();
-        let refused = env.rt.crdt_apply_update("Doc", &id, &update).unwrap_err();
+        let refused = env
+            .rt
+            .crdt_apply_update("Doc", &id, &update, &|_| Ok(()))
+            .unwrap_err();
         assert_eq!(refused.code, "ENTITY_NOT_FOUND", "{}", env.name());
         let snapshots = env.raw(
             "SELECT COUNT(*) FROM _pylon_crdt_snapshots WHERE entity = 'Doc' AND row_id = ?1",

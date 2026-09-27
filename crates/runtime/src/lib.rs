@@ -7187,7 +7187,8 @@ mod tests {
         let update = peer
             .export(pylon_crdt::loro::ExportMode::all_updates())
             .unwrap();
-        rt.crdt_apply_update("Doc", &id, &update).unwrap();
+        rt.crdt_apply_update("Doc", &id, &update, &|_| Ok(()))
+            .unwrap();
         let row = rt.get_by_id("Doc", &id).unwrap().unwrap();
         // The pushed field stands; the others keep the row's values.
         assert_eq!(row["title"], "peer");
@@ -7278,7 +7279,8 @@ mod tests {
             let update = client
                 .export(pylon_crdt::loro::ExportMode::updates(&before))
                 .unwrap();
-            rt.crdt_apply_update("Doc", &id, &update).unwrap();
+            rt.crdt_apply_update("Doc", &id, &update, &|_| Ok(()))
+                .unwrap();
             let row = rt.get_by_id("Doc", &id).unwrap().unwrap();
             assert_eq!(row["title"], "client");
         }
@@ -7336,7 +7338,8 @@ mod tests {
             );
             // Another client's read seeds the doc from the row.
             rt.crdt_snapshot("Doc", &id).unwrap();
-            rt.crdt_apply_update("Doc", &id, &update).unwrap();
+            rt.crdt_apply_update("Doc", &id, &update, &|_| Ok(()))
+                .unwrap();
             let row = rt.get_by_id("Doc", &id).unwrap().unwrap();
             assert_eq!(row["done"], true);
             assert_eq!(row["body"], "typed");
@@ -7383,7 +7386,8 @@ mod tests {
                 "one change only"
             );
             rt.crdt_snapshot("Doc", &id).unwrap();
-            rt.crdt_apply_update("Doc", &id, &update).unwrap();
+            rt.crdt_apply_update("Doc", &id, &update, &|_| Ok(()))
+                .unwrap();
             let row = rt.get_by_id("Doc", &id).unwrap().unwrap();
             assert_eq!(row["done"], true);
             assert_eq!(row["body"], "typed");
@@ -7415,13 +7419,15 @@ mod tests {
                 .export(pylon_crdt::loro::ExportMode::all_updates())
                 .unwrap();
             rt.crdt_snapshot("Doc", &id).unwrap();
-            rt.crdt_apply_update("Doc", &id, &update).unwrap();
+            rt.crdt_apply_update("Doc", &id, &update, &|_| Ok(()))
+                .unwrap();
             assert_eq!(
                 key_owner(&rt, &id, "likes") == peer,
                 earlier_ops > 0,
                 "which counter holds the key (peer {peer}, {earlier_ops} ops)"
             );
-            rt.crdt_apply_update("Doc", &id, &update).unwrap();
+            rt.crdt_apply_update("Doc", &id, &update, &|_| Ok(()))
+                .unwrap();
             let row = rt.get_by_id("Doc", &id).unwrap().unwrap();
             assert_eq!(
                 row["likes"].as_i64(),
@@ -7476,14 +7482,16 @@ mod tests {
             let first = offline
                 .export(pylon_crdt::loro::ExportMode::all_updates())
                 .unwrap();
-            rt.crdt_apply_update("Doc", &id, &first).unwrap();
+            rt.crdt_apply_update("Doc", &id, &first, &|_| Ok(()))
+                .unwrap();
             pylon_crdt::apply_patch(&offline, &fields, &serde_json::json!({"likes": 1})).unwrap();
             // Sent again from the start (its first push's answer was lost):
             // it repeats the op the server holds.
             let second = offline
                 .export(pylon_crdt::loro::ExportMode::all_updates())
                 .unwrap();
-            rt.crdt_apply_update("Doc", &id, &second).unwrap();
+            rt.crdt_apply_update("Doc", &id, &second, &|_| Ok(()))
+                .unwrap();
             let likes = || rt.get_by_id("Doc", &id).unwrap().unwrap()["likes"].as_i64();
             assert_eq!(likes(), Some(5), "peer {peer}");
             // R increments the counter it knows (the seed's).
@@ -7492,7 +7500,8 @@ mod tests {
             let update = online
                 .export(pylon_crdt::loro::ExportMode::updates(&before))
                 .unwrap();
-            rt.crdt_apply_update("Doc", &id, &update).unwrap();
+            rt.crdt_apply_update("Doc", &id, &update, &|_| Ok(()))
+                .unwrap();
             assert_eq!(likes(), Some(6), "peer {peer}");
         }
     }
@@ -7521,7 +7530,8 @@ mod tests {
         let edit = online
             .export(pylon_crdt::loro::ExportMode::updates(&before))
             .unwrap();
-        rt.crdt_apply_update("Doc", &id, &edit).unwrap();
+        rt.crdt_apply_update("Doc", &id, &edit, &|_| Ok(()))
+            .unwrap();
         // P typed on an empty doc, pushes, types more, pushes again.
         let offline = pylon_crdt::loro::LoroDoc::new();
         offline.set_peer_id(1).unwrap();
@@ -7532,6 +7542,7 @@ mod tests {
             &offline
                 .export(pylon_crdt::loro::ExportMode::all_updates())
                 .unwrap(),
+            &|_| Ok(()),
         )
         .unwrap();
         let pushed = offline.oplog_vv();
@@ -7548,6 +7559,7 @@ mod tests {
             &offline
                 .export(pylon_crdt::loro::ExportMode::updates(&pushed))
                 .unwrap(),
+            &|_| Ok(()),
         )
         .unwrap();
         let body = rt.get_by_id("Doc", &id).unwrap().unwrap()["body"]
@@ -7570,7 +7582,8 @@ mod tests {
         rt.crdt_snapshot("Doc", &id).unwrap();
         for (peer, text) in [(1, "first"), (2, "second")] {
             let update = offline_edit(&fields, serde_json::json!({"body": text}), peer);
-            rt.crdt_apply_update("Doc", &id, &update).unwrap();
+            rt.crdt_apply_update("Doc", &id, &update, &|_| Ok(()))
+                .unwrap();
         }
         let body = rt.get_by_id("Doc", &id).unwrap().unwrap()["body"]
             .as_str()
@@ -7613,7 +7626,8 @@ mod tests {
         let update = doc
             .export(pylon_crdt::loro::ExportMode::updates(since))
             .unwrap();
-        rt.crdt_apply_update("Doc", id, &update).unwrap();
+        rt.crdt_apply_update("Doc", id, &update, &|_| Ok(()))
+            .unwrap();
     }
 
     fn body_of(rt: &Runtime, id: &str) -> String {
@@ -7967,6 +7981,7 @@ mod tests {
                     &client
                         .export(pylon_crdt::loro::ExportMode::all_updates())
                         .unwrap(),
+                    &|_| Ok(()),
                 );
             }
             rt.update("Doc", &id, &serde_json::json!({"title": "still writes"}))
@@ -8009,7 +8024,8 @@ mod tests {
         let update = client
             .export(pylon_crdt::loro::ExportMode::all_updates())
             .unwrap();
-        rt.crdt_apply_update("Doc", &id, &update).unwrap();
+        rt.crdt_apply_update("Doc", &id, &update, &|_| Ok(()))
+            .unwrap();
         let row = rt.get_by_id("Doc", &id).unwrap().unwrap();
         assert_eq!(row["body"], "typed");
     }
@@ -8260,7 +8276,8 @@ mod tests {
         let update = client
             .export(pylon_crdt::loro::ExportMode::updates(&before))
             .unwrap();
-        rt.crdt_apply_update("Doc", &id, &update).unwrap();
+        rt.crdt_apply_update("Doc", &id, &update, &|_| Ok(()))
+            .unwrap();
         let row = rt.get_by_id("Doc", &id).unwrap().unwrap();
         assert_eq!(row["title"], "edited");
         assert_eq!(row["meta"], deep);
@@ -8283,7 +8300,8 @@ mod tests {
         let update = client
             .export(pylon_crdt::loro::ExportMode::all_updates())
             .unwrap();
-        rt.crdt_apply_update("Doc", &id, &update).unwrap();
+        rt.crdt_apply_update("Doc", &id, &update, &|_| Ok(()))
+            .unwrap();
         let row = rt.get_by_id("Doc", &id).unwrap().unwrap();
         assert_eq!(row["likes"].as_i64(), Some(4));
         assert!(
@@ -8325,7 +8343,8 @@ mod tests {
         let update = client
             .export(pylon_crdt::loro::ExportMode::updates(&before))
             .unwrap();
-        rt.crdt_apply_update("Doc", &id, &update).unwrap();
+        rt.crdt_apply_update("Doc", &id, &update, &|_| Ok(()))
+            .unwrap();
         let row = rt.get_by_id("Doc", &id).unwrap().unwrap();
         assert_eq!(row["done"], true);
         assert_eq!(row["title"], "a");
@@ -8362,7 +8381,8 @@ mod tests {
         let update = client
             .export(pylon_crdt::loro::ExportMode::updates(&before))
             .unwrap();
-        rt.crdt_apply_update("Doc", &id, &update).unwrap();
+        rt.crdt_apply_update("Doc", &id, &update, &|_| Ok(()))
+            .unwrap();
         let row = rt.get_by_id("Doc", &id).unwrap().unwrap();
         assert_eq!(row["title"], "server");
         assert_eq!(row["done"], true);

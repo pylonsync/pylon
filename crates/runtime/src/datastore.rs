@@ -1242,127 +1242,134 @@ impl DataStore for Runtime {
         let crdt_fields = self.crdt_fields_for(&ent).map_err(into_data_error)?;
 
         let conn = self.lock_conn_pub().map_err(into_data_error)?;
-        let result = crate::with_write_tx(self, &conn, || -> Result<Vec<u8>, crate::RuntimeError> {
-            // A row a delete removed after the router's check: no snapshot
-            // for a row that does not exist (as on Postgres).
-            if self
-                .crdt_row_for_doc(&conn, &ent, row_id, &crdt_fields)?
-                .is_none()
-            {
-                return Err(crate::RuntimeError {
-                    code: "ENTITY_NOT_FOUND".into(),
-                    message: format!(
-                        "Peer-pushed CRDT update targets {entity}/{row_id} which has no \
-                         materialized row — refusing to commit an orphan snapshot."
-                    ),
-                });
-            }
-            let (has_doc, before) =
-                self.prepare_crdt_doc_for_push(&conn, &ent, row_id, &crdt_fields)?;
-            // Apply the update to the LoroDoc + persist the new snapshot
-            // to the sidecar. Returns the projected JSON shape for the
-            // post-merge state.
-            let (before_push, touched) = self
-                .crdt_store()
-                .apply_client_update(&conn, entity, row_id, &crdt_fields, update)
-                .map_err(|e| crate::RuntimeError {
-                    code: "CRDT_APPLY_FAILED".into(),
-                    message: format!("apply the update to {entity}/{row_id}: {e}"),
-                })?;
-            // A row the one-time reconcile has not reached: the fields this
-            // update left alone take the row's values (a server write the
-            // doc missed), the ones it changed keep the client's.
-            if let Some(before) = &before {
-                self.reconcile_crdt_push(&conn, &ent, row_id, &crdt_fields, before)?;
-            }
-            // A row with no doc (from before inserts seeded one, and never
-            // read by a client since): the update came first, so its fields
-            // stand; the fields it did not set take the row's values, or
-            // the projection below would null them in the row.
-            if !has_doc {
-                self.fill_crdt_doc_from_row(&conn, &ent, row_id, &crdt_fields, touched.as_deref())?;
-            }
-            let projected = self
-                .crdt_store()
-                .project(&conn, entity, row_id, &crdt_fields)
-                .map_err(|e| crate::RuntimeError {
-                    code: "CRDT_APPLY_FAILED".into(),
-                    message: format!("read the doc of {entity}/{row_id}: {e}"),
-                })?;
-            authorize(&self.projection_as_read(entity, &projected)).map_err(|e| {
-                crate::RuntimeError {
-                    code: e.code,
-                    message: e.message,
-                }
-            })?;
-
-            // Re-project into the materialized SQLite row so SELECT
-            // queries see the merged content. Build SET clauses from
-            // the projection — every CRDT-managed field gets rewritten.
-            let projection = projected.as_object().ok_or_else(|| crate::RuntimeError {
-                code: "CRDT_PROJECTION_INVALID".into(),
-                message: "projected row was not a JSON object".into(),
-            })?;
-
-            let mut set_clauses = Vec::with_capacity(projection.len());
-            let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-            let mut idx = 1;
-            let null = serde_json::Value::Null;
-            for (key, val) in projection {
-                if key == "id" {
-                    continue;
-                }
-                // Only the fields this push changed or set (a delete the doc
-                // shows as no change, on a row that had no doc): a column the
-                // doc does not hold a value for (one it could not take) keeps
-                // its value.
-                let set_by_push = touched.as_ref().is_some_and(|t| t.contains(key));
-                if !set_by_push
-                    && crate::same_json_value(before_push.get(key).unwrap_or(&null), val)
+        let result =
+            crate::with_write_tx(self, &conn, || -> Result<Vec<u8>, crate::RuntimeError> {
+                // A row a delete removed after the router's check: no snapshot
+                // for a row that does not exist (as on Postgres).
+                if self
+                    .crdt_row_for_doc(&conn, &ent, row_id, &crdt_fields)?
+                    .is_none()
                 {
-                    continue;
+                    return Err(crate::RuntimeError {
+                        code: "ENTITY_NOT_FOUND".into(),
+                        message: format!(
+                            "Peer-pushed CRDT update targets {entity}/{row_id} which has no \
+                         materialized row — refusing to commit an orphan snapshot."
+                        ),
+                    });
                 }
-                set_clauses.push(format!("{} = ?{idx}", crate::quote_ident(key.as_str())));
-                // Typed bind, not the raw shape-driven one: a `json`
-                // field's string value must land as JSON text (`"42"`,
-                // not bare `42`) or the read-side parse-back changes its
-                // shape. (Vector fields never appear here —
-                // `crdt_fields_for` excludes them from the doc.)
-                values.push(crate::json_to_sql_typed(&ent, key, val));
-                idx += 1;
-            }
-            if set_clauses.is_empty() {
-                // No projected fields — happens when the doc has no
-                // top-level keys yet (fresh row from a peer subscribing
-                // before any writes). Skip the UPDATE; row may not exist
-                // in SQLite. Subsequent inserts will materialize it.
-            } else {
-                values.push(Box::new(row_id.to_string()));
-                let sql = format!(
-                    "UPDATE {} SET {} WHERE \"id\" = ?{idx}",
-                    crate::quote_ident(entity),
-                    set_clauses.join(", ")
-                );
-                let params: Vec<&dyn rusqlite::types::ToSql> =
-                    values.iter().map(|v| v.as_ref()).collect();
-                conn.execute(&sql, params.as_slice())
+                let (has_doc, before) =
+                    self.prepare_crdt_doc_for_push(&conn, &ent, row_id, &crdt_fields)?;
+                // Apply the update to the LoroDoc + persist the new snapshot
+                // to the sidecar. Returns the projected JSON shape for the
+                // post-merge state.
+                let (before_push, touched) = self
+                    .crdt_store()
+                    .apply_client_update(&conn, entity, row_id, &crdt_fields, update)
                     .map_err(|e| crate::RuntimeError {
-                        code: "UPDATE_FAILED".into(),
-                        message: format!("post-merge UPDATE {entity}/{row_id}: {e}"),
+                        code: "CRDT_APPLY_FAILED".into(),
+                        message: format!("apply the update to {entity}/{row_id}: {e}"),
                     })?;
-            }
-
-            // Return the new snapshot for the router to broadcast.
-            let snap = self
-                .crdt_store()
-                .snapshot(&conn, entity, row_id)
-                .map_err(|e| crate::RuntimeError {
-                    code: "CRDT_SNAPSHOT_FAILED".into(),
-                    message: format!("post-merge snapshot {entity}/{row_id}: {e}"),
+                // A row the one-time reconcile has not reached: the fields this
+                // update left alone take the row's values (a server write the
+                // doc missed), the ones it changed keep the client's.
+                if let Some(before) = &before {
+                    self.reconcile_crdt_push(&conn, &ent, row_id, &crdt_fields, before)?;
+                }
+                // A row with no doc (from before inserts seeded one, and never
+                // read by a client since): the update came first, so its fields
+                // stand; the fields it did not set take the row's values, or
+                // the projection below would null them in the row.
+                if !has_doc {
+                    self.fill_crdt_doc_from_row(
+                        &conn,
+                        &ent,
+                        row_id,
+                        &crdt_fields,
+                        touched.as_deref(),
+                    )?;
+                }
+                let projected = self
+                    .crdt_store()
+                    .project(&conn, entity, row_id, &crdt_fields)
+                    .map_err(|e| crate::RuntimeError {
+                        code: "CRDT_APPLY_FAILED".into(),
+                        message: format!("read the doc of {entity}/{row_id}: {e}"),
+                    })?;
+                authorize(&self.projection_as_read(entity, &projected)).map_err(|e| {
+                    crate::RuntimeError {
+                        code: e.code,
+                        message: e.message,
+                    }
                 })?;
-            Ok(snap)
-        })
-        .map_err(into_data_error);
+
+                // Re-project into the materialized SQLite row so SELECT
+                // queries see the merged content. Build SET clauses from
+                // the projection — every CRDT-managed field gets rewritten.
+                let projection = projected.as_object().ok_or_else(|| crate::RuntimeError {
+                    code: "CRDT_PROJECTION_INVALID".into(),
+                    message: "projected row was not a JSON object".into(),
+                })?;
+
+                let mut set_clauses = Vec::with_capacity(projection.len());
+                let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+                let mut idx = 1;
+                let null = serde_json::Value::Null;
+                for (key, val) in projection {
+                    if key == "id" {
+                        continue;
+                    }
+                    // Only the fields this push changed or set (a delete the doc
+                    // shows as no change, on a row that had no doc): a column the
+                    // doc does not hold a value for (one it could not take) keeps
+                    // its value.
+                    let set_by_push = touched.as_ref().is_some_and(|t| t.contains(key));
+                    if !set_by_push
+                        && crate::same_json_value(before_push.get(key).unwrap_or(&null), val)
+                    {
+                        continue;
+                    }
+                    set_clauses.push(format!("{} = ?{idx}", crate::quote_ident(key.as_str())));
+                    // Typed bind, not the raw shape-driven one: a `json`
+                    // field's string value must land as JSON text (`"42"`,
+                    // not bare `42`) or the read-side parse-back changes its
+                    // shape. (Vector fields never appear here —
+                    // `crdt_fields_for` excludes them from the doc.)
+                    values.push(crate::json_to_sql_typed(&ent, key, val));
+                    idx += 1;
+                }
+                if set_clauses.is_empty() {
+                    // No projected fields — happens when the doc has no
+                    // top-level keys yet (fresh row from a peer subscribing
+                    // before any writes). Skip the UPDATE; row may not exist
+                    // in SQLite. Subsequent inserts will materialize it.
+                } else {
+                    values.push(Box::new(row_id.to_string()));
+                    let sql = format!(
+                        "UPDATE {} SET {} WHERE \"id\" = ?{idx}",
+                        crate::quote_ident(entity),
+                        set_clauses.join(", ")
+                    );
+                    let params: Vec<&dyn rusqlite::types::ToSql> =
+                        values.iter().map(|v| v.as_ref()).collect();
+                    conn.execute(&sql, params.as_slice())
+                        .map_err(|e| crate::RuntimeError {
+                            code: "UPDATE_FAILED".into(),
+                            message: format!("post-merge UPDATE {entity}/{row_id}: {e}"),
+                        })?;
+                }
+
+                // Return the new snapshot for the router to broadcast.
+                let snap = self
+                    .crdt_store()
+                    .snapshot(&conn, entity, row_id)
+                    .map_err(|e| crate::RuntimeError {
+                        code: "CRDT_SNAPSHOT_FAILED".into(),
+                        message: format!("post-merge snapshot {entity}/{row_id}: {e}"),
+                    })?;
+                Ok(snap)
+            })
+            .map_err(into_data_error);
         if result.is_err() {
             // The cached LoroDoc absorbed the update before the tx rolled
             // back. Evict it so the next reader re-hydrates from the
