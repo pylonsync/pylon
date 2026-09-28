@@ -117,9 +117,12 @@ fn functions_dir() -> PathBuf {
     let fns = dir.join("functions");
     std::fs::create_dir_all(&fns).unwrap();
     let src = repo_root().join("packages/functions/src");
-    let agent_ts = src.join("agent.ts");
-    let define_ts = src.join("define.ts");
-    let validators_ts = src.join("validators.ts");
+    // Written into JS string literals below: forward slashes, since a
+    // Windows backslash there is an escape ("D:\a\b" reads as "D:ab").
+    let module_path = |name: &str| src.join(name).to_string_lossy().replace('\\', "/");
+    let agent_ts = module_path("agent.ts");
+    let define_ts = module_path("define.ts");
+    let validators_ts = module_path("validators.ts");
     let files = [
         (
             "helper",
@@ -139,7 +142,7 @@ export default agent({{
   }},
 }});
 "#,
-                agent = agent_ts.display()
+                agent = agent_ts
             ),
         ),
         (
@@ -148,7 +151,7 @@ export default agent({{
                 r#"import {{ agent }} from "{agent}";
 export default agent({{ auth: "admin", model: "m" }});
 "#,
-                agent = agent_ts.display()
+                agent = agent_ts
             ),
         ),
         (
@@ -157,7 +160,7 @@ export default agent({{ auth: "admin", model: "m" }});
                 r#"import {{ action }} from "{define}";
 export default action({{ auth: "public", handler: async () => "plain" }});
 "#,
-                define = define_ts.display()
+                define = define_ts
             ),
         ),
         (
@@ -182,8 +185,8 @@ export default action({{
   }},
 }});
 "#,
-                define = define_ts.display(),
-                validators = validators_ts.display()
+                define = define_ts,
+                validators = validators_ts
             ),
         ),
     ];
