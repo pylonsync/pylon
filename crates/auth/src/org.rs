@@ -843,9 +843,10 @@ impl OrgStore {
     /// Accepts run one at a time in this process ([`ACCEPT_LOCK`]), and the
     /// invite is re-read under the lock, so two concurrent accepts of one
     /// invite cannot both pass the checks. Machines that share a Postgres
-    /// database do not share the lock; across machines the stamp read-back
-    /// below is the only guard, and it cannot tell apart two accepts that
-    /// write in the same millisecond.
+    /// database do not share the lock. Across machines the stamp read-back
+    /// below is the only guard, and the stamp write is not a compare-and-set:
+    /// a second machine's write that lands after this machine's read-back
+    /// replaces the stamp, and both machines create a membership.
     #[cfg(not(target_arch = "wasm32"))]
     fn accept_row(
         &self,
