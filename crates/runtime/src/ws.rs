@@ -2649,7 +2649,10 @@ fn handle_reactive_control(
                 hub.send_text_to(client_id, &frame);
                 return;
             }
-            if let Err((code, message)) = reg.check_subscribe(&fn_name, auth_ctx, rate_identity) {
+            let args = parsed.get("args").cloned().unwrap_or(serde_json::json!({}));
+            if let Err((code, message)) =
+                reg.check_subscribe(&fn_name, auth_ctx, rate_identity, client_id, &sub_id, &args)
+            {
                 let frame = serde_json::json!({
                     "type": "reactive-error",
                     "sub_id": sub_id,
@@ -2660,7 +2663,6 @@ fn handle_reactive_control(
                 hub.send_text_to(client_id, &frame);
                 return;
             }
-            let args = parsed.get("args").cloned().unwrap_or(serde_json::json!({}));
             // Map AuthContext → AuthInfo. Carries the FULL identity
             // (roles included) so RBAC-style policies see the same
             // values on re-run as on the first run.

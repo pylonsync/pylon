@@ -77,6 +77,23 @@ const PER_CLIENT_SUB_CAP: usize = 256;
 /// unbounded memory.
 const DIRTY_QUEUE_CAP: usize = 10_000;
 
+/// Default cap on new reactive subscriptions per identity (user id, else
+/// client IP) per minute. `PYLON_REACTIVE_SUBSCRIBE_PER_MIN` changes it.
+/// Separate from the function call limit (`PYLON_FN_RATE_LIMIT_MAX`, 30 a
+/// minute by default): one page mounts dozens of subscriptions at once.
+const DEFAULT_SUBSCRIBES_PER_MIN: u32 = 600;
+
+/// How long a subscription's (identity, function, sub_id, args) stays
+/// known, so the client re-sending it after a reconnect is not counted.
+const REPLAY_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// Bound on remembered subscriptions. Past it, the expired ones go; if
+/// that is not enough, all do (replays are counted again until re-learned).
+const REPLAY_CAP: usize = 100_000;
+
+/// A subscription as the client asked for it, for recognizing a replay.
+type ReplayKey = (String, String, String, u64);
+
 /// One reactive subscription. Cheap to clone (Arc'd at the registry
 /// layer, not here) but we keep ownership simple by storing by value.
 #[derive(Clone)]
@@ -123,6 +140,15 @@ pub struct ReactiveRegistry {
     fn_ops: Mutex<Option<Arc<dyn pylon_router::FnOps>>>,
     ws_hub: Arc<WsHub>,
     runner_started: AtomicBool,
+    /// Cap on new subscriptions per identity. See
+    /// [`DEFAULT_SUBSCRIBES_PER_MIN`].
+    subscribe_limiter: Mutex<crate::rate_limit::RateLimiter>,
+    /// Subscriptions admitted recently: key → (client id it was admitted
+    /// on, when). A client that reconnects re-sends every subscription;
+    /// the first re-send of each on a new connection is not counted.
+    replays: Mutex<HashMap<ReplayKey, (u64, std::time::Instant)>>,
+    /// When the limiter and `replays` were last pruned.
+    last_prune: Mutex<std::time::Instant>,
     /// `FnOps::definitions_generation` when the subscriptions were last
     /// checked against the function definitions. The re-runner compares
     /// it on every wake and re-checks every subscription when a reload
@@ -189,6 +215,12 @@ impl ReactiveRegistry {
             fn_ops: Mutex::new(None),
             ws_hub,
             runner_started: AtomicBool::new(false),
+            subscribe_limiter: Mutex::new(crate::rate_limit::RateLimiter::new(
+                subscribes_per_min(),
+                60,
+            )),
+            replays: Mutex::new(HashMap::new()),
+            last_prune: Mutex::new(std::time::Instant::now()),
             checked_generation: AtomicU64::new(0),
         })
     }
@@ -276,29 +308,94 @@ impl ReactiveRegistry {
     /// duration of the call.
     /// Whether `auth` may subscribe to `fn_name`. The same checks as
     /// `POST /api/fn/<name>`: the function exists and isn't internal
-    /// (unless admin), the caller passes its declared `auth` mode, and the
-    /// function's rate limit for `rate_identity` (the user id, else the
-    /// client IP) has room. Reactive subscriptions re-run on every change,
-    /// so only `query` functions qualify. `Err((code, message))` on
-    /// refusal. With no function runtime wired yet, the check passes and
-    /// the first run reports REACTIVE_UNAVAILABLE as before.
+    /// (unless admin) and the caller passes its declared `auth` mode.
+    /// Reactive subscriptions re-run on every change, so only `query`
+    /// functions qualify. Then the subscription cap for `rate_identity`
+    /// (the user id, else the client IP): see
+    /// [`DEFAULT_SUBSCRIBES_PER_MIN`]. A subscription re-sent on a new
+    /// connection (the client reconnected) with the same `sub_id` and
+    /// `args` is not counted. `Err((code, message))` on refusal. With no
+    /// function runtime wired yet, the check passes and the first run
+    /// reports REACTIVE_UNAVAILABLE as before.
     pub fn check_subscribe(
         &self,
         fn_name: &str,
         auth: &pylon_auth::AuthContext,
         rate_identity: &str,
+        client_id: u64,
+        sub_id: &str,
+        args: &serde_json::Value,
     ) -> Result<(), (String, String)> {
         let Some(fn_ops) = self.current_fn_ops() else {
             return Ok(());
         };
         fn_gate(fn_ops.as_ref(), fn_name, auth)?;
-        if let Err(retry_after) = fn_ops.check_rate_limit(fn_name, rate_identity) {
+        let key: ReplayKey = (
+            rate_identity.to_string(),
+            fn_name.to_string(),
+            sub_id.to_string(),
+            hash_value(args),
+        );
+        let now = std::time::Instant::now();
+        let mut replays = self.replays.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((admitted_on, at)) = replays.get_mut(&key) {
+            if *admitted_on != client_id && now.duration_since(*at) < REPLAY_TTL {
+                *admitted_on = client_id;
+                *at = now;
+                return Ok(());
+            }
+        }
+        let limited = self
+            .subscribe_limiter
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .check(rate_identity);
+        if let Err(retry_after) = limited {
             return Err((
                 "RATE_LIMITED".to_string(),
-                format!("Function \"{fn_name}\" rate limit exceeded; retry in {retry_after}s"),
+                format!(
+                    "Too many new reactive subscriptions; retry in {retry_after}s \
+                     (PYLON_REACTIVE_SUBSCRIBE_PER_MIN)"
+                ),
             ));
         }
+        if replays.len() >= REPLAY_CAP {
+            replays.retain(|_, (_, at)| now.duration_since(*at) < REPLAY_TTL);
+            if replays.len() >= REPLAY_CAP {
+                replays.clear();
+            }
+        }
+        replays.insert(key, (client_id, now));
         Ok(())
+    }
+
+    /// Replace the subscription cap (tests).
+    #[cfg(test)]
+    fn set_subscribes_per_min(&self, max: u32) {
+        *self
+            .subscribe_limiter
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = crate::rate_limit::RateLimiter::new(max, 60);
+    }
+
+    /// Drop expired limiter windows and remembered subscriptions, at most
+    /// once a minute. Called from the re-runner's idle wake.
+    fn prune_limits(&self) {
+        let mut last = self.last_prune.lock().unwrap_or_else(|p| p.into_inner());
+        if last.elapsed() < Duration::from_secs(60) {
+            return;
+        }
+        *last = std::time::Instant::now();
+        drop(last);
+        self.subscribe_limiter
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .cleanup();
+        let now = std::time::Instant::now();
+        self.replays
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|_, (_, at)| now.duration_since(*at) < REPLAY_TTL);
     }
 
     /// Re-check every subscription against the current function
@@ -528,6 +625,7 @@ impl ReactiveRegistry {
                         self.revalidate_all();
                         inner = self.inner.lock().unwrap();
                     }
+                    self.prune_limits();
                 }
                 // Coalesce: drain at most N at a time so a flood
                 // doesn't starve fresh subscribes. 64 is enough for
@@ -753,6 +851,14 @@ fn auth_context(info: &AuthInfo) -> pylon_auth::AuthContext {
         api_key_scopes: None,
         is_trusted_device: false,
     }
+}
+
+fn subscribes_per_min() -> u32 {
+    std::env::var("PYLON_REACTIVE_SUBSCRIBE_PER_MIN")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_SUBSCRIBES_PER_MIN)
 }
 
 enum HandlerResult {
@@ -1013,7 +1119,9 @@ mod tests {
         let user = AuthContext::authenticated("u1".into());
         let admin = AuthContext::admin();
         let code = |name: &str, auth: &AuthContext| {
-            reg.check_subscribe(name, auth, "id").err().map(|(c, _)| c)
+            reg.check_subscribe(name, auth, "id", 1, name, &serde_json::json!({}))
+                .err()
+                .map(|(c, _)| c)
         };
 
         assert_eq!(code("publicFeed", &anon), None);
@@ -1143,7 +1251,9 @@ mod tests {
         reg.set_fn_ops(Arc::clone(&fns) as Arc<dyn pylon_router::FnOps>);
         reg.start_runner();
         let anon = pylon_auth::AuthContext::anonymous();
-        assert!(reg.check_subscribe("feed", &anon, "1.2.3.4").is_ok());
+        assert!(reg
+            .check_subscribe("feed", &anon, "1.2.3.4", 9, "s1", &serde_json::json!({}))
+            .is_ok());
         reg.register_pending(
             "s1".into(),
             "feed".into(),
@@ -1199,18 +1309,70 @@ mod tests {
 
     /// Before, `reactive-subscribe` skipped the function's rate limit, so
     /// subscribe/unsubscribe in a loop ran the function without limit.
+    /// Subscriptions have their own cap per identity; past it, a new one
+    /// is refused.
     #[test]
-    fn subscribe_applies_the_function_rate_limit() {
+    fn subscribe_applies_a_subscription_cap() {
         use pylon_functions::protocol::FnType;
         use pylon_functions::registry::FnAuthMode;
         let fns = ReloadableFns::new(vec![def("feed", FnType::Query, FnAuthMode::Public, false)]);
         let reg = ReactiveRegistry::new(make_hub());
         reg.set_fn_ops(fns as Arc<dyn pylon_router::FnOps>);
+        reg.set_subscribes_per_min(5);
         let anon = pylon_auth::AuthContext::anonymous();
-        assert!(reg.check_subscribe("feed", &anon, "ok").is_ok());
-        let (code, message) = reg.check_subscribe("feed", &anon, "limited").unwrap_err();
+        let args = serde_json::json!({});
+        for i in 0..5 {
+            let sub = format!("s{i}");
+            assert!(reg
+                .check_subscribe("feed", &anon, "ip", 1, &sub, &args)
+                .is_ok());
+        }
+        let (code, message) = reg
+            .check_subscribe("feed", &anon, "ip", 1, "s5", &args)
+            .unwrap_err();
         assert_eq!(code, "RATE_LIMITED");
-        assert!(message.contains("7s"), "{message}");
+        assert!(
+            message.contains("PYLON_REACTIVE_SUBSCRIBE_PER_MIN"),
+            "{message}"
+        );
+        // Another identity has its own allowance.
+        assert!(reg
+            .check_subscribe("feed", &anon, "ip2", 2, "s5", &args)
+            .is_ok());
+    }
+
+    /// Review P1: subscriptions shared the function call limit (30 a
+    /// minute, per function and identity), so a page with 31 subscriptions
+    /// to one query was refused, and every reconnect re-sent them all. A
+    /// page of subscriptions fits the subscription cap, and re-sending the
+    /// same subscriptions on a new connection is not counted; re-sending
+    /// them on the same connection is.
+    #[test]
+    fn a_reconnect_replaying_its_subscriptions_is_not_counted() {
+        use pylon_functions::protocol::FnType;
+        use pylon_functions::registry::FnAuthMode;
+        let fns = ReloadableFns::new(vec![def("item", FnType::Query, FnAuthMode::Public, false)]);
+        let reg = ReactiveRegistry::new(make_hub());
+        reg.set_fn_ops(fns as Arc<dyn pylon_router::FnOps>);
+        let user = pylon_auth::AuthContext::authenticated("u1".into());
+        let page = |client_id: u64| -> usize {
+            (0..100)
+                .filter(|i| {
+                    let args = serde_json::json!({ "id": i });
+                    reg.check_subscribe("item", &user, "u1", client_id, &format!("s{i}"), &args)
+                        .is_err()
+                })
+                .count()
+        };
+        assert_eq!(page(1), 0, "a page of 100 subscriptions was refused");
+        // Only the allowance the page used is left: 100 a minute, all spent.
+        reg.set_subscribes_per_min(100);
+        assert_eq!(page(1), 0);
+        for reconnect in 2..6 {
+            assert_eq!(page(reconnect), 0, "reconnect {reconnect} was counted");
+        }
+        // The same connection re-sending them counts.
+        assert_eq!(page(5), 100);
     }
 
     #[test]
