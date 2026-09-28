@@ -1289,6 +1289,16 @@ function buildActionCtx(
           (err as { code?: string }).code = "INVALID_ARGS";
           throw err;
         }
+        const context = options.context;
+        if (
+          context !== undefined &&
+          context !== null &&
+          (typeof context !== "object" || Array.isArray(context))
+        ) {
+          const err = new Error("ctx.agents.run: context must be a plain object");
+          (err as { code?: string }).code = "INVALID_ARGS";
+          throw err;
+        }
         const args: Record<string, unknown> = { input: options.input };
         if (options.runId !== undefined) args.runId = options.runId;
         if (options.title !== undefined) args.title = options.title;

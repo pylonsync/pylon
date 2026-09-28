@@ -2060,6 +2060,11 @@ impl FnRunner {
                             }
                         }
                     };
+                    // The nested call ran on this thread, so this call's
+                    // idle budget was not renewed meanwhile. Renew it now,
+                    // or a nested call longer than the caller's timeout
+                    // times the caller out the moment it returns.
+                    deadline = Instant::now() + timeout;
                     self.send(&reply)?;
                 }
 
@@ -2111,6 +2116,8 @@ impl FnRunner {
                             }
                         }
                     };
+                    // Same as RunFn: the agent ran on this thread.
+                    deadline = Instant::now() + timeout;
                     self.send(&reply)?;
                 }
 

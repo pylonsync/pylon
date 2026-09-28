@@ -410,7 +410,8 @@ async function runAgentLoop(
 
   // Server code that started this run with ctx.agents.run may pass a
   // context for the tools. It wins over one stored on the run.
-  const invocationContext = invocationOf(ctx)?.context ?? null;
+  const invocation = invocationOf(ctx);
+  const invocationContext = asContext(invocation?.context);
   let runContext = invocationContext;
   let runUserId: string | null = ctx.auth.userId ?? null;
 
@@ -440,6 +441,15 @@ async function runAgentLoop(
     }
     if (loaded.run.status === "running") {
       const updatedAt = Date.parse(String(loaded.run.updatedAt ?? "")) || 0;
+      if (Date.now() - updatedAt < staleMs && invocation) {
+        // Server code (ctx.agents.run) waits for this turn's reply and
+        // brings its own context; queueing would return an empty result
+        // and answer the input later under the running turn's context.
+        throw ctx.error(
+          "RUN_BUSY",
+          "This run is already generating — wait for it to finish",
+        );
+      }
       if (Date.now() - updatedAt < staleMs) {
         // The generation is alive. Hand it the message rather than
         // refusing the call: the loop drains the queue at its next

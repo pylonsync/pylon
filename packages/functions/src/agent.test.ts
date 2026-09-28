@@ -930,6 +930,47 @@ describe("agent loop", () => {
     expect(runs).toEqual([{ conversationId: "old" }, { conversationId: "new" }]);
   });
 
+  test("ctx.agents.run refuses a live run instead of queueing, and ignores a non-object context", async () => {
+    const seen: unknown[] = [];
+    const def = agent({
+      tools: {
+        whoami: {
+          description: "who",
+          handler: async (_ctx, _input, run) => {
+            seen.push(run.context);
+            return "ok";
+          },
+        },
+      },
+    });
+    const call = (ctx: ActionCtx, runId?: string) =>
+      (def.handler as unknown as (
+        c: ActionCtx,
+        a: Record<string, unknown>,
+      ) => Promise<unknown>)(ctx, {
+        input: "hi",
+        ...(runId ? { runId } : {}),
+        __agentName: "helper",
+      });
+
+    const busy = mockCtx([], {
+      run: { status: "running", updatedAt: new Date().toISOString() },
+    });
+    (busy.ctx as unknown as Record<symbol, unknown>)[AGENT_INVOCATION] = {
+      context: { conversationId: "c" },
+    };
+    await expect(call(busy.ctx, "run_7")).rejects.toMatchObject({ code: "RUN_BUSY" });
+    expect(busy.writes.some((w) => w.op === "enqueueInput")).toBe(false);
+
+    const odd = mockCtx([wantsTool("whoami", {}), done("bye")]);
+    (odd.ctx as unknown as Record<symbol, unknown>)[AGENT_INVOCATION] = {
+      context: ["not", "an", "object"],
+    };
+    await call(odd.ctx);
+    expect(seen).toEqual([null]);
+    expect(odd.writes.find((w) => w.op === "createRun")?.context).toBeUndefined();
+  });
+
   test("a run a client started has no context, and args cannot supply one", async () => {
     let context: unknown = "unset";
     const def = agent({

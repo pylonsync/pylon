@@ -7565,8 +7565,19 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>, runner: &Arc<FnRunner>) {
                     let result = match agent {
                         Some(invocation) => runner_for_hook
                             .call_agent_inner(&hooked, fn_name, args, auth, invocation),
-                        None => runner_for_hook.call_inner(
-                            &hooked, fn_name, fn_type, args, auth, None, None,
+                        // The nested function's own `internal` flag, as a
+                        // top-level call gets: the scheduler gate and
+                        // ctx.agents.run read it.
+                        None => runner_for_hook.call_inner_with_caller_internal(
+                            &hooked,
+                            fn_name,
+                            fn_type,
+                            args,
+                            auth,
+                            None,
+                            None,
+                            None,
+                            ops.registry.get(fn_name).is_some_and(|d| d.internal),
                         ),
                     };
                     result.map(|(v, _)| v).map_err(|e| (e.code, e.message))
