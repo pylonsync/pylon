@@ -81,6 +81,7 @@ ctx.shards.get(shardId) / ctx.shards.list()                    // running shards
 // Actions only:
 ctx.shards.create(kind, shardId, params)  // start a WebAssembly shard (see Realtime shards)
 ctx.shards.stop(shardId)                  // stop it and close its connections
+ctx.agents.run(name, { input, as, context })  // run an agent() as a named user (see Agents)
 ```
 
 ### Signed file URLs

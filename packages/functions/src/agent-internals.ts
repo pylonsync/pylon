@@ -128,6 +128,10 @@ export function registerAgentInternals(
             pendingInput: [],
             cancelRequested: false,
             steps: 0,
+            // Only written when present, so an app that declares its own
+            // AgentRun without a `context` column keeps working until it
+            // uses ctx.agents.run with a context.
+            ...(args.context != null ? { context: args.context } : {}),
             createdAt: nowIso(),
             updatedAt: nowIso(),
           });
@@ -188,6 +192,7 @@ export function registerAgentInternals(
           if (args.error !== undefined) patch.error = args.error;
           if (args.streamId !== undefined) patch.streamId = args.streamId;
           if (args.steps !== undefined) patch.steps = Number(args.steps) || 0;
+          if (args.context != null) patch.context = args.context;
           // Claiming the run starts a new generation, which supersedes
           // a cancel left set by one that died before acting on it.
           // Terminal statuses clear it because it has been honoured.

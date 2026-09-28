@@ -52,6 +52,21 @@ import type {
 // Public types
 // ---------------------------------------------------------------------------
 
+/** The run a tool call belongs to: the third argument of every tool
+ *  handler. */
+export interface AgentToolRun {
+  runId: string;
+  /** The agent's name (its file name in `functions/`). */
+  agent: string;
+  /** The user the run belongs to. */
+  userId: string | null;
+  /** The `context` server code passed to `ctx.agents.run`, or the one
+   *  stored on the run by an earlier `ctx.agents.run`. `null` when the
+   *  run has none (a run a client started with `streamFn`). Set only by
+   *  server code, so a tool can trust it to identify what it acts on. */
+  context: Record<string, unknown> | null;
+}
+
 /** One tool an agent can call. */
 export interface AgentTool {
   /** Shown to the model — say when to use the tool, not how it works. */
@@ -61,10 +76,15 @@ export interface AgentTool {
    *  a tool_result error the model can react to. Omit for no-arg tools. */
   args?: ValidatorSchema;
   /** Runs with the agent action's ctx (runQuery/runMutation, llm,
-   *  email, …). The return value is JSON-serialized into the
-   *  tool_result the model sees. Throwing marks the result is_error —
-   *  the model sees the message and can recover. */
-  handler: (ctx: ActionCtx, input: Record<string, unknown>) => unknown;
+   *  email, …). `run` identifies the run, including the server-set
+   *  `context` from `ctx.agents.run`. The return value is
+   *  JSON-serialized into the tool_result the model sees. Throwing marks
+   *  the result is_error — the model sees the message and can recover. */
+  handler: (
+    ctx: ActionCtx,
+    input: Record<string, unknown>,
+    run: AgentToolRun,
+  ) => unknown;
 }
 
 export interface AgentDefinition {
@@ -193,6 +213,26 @@ export function validatorSchemaToJsonSchema(
 /** Marker so the SDK's discoverFunctions can detect agents and inject
  *  the AgentRun/AgentMessage entities into the manifest. */
 export const AGENT_MARKER = "__pylonAgent";
+
+/** ctx key the runtime sets when server code started this call with
+ *  `ctx.agents.run`: `{ context }`. A symbol, so no JSON a client sends
+ *  can set it. */
+export const AGENT_INVOCATION = Symbol.for("pylon.agentInvocation");
+
+interface AgentInvocation {
+  context: Record<string, unknown> | null;
+}
+
+function invocationOf(ctx: ActionCtx): AgentInvocation | null {
+  const value = (ctx as unknown as Record<symbol, unknown>)[AGENT_INVOCATION];
+  return (value as AgentInvocation | undefined) ?? null;
+}
+
+function asContext(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
 
 export function agent(def: AgentDefinition): FnDefinition<AgentCallArgs, AgentResult> {
   const fnDef = action({
@@ -368,6 +408,12 @@ async function runAgentLoop(
   // continuations may take it over instead of waiting forever.
   const staleMs = Math.max(def.timeout ?? 600, 60) * 1000;
 
+  // Server code that started this run with ctx.agents.run may pass a
+  // context for the tools. It wins over one stored on the run.
+  const invocationContext = invocationOf(ctx)?.context ?? null;
+  let runContext = invocationContext;
+  let runUserId: string | null = ctx.auth.userId ?? null;
+
   // 1. Create or load the run (ownership enforced inside the internal
   // fns, which run under this caller's auth).
   let runId: string;
@@ -381,6 +427,8 @@ async function runAgentLoop(
         status: string;
         updatedAt?: string;
         steps?: number;
+        userId?: string | null;
+        context?: unknown;
       };
       messages: StoredMessage[];
     }>("__pylon_agent_read", { runId: args.runId });
@@ -416,10 +464,17 @@ async function runAgentLoop(
     runId = loaded.run.id;
     priorSteps = Number(loaded.run.steps) || 0;
     history = loaded.messages.map(storedToLlmMessage);
+    runUserId = loaded.run.userId ?? runUserId;
+    runContext ??= asContext(loaded.run.context);
   } else {
     const created = await ctx.runMutation<{ id: string }>(
       "__pylon_agent_write",
-      { op: "createRun", agent: agentName, title: args.title ?? null },
+      {
+        op: "createRun",
+        agent: agentName,
+        title: args.title ?? null,
+        ...(invocationContext ? { context: invocationContext } : {}),
+      },
     );
     runId = created.id;
   }
@@ -439,6 +494,7 @@ async function runAgentLoop(
     streamId: ctx.stream.id ?? null,
     guardNotRunning: true,
     staleMs,
+    ...(args.runId && invocationContext ? { context: invocationContext } : {}),
   });
 
   // A crash between persisting an assistant tool_use turn and its
@@ -585,7 +641,12 @@ async function runAgentLoop(
 
       // 3. Execute every requested tool; failures become is_error
       // results the model can react to rather than run-fatal throws.
-      const batch = await runToolBatch(def, ctx, toolCtx, watch, res.content);
+      const batch = await runToolBatch(def, ctx, toolCtx, watch, res.content, {
+        runId,
+        agent: agentName,
+        userId: runUserId,
+        context: runContext,
+      });
 
       // Tool boundary. Every tool_use needs its tool_result even when
       // the batch stopped early, or the transcript can't be replayed.
@@ -645,6 +706,7 @@ async function runToolBatch(
   toolCtx: ActionCtx,
   watch: CancelWatch,
   turn: LlmContentBlock[],
+  run: AgentToolRun,
 ): Promise<{ results: LlmContentBlock[]; cancelled: boolean }> {
   const calls = turn.filter(
     (b): b is Extract<LlmContentBlock, { type: "tool_use" }> =>
@@ -674,7 +736,7 @@ async function runToolBatch(
               throw new Error(`Invalid tool input: ${check.errors.join("; ")}`);
             }
           }
-          const value = await tool.handler(toolCtx, block.input);
+          const value = await tool.handler(toolCtx, block.input, run);
           content =
             typeof value === "string" ? value : JSON.stringify(value ?? null);
         } catch (err) {

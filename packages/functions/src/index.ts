@@ -31,6 +31,7 @@ export {
 export type {
   AgentDefinition,
   AgentTool,
+  AgentToolRun,
   AgentCallArgs,
   AgentResult,
 } from "./agent";
@@ -86,6 +87,8 @@ export type {
   Audit,
   AuditLog,
   AuditEntry,
+  Agents,
+  AgentRunOptions,
   VectorSearchQuery,
   VectorSearchResult,
   SearchResult,

@@ -4,6 +4,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+  AGENT_INVOCATION,
   agent,
   isAgentDefinition,
   validatorSchemaToJsonSchema,
@@ -847,6 +848,114 @@ describe("agent loop", () => {
     expect(appended[2].content).toBe("queued while generating");
     expect(result.text).toBe("tok ".repeat(tokens));
   }, 10_000);
+
+  test("ctx.agents.run context reaches every tool and is stored on the new run", async () => {
+    const seen: unknown[] = [];
+    const def = agent({
+      tools: {
+        whoami: {
+          description: "who",
+          handler: async (_ctx, _input, run) => {
+            seen.push(run);
+            return "ok";
+          },
+        },
+      },
+    });
+    const { ctx, writes } = mockCtx([wantsTool("whoami", {}), done("bye")]);
+    (ctx as unknown as Record<symbol, unknown>)[AGENT_INVOCATION] = {
+      context: { conversationId: "conv-1" },
+    };
+    await (def.handler as unknown as (
+      c: ActionCtx,
+      a: Record<string, unknown>,
+    ) => Promise<unknown>)(ctx, { input: "hi", __agentName: "helper" });
+
+    expect(seen).toEqual([
+      {
+        runId: "run_1",
+        agent: "helper",
+        userId: "u1",
+        context: { conversationId: "conv-1" },
+      },
+    ]);
+    expect(writes.find((w) => w.op === "createRun")?.context).toEqual({
+      conversationId: "conv-1",
+    });
+  });
+
+  test("a continued run uses its stored context; a new invocation context replaces it", async () => {
+    const runs: unknown[] = [];
+    const def = agent({
+      tools: {
+        whoami: {
+          description: "who",
+          handler: async (_ctx, _input, run) => {
+            runs.push(run.context);
+            return "ok";
+          },
+        },
+      },
+    });
+    const call = (ctx: ActionCtx) =>
+      (def.handler as unknown as (
+        c: ActionCtx,
+        a: Record<string, unknown>,
+      ) => Promise<unknown>)(ctx, {
+        input: "again",
+        runId: "run_7",
+        __agentName: "helper",
+      });
+    const stored = { run: { userId: "owner", context: { conversationId: "old" } } };
+
+    // A client continuing over HTTP: no invocation, the stored context.
+    const first = mockCtx([wantsTool("whoami", {}), done("bye")], stored);
+    await call(first.ctx);
+    expect(
+      first.writes.find((w) => w.op === "setStatus" && w.status === "running")
+        ?.context,
+    ).toBeUndefined();
+
+    // Server code continuing with a new context: it wins and is stored.
+    const second = mockCtx([wantsTool("whoami", {}), done("bye")], stored);
+    (second.ctx as unknown as Record<symbol, unknown>)[AGENT_INVOCATION] = {
+      context: { conversationId: "new" },
+    };
+    await call(second.ctx);
+    expect(
+      second.writes.find((w) => w.op === "setStatus" && w.status === "running")
+        ?.context,
+    ).toEqual({ conversationId: "new" });
+
+    expect(runs).toEqual([{ conversationId: "old" }, { conversationId: "new" }]);
+  });
+
+  test("a run a client started has no context, and args cannot supply one", async () => {
+    let context: unknown = "unset";
+    const def = agent({
+      tools: {
+        whoami: {
+          description: "who",
+          handler: async (_ctx, _input, run) => {
+            context = run.context;
+            return "ok";
+          },
+        },
+      },
+    });
+    const { ctx, writes } = mockCtx([wantsTool("whoami", {}), done("bye")]);
+    await (def.handler as unknown as (
+      c: ActionCtx,
+      a: Record<string, unknown>,
+    ) => Promise<unknown>)(ctx, {
+      input: "hi",
+      __agentName: "helper",
+      context: { conversationId: "forged" },
+      __agentContext: { conversationId: "forged" },
+    });
+    expect(context).toBeNull();
+    expect(writes.find((w) => w.op === "createRun")?.context).toBeUndefined();
+  });
 
   test("the default step budget is high enough for a real tool loop", async () => {
     // 16 was the old default and is nowhere near enough for an agent

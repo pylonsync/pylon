@@ -44,12 +44,12 @@ const { runId } = (await gen.next()).value as { runId: string };
 
 Every invocation creates (or continues) an `AgentRun` with an ordered `AgentMessage` transcript. Both are ordinary synced entities. The framework injects them into your manifest when any agent exists:
 
-- `AgentRun` — `agent`, `status` (`idle | running | completed | failed | cancelled`), `title`, `streamId` (the resumable stream of the current generation), `error`, `pendingInput` (messages queued mid-generation), `cancelRequested`, `steps` (cumulative round-trips), timestamps. Owner-scoped: readable only by the user who started it.
+- `AgentRun` — `agent`, `status` (`idle | running | completed | failed | cancelled`), `title`, `streamId` (the resumable stream of the current generation), `error`, `pendingInput` (messages queued mid-generation), `cancelRequested`, `steps` (cumulative round-trips), `context` (what server code passed to `ctx.agents.run`), timestamps. Owner-scoped: readable only by the user the run belongs to.
 - `AgentMessage` — `runId`, `seq`, `role`, `content` (a string for user turns; content blocks for assistant turns, including `tool_use` and `tool_result` records).
 
 They are plain synced entities, so the usual rules apply: they replicate into the owner's local replica live, `pylon codegen` types them, `pylon migrate` creates them on Postgres, and policies fence them (clients can never write them; the loop's server-side mutations are the only writer).
 
-If your app declares its own `AgentRun` or `AgentMessage` entity (to add columns), yours wins, but the loop still writes through it, so keep the framework's columns intact: `AgentRun` needs `agent`, `status`, `userId`, `title`, `streamId`, `error`, `pendingInput`, `cancelRequested`, `steps`, `createdAt`, `updatedAt`; `AgentMessage` needs `runId`, `userId`, `seq`, `role`, `content`, `createdAt`. The same goes for policies: declaring your own `AgentRun` policy replaces the injected one, so keep reads owner-scoped with the `auth.userId != null &&` guard (bare `data.userId == auth.userId` matches anonymous callers against null-owner rows).
+If your app declares its own `AgentRun` or `AgentMessage` entity (to add columns), yours wins, but the loop still writes through it, so keep the framework's columns intact: `AgentRun` needs `agent`, `status`, `userId`, `title`, `streamId`, `error`, `pendingInput`, `cancelRequested`, `steps`, `createdAt`, `updatedAt`, plus `context` (JSON) if you pass a context to `ctx.agents.run`; `AgentMessage` needs `runId`, `userId`, `seq`, `role`, `content`, `createdAt`. The same goes for policies: declaring your own `AgentRun` policy replaces the injected one, so keep reads owner-scoped with the `auth.userId != null &&` guard (bare `data.userId == auth.userId` matches anonymous callers against null-owner rows).
 
 ```tsx
 import { useAgentRun } from "@pylonsync/react";
@@ -137,7 +137,44 @@ While generating, the SSE stream carries:
 
 Tool `args` are the same `v.*` validators as functions, converted to JSON Schema for the model. The model's arguments are validated before your handler runs; invalid input, a thrown handler error, or an unknown tool all become `is_error` tool results the model can react to. A bad tool call never ends the run. Handlers get the full action ctx: `runQuery`/`runMutation` for data, `ctx.llm` for sub-calls, `ctx.email`, `ctx.workflows`, everything.
 
-Options: `model` (subject to the server's allowlist), `maxSteps` (default 64; reaching the cap fails the run instead of looping forever), `maxTokens`, `auth` (`"user"` default; agents require a signed-in caller so runs always have an owner), `timeout` (default 600s idle).
+The third argument is the run: `{ runId, agent, userId, context }`. `context` is what server code passed to [`ctx.agents.run`](#running-an-agent-from-server-code), or `null` for a run a client started. Only server code can set it, so a tool can use it to decide what it acts on:
+
+```ts
+handler: async (ctx, { text }, run) => {
+  const conversationId = run.context?.conversationId;
+  if (typeof conversationId !== "string") throw new Error("Not available here");
+  return ctx.runMutation("saveNote", { conversationId, text: String(text) });
+},
+```
+
+## Running an agent from server code
+
+A webhook, a scheduled job, or a workflow has no signed-in user, but a run needs an owner. `ctx.agents.run` runs an agent from an action as a user you name:
+
+```ts
+// functions/onInboundText.ts: an internal action, scheduled by a webhook
+export default action({
+  internal: true,
+  args: { conversationId: v.string(), text: v.string() },
+  async handler(ctx, args) {
+    const result = await ctx.agents.run("assistant", {
+      input: args.text,
+      as: { userId: ownerId },
+      context: { conversationId: args.conversationId },
+    });
+    return result.text;
+  },
+});
+```
+
+- `as.userId` owns the run: it shows up in that user's synced `AgentRun`/`AgentMessage` rows, and the agent and its tools run with that user's `ctx.auth`. `as.admin: true` adds admin rights, which an agent declared `auth: "admin"` needs.
+- `context` is JSON the tools receive as `run.context`. It is stored on the run, so later turns of the same run (including ones the owner sends from the UI) see it. The owner can read it, so keep secrets out of it.
+- `runId` continues a run; `title` names a new one.
+- The promise resolves with the same result a `streamFn` call ends with (`{ runId, text, steps, usage }`). The tokens are not streamed to the caller.
+
+Only server code can do this. The calling action must be `internal: true` (no client can call it; jobs, workflows, and other server code start it) or run with admin rights: an admin session, or a webhook that verified its signature and called `ctx.auth.elevate`. `as.admin` needs an admin caller. Anything else throws `AGENT_RUN_FORBIDDEN`. The target must be an `agent()` (`AGENT_NOT_FOUND` otherwise), and the identity must satisfy the agent's own `auth` mode (`FORBIDDEN` / `UNAUTHENTICATED`), exactly as an HTTP call would.
+
+Options: `model` (subject to the server's allowlist), `maxSteps` (default 64; reaching the cap fails the run instead of looping forever), `maxTokens`, `auth` (`"user"` default; agents require a signed-in caller so runs always have an owner; server code names one with `ctx.agents.run`), `timeout` (default 600s idle).
 
 `maxSteps` bounds one invocation, including the extra turns steering adds to it. The run row's `steps` counts every invocation and is not capped — read it to budget a long-lived conversation.
 

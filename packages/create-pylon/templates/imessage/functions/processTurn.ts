@@ -1,5 +1,5 @@
 import { action, v } from "@pylonsync/functions";
-import { runAgentAsOwner } from "../lib/agent-call";
+import { AGENT_NAME } from "../lib/assistant";
 import { chunkReply } from "../lib/chunk";
 import { providerStatus } from "../lib/provider";
 
@@ -47,27 +47,28 @@ export default action({
         return { state: "awaiting_setup" };
       }
 
-      const outcome = await runAgentAsOwner(ctx.env, owner.userId, {
+      // The run belongs to the owner, so it shows up live in the dashboard.
+      // `admin: true` because the assistant is declared auth: "admin".
+      // The context tells the tools which conversation and turn they act on
+      // (functions/assistant.ts); only server code can set it.
+      const result = await ctx.agents.run(AGENT_NAME, {
         input: begin.input,
         ...(begin.runId ? { runId: begin.runId } : {}),
-        // The run's title carries the conversation id. The agent's tools read
-        // it back (functions/resolveTurn.ts) to know which contact they act on.
-        title: begin.conversationId,
+        as: { userId: owner.userId, admin: true },
+        context: { conversationId: begin.conversationId, turnId: begin.turnId },
       });
-      if (!outcome.ok) {
-        await finish({ outcome: "failed", detail: `${outcome.code}: ${outcome.message}`.slice(0, 500) });
-        return { state: "failed" };
-      }
-      const chunks = chunkReply(outcome.result.text);
+      const chunks = chunkReply(result.text);
       if (chunks.length === 0) {
-        await finish({ outcome: "failed", detail: "The model returned an empty reply", runId: outcome.result.runId });
+        await finish({ outcome: "failed", detail: "The model returned an empty reply", runId: result.runId });
         return { state: "failed" };
       }
-      await finish({ outcome: "answered", runId: outcome.result.runId, chunks });
+      await finish({ outcome: "answered", runId: result.runId, chunks });
       return { state: "answered", bubbles: chunks.length };
     } catch (err) {
+      const code = (err as { code?: unknown })?.code;
       const message = err instanceof Error ? err.message : String(err);
-      await finish({ outcome: "failed", detail: message.slice(0, 500) });
+      const detail = typeof code === "string" ? `${code}: ${message}` : message;
+      await finish({ outcome: "failed", detail: detail.slice(0, 500) });
       return { state: "failed" };
     }
   },

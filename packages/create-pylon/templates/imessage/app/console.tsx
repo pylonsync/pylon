@@ -55,7 +55,7 @@ interface AgentRunRow {
   steps?: number | null;
   error?: string | null;
   updatedAt: string;
-  title?: string | null;
+  context?: { conversationId?: string } | null;
 }
 interface AgentMessageRow {
   id: string;
@@ -242,10 +242,10 @@ export function Console({ view, initialConversationId }: { view: View; initialCo
     const contact = conversation ? contactById.get(conversation.contactId) : undefined;
     const threadMessages = conversation ? (messages ?? []).filter((m) => m.conversationId === conversation.id) : [];
     const unanswered = threadMessages.filter((m) => m.direction === "in" && UNANSWERED.has(m.status)).length;
-    const runRow = conversation ? (runs ?? []).find((r) => r.id === conversation.agentRunId || r.title === conversation.id) : undefined;
+    const runRow = conversation ? (runs ?? []).find((r) => r.id === conversation.agentRunId || r.context?.conversationId === conversation.id) : undefined;
     const activity: PanelActivity[] = [];
     if (conversation) {
-      const runIds = new Set((runs ?? []).filter((r) => r.title === conversation.id).map((r) => r.id));
+      const runIds = new Set((runs ?? []).filter((r) => r.id === conversation.agentRunId || r.context?.conversationId === conversation.id).map((r) => r.id));
       const refusals = new Map<string, string | null>();
       for (const m of agentMessages ?? []) {
         if (!runIds.has(m.runId) || m.role !== "user" || !Array.isArray(m.content)) continue;

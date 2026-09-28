@@ -164,11 +164,20 @@ pub type CancelScheduleHook =
 /// Returns the nested function's return value or a `FnCallError`-shaped
 /// `(code, message)` pair. The runner translates the error back into the
 /// NDJSON protocol reply so the TS side sees the same shape it always did.
-pub type NestedCallHook = Box<
-    dyn Fn(&str, FnType, serde_json::Value, AuthInfo) -> Result<serde_json::Value, (String, String)>
-        + Send
-        + Sync,
->;
+///
+/// The last argument is `Some` only for `ctx.agents.run`: the nested call
+/// is then an action that must be started with
+/// [`FnRunner::call_agent_inner`], so the child knows it is an agent run.
+pub type NestedCallHookFn = dyn Fn(
+        &str,
+        FnType,
+        serde_json::Value,
+        AuthInfo,
+        Option<crate::protocol::AgentInvocation>,
+    ) -> Result<serde_json::Value, (String, String)>
+    + Send
+    + Sync;
+pub type NestedCallHook = Box<NestedCallHookFn>;
 
 /// Callback for `ctx.files.signedUrl(fileId, {ttlSecs})`. Takes the file id
 /// and an optional TTL, returns the signed download path (or an error pair).
@@ -438,7 +447,10 @@ pub struct FnRunner {
     /// caller can wrap mutations in their own transaction. When absent, we
     /// fall back to the old recursive path (no transaction for nested
     /// mutations — documented limitation).
-    nested_call_hook: Mutex<Option<NestedCallHook>>,
+    /// An `Arc` so a nested call runs without holding this lock: a nested
+    /// call can nest again (an agent started by `ctx.agents.run` calls
+    /// `ctx.runMutation`), and concurrent calls must not serialize here.
+    nested_call_hook: Mutex<Option<Arc<NestedCallHookFn>>>,
     file_url_signer: Mutex<Option<FileUrlSigner>>,
     shard_ticket_signer: Mutex<Option<ShardTicketSigner>>,
     /// An `Arc` so a call runs after the lock is released: a hook that
@@ -625,7 +637,7 @@ impl FnRunner {
     /// the nested fn is a mutation. Without this hook, nested mutations share
     /// the outer action's non-transactional store and writes aren't atomic.
     pub fn set_nested_call_hook(&self, hook: NestedCallHook) {
-        *self.nested_call_hook.lock().unwrap() = Some(hook);
+        *self.nested_call_hook.lock().unwrap() = Some(Arc::from(hook));
     }
 
     /// Install the signed-file-URL minter backing `ctx.files.signedUrl`.
@@ -1149,13 +1161,14 @@ impl FnRunner {
                         )
                     } else {
                         let hook_result: Option<Result<serde_json::Value, (String, String)>> = {
-                            let hook = self.nested_call_hook.lock().unwrap();
-                            hook.as_ref().map(|cb| {
+                            let hook = self.nested_call_hook.lock().unwrap().clone();
+                            hook.map(|cb| {
                                 cb(
                                     &run.fn_name,
                                     run.fn_type,
                                     run.args.clone(),
                                     ssr_auth.clone(),
+                                    None,
                                 )
                             })
                         };
@@ -1497,10 +1510,66 @@ impl FnRunner {
         fn_type: FnType,
         args: serde_json::Value,
         auth: AuthInfo,
+        on_stream: Option<StreamCallback>,
+        request: Option<crate::protocol::RequestInfo>,
+        stream_id: Option<String>,
+        caller_internal: bool,
+    ) -> Result<(serde_json::Value, crate::trace::FnTrace), FnCallError> {
+        self.call_impl(
+            store,
+            fn_name,
+            fn_type,
+            args,
+            auth,
+            on_stream,
+            request,
+            stream_id,
+            caller_internal,
+            None,
+        )
+    }
+
+    /// Run the `agent()` action `agent_name` for `ctx.agents.run`. The
+    /// call carries `invocation`, so the child refuses a target that is
+    /// not an agent, checks the agent's own `auth` mode against `auth`,
+    /// and hands the invocation's context to the tools. The caller (the
+    /// `RunAgent` arm below, through the nested-call hook) has already
+    /// checked that the requesting function may run agents as `auth`.
+    pub fn call_agent_inner(
+        &self,
+        store: &dyn DataStore,
+        agent_name: &str,
+        args: serde_json::Value,
+        auth: AuthInfo,
+        invocation: crate::protocol::AgentInvocation,
+    ) -> Result<(serde_json::Value, crate::trace::FnTrace), FnCallError> {
+        self.call_impl(
+            store,
+            agent_name,
+            FnType::Action,
+            args,
+            auth,
+            None,
+            None,
+            None,
+            false,
+            Some(invocation),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn call_impl(
+        &self,
+        store: &dyn DataStore,
+        fn_name: &str,
+        fn_type: FnType,
+        args: serde_json::Value,
+        auth: AuthInfo,
         mut on_stream: Option<StreamCallback>,
         request: Option<crate::protocol::RequestInfo>,
         stream_id: Option<String>,
         caller_internal: bool,
+        agent: Option<crate::protocol::AgentInvocation>,
     ) -> Result<(serde_json::Value, crate::trace::FnTrace), FnCallError> {
         // Mutable so `ctx.auth.elevate({ admin: true, ... })` can
         // promote the call mid-flight. Webhook receivers need this:
@@ -1560,6 +1629,9 @@ impl FnRunner {
         }
         if let Some(sid) = stream_id {
             call_msg = call_msg.with_stream_id(sid);
+        }
+        if let Some(invocation) = agent {
+            call_msg = call_msg.with_agent(invocation);
         }
         self.send(&call_msg)?;
 
@@ -1944,13 +2016,14 @@ impl FnRunner {
                     // mutations non-transactional when triggered from an
                     // action (documented limitation).
                     let hook_result: Option<Result<serde_json::Value, (String, String)>> = {
-                        let hook = self.nested_call_hook.lock().unwrap();
-                        hook.as_ref().map(|cb| {
+                        let hook = self.nested_call_hook.lock().unwrap().clone();
+                        hook.map(|cb| {
                             cb(
                                 &run.fn_name,
                                 run.fn_type,
                                 run.args.clone(),
                                 nested_auth.clone(),
+                                None,
                             )
                         })
                     };
@@ -1984,6 +2057,57 @@ impl FnRunner {
                                     "FN_CALL_FAILED",
                                     &e.message,
                                 ),
+                            }
+                        }
+                    };
+                    self.send(&reply)?;
+                }
+
+                TsMessage::RunAgent(req) if req.call_id == call_id => {
+                    let reply = match run_agent_auth(
+                        &req,
+                        fn_type,
+                        caller_internal,
+                        caller_is_admin,
+                    ) {
+                        Err((code, msg)) => DbResultMessage::err(call_id.clone(), code, &msg),
+                        Ok(agent_auth) => {
+                            tracing::info!(
+                                "[functions] run_agent: fn=\"{}\" agent=\"{}\" as_user=\"{}\" admin={}",
+                                fn_name,
+                                req.agent,
+                                req.user_id,
+                                req.admin
+                            );
+                            let invocation = crate::protocol::AgentInvocation {
+                                context: req.context.clone(),
+                            };
+                            let hook_result: Option<Result<serde_json::Value, (String, String)>> = {
+                                let hook = self.nested_call_hook.lock().unwrap().clone();
+                                hook.map(|cb| {
+                                    cb(
+                                        &req.agent,
+                                        FnType::Action,
+                                        req.args.clone(),
+                                        agent_auth.clone(),
+                                        Some(invocation.clone()),
+                                    )
+                                })
+                            };
+                            let result = match hook_result {
+                                Some(r) => r,
+                                None => self
+                                    .call_agent_inner(
+                                        store, &req.agent, req.args, agent_auth, invocation,
+                                    )
+                                    .map(|(value, _)| value)
+                                    .map_err(|e| (e.code, e.message)),
+                            };
+                            match result {
+                                Ok(value) => DbResultMessage::ok(call_id.clone(), value),
+                                Err((code, msg)) => {
+                                    DbResultMessage::err(call_id.clone(), &code, &msg)
+                                }
                             }
                         }
                     };
@@ -2380,6 +2504,58 @@ impl FnRunner {
             Err(e) => Err(e),
         }
     }
+}
+
+/// Who `ctx.agents.run` may run an agent as, or why it may not.
+///
+/// Server code only: the requesting function must be an action that is
+/// either `internal: true` (no client can call it; jobs, workflows, and
+/// other server code start it) or running with admin rights (an admin
+/// session, or a webhook after `ctx.auth.elevate`). A public action a
+/// client calls cannot pick an identity to act as. `admin: true` needs an
+/// admin caller, so an internal non-admin function cannot mint admin
+/// rights.
+fn run_agent_auth(
+    req: &crate::protocol::RunAgentMessage,
+    fn_type: FnType,
+    caller_internal: bool,
+    caller_is_admin: bool,
+) -> Result<AuthInfo, (&'static str, String)> {
+    if !matches!(fn_type, FnType::Action) {
+        return Err((
+            "AGENT_RUN_ACTIONS_ONLY",
+            "ctx.agents.run is available in actions only".into(),
+        ));
+    }
+    if !caller_internal && !caller_is_admin {
+        return Err((
+            "AGENT_RUN_FORBIDDEN",
+            "ctx.agents.run needs a server-side caller: an internal: true action, or an admin one (a webhook can call ctx.auth.elevate first)".into(),
+        ));
+    }
+    if req.admin && !caller_is_admin {
+        return Err((
+            "AGENT_RUN_FORBIDDEN",
+            "ctx.agents.run with as.admin needs a caller that is an admin".into(),
+        ));
+    }
+    let user_id = req.user_id.trim();
+    if user_id.is_empty() {
+        return Err((
+            "INVALID_ARGS",
+            "ctx.agents.run needs as.userId: the user the run belongs to".into(),
+        ));
+    }
+    if req.agent.trim().is_empty() {
+        return Err(("INVALID_ARGS", "ctx.agents.run needs an agent name".into()));
+    }
+    Ok(AuthInfo {
+        user_id: Some(user_id.to_string()),
+        is_admin: req.admin,
+        tenant_id: None,
+        roles: vec![],
+        is_guest: false,
+    })
 }
 
 /// Serialize `msg` as one NDJSON line and write it to the child's stdin.
@@ -3212,6 +3388,53 @@ mod tests {
             .call_id(),
             Some("c_1")
         );
+    }
+
+    fn run_agent_req(user_id: &str, admin: bool) -> crate::protocol::RunAgentMessage {
+        crate::protocol::RunAgentMessage {
+            call_id: "c_1".into(),
+            agent: "helper".into(),
+            args: serde_json::json!({ "input": "hi" }),
+            user_id: user_id.into(),
+            admin,
+            context: None,
+        }
+    }
+
+    #[test]
+    fn run_agent_needs_a_server_side_action_caller() {
+        let req = run_agent_req("owner", false);
+        // A public action a client can call, without elevation: refused.
+        let err = run_agent_auth(&req, FnType::Action, false, false).unwrap_err();
+        assert_eq!(err.0, "AGENT_RUN_FORBIDDEN");
+        // Queries and mutations: refused whoever calls.
+        for fn_type in [FnType::Query, FnType::Mutation] {
+            let err = run_agent_auth(&req, fn_type, true, true).unwrap_err();
+            assert_eq!(err.0, "AGENT_RUN_ACTIONS_ONLY");
+        }
+        // An internal action, or an admin (elevated) one: allowed.
+        for (internal, admin) in [(true, false), (false, true)] {
+            let auth = run_agent_auth(&req, FnType::Action, internal, admin).unwrap();
+            assert_eq!(auth.user_id.as_deref(), Some("owner"));
+            assert!(!auth.is_admin);
+            assert!(!auth.is_guest);
+        }
+    }
+
+    #[test]
+    fn run_agent_admin_identity_needs_an_admin_caller() {
+        let req = run_agent_req("owner", true);
+        let err = run_agent_auth(&req, FnType::Action, true, false).unwrap_err();
+        assert_eq!(err.0, "AGENT_RUN_FORBIDDEN");
+        let auth = run_agent_auth(&req, FnType::Action, false, true).unwrap();
+        assert!(auth.is_admin);
+    }
+
+    #[test]
+    fn run_agent_needs_a_user() {
+        let err =
+            run_agent_auth(&run_agent_req("  ", false), FnType::Action, true, true).unwrap_err();
+        assert_eq!(err.0, "INVALID_ARGS");
     }
 
     #[test]

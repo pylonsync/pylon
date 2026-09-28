@@ -2327,6 +2327,9 @@ function agentEntities(): EntityDefinition[] {
         // Cumulative model↔tool round-trips across every invocation of
         // this run. `maxSteps` bounds one invocation, not this.
         steps: field.int().optional(),
+        // What server code passed as `context` to ctx.agents.run; the
+        // tools receive it as `run.context`. Written by server code only.
+        context: field.json().optional(),
         createdAt: field.datetime(),
         updatedAt: field.datetime(),
       },

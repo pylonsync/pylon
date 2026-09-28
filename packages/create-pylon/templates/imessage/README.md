@@ -55,8 +55,8 @@ real texts arrive.
   history; after 80 turns a new run starts with the last few texts as context.
 - **Tools.** `remember_note`, `recall_notes`, `forget_note`, `set_reminder`,
   `list_reminders`, `cancel_reminder`. They act only on the person being
-  answered: the contact comes from the server (`functions/resolveTurn.ts`),
-  never from the model. Reminders run on Pylon's job scheduler
+  answered: the contact comes from the server (the run's context and
+  `functions/resolveTurn.ts`), never from the model. Reminders run on Pylon's job scheduler
   (`ctx.scheduler.runAt` → `functions/fireReminder.ts`).
 - **Replies** are converted from Markdown to plain text and split into up to
   four bubbles along paragraph breaks (`lib/chunk.ts`).
@@ -64,15 +64,15 @@ real texts arrive.
   owner is the account whose verified email is in `PYLON_ADMIN_EMAILS`.
   Anonymous visitors and other accounts read nothing.
 
-### Why the server calls itself
+### How a turn runs the agent
 
-`agent()` stores each run under the signed-in user who called it. A webhook
-has no user, so `processTurn` opens a session for the owner
-(`POST /api/auth/session`) and calls `/api/fn/assistant` over HTTP
-(`lib/agent-call.ts`). The session token stays in server memory. In
-`pylon dev` this needs nothing. In production set `PYLON_ADMIN_TOKEN` (only the
-server uses it, to open that session). The call goes to `127.0.0.1:$PYLON_PORT`
-when the port is known, otherwise to `APP_URL`, which must be https.
+`agent()` stores each run under a user. A webhook has no user, so
+`processTurn` (an internal action) calls `ctx.agents.run("assistant", ...)` with
+`as: { userId: <owner>, admin: true }`. The run belongs to the owner and shows
+up live in the dashboard. The call also passes `context: { conversationId,
+turnId }`; the tools read it from their `run` argument, and `resolveTurn`
+maps it to the contact only while that turn is running. Only server code can
+set a run's context.
 
 ## Transport 1: Sendblue
 
@@ -155,7 +155,7 @@ How the relay works (`relay/main.ts`):
 | `SENDBLUE_*` | The Sendblue transport. |
 | `RELAY_TOKEN` | The relay transport. At least 24 characters. |
 | `IMESSAGE_DRY_RUN=1` | Store replies without sending them (both transports). Always on in `pylon dev` unless `IMESSAGE_ALLOW_DEV_SENDS=1`. |
-| `PYLON_ADMIN_TOKEN`, `APP_URL` | Production: how the server reaches its own API to run the agent. `APP_URL` must be https and is used only when `PYLON_PORT` is not set. |
+| `APP_URL` | Production: the public origin the Setup page uses for the webhook and relay URLs. |
 
 The Setup page shows which of these are set (never their values), when the
 last text came in, and when the relay last checked in.
@@ -170,8 +170,8 @@ Covers webhook verification (valid, wrong, missing, unconfigured secret),
 idempotency, the allowlist and rate limit, STOP/START, relay token auth,
 AppleScript argument passing (including a real `osascript` echo run on macOS
 with quotes, backslashes, newlines, and unicode), the chat.db reader against a
-fixture database built in a temp directory, the agent call over SSE, and
-reply chunking. Nothing in the suite sends a message or calls Sendblue.
+fixture database built in a temp directory, the agent turn and its tool
+fence, and reply chunking. Nothing in the suite sends a message or calls Sendblue.
 
 ## Deploy
 
@@ -180,7 +180,7 @@ pylon deploy
 pylon secrets set PYLON_ADMIN_EMAILS=you@example.com ANTHROPIC_API_KEY=... \
   IMESSAGE_TRANSPORT=sendblue SENDBLUE_API_KEY=... SENDBLUE_API_SECRET=... \
   SENDBLUE_FROM_NUMBER=+1... SENDBLUE_WEBHOOK_SECRET=... \
-  APP_URL=https://<your app> PYLON_ADMIN_TOKEN=<openssl rand -hex 32>
+  APP_URL=https://<your app>
 ```
 
 Sign-in codes in production need an email provider (`PYLON_EMAIL_PROVIDER`);

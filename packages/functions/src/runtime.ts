@@ -49,6 +49,7 @@ import type {
   AuthInfo,
 } from "./types";
 import { normalizeAuthClaims } from "./auth";
+import { AGENT_INVOCATION, isAgentDefinition } from "./agent";
 import { makeRequireMember } from "./member";
 import { response } from "./response";
 import { isDevMode } from "./ssr-runtime";
@@ -84,6 +85,9 @@ interface CallMessage {
   fn_type: "query" | "mutation" | "action";
   args: Record<string, unknown>;
   auth: AuthInfo;
+  /** Present only when server code started this call with
+   *  `ctx.agents.run`; the host sets it, never a client. */
+  agent?: { context?: Record<string, unknown> | null };
 }
 
 interface ResultMessage {
@@ -1276,6 +1280,28 @@ function buildActionCtx(
     connections,
     workflows: buildWorkflows(callId),
     audit: buildAudit(callId),
+    agents: {
+      async run(name, options) {
+        if (!options || typeof options.as?.userId !== "string") {
+          const err = new Error(
+            "ctx.agents.run needs as.userId: the user the run belongs to",
+          );
+          (err as { code?: string }).code = "INVALID_ARGS";
+          throw err;
+        }
+        const args: Record<string, unknown> = { input: options.input };
+        if (options.runId !== undefined) args.runId = options.runId;
+        if (options.title !== undefined) args.title = options.title;
+        return rpc(callId, {
+          type: "run_agent",
+          agent: name,
+          args,
+          user_id: options.as.userId,
+          admin: options.as.admin === true,
+          context: options.context ?? null,
+        }) as Promise<any>;
+      },
+    },
     domains: buildDomains(),
     env: process.env as Record<string, string>,
     async runQuery(fnName, args) {
@@ -1338,6 +1364,32 @@ registry.set("__pylonMemberLookup", {
 // Handler
 // ---------------------------------------------------------------------------
 
+/** Why a `ctx.agents.run` target may not run, or null when it may. */
+function agentInvocationRefusal(
+  def: FnDefinition,
+  rawAuth: AuthInfo,
+): { code: string; message: string } | null {
+  if (!isAgentDefinition(def)) {
+    return {
+      code: "AGENT_NOT_FOUND",
+      message: "ctx.agents.run can only run a function defined with agent()",
+    };
+  }
+  const auth = normalizeAuthClaims(rawAuth as unknown as Record<string, unknown>);
+  const mode = (def as { auth?: string }).auth ?? "user";
+  if (mode === "admin" && !auth.isAdmin) {
+    return {
+      code: "FORBIDDEN",
+      message:
+        "this agent is declared auth: \"admin\"; pass as: { userId, admin: true } from an admin caller",
+    };
+  }
+  if ((mode === "user" || mode === "admin") && !auth.userId) {
+    return { code: "UNAUTHENTICATED", message: "the agent needs a user" };
+  }
+  return null;
+}
+
 async function handleCall(msg: CallMessage): Promise<void> {
   const def = registry.get(msg.fn_name);
 
@@ -1364,6 +1416,18 @@ async function handleCall(msg: CallMessage): Promise<void> {
       message: `Function "${msg.fn_name}" is registered as ${def.type}, not ${msg.fn_type}`,
     });
     return;
+  }
+
+  // `ctx.agents.run`: the host checked who may start this and as whom.
+  // What is left is the target: it must be an agent, and the identity
+  // must satisfy the agent's own auth mode, exactly as an HTTP call to
+  // it would have to.
+  if (msg.agent) {
+    const refusal = agentInvocationRefusal(def, msg.auth);
+    if (refusal) {
+      send({ type: "error", call_id: msg.call_id, ...refusal });
+      return;
+    }
   }
 
   if (def.args) {
@@ -1503,6 +1567,13 @@ async function handleCall(msg: CallMessage): Promise<void> {
   // the switch so all three ctx shapes get it without threading another
   // parameter through each builder.
   (ctx as { signal?: AbortSignal }).signal = abort.signal;
+  if (msg.agent) {
+    // Read by the agent loop only. A symbol key, so nothing a client
+    // sends (args are plain JSON) can set it.
+    (ctx as unknown as Record<symbol, unknown>)[AGENT_INVOCATION] = {
+      context: msg.agent.context ?? null,
+    };
+  }
 
   try {
     const result = await def.handler(ctx, msg.args);

@@ -7256,8 +7256,15 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>, runner: &Arc<FnRunner>) {
         move |fn_name: &str,
               fn_type: FnType,
               args: serde_json::Value,
-              auth: AuthInfo|
+              auth: AuthInfo,
+              agent: Option<pylon_functions::protocol::AgentInvocation>|
               -> Result<serde_json::Value, (String, String)> {
+            if agent.is_some() && fn_type != FnType::Action {
+                return Err((
+                    "AGENT_RUN_ACTIONS_ONLY".into(),
+                    "an agent run is an action".into(),
+                ));
+            }
             let ops = match weak.upgrade() {
                 Some(o) => o,
                 None => {
@@ -7519,15 +7526,13 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>, runner: &Arc<FnRunner>) {
                     );
                     // Nested action/query path — same runner pinning as
                     // the mutation branch above.
-                    let result = runner_for_hook.call_inner(
-                        &hooked,
-                        fn_name,
-                        fn_type,
-                        args,
-                        auth,
-                        None,
-                        None,
-                    );
+                    let result = match agent {
+                        Some(invocation) => runner_for_hook
+                            .call_agent_inner(&hooked, fn_name, args, auth, invocation),
+                        None => runner_for_hook.call_inner(
+                            &hooked, fn_name, fn_type, args, auth, None, None,
+                        ),
+                    };
                     result.map(|(v, _)| v).map_err(|e| (e.code, e.message))
                 }
             }

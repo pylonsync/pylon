@@ -14,9 +14,10 @@ transports, the owner model, and production setup.
   on the transport's message id, allowlist and rate limit (`lib/gate.ts`), then
   schedule `processTurn`. Do not add a second path that skips it.
 - **The agent is `functions/assistant.ts` (`agent()`, `auth: "admin"`).**
-  `processTurn` runs it as the owner through `lib/agent-call.ts`. Tools must
-  resolve their contact with `currentTurn(ctx)` and never accept a contact,
-  handle, or id from the model.
+  `processTurn` runs it as the owner with `ctx.agents.run`, passing the
+  conversation and turn as the run's `context`. Tools must resolve their
+  contact with `currentTurn(ctx, run)` and never accept a contact, handle, or
+  id from the model.
 - **The dashboard is owner-only.** Every entity policy is `auth.isAdmin`; the
   owner is the verified email in `PYLON_ADMIN_EMAILS`.
 - **AppleScript:** `relay/applescript.ts` passes text and handle as argv to a

@@ -1,25 +1,20 @@
 import { query, v } from "@pylonsync/functions";
-import { AGENT_NAME } from "../lib/assistant";
 
-// Map the agent's current stream id to the conversation it is answering.
-// Internal: called by the assistant's tools only (functions/assistant.ts).
+// The contact a tool call acts on. Internal: called by the assistant's tools
+// only (functions/assistant.ts), with the conversation and turn that
+// processTurn put in the agent run's context.
 //
-// Returns null unless all of these hold:
-//   - an AgentRun of the assistant carries this stream id and belongs to the caller
-//   - its title is a conversation id (processTurn sets it)
-//   - that conversation has a turn running right now
+// Returns null unless that conversation exists and that exact turn is still
+// running, so a tool cannot act for a finished turn (for example when the
+// owner continues the run from the dashboard later).
 export default query({
   internal: true,
   auth: "admin",
-  args: { streamId: v.string() },
+  args: { conversationId: v.string(), turnId: v.string() },
   async handler(ctx, args) {
-    if (args.streamId === "") return null;
-    const runs = await ctx.db.query("AgentRun", { streamId: args.streamId, $limit: 2 });
-    if (runs.length !== 1) return null;
-    const run = runs[0];
-    if (run.agent !== AGENT_NAME || run.userId !== ctx.auth.userId || run.status !== "running") return null;
-    const conversation = await ctx.db.get("Conversation", String(run.title ?? ""));
-    if (!conversation || conversation.turnState !== "running") return null;
+    if (args.conversationId === "" || args.turnId === "") return null;
+    const conversation = await ctx.db.get("Conversation", args.conversationId);
+    if (!conversation || conversation.turnState !== "running" || conversation.turnId !== args.turnId) return null;
     return { conversationId: String(conversation.id), contactId: String(conversation.contactId) };
   },
 });

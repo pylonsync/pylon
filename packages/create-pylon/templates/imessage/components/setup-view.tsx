@@ -9,7 +9,6 @@ export interface SetupStatus {
   checklist: { key: string; label: string; ok: boolean; hint: string }[];
   provider: { configured: boolean; provider: string | null };
   ownerConfigured: boolean;
-  adminTokenSet: boolean;
   appUrlSet: boolean;
   devMode: boolean;
   baseUrl: string;
@@ -139,7 +138,7 @@ export function SetupView({
 function StatusGrid({ status, transport }: { status: SetupStatus; transport: TransportStateView | null }) {
   const online = relayOnline(transport?.relayLastSeenAt ?? null);
   const transportOk = status.transport !== null && status.checklist.every((c) => c.ok);
-  const needsProdConfig = !status.devMode && (!status.appUrlSet || !status.adminTokenSet);
+  const needsProdConfig = !status.devMode && !status.appUrlSet;
   return (
     <div className="mt-8 grid gap-3 sm:grid-cols-2">
       <StatusCard
@@ -200,13 +199,10 @@ function StatusGrid({ status, transport }: { status: SetupStatus; transport: Tra
         ok={!needsProdConfig}
         title="Server"
         lines={[
-          `Calls itself at ${status.baseUrl}`,
-          status.devMode
-            ? "Development mode: no admin token needed."
-            : status.adminTokenSet
-              ? "PYLON_ADMIN_TOKEN set."
-              : "Set PYLON_ADMIN_TOKEN so the server can open the owner's session for replies.",
-          ...(!status.devMode && !status.appUrlSet ? ["Set APP_URL to this app's public https origin."] : []),
+          `Public URL ${status.baseUrl}`,
+          ...(!status.devMode && !status.appUrlSet
+            ? ["Set APP_URL to this app's public https origin so the webhook and relay URLs are right."]
+            : []),
         ]}
       />
     </div>

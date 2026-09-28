@@ -1370,6 +1370,48 @@ export interface Domains {
   ): Promise<RegisteredDomainResult>;
 }
 
+/** Options for {@link Agents.run}. */
+export interface AgentRunOptions {
+  /** The message for this turn. */
+  input: string;
+  /** Continue this run. It must belong to `as.userId` and this agent. */
+  runId?: string;
+  /** Display title, stored on a new run. */
+  title?: string;
+  /**
+   * The user the run belongs to and runs as. The run shows up in that
+   * user's synced `AgentRun`/`AgentMessage` rows. `admin: true` also
+   * gives the run admin rights (needed for an agent declared
+   * `auth: "admin"`), and is allowed only when the caller is an admin.
+   */
+  as: { userId: string; admin?: boolean };
+  /**
+   * JSON the agent's tool handlers receive as `run.context` (their third
+   * argument), for example the conversation a webhook turn belongs to.
+   * Stored on the run as `AgentRun.context`, so later turns of the run
+   * see it too. The run's owner can read it; do not put secrets in it.
+   */
+  context?: Record<string, unknown>;
+}
+
+/**
+ * Run an `agent()` from server code. See {@link ActionCtx.agents}.
+ */
+export interface Agents {
+  /**
+   * Run agent `name` (its file name in `functions/`) as `options.as`.
+   * Resolves with the agent's result once the turn finishes, like a
+   * `streamFn` call's final `result` event. The agent's tokens are not
+   * streamed to this caller; they are in the run's `AgentMessage` rows.
+   *
+   * Only server code can do this: the calling action must be
+   * `internal: true` (jobs, workflows, scheduled work) or run with admin
+   * rights (an admin session, or a webhook after `ctx.auth.elevate`).
+   * Otherwise it throws `AGENT_RUN_FORBIDDEN`.
+   */
+  run(name: string, options: AgentRunOptions): Promise<import("./agent").AgentResult>;
+}
+
 export interface ActionCtx<R extends AuthRequirement = "optional"> {
   auth: AuthInfo<R>;
   stream: Stream;
@@ -1386,6 +1428,8 @@ export interface ActionCtx<R extends AuthRequirement = "optional"> {
   workflows: Workflows;
   /** Application audit log — see {@link Audit}. */
   audit: Audit;
+  /** Run an `agent()` as a named user from server code — see {@link Agents}. */
+  agents: Agents;
   /** Attach / register custom domains for your app's OWN end-customers
    *  (platform domains) — see {@link Domains}. Cloud-only. */
   domains: Domains;

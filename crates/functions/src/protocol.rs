@@ -33,6 +33,22 @@ pub struct CallMessage {
     /// non-streaming invocations.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_id: Option<String>,
+    /// Set only when server code started this call with
+    /// `ctx.agents.run`. The TS runtime then requires the target to be an
+    /// `agent()` and hands `context` to its tool handlers. The host sets
+    /// it; nothing a client sends can.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentInvocation>,
+}
+
+/// How an agent was started by `ctx.agents.run`. See
+/// [`CallMessage::agent`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentInvocation {
+    /// App JSON the caller passed as `context`. Every tool handler of the
+    /// run receives it. `None` when the caller passed none.
+    #[serde(default)]
+    pub context: Option<serde_json::Value>,
 }
 
 /// HTTP request metadata forwarded to TypeScript actions invoked via
@@ -77,7 +93,14 @@ impl CallMessage {
             auth,
             request: None,
             stream_id: None,
+            agent: None,
         }
+    }
+
+    /// Mark the call as an agent run started by `ctx.agents.run`.
+    pub fn with_agent(mut self, agent: AgentInvocation) -> Self {
+        self.agent = Some(agent);
+        self
     }
 
     /// Attach HTTP request metadata (used when the call originated from a
@@ -426,6 +449,14 @@ pub enum TsMessage {
     #[serde(rename = "run_fn")]
     RunFn(RunFnMessage),
 
+    /// `ctx.agents.run(name, { input, as, context })` — run an `agent()`
+    /// as a named user from server code (webhooks, jobs). The host checks
+    /// that the caller may do this, then runs the agent as a nested call
+    /// with that user's auth. Replied to with a `result` frame carrying
+    /// the agent's result.
+    #[serde(rename = "run_agent")]
+    RunAgent(RunAgentMessage),
+
     /// `ctx.files.signedUrl(fileId, {ttlSecs})` — mint a short-lived
     /// HMAC-signed download path for `/api/files/<id>`. The host signs
     /// with its file-URL secret; the GET handler honors the signature
@@ -562,6 +593,7 @@ impl TsMessage {
             TsMessage::ElevateAuth(m) => Some(&m.call_id),
             TsMessage::CancelSchedule(m) => Some(&m.call_id),
             TsMessage::RunFn(m) => Some(&m.call_id),
+            TsMessage::RunAgent(m) => Some(&m.call_id),
             TsMessage::SignFileUrl(m) => Some(&m.call_id),
             TsMessage::SignShardTicket(m) => Some(&m.call_id),
             TsMessage::ShardOp(m) => Some(&m.call_id),
@@ -837,6 +869,23 @@ pub struct RunFnMessage {
     pub fn_name: String,
     pub fn_type: FnType,
     pub args: serde_json::Value,
+}
+
+/// See [`TsMessage::RunAgent`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct RunAgentMessage {
+    pub call_id: String,
+    /// The agent's function name (its file name in `functions/`).
+    pub agent: String,
+    /// The agent action's args: `{ input, runId?, title? }`.
+    pub args: serde_json::Value,
+    /// The user the run belongs to and runs as.
+    pub user_id: String,
+    /// Run with admin rights. Only an admin caller may ask for this.
+    #[serde(default)]
+    pub admin: bool,
+    #[serde(default)]
+    pub context: Option<serde_json::Value>,
 }
 
 /// See [`TsMessage::SignFileUrl`].
