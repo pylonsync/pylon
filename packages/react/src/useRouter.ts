@@ -271,7 +271,15 @@ function loaderEntry(
     Object.assign(promise, { status: "fulfilled", value });
   }
   const entry: LoaderEntry = { source, deps: [...deps], promise };
+  // Server render: the module is shared by every request, and the key
+  // (loader source + deps) does not identify the request, so a shared
+  // entry could hand one request's data to another. Each server render
+  // gets its own promise.
+  if (typeof window === "undefined") return entry;
   pendingLoaders.push(entry);
+  // A failed load must not stay cached: an error-boundary retry has to
+  // run the loader again.
+  promise.then(undefined, () => releaseLoaderEntry(entry));
   if (pendingLoaders.length > PENDING_LOADERS_MAX) pendingLoaders.shift();
   return entry;
 }
@@ -367,3 +375,12 @@ export function useRouter(): PylonRouter {
     [],
   );
 }
+
+/** Test hooks for the useRouteData promise cache. */
+export const __routeDataCacheInternals = {
+  lookup: loaderEntry,
+  size: (): number => pendingLoaders.length,
+  clear: (): void => {
+    pendingLoaders.length = 0;
+  },
+};

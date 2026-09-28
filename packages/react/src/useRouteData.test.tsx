@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Suspense, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
-import { useRouteData } from "./useRouter";
+import { __routeDataCacheInternals, useRouteData } from "./useRouter";
 
 let root: Root | null = null;
 let host: HTMLElement | null = null;
@@ -111,5 +111,43 @@ describe("useRouteData", () => {
     expect(seen.filter((s) => s === "a:1")).toHaveLength(1);
     expect(seen.filter((s) => s === "a:2")).toHaveLength(1);
     expect(seen.filter((s) => s === "b:2")).toHaveLength(1);
+  });
+});
+
+describe("useRouteData promise cache", () => {
+  test("a server render never shares a cached promise between requests", () => {
+    __routeDataCacheInternals.clear();
+    const g = globalThis as { window?: unknown };
+    const saved = g.window;
+    delete g.window;
+    try {
+      let calls = 0;
+      const loader = () => {
+        calls += 1;
+        return Promise.resolve(`user-${calls}`);
+      };
+      const a = __routeDataCacheInternals.lookup("src", ["slug"], loader);
+      const b = __routeDataCacheInternals.lookup("src", ["slug"], loader);
+      expect(a).not.toBe(b);
+      expect(calls).toBe(2);
+      expect(__routeDataCacheInternals.size()).toBe(0);
+    } finally {
+      g.window = saved;
+    }
+  });
+
+  test("a rejected load leaves the cache so a retry runs the loader again", async () => {
+    __routeDataCacheInternals.clear();
+    let calls = 0;
+    const loader = () => {
+      calls += 1;
+      return Promise.reject(new Error("boom"));
+    };
+    const first = __routeDataCacheInternals.lookup("src-err", ["x"], loader);
+    await first.promise.catch(() => {});
+    await Promise.resolve();
+    __routeDataCacheInternals.lookup("src-err", ["x"], loader).promise.catch(() => {});
+    expect(calls).toBe(2);
+    __routeDataCacheInternals.clear();
   });
 });
