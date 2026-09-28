@@ -49,12 +49,31 @@ fn without_verbatim_prefix(p: PathBuf) -> PathBuf {
 
 /// `abs` as a path relative to the current directory. The runtime joins
 /// `PYLON_FUNCTIONS_DIR` onto the process cwd, so it must be relative.
+///
+/// Built from path components so it holds on Windows too. There the two
+/// paths must share a drive, which is why the test dirs live under
+/// `CARGO_TARGET_TMPDIR` (inside the target dir) and not the system temp
+/// dir (C: while the checkout may be on D:).
 fn relative_to_cwd(abs: &Path) -> String {
-    let cwd = std::env::current_dir().unwrap();
-    let ups = cwd.components().count() - 1;
-    let mut rel = "../".repeat(ups);
-    rel.push_str(abs.to_str().unwrap().trim_start_matches('/'));
-    rel
+    let cwd = without_verbatim_prefix(std::env::current_dir().unwrap().canonicalize().unwrap());
+    let abs = without_verbatim_prefix(abs.canonicalize().unwrap());
+    let from: Vec<_> = cwd.components().collect();
+    let to: Vec<_> = abs.components().collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    assert!(
+        common > 0,
+        "{} and {} share no root",
+        cwd.display(),
+        abs.display()
+    );
+    let mut rel = PathBuf::new();
+    for _ in common..from.len() {
+        rel.push("..");
+    }
+    for part in &to[common..] {
+        rel.push(part);
+    }
+    rel.to_string_lossy().into_owned()
 }
 
 /// One SSE response per request: the first asks for the `whoami` tool,
@@ -116,7 +135,7 @@ fn stub_anthropic() -> String {
 }
 
 fn functions_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
         "pylon-agent-run-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()

@@ -194,12 +194,31 @@ fn without_verbatim_prefix(p: PathBuf) -> PathBuf {
 
 /// `abs` relative to the current directory: the runtime joins
 /// `PYLON_FUNCTIONS_DIR` onto the process cwd.
+///
+/// Built from path components so it holds on Windows too. There the two
+/// paths must share a drive, which is why the test dirs live under
+/// `CARGO_TARGET_TMPDIR` (inside the target dir) and not the system temp
+/// dir (C: while the checkout may be on D:).
 fn relative_to_cwd(abs: &Path) -> String {
-    let cwd = std::env::current_dir().unwrap();
-    let ups = cwd.components().count() - 1;
-    let mut rel = "../".repeat(ups);
-    rel.push_str(abs.to_str().unwrap().trim_start_matches('/'));
-    rel
+    let cwd = without_verbatim_prefix(std::env::current_dir().unwrap().canonicalize().unwrap());
+    let abs = without_verbatim_prefix(abs.canonicalize().unwrap());
+    let from: Vec<_> = cwd.components().collect();
+    let to: Vec<_> = abs.components().collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    assert!(
+        common > 0,
+        "{} and {} share no root",
+        cwd.display(),
+        abs.display()
+    );
+    let mut rel = PathBuf::new();
+    for _ in common..from.len() {
+        rel.push("..");
+    }
+    for part in &to[common..] {
+        rel.push(part);
+    }
+    rel.to_string_lossy().into_owned()
 }
 
 fn http(port: u16, method: &str, path: &str, token: Option<&str>, body: &str) -> (u16, Value) {
@@ -237,7 +256,7 @@ fn http(port: u16, method: &str, path: &str, token: Option<&str>, body: &str) ->
 fn http_and_function_writes_enforce_max_length() {
     let with_functions = bun_available();
     if with_functions {
-        let fns = std::env::temp_dir().join(format!(
+        let fns = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
             "pylon-max-length-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
