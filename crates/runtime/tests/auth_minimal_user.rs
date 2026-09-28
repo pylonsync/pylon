@@ -57,6 +57,9 @@ fn start() -> (u16, Arc<Runtime>) {
     // SAFETY: set before any server thread in this binary starts.
     unsafe {
         std::env::set_var("PYLON_DEV_MODE", "1");
+        // Password sign-up checks HIBP over the network; this test is about
+        // the User entity, not the breach check.
+        std::env::set_var("PYLON_DISABLE_HIBP", "1");
     }
     let port = loop {
         let base = 20_000 + rand::random::<u16>() % 8_000;

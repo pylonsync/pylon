@@ -99,13 +99,39 @@ pub fn bind_listeners(port: u16, scope: &ListenScope) -> std::io::Result<Vec<Tcp
     }
 }
 
-/// Whether a server could bind `port` in either scope: every interface
-/// (dual-stack `[::]`) and loopback. Checking `127.0.0.1` alone is not
-/// enough: on macOS and BSD that bind succeeds while another socket holds
-/// `[::]:port`, and connections to `127.0.0.1:port` then reach that socket.
+/// Whether a server could bind `port`. Each address a server may bind is
+/// probed on its own: dual-stack `[::]`, `0.0.0.0`, `127.0.0.1`, and `::1`.
+/// The port is busy when any of them fails with "address in use"; an
+/// address family the machine lacks is skipped.
+///
+/// One probe is not enough. On macOS and BSD a `127.0.0.1` bind succeeds
+/// while another socket holds `[::]:port`, and connections to
+/// `127.0.0.1:port` then reach that socket. On Windows a `0.0.0.0` bind
+/// succeeds in the same situation, so the dual-stack bind (which falls back
+/// to `0.0.0.0`) cannot stand in for the `[::]` probe.
 pub fn port_is_free(port: u16) -> bool {
-    bind_listeners(port, &ListenScope::All).is_ok()
-        && bind_listeners(port, &ListenScope::Loopback).is_ok()
+    let probes: [fn(u16) -> std::io::Result<TcpListener>; 4] = [
+        bind_v6_any_dual_stack,
+        |p| TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), p)),
+        |p| TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p)),
+        |p| TcpListener::bind(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), p)),
+    ];
+    probes.iter().all(|probe| match probe(port) {
+        // Dropped at once, before the next probe binds.
+        Ok(_) => true,
+        Err(e) => e.kind() != std::io::ErrorKind::AddrInUse,
+    })
+}
+
+/// `[::]:port` accepting IPv4-mapped connections, with no IPv4 fallback.
+fn bind_v6_any_dual_stack(port: u16) -> std::io::Result<TcpListener> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let socket = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_only_v6(false)?;
+    let addr: SocketAddr = (Ipv6Addr::UNSPECIFIED, port).into();
+    socket.bind(&addr.into())?;
+    socket.listen(1)?;
+    Ok(socket.into())
 }
 
 #[cfg(unix)]
