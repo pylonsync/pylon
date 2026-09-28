@@ -862,28 +862,38 @@ jobs:
       # fine and is not. Wait for each package to actually be reachable, the
       # way a user's install reaches it, before calling the release done.
       #
+      # The check reads this release's version document and downloads its
+      # tarball URL. `bun publish` can print success for a version the
+      # registry never stores (cli-darwin-arm64@0.22.0), and the package
+      # document still answers 200 for the older versions.
+      #
       # This also fails loudly on the other cause of a 404 here: a first
       # publish that landed as `restricted` rather than public.
-      - name: Every CLI package is publicly resolvable
+      - name: Every CLI package version is publicly resolvable
         shell: bash
         run: |
           set -euo pipefail
           fail=0
           for pkg in cli-darwin-arm64 cli-linux-x64 cli-win32-x64 cli; do
             NAME="$(node -p "require('./packages/$pkg/package.json').name")"
+            VERSION="$(node -p "require('./packages/$pkg/package.json').version")"
             ENC="${NAME/@/%40}"; ENC="${ENC//\//%2f}"
-            code=""
+            ok=""
             # ~5 minutes: the observed propagation delay was 3.5.
             for attempt in $(seq 1 20); do
-              code="$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/${ENC}" || true)"
-              [ "$code" = "200" ] && break
+              tarball="$(curl -sf "https://registry.npmjs.org/${ENC}/${VERSION}" \
+                | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).dist.tarball||"")}catch{}})' || true)"
+              if [ -n "$tarball" ] && [ "$(curl -s -o /dev/null -w '%{http_code}' -I "$tarball" || true)" = "200" ]; then
+                ok=1
+                break
+              fi
               sleep 15
             done
-            if [ "$code" != "200" ]; then
-              echo "::error::$NAME is not publicly readable (HTTP $code). npm silently skips an unreachable optionalDependency, so the CLI would report no prebuilt binary for that platform. Check whether the package published as restricted." >&2
+            if [ -z "$ok" ]; then
+              echo "::error::$NAME@$VERSION is not publicly downloadable. npm silently skips an unreachable optionalDependency, so the CLI would keep an older binary or report none for that platform. Check the publish output above and whether the package published as restricted." >&2
               fail=1
             else
-              echo "✓ $NAME is publicly resolvable"
+              echo "✓ $NAME@$VERSION is publicly downloadable"
             fi
           done
           exit "$fail"
