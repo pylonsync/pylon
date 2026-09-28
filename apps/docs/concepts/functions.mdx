@@ -407,6 +407,14 @@ connected to the app is a Cloudflare edge address (on Fly, the
 choose its IP. Stack0 Cloud sets
 `PYLON_CLIENT_IP_HEADER=CF-Connecting-IP,Fly-Client-IP`.
 
+A self-hosted app behind Cloudflare with another hop in front of Pylon
+(Cloudflare Tunnel, a load balancer) connects from that hop, not from a
+Cloudflare address, so `CF-Connecting-IP` is ignored. Set
+`PYLON_TRUST_PROXY_HOPS` to the number of hops in front of Pylon; the
+client IP then comes from `X-Forwarded-For`. Other edge headers you add to
+`PYLON_CLIENT_IP_HEADER`, such as `True-Client-IP`, are used as sent, so
+allow traffic to the origin from that edge only.
+
 ## Streaming LLM output
 
 `ctx.llm.complete(request)` sends a completion and resolves once the model has finished generating. `ctx.llm.stream(request, onEvent)` sends the same request but calls `onEvent` for each event as the provider emits it, then resolves with the same assembled response `complete` would have returned. A handler can push text to the client as it arrives and still inspect `stop_reason` afterwards.

@@ -844,14 +844,13 @@ fn rebuild_with_retry(port: u16, scope: &crate::listen::ListenScope) -> Option<A
 ///  - Otherwise: empty → fall through to the X-Forwarded-For + trust-hops
 ///    logic below (self-hosted behavior unchanged).
 ///
-/// SECURITY: any header earlier than `fly-client-ip` in the chain (e.g.
-/// `cf-connecting-ip`) is honored even on a request that reached the origin
-/// directly, so it's spoofable unless the origin is reachable ONLY through
-/// that edge (Authenticated Origin Pulls / CF-IP allowlist). That's an
-/// accepted tradeoff for rate-limit *bucket keying* — the global dispatch +
-/// per-IP concurrency caps still bound total load; the spoofer can only
-/// scatter their own requests across buckets. For strict per-IP enforcement,
-/// lock the origin to the edge or pin a single unspoofable header.
+/// SECURITY: Cloudflare's headers (`cf-connecting-ip`, `cf-connecting-ipv6`)
+/// count only when the connecting address is a Cloudflare edge address (see
+/// `resolve_client_ip_with`), so a request that reached the origin directly
+/// cannot set them. Any other configured header (for example
+/// `true-client-ip` from Akamai or a Cloudflare Enterprise zone) is used as
+/// sent: it is safe only when the origin is reachable through that edge
+/// alone (an IP allowlist or authenticated origin pulls).
 pub(crate) fn client_ip_headers() -> &'static [String] {
     static H: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     H.get_or_init(|| {
@@ -1033,8 +1032,8 @@ fn canonical_ip(ip: String) -> String {
 /// [`client_ip_from`] with the Fly check passed in, so tests do not read the
 /// process env.
 ///
-/// `CF-Connecting-IP` is used only when the address that connected to this
-/// server is a Cloudflare address: on Fly, `Fly-Client-IP` (set by Fly's
+/// `CF-Connecting-IP` (and `CF-Connecting-IPv6`) is used only when the
+/// address that connected to this server is a Cloudflare address: on Fly, `Fly-Client-IP` (set by Fly's
 /// proxy); elsewhere, the X-Forwarded-For entry the closest trusted proxy
 /// saw, or the socket address. A request that reached the origin directly
 /// can set `CF-Connecting-IP` itself; without this check it would choose
@@ -1071,12 +1070,18 @@ fn resolve_client_ip_with(
         if v.parse::<std::net::IpAddr>().is_err() {
             continue;
         }
-        if hdr == "cf-connecting-ip" && !edge_peer().is_some_and(is_cloudflare_ip) {
+        if is_cloudflare_header(hdr) && !edge_peer().is_some_and(is_cloudflare_ip) {
             continue;
         }
         return canonical_ip(v);
     }
     forwarded.map(canonical_ip).unwrap_or(socket_ip)
+}
+
+/// Headers only Cloudflare's edge sets. Other edge headers carry no
+/// address range Pylon can check.
+fn is_cloudflare_header(name: &str) -> bool {
+    matches!(name, "cf-connecting-ip" | "cf-connecting-ipv6")
 }
 
 /// The X-Forwarded-For entry the closest of `trust_proxy_hops` trusted
@@ -1239,6 +1244,20 @@ mod client_ip_resolution_tests {
         assert_eq!(
             resolve_client_ip_with("10.0.0.2".into(), headers(&h), &chain, 1, false),
             "203.0.113.7"
+        );
+    }
+
+    #[test]
+    fn cf_connecting_ipv6_is_gated_like_cf_connecting_ip() {
+        let chain = vec!["cf-connecting-ipv6".to_string()];
+        let h = [("CF-Connecting-IPv6", "2001:db8::7")];
+        assert_eq!(
+            resolve_client_ip_with("198.51.100.9".into(), headers(&h), &chain, 0, false),
+            "198.51.100.9"
+        );
+        assert_eq!(
+            resolve_client_ip_with("2606:4700::1".into(), headers(&h), &chain, 0, false),
+            "2001:db8::7"
         );
     }
 
