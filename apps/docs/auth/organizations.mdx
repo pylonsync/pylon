@@ -51,6 +51,7 @@ export const OrgInvite = entity("OrgInvite", {
   createdAt: field.string(),
   expiresAt: field.string(),
   acceptedAt: field.string().optional(),
+  acceptedByUserId: field.string().optional(), // set on accept when declared
 });
 ```
 
@@ -195,7 +196,26 @@ Response:
 }
 ```
 
-Pylon sends the email automatically using the configured `EMAIL_PROVIDER` (or `ctx.email`). The plaintext token appears in the response only in dev mode. In production, the inviter sees the invite in their dashboard, and the invitee gets the email.
+Pylon sends the email through the auth email transport (`PYLON_AUTH_EMAIL_*`, falling back to `PYLON_EMAIL_*`). The plaintext token appears in the response only in dev mode. In production, the inviter sees the invite in their dashboard, and the invitee gets the email.
+
+### The invite email
+
+The email links to `/api/auth/invites/<token>/accept` by default. A browser that opens it while signed in accepts the invite and lands on `/?invite=accepted`. A signed-out browser goes to `/login?next=...` and comes back to accept after sign-in.
+
+To send invitees to your own page instead, set `PYLON_INVITE_URL`. `{token}` in it is replaced with the invite token; without `{token}`, Pylon appends `token=` as a query parameter. A path is joined to the app's public URL.
+
+```bash
+PYLON_INVITE_URL=/accept-invite?token={token}
+```
+
+Your page then calls `acceptInvite(token)` from `@pylonsync/client` once the user is signed in.
+
+To change the copy, set `PYLON_EMAIL_TEMPLATE_ORG_INVITE_SUBJECT` and `PYLON_EMAIL_TEMPLATE_ORG_INVITE_BODY`. The template can use `{{org_name}}`, `{{url}}`, and `{{app_name}}` (from `PYLON_EMAIL_APP_NAME`). The other auth emails take the same overrides with `MAGIC_CODE`, `MAGIC_LINK`, `PASSWORD_RESET`, `EMAIL_CHANGE`, and `EMAIL_VERIFY` in place of `ORG_INVITE`.
+
+```bash
+PYLON_EMAIL_APP_NAME=Miles
+PYLON_EMAIL_TEMPLATE_ORG_INVITE_SUBJECT="Join {{org_name}} on {{app_name}}"
+```
 
 Invites are:
 

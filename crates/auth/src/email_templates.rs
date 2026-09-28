@@ -1,9 +1,12 @@
 //! Email template customization with safe variable substitution.
 //!
-//! Pylon's auth flows send 5 transactional emails: magic code,
+//! Pylon's auth flows send 6 transactional emails: magic code,
 //! magic link, password reset, email change confirmation, org
-//! invite. Apps that want branded copy override the subject + body
-//! via env vars (`PYLON_EMAIL_TEMPLATE_<KIND>_{SUBJECT,BODY}`).
+//! invite, and email verification. Apps that want branded copy
+//! override the subject + body via env vars
+//! (`PYLON_EMAIL_TEMPLATE_<KIND>_{SUBJECT,BODY}`). Every template may
+//! use `{{app_name}}`, from `PYLON_EMAIL_APP_NAME`; the defaults do not
+//! name the framework.
 //!
 //! **Security posture:**
 //! - `{{var}}` substitution ONLY for the per-template allowlisted
@@ -36,6 +39,8 @@ pub enum EmailTemplate {
     /// Org invite (`/api/auth/orgs/:id/invites`). Vars:
     /// `{{org_name}}`, `{{url}}`.
     OrgInvite,
+    /// Verification code sent after password sign-up. Vars: `{{code}}`.
+    EmailVerify,
 }
 
 impl EmailTemplate {
@@ -47,6 +52,7 @@ impl EmailTemplate {
             Self::PasswordReset => "PASSWORD_RESET",
             Self::EmailChangeConfirm => "EMAIL_CHANGE",
             Self::OrgInvite => "ORG_INVITE",
+            Self::EmailVerify => "EMAIL_VERIFY",
         }
     }
 
@@ -59,6 +65,7 @@ impl EmailTemplate {
             Self::PasswordReset => "Reset your password",
             Self::EmailChangeConfirm => "Confirm your email change",
             Self::OrgInvite => "You've been invited to {{org_name}}",
+            Self::EmailVerify => "Verify your email address",
         }
     }
 
@@ -84,8 +91,11 @@ impl EmailTemplate {
                  hours. If you didn't request this change, ignore the email."
             }
             Self::OrgInvite => {
-                "You've been invited to join {{org_name}} on Pylon.\n\nAccept here: \
+                "You've been invited to join {{org_name}}.\n\nAccept here: \
                  {{url}}\n\nThis link expires in 7 days."
+            }
+            Self::EmailVerify => {
+                "Your email verification code is: {{code}}\n\nThis code will expire in 10 minutes."
             }
         }
     }
@@ -96,11 +106,11 @@ impl EmailTemplate {
     /// to end users on misconfigured templates).
     pub fn allowed_vars(&self) -> &'static [&'static str] {
         match self {
-            Self::MagicCode => &["code"],
-            Self::MagicLink => &["url"],
-            Self::PasswordReset => &["url"],
-            Self::EmailChangeConfirm => &["url"],
-            Self::OrgInvite => &["org_name", "url"],
+            Self::MagicCode | Self::EmailVerify => &["code", "app_name"],
+            Self::MagicLink | Self::PasswordReset | Self::EmailChangeConfirm => {
+                &["url", "app_name"]
+            }
+            Self::OrgInvite => &["org_name", "url", "app_name"],
         }
     }
 }
@@ -109,6 +119,10 @@ impl EmailTemplate {
 /// when `PYLON_EMAIL_TEMPLATE_<KIND>_{SUBJECT,BODY}` are set;
 /// falls back to the bundled defaults otherwise.
 pub fn render(template: EmailTemplate, vars: &HashMap<&str, &str>) -> (String, String) {
+    let app_name = std::env::var("PYLON_EMAIL_APP_NAME").unwrap_or_default();
+    let mut vars = vars.clone();
+    vars.entry("app_name").or_insert(app_name.as_str());
+    let vars = &vars;
     let subject_raw = std::env::var(format!(
         "PYLON_EMAIL_TEMPLATE_{}_SUBJECT",
         template.env_key()
@@ -317,6 +331,43 @@ mod tests {
         assert!(subject.contains("Acme"));
         assert!(body.contains("Acme"));
         assert!(body.contains("https://x/accept"));
+    }
+
+    #[test]
+    fn defaults_do_not_name_the_framework() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let vars = HashMap::from([
+            ("org_name", "Acme"),
+            ("url", "https://x"),
+            ("code", "123456"),
+        ]);
+        for t in [
+            EmailTemplate::MagicCode,
+            EmailTemplate::MagicLink,
+            EmailTemplate::PasswordReset,
+            EmailTemplate::EmailChangeConfirm,
+            EmailTemplate::OrgInvite,
+            EmailTemplate::EmailVerify,
+        ] {
+            let (subject, body) = render(t, &vars);
+            assert!(
+                !subject.contains("Pylon") && !body.contains("Pylon"),
+                "{t:?}: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn app_name_is_available_to_every_template() {
+        let vars = HashMap::from([("app_name", "Miles"), ("code", "123456")]);
+        assert_eq!(
+            substitute(
+                "{{app_name}} code {{code}}",
+                EmailTemplate::EmailVerify.allowed_vars(),
+                &vars
+            ),
+            "Miles code 123456"
+        );
     }
 
     #[test]

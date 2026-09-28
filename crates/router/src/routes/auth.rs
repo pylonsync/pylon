@@ -582,6 +582,31 @@ fn build_sso_redirect_uri(ctx: &RouterContext, org_id: &str) -> Option<String> {
 /// explicit allowlist (+ loopback for dev); anything else falls back to the
 /// env var. SSO/SAML callbacks intentionally do NOT use this — those must match
 /// the fixed redirect_uri registered with the IdP.
+/// The link an invite email carries. `PYLON_INVITE_URL` points it at the
+/// app's own accept page: `{token}` in it is replaced with the invite
+/// token (otherwise `token=` is appended as a query parameter), and a path
+/// is joined to `base`. Unset, the link is the built-in
+/// `/api/auth/invites/<token>/accept`, which accepts for a signed-in user
+/// and sends a signed-out one to the login page first.
+fn invite_accept_url(base: &str, invite_url: Option<&str>, token: &str) -> String {
+    let token = crate::url_encode(token);
+    let Some(template) = invite_url.map(str::trim).filter(|t| !t.is_empty()) else {
+        return format!("{base}/api/auth/invites/{token}/accept");
+    };
+    let url = if template.contains("{token}") {
+        template.replace("{token}", &token)
+    } else if template.contains('?') {
+        format!("{template}&token={token}")
+    } else {
+        format!("{template}?token={token}")
+    };
+    if url.starts_with('/') {
+        format!("{base}{url}")
+    } else {
+        url
+    }
+}
+
 fn auth_link_base(ctx: &RouterContext) -> String {
     pick_auth_base(
         ctx.request_origin(),
@@ -2031,12 +2056,13 @@ pub(crate) fn handle(
         let mut dev_code: Option<String> = None;
         match ctx.magic_codes.try_create(&email) {
             Ok(code) => {
-                let subject = "Verify your email address";
-                let body_text = format!(
-                    "Welcome to Pylon!\n\nYour email verification code is: {code}\n\nThis code will expire in 10 minutes."
+                let vars = std::collections::HashMap::from([("code", code.as_str())]);
+                let (subject, body_text) = pylon_auth::email_templates::render(
+                    pylon_auth::email_templates::EmailTemplate::EmailVerify,
+                    &vars,
                 );
                 if let Err(e) = ctx.email.send(&pylon_kernel::EmailMessage::plain(
-                    &email, subject, &body_text,
+                    &email, &subject, &body_text,
                 )) {
                     tracing::warn!(
                         "[auth] post-register verification email to {} failed: {e}",
@@ -5037,10 +5063,10 @@ pub(crate) fn handle(
                         ));
                     }
                 };
-                let accept_url = format!(
-                    "{}/api/auth/invites/{}/accept",
-                    auth_link_base(ctx),
-                    invited.token
+                let accept_url = invite_accept_url(
+                    &auth_link_base(ctx),
+                    std::env::var("PYLON_INVITE_URL").ok().as_deref(),
+                    &invited.token,
                 );
                 let mut vars = std::collections::HashMap::new();
                 vars.insert("org_name", org.name.as_str());
@@ -7563,7 +7589,34 @@ fn run_delete_account_hook(ctx: &RouterContext, user_id: &str) -> Result<(), (u1
 
 #[cfg(test)]
 mod tests {
-    use super::{insert_oidc_email_claims, newest_avatar, oidc_email_is_verified};
+    use super::{
+        insert_oidc_email_claims, invite_accept_url, newest_avatar, oidc_email_is_verified,
+    };
+
+    #[test]
+    fn invite_links_use_the_app_page_when_configured() {
+        let base = "https://www.acme.com";
+        assert_eq!(
+            invite_accept_url(base, None, "tok_1"),
+            "https://www.acme.com/api/auth/invites/tok_1/accept"
+        );
+        assert_eq!(
+            invite_accept_url(base, Some("/accept-invite?token={token}"), "tok_1"),
+            "https://www.acme.com/accept-invite?token=tok_1"
+        );
+        assert_eq!(
+            invite_accept_url(base, Some("https://app.acme.com/join"), "tok_1"),
+            "https://app.acme.com/join?token=tok_1"
+        );
+        assert_eq!(
+            invite_accept_url(base, Some("/join?src=email"), "a b"),
+            "https://www.acme.com/join?src=email&token=a%20b"
+        );
+        assert_eq!(
+            invite_accept_url(base, Some("  "), "tok_1"),
+            "https://www.acme.com/api/auth/invites/tok_1/accept"
+        );
+    }
 
     fn account(provider: &str, avatar: Option<&str>, updated_at: u64) -> pylon_auth::Account {
         pylon_auth::Account {
