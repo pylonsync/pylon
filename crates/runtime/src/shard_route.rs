@@ -335,15 +335,13 @@ fn proxy_stream(
         Ok(s) => s,
         Err(e) => return unreachable(request, address, &e),
     };
-    let version = request.http_version().clone();
-    let writer = request.into_writer();
+    let body = crate::server::SseBody::for_request(request, false);
     let address = address.to_string();
     let _ = std::thread::Builder::new()
         .name("pylon-shard-stream-proxy".into())
         .stack_size(128 * 1024)
         .spawn(move || {
             let _slot = slot;
-            let body = crate::server::SseBody::new(writer, &version);
             match read_head(upstream) {
                 Ok((stream, status, headers, rest)) => {
                     let upstream =
@@ -416,6 +414,9 @@ fn relay_stream<R: std::io::BufRead, W: Write>(
         }
     }
     if let Some(n) = length {
+        if body.owns_connection() {
+            head.push_str("Connection: close\r\n");
+        }
         head.push_str(&format!("Content-Length: {n}\r\n\r\n"));
         if body.write_head(&head).is_err() {
             return;

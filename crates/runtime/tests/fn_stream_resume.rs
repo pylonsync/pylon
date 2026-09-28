@@ -489,3 +489,31 @@ fn http_1_0_stream_closes_right_after_the_result_frame() {
     assert!(!response.contains("Transfer-Encoding"), "{response}");
     assert!(response.contains("event: result"), "{response}");
 }
+
+/// Review P3: an HTTP/1.0 request with `Connection: keep-alive` got a
+/// close-delimited body on a connection tiny_http kept open, so the
+/// response never ended. The body now ends by closing the connection.
+#[test]
+fn http_1_0_keep_alive_stream_closes_right_after_the_result_frame() {
+    let port = start_stub_server();
+    let host_port = format!("127.0.0.1:{port}");
+    let body = "{}";
+    let mut stream = TcpStream::connect(&host_port).expect("connect");
+    stream
+        .write_all(
+            format!(
+                "POST /api/fn/eventFn HTTP/1.0\r\nHost: {host_port}\r\n\
+                 Connection: keep-alive\r\n\
+                 Accept: text/event-stream\r\n\
+                 Content-Type: application/json\r\n\
+                 Content-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .expect("write");
+    let raw = read_complete_response(&mut stream, Duration::from_secs(3));
+    let response = String::from_utf8_lossy(&raw);
+    assert!(response.contains("Connection: close"), "{response}");
+    assert!(response.contains("event: result"), "{response}");
+}

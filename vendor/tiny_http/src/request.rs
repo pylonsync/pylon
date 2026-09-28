@@ -571,6 +571,32 @@ impl Request {
         Ok(stream)
     }
 
+    /// Pylon patch: take the connection out of tiny_http as a plain
+    /// `TcpStream`, with nothing written, so the caller writes the whole
+    /// response and decides when the connection ends (it closes when the
+    /// caller drops or shuts down the stream; tiny_http does not read
+    /// another request from it). For a response whose body ends at close
+    /// on a connection tiny_http would otherwise keep alive. Plain TCP
+    /// only; for a TLS or Unix-socket request it returns the request
+    /// unchanged.
+    pub fn into_detached_stream(mut self) -> Result<std::net::TcpStream, Request> {
+        let handle = match (&self.detach, self.secure) {
+            (Some(h), false) => h.clone(),
+            _ => return Err(self),
+        };
+        let stream = match handle.clone_socket() {
+            Ok(s) => s,
+            Err(_) => return Err(self),
+        };
+        handle.set_detached();
+        self.response_writer = None;
+        self.data_reader = None;
+        if let Some(sender) = self.notify_when_responded.take() {
+            let _ = sender.send(());
+        }
+        Ok(stream)
+    }
+
     pub(crate) fn with_notify_sender(mut self, sender: Sender<()>) -> Self {
         self.notify_when_responded = Some(sender);
         self

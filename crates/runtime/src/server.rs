@@ -246,11 +246,56 @@ const WS_REVALIDATE_INTERVAL: std::time::Duration = std::time::Duration::from_se
 /// replies use up its HTTP/1.1 connection pool. So HTTP/1.1 bodies are
 /// chunked, and the terminal zero-length chunk ends the response the
 /// moment the stream ends; the connection then serves the client's next
-/// request. HTTP/1.0 has no chunked encoding, and tiny_http closes a 1.0
-/// connection after one response, so its body ends at close.
+/// request. HTTP/1.0 has no chunked encoding, so its body ends at close:
+/// [`SseBody::for_request`] takes the connection out of tiny_http
+/// ([`tiny_http::Request::into_detached_stream`]) and closes it when the
+/// body ends. Without that, an HTTP/1.0 request with `Connection:
+/// keep-alive` left the connection open with no end to the body.
 pub(crate) struct SseBody<W: std::io::Write> {
     inner: W,
     chunked: bool,
+    /// The connection, when this body owns it (taken out of tiny_http).
+    /// Shut down when the body ends; the response head says
+    /// `Connection: close`.
+    owned: Option<std::net::TcpStream>,
+}
+
+impl SseBody<Box<dyn std::io::Write + Send>> {
+    /// The body writer for `request`'s response. HTTP/1.1 keeps the
+    /// connection in tiny_http (chunked; it serves the next request) unless
+    /// `own_connection` is set; HTTP/1.0 always takes the connection so
+    /// the body can end by closing it. A TLS or Unix-socket connection
+    /// cannot be taken and stays with tiny_http.
+    pub(crate) fn for_request(request: tiny_http::Request, own_connection: bool) -> Self {
+        let chunked = *request.http_version() >= tiny_http::HTTPVersion(1, 1);
+        if chunked && !own_connection {
+            return Self {
+                inner: request.into_writer(),
+                chunked,
+                owned: None,
+            };
+        }
+        match request.into_detached_stream() {
+            Ok(stream) => match stream.try_clone() {
+                Ok(writer) => Self {
+                    inner: Box::new(writer),
+                    chunked,
+                    owned: Some(stream),
+                },
+                // Dropping the only handle closes the connection at the end.
+                Err(_) => Self {
+                    inner: Box::new(stream),
+                    chunked,
+                    owned: None,
+                },
+            },
+            Err(request) => Self {
+                inner: request.into_writer(),
+                chunked,
+                owned: None,
+            },
+        }
+    }
 }
 
 impl<W: std::io::Write> SseBody<W> {
@@ -258,15 +303,31 @@ impl<W: std::io::Write> SseBody<W> {
         Self {
             inner,
             chunked: *http_version >= tiny_http::HTTPVersion(1, 1),
+            owned: None,
         }
     }
 
     /// The framing header line(s) for the response head.
     pub(crate) fn head_headers(&self) -> &'static str {
-        if self.chunked {
-            "Transfer-Encoding: chunked\r\n"
-        } else {
-            "Connection: close\r\n"
+        match (self.chunked, self.owned.is_some()) {
+            (true, false) => "Transfer-Encoding: chunked\r\n",
+            (true, true) => "Transfer-Encoding: chunked\r\nConnection: close\r\n",
+            (false, _) => "Connection: close\r\n",
+        }
+    }
+
+    /// Whether this body owns the connection (it closes when the body
+    /// ends or drops).
+    pub(crate) fn owns_connection(&self) -> bool {
+        self.owned.is_some()
+    }
+
+    /// End the response without ending the body: the connection closes
+    /// with no terminal chunk, so the client sees a cut-off response, not
+    /// a complete one. For an upstream that broke off mid-stream.
+    pub(crate) fn abort(self) {
+        if let Some(stream) = &self.owned {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
         }
     }
 
@@ -299,12 +360,15 @@ impl<W: std::io::Write> SseBody<W> {
     }
 
     /// End the body. Chunked: the terminal chunk, after which the client
-    /// has the whole response. Close-delimited: nothing to write; the
-    /// connection closes when the writer drops.
+    /// has the whole response. Close-delimited: nothing to write. An
+    /// owned connection is then closed.
     pub(crate) fn finish(&mut self) -> std::io::Result<()> {
         if self.chunked {
             self.inner.write_all(b"0\r\n\r\n")?;
             self.inner.flush()?;
+        }
+        if let Some(stream) = &self.owned {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
         }
         Ok(())
     }
@@ -349,8 +413,7 @@ fn spawn_hub_sse(
         Some(g) => g,
         None => return Err(request),
     };
-    let http_version = request.http_version().clone();
-    let mut body = SseBody::new(request.into_writer(), &http_version);
+    let mut body = SseBody::for_request(request, false);
     let _ = std::thread::Builder::new()
         .name("pylon-fn-stream".into())
         .stack_size(256 * 1024)
