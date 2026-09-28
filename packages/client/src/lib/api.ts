@@ -85,10 +85,22 @@ async function get<T>(path: string): Promise<T> {
  * reset (e.g. "switch identity"), clear the token from storage and
  * call this again.
  */
-export async function ensureGuestSession(): Promise<SessionResponse | null> {
-	if (typeof window === "undefined") return null;
+export function ensureGuestSession(): Promise<SessionResponse | null> {
+	if (typeof window === "undefined") return Promise.resolve(null);
 	const existing = window.localStorage?.getItem(storageKey("token"));
-	if (existing) return null;
+	if (existing) return Promise.resolve(null);
+	// Concurrent callers (two <EnsureGuest> mounts, StrictMode's double
+	// effect) share one request, so the browser gets one guest identity.
+	if (guestInFlight) return guestInFlight;
+	guestInFlight = mintGuestSession().finally(() => {
+		guestInFlight = null;
+	});
+	return guestInFlight;
+}
+
+let guestInFlight: Promise<SessionResponse | null> | null = null;
+
+async function mintGuestSession(): Promise<SessionResponse | null> {
 	try {
 		const res = await fetch(`${getBaseUrl()}/api/auth/guest`, {
 			method: "POST",

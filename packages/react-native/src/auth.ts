@@ -80,11 +80,22 @@ export function clearSession(): void {
  * later sign-in through any method below merges the guest's rows into
  * the real account (the server's anonymous merge).
  */
-export async function guestSession(): Promise<Session> {
-  const session = await request<Session>("POST", "/api/auth/guest", {});
-  persistSession(session);
-  return session;
+export function guestSession(): Promise<Session> {
+  // Concurrent callers share one request, so the device gets one guest
+  // identity instead of one per caller.
+  if (guestInFlight) return guestInFlight;
+  guestInFlight = request<Session>("POST", "/api/auth/guest", {})
+    .then((session) => {
+      persistSession(session);
+      return session;
+    })
+    .finally(() => {
+      guestInFlight = null;
+    });
+  return guestInFlight;
 }
+
+let guestInFlight: Promise<Session> | null = null;
 
 /** Email a 6-digit code. Rate-limited server-side. */
 export function sendEmailCode(email: string): Promise<{ sent: boolean }> {
