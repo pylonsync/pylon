@@ -1601,8 +1601,9 @@ impl WsHub {
         handle
             .revoked
             .store(true, std::sync::atomic::Ordering::SeqCst);
+        // Room subscriptions stay until the reader's `end_session`: only it
+        // holds the room bridge that announces the leaves.
         self.subscriptions.unsubscribe_all(id);
-        self.room_subscriptions.unsubscribe_all(id);
         self.remove_client(id);
         let _ =
             handle
@@ -2152,20 +2153,11 @@ fn run_authenticated_session(
         // out of the hub and every registry; drop what the reader still
         // holds and stop.
         if socket_handle.is_revoked() {
-            if let Some(reg) = reactive.as_ref() {
-                reg.disconnect_client(client_id);
-            }
-            let snapshot_auth = match socket_handle.auth.read() {
-                Ok(g) => g.clone(),
-                Err(poisoned) => poisoned.into_inner().clone(),
-            };
-            fanout_room_leaves_on_disconnect(&hub, &snapshot_auth, rooms.as_ref());
-            let disconnect = serde_json::json!({
-                "type": "presence",
-                "event": "disconnect",
-                "clientId": client_id,
-            });
-            hub.broadcast_presence(&disconnect.to_string());
+            // The hub already dropped this connection from its client map
+            // and CRDT registry; release its rooms (leaving only those no
+            // other connection holds), its reactive subscriptions, and
+            // announce the disconnect, as every other exit does.
+            end_session(&hub, client_id, reactive.as_ref(), rooms.as_ref());
             if let Some(ref outbound_rx) = outbound_rx_for_reader {
                 // Single-thread mode: this thread owns the send side.
                 let mut guard = match socket_handle.socket.lock() {

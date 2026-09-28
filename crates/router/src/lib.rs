@@ -3612,6 +3612,7 @@ mod auth_gate_tests {
             Some(rooms),
             manifest,
             store,
+            "127.0.0.1",
             f,
         );
     }
@@ -3963,6 +3964,7 @@ mod auth_gate_tests {
             false,
             auth,
             &NoopPluginHooks,
+            None,
             None,
             None,
             None,
@@ -7122,6 +7124,7 @@ mod auth_gate_tests {
             None,
             None,
             None,
+            None,
             manifest,
             store,
             "198.51.100.20",
@@ -7181,6 +7184,7 @@ mod auth_gate_tests {
                 false,
                 &victim,
                 &NoopPluginHooks,
+                None,
                 None,
                 None,
                 None,
