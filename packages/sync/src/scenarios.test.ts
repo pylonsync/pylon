@@ -973,7 +973,9 @@ describe("sync scenarios", () => {
   // the previous "<= 2" bound, which would have passed even if
   // coalescing was broken. Pins the inFlightReconcile dedupe.
   test("back-to-back reconcile calls coalesce to a single fetch", async () => {
-    env = createTestEnv();
+    // Poll transport: the WebSocket's on-connect full reconcile is a
+    // separate op and could land inside the measured window.
+    env = createTestEnv({ transport: "poll" });
     env.signIn({ userId: "u1" });
     env.server.seed("Note", [{ id: "n1" }]);
     await env.start();
