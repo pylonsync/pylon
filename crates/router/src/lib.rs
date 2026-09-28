@@ -2537,6 +2537,19 @@ pub fn project_row_for_replication(
     strip_sync_omit_fields(manifest, entity, projected)
 }
 
+/// Whether `entity`'s change events reach clients over the live fan-out
+/// (the WebSocket hub, the SSE hub, the sync relay). `sync: false`
+/// entities are never in a client replica: the snapshot, the delta pull,
+/// the reconcile fetch, and the live fan-out all leave them out. A name
+/// the manifest doesn't declare (a system table) keeps going out.
+pub fn is_replicated_entity(manifest: &pylon_kernel::AppManifest, entity: &str) -> bool {
+    manifest
+        .entities
+        .iter()
+        .find(|e| e.name == entity)
+        .is_none_or(|e| e.sync)
+}
+
 /// Option-variant of [`project_row_for_replication`], for
 /// `event.data` / `event.prev_data` callers.
 pub fn project_row_for_replication_opt(

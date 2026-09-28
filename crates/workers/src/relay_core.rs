@@ -10,6 +10,7 @@
 //! fan-out — `Shard::broadcast_change` + `WsHub::broadcast` in
 //! `crates/runtime/src/ws.rs` — decision for decision:
 //!
+//! 0. `sync: false` entities are never sent (`is_replicated_entity`).
 //! 1. Unscoped admin (`is_unscoped_admin`) bypasses policy.
 //! 2. Otherwise `check_entity_read(entity, auth, RAW data)` — the raw
 //!    row, so policies referencing `serverOnly` fields still evaluate.
@@ -109,6 +110,9 @@ impl RelayFilter {
     /// `data`/`prev_data` (as pushed by the machine's sink); the output
     /// JSON is projected and `prev_data`-stripped.
     pub fn wire_json_for(&self, auth: &AuthContext, event: &ChangeEvent) -> Option<String> {
+        if !pylon_router::is_replicated_entity(&self.manifest, &event.entity) {
+            return None;
+        }
         if auth.is_unscoped_admin() {
             return self.projected_wire(event);
         }
@@ -472,6 +476,45 @@ mod tests {
         let update = filter.wire_json_for(&user("u2"), &ev).unwrap();
         assert!(update.contains("\"kind\":\"update\""));
         assert!(filter.wire_json_for(&user("u3"), &ev).is_none());
+    }
+
+    /// Parity with the machine's WS hub: a `sync: false` entity is never
+    /// sent, not even to an unscoped admin.
+    #[test]
+    fn sync_false_entity_is_never_sent() {
+        let manifest = AppManifest {
+            manifest_version: 1,
+            name: "t".into(),
+            version: "0".into(),
+            entities: vec![pylon_kernel::ManifestEntity {
+                name: "Catalog".into(),
+                fields: vec![field("x")],
+                sync: false,
+                ..Default::default()
+            }],
+            policies: vec![pylon_kernel::ManifestPolicy {
+                name: "open".into(),
+                entity: Some("Catalog".into()),
+                allow_read: Some("true".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let payload = serde_json::json!({ "manifest": manifest }).to_string();
+        let filter = RelayFilter::from_manifest_payload(&payload).unwrap();
+        let ev = ChangeEvent {
+            seq: 1,
+            entity: "Catalog".into(),
+            row_id: "c1".into(),
+            kind: ChangeKind::Insert,
+            data: Some(serde_json::json!({"x": "y"})),
+            prev_data: None,
+            timestamp: "t".into(),
+        };
+        let mut admin = AuthContext::anonymous();
+        admin.is_admin = true;
+        assert!(filter.wire_json_for(&admin, &ev).is_none());
+        assert!(filter.wire_json_for(&user("u1"), &ev).is_none());
     }
 
     #[test]

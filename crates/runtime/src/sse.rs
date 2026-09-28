@@ -325,6 +325,11 @@ impl SseHub {
     /// the entity's read policy. Per-client filtering happens in the
     /// shard worker.
     pub fn broadcast(&self, event: &ChangeEvent) {
+        // `sync: false` entities never reach a client replica (see
+        // `WsHub::broadcast`).
+        if !pylon_router::is_replicated_entity(&self.manifest, &event.entity) {
+            return;
+        }
         // Project NOW for wire serialization (User allowlist +
         // serverOnly strip), AFTER the per-client policy check in
         // the shard worker. The `event` in the SseJob stays raw so

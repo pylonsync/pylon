@@ -84,6 +84,23 @@ pub(crate) fn handle(
                     .nth(1)
                     .and_then(|s| s.split('&').next())
                     .is_some_and(|v| v == "1" || v == "true");
+                // A replication fetch of a `sync: false` entity is empty: the
+                // entity is never in a client replica. Without this, rows that
+                // reached a replica anyway (an older server's WS fan-out) made
+                // every reconcile page the whole table.
+                if replication_fetch
+                    && !crate::is_replicated_entity(ctx.store.manifest(), entity_name)
+                {
+                    return Some((
+                        200,
+                        serde_json::json!({
+                            "data": [],
+                            "next_cursor": null,
+                            "has_more": false,
+                        })
+                        .to_string(),
+                    ));
+                }
                 // Replication fetches page at 1000 (matching the sync pull
                 // batch limits) — a reconcile sweep pays one round trip per
                 // page, so the cap directly divides sweep latency. Total scan

@@ -1083,6 +1083,11 @@ impl WsHub {
     /// sees the row data. This is the v0.3.72 fix for the cross-tenant
     /// data leak the codex pass-3 audit flagged.
     pub fn broadcast(&self, event: &ChangeEvent) {
+        // `sync: false` entities never reach a client replica; the pull
+        // path skips them, and so does the live fan-out.
+        if !pylon_router::is_replicated_entity(&self.manifest, &event.entity) {
+            return;
+        }
         // Project NOW for wire serialization. The raw event in the
         // `BroadcastJob` keeps `data` / `prev_data` intact so the
         // per-client policy check evaluates against the unprojected
