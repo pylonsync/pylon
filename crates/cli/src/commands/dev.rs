@@ -591,6 +591,11 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
                 }
                 std::process::exit(1);
             }
+            // `start` returns Ok after a graceful shutdown (Ctrl-C or
+            // SIGTERM, once the drain finishes). The main thread is in the
+            // file watcher loop and never returns, so without this exit the
+            // process kept running with no listener until a second signal.
+            std::process::exit(0);
         });
         dev_timing(
             boot_kind,
@@ -1015,53 +1020,49 @@ fn collect_env_mtimes(paths: &[PathBuf]) -> HashMap<PathBuf, Option<SystemTime>>
         .collect()
 }
 
-/// Mark every inherited descriptor above stdio close-on-exec, immediately
-/// before `exec`.
+/// Mark every descriptor above stdio close-on-exec, immediately before the
+/// restart replaces the process image.
 ///
-/// `exec` replaces the process image but does NOT close open file descriptors.
-/// Without this, every socket the outgoing image had already accepted survives
-/// into the new image as a live descriptor that nothing knows about: the kernel
-/// keeps the connection ESTABLISHED, so a request caught in the restart window
-/// never receives a response — and never receives a reset either. The client
-/// just waits. Measured on the pylon-cloud control plane: the server was
-/// serving new connections again ~3s after the reload while a request accepted
-/// at the instant of the exec hung for the full 180s test timeout. With a
-/// coding agent saving files continuously, requests land in that window
-/// constantly, which reads as "hot reload keeps hanging".
+/// The new image keeps every descriptor that lacks FD_CLOEXEC. A socket the
+/// outgoing image had already accepted would survive as a live descriptor
+/// nothing services: the kernel keeps the connection ESTABLISHED, so a request
+/// caught in the restart window gets no response and no reset. With
+/// FD_CLOEXEC set, the kernel closes all of them as the image is replaced, so
+/// the peer sees EOF and retries against the new image, the listeners are
+/// free for the successor to rebind, and orphaned runners from the outgoing
+/// image see their pipes close and exit.
 ///
-/// Marking them close-on-exec makes the kernel close them at the exec, so the
-/// peer sees EOF at once and retries against the new image. Nothing needs to
-/// be inherited — the successor rebinds its listeners, reconnects the database
-/// pool, and respawns the Bun runner pool during its own boot. Dropping the
-/// runner pipes also lets orphaned runners from the outgoing image exit instead
-/// of lingering.
-///
-/// The descriptors are not closed here. Other threads (the accept loops, the
-/// file watcher, the database pool) still own them until the exec, and Rust
-/// aborts the process with "IO Safety violation: owned file descriptor already
-/// closed" when an owner touches a descriptor that was closed under it.
+/// The descriptors are marked, not closed. Other threads (the HTTP, WebSocket,
+/// and SSE accept loops, runner readers, job workers) still own them until the
+/// image is replaced. Closing a descriptor another thread owns breaks IO
+/// safety: a debug build aborts ("owned file descriptor already closed") as
+/// soon as that thread drops its handle, so `pylon dev` died right after
+/// printing "restarting" and no listener came back. A release build does not
+/// check, but its threads then keep using descriptor numbers that were closed
+/// and can be handed out again to new files and sockets.
 ///
 /// stdin/stdout/stderr (0/1/2) are deliberately kept: the successor inherits
 /// the terminal.
 #[cfg(unix)]
-fn mark_inherited_fds_cloexec() {
-    for fd in inherited_fds_to_close() {
-        // SAFETY: fcntl only changes the descriptor flags. An fd that closed
-        // after the listing returns EBADF, which is harmless.
+fn mark_fds_close_on_exec() {
+    for fd in fds_above_stdio() {
+        // SAFETY: F_GETFD/F_SETFD only change the descriptor's flags; the
+        // descriptor stays open and valid for whoever owns it. On a
+        // descriptor that closed meanwhile both return EBADF, which is
+        // ignored.
         unsafe {
             let flags = libc::fcntl(fd, libc::F_GETFD);
-            if flags >= 0 {
+            if flags >= 0 && flags & libc::FD_CLOEXEC == 0 {
                 libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
             }
         }
     }
 }
 
-/// The descriptors `mark_inherited_fds_cloexec` marks: everything currently open
-/// above stdio. Split out from the closing loop so it can be tested without the
-/// test process closing its own harness descriptors.
+/// Every descriptor currently open above stdio: the ones
+/// `mark_fds_close_on_exec` marks.
 #[cfg(unix)]
-fn inherited_fds_to_close() -> Vec<i32> {
+fn fds_above_stdio() -> Vec<i32> {
     // Both platforms expose the open descriptors as a directory. Linux also
     // has /proc/self/fd; macOS only has /dev/fd.
     let dir = if Path::new("/proc/self/fd").is_dir() {
@@ -1072,8 +1073,6 @@ fn inherited_fds_to_close() -> Vec<i32> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    // Collect before closing: closing descriptors while the directory handle
-    // is still being iterated would invalidate the iterator mid-walk.
     let mut fds: Vec<i32> = entries
         .flatten()
         .filter_map(|e| e.file_name().to_str().and_then(|s| s.parse::<i32>().ok()))
@@ -1103,7 +1102,9 @@ fn exec_restart(_json_mode: bool) {
         unsafe {
             std::env::set_var("PYLON_DEV_RELOAD", "1");
         }
-        mark_inherited_fds_cloexec();
+        // Only marked, so if the restart below fails the running server is
+        // intact and keeps serving.
+        mark_fds_close_on_exec();
         let err = std::process::Command::new(&exe).args(&args[1..]).exec();
         eprintln!("[dev] exec failed: {err}");
     }
@@ -1619,71 +1620,57 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn mark_inherited_fds_cloexec_keeps_fds_open_and_sets_the_flag() {
-        use super::mark_inherited_fds_cloexec;
-
-        // Closing the descriptors before exec aborted `pylon dev` with "IO
-        // Safety violation: owned file descriptor already closed" when another
-        // thread still owned one. The marking must leave every fd open.
-        let mut fds = [0i32; 2];
-        // SAFETY: plain pipe(2); both ends are closed at the end of the test.
-        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
-        for fd in fds {
-            // pipe(2) does not set FD_CLOEXEC.
-            assert_eq!(
-                unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC,
-                0
-            );
-        }
-
-        mark_inherited_fds_cloexec();
-
-        for fd in fds {
-            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-            assert!(flags >= 0, "fd {fd} must still be open");
-            assert_ne!(flags & libc::FD_CLOEXEC, 0, "fd {fd} must be close-on-exec");
-            unsafe { libc::close(fd) };
-        }
-        for stdio in [0, 1, 2] {
-            assert!(unsafe { libc::fcntl(stdio, libc::F_GETFD) } >= 0);
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn inherited_fds_to_close_covers_sockets_but_spares_stdio() {
-        use super::inherited_fds_to_close;
+    fn marking_fds_covers_sockets_spares_stdio_and_keeps_them_open() {
+        use super::{fds_above_stdio, mark_fds_close_on_exec};
+        use std::io::{Read, Write};
         use std::os::fd::AsRawFd;
 
-        // The bug this guards: `exec` does not close open descriptors, so a
-        // connection the outgoing image had already accepted survived into the
-        // new one as a live socket nothing was servicing. The kernel kept it
-        // ESTABLISHED, so a request caught in the restart window got no
-        // response and no reset — it hung until the client gave up (measured
-        // at 180s+ against the pylon-cloud control plane).
+        // A connected pair: the accepted side is what a request caught in
+        // the restart window looks like. Replacing the image must close it,
+        // or the kernel keeps it ESTABLISHED and the client hangs.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        let fd = listener.as_raw_fd();
+        let mut client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut accepted, _) = listener.accept().unwrap();
+        let fd = accepted.as_raw_fd();
         assert!(fd > 2, "expected a real socket fd above stdio, got {fd}");
-
-        let doomed = inherited_fds_to_close();
-        assert!(
-            doomed.contains(&fd),
-            "an open socket ({fd}) must be closed before exec, got {doomed:?}"
-        );
-
-        // stdin/stdout/stderr must survive — the successor inherits the terminal.
-        for stdio in [0, 1, 2] {
-            assert!(
-                !doomed.contains(&stdio),
-                "stdio fd {stdio} must not be closed"
-            );
+        // Clear the flag std sets, the way a descriptor from a library that
+        // does not set it arrives.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
         }
+        assert!(fds_above_stdio().contains(&fd));
+        let stdio_flags = || -> Vec<i32> {
+            [0, 1, 2]
+                .iter()
+                .map(|&s| unsafe { libc::fcntl(s, libc::F_GETFD) })
+                .collect()
+        };
+        let before = stdio_flags();
 
-        // Sorted, so closing walks descriptors in a deterministic order.
-        let mut sorted = doomed.clone();
-        sorted.sort_unstable();
-        assert_eq!(doomed, sorted, "fd list should be sorted");
+        mark_fds_close_on_exec();
 
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert!(flags >= 0, "the socket must stay open for its owner");
+        assert_ne!(
+            flags & libc::FD_CLOEXEC,
+            0,
+            "the restart must close the socket"
+        );
+        // stdin/stdout/stderr are untouched: the successor inherits the
+        // terminal.
+        assert_eq!(before, stdio_flags());
+
+        // The owners keep working, and dropping them is fine: nothing was
+        // closed under them. The old code closed every descriptor here, so
+        // this drop aborted a debug build with "owned file descriptor
+        // already closed" — the `pylon dev` crash after "restarting".
+        client.write_all(b"ping").unwrap();
+        let mut buf = [0u8; 4];
+        accepted.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"ping");
+        drop(accepted);
+        drop(client);
         drop(listener);
     }
 
