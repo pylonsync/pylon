@@ -168,10 +168,17 @@ fn run_add(
         );
     } else {
         println!("✓ Added {hostname}");
-        if let Some(t) = &r.dns_target {
-            println!("  Point a CNAME to: {t}");
-            println!("  Then: pylon domains verify {hostname}");
+        let recipe =
+            find_domain(creds, project_id, hostname).and_then(|d| fetch_recipe(creds, &d.id));
+        match recipe {
+            Ok(recipe) => print_recipe(&recipe),
+            Err(_) => {
+                if let Some(t) = &r.dns_target {
+                    println!("  Point a CNAME to: {t}");
+                }
+            }
         }
+        println!("  Then: pylon domains verify {hostname}");
     }
     ExitCode::Ok
 }
@@ -186,34 +193,15 @@ fn run_verify(
         output::print_error("Usage: pylon domains verify <hostname>");
         return ExitCode::Usage;
     };
-    // The control plane keys verification by domain id (verifyDomainDNS
-    // takes `domainId`), while the ergonomic CLI form — the one `add`
-    // suggests — is the hostname. Resolve through the same listing the
-    // `list` subcommand renders; a raw id is accepted too.
-    #[derive(serde::Serialize)]
-    struct ListArgs<'a> {
-        #[serde(rename = "projectId")]
-        project_id: &'a str,
-    }
-    let domains: Vec<Domain> = match post_json(
-        creds,
-        "/api/fn/listProjectDomains",
-        &ListArgs { project_id },
-    ) {
+    // The control plane keys everything by domain id, while the form `add`
+    // suggests is the hostname. Resolve through the listing; a raw id is
+    // accepted too.
+    let domain = match find_domain(creds, project_id, host_or_id) {
         Ok(d) => d,
         Err(e) => {
             output::print_error(&e);
-            return ExitCode::Error;
+            return ExitCode::Usage;
         }
-    };
-    let Some(domain) = domains
-        .iter()
-        .find(|d| d.hostname.eq_ignore_ascii_case(host_or_id) || d.id == host_or_id)
-    else {
-        output::print_error(&format!(
-            "no domain \"{host_or_id}\" on this project — run: pylon domains list"
-        ));
-        return ExitCode::Usage;
     };
     #[derive(serde::Serialize)]
     struct Args<'a> {
@@ -221,47 +209,82 @@ fn run_verify(
         domain_id: &'a str,
     }
     #[derive(Deserialize)]
-    struct Out {
+    struct DnsCheck {
         status: Option<String>,
         #[serde(rename = "pointsAt")]
         points_at: Option<String>,
     }
-    let r: Out = match post_json(
-        creds,
-        "/api/fn/verifyDomainDNS",
-        &Args {
-            domain_id: &domain.id,
-        },
-    ) {
+    #[derive(Deserialize)]
+    struct Refresh {
+        status: Option<String>,
+    }
+    let args = Args {
+        domain_id: &domain.id,
+    };
+    // DNS check: does the hostname resolve to the target yet.
+    let dns: DnsCheck = match post_json(creds, "/api/fn/verifyDomainDNS", &args) {
         Ok(o) => o,
         Err(e) => {
             output::print_error(&e);
             return ExitCode::Error;
         }
     };
+    // Certificate check: asks Cloudflare / Fly for the certificate state and
+    // moves the domain to `ready` once it is issued. Without it a domain
+    // stays `provisioning` in `pylon domains list`.
+    let refresh: Refresh = match post_json(creds, "/api/fn/refreshProjectDomain", &args) {
+        Ok(o) => o,
+        Err(e) => {
+            output::print_error(&e);
+            return ExitCode::Error;
+        }
+    };
+    let domain_status = refresh.status.unwrap_or_else(|| domain.status.clone());
+    // The records still to add, and the reason it is not ready, when any.
+    let (recipe, error) = if domain_status == "ready" {
+        (None, None)
+    } else {
+        let recipe = fetch_recipe(creds, &domain.id).ok();
+        let error = find_domain(creds, project_id, &domain.id)
+            .ok()
+            .and_then(|d| d.error)
+            .filter(|e| !e.is_empty());
+        (recipe, error)
+    };
+
     if json_mode {
         println!(
             "{}",
             serde_json::to_string(&serde_json::json!({
-                "hostname": domain.hostname, "status": r.status, "pointsAt": r.points_at,
+                "hostname": domain.hostname,
+                "status": dns.status,
+                "pointsAt": dns.points_at,
+                "domainStatus": domain_status,
+                "records": recipe.as_ref().map(DnsRecipe::records).unwrap_or_default(),
+                "error": error,
             }))
             .unwrap_or_default()
         );
-        return ExitCode::Ok;
+        return match dns.status.as_deref() {
+            Some("wrong") | Some("missing") => ExitCode::Error,
+            _ if domain_status == "error" => ExitCode::Error,
+            _ => ExitCode::Ok,
+        };
     }
-    match r.status.as_deref() {
+
+    let dns_ok = match dns.status.as_deref() {
         Some("ok") => {
             println!("✓ {} — DNS points at the right target", domain.hostname);
-            ExitCode::Ok
+            true
         }
         Some("wrong") => {
             println!(
                 "✗ {} resolves to {}, expected {}",
                 domain.hostname,
-                r.points_at.as_deref().unwrap_or("?"),
+                dns.points_at.as_deref().unwrap_or("?"),
                 domain.dns_target.as_deref().unwrap_or("the DNS target"),
             );
-            ExitCode::Error
+            false
         }
         Some("missing") => {
             println!(
@@ -269,12 +292,125 @@ fn run_verify(
                 domain.hostname,
                 domain.dns_target.as_deref().unwrap_or("the DNS target"),
             );
-            ExitCode::Error
+            false
         }
         other => {
-            println!("  Status: {}", other.unwrap_or("?"));
-            ExitCode::Ok
+            println!("  DNS: {}", other.unwrap_or("?"));
+            true
         }
+    };
+    match domain_status.as_str() {
+        "ready" => println!("✓ {} — certificate issued, domain ready", domain.hostname),
+        status => {
+            println!("  Status: {status}");
+            if let Some(e) = &error {
+                println!("    ! {e}");
+            }
+            if let Some(recipe) = &recipe {
+                print_recipe(recipe);
+            }
+        }
+    }
+    if dns_ok && domain_status != "error" {
+        ExitCode::Ok
+    } else {
+        ExitCode::Error
+    }
+}
+
+/// A domain on the project, by hostname (any case) or id.
+fn find_domain(creds: &Credentials, project_id: &str, host_or_id: &str) -> Result<Domain, String> {
+    #[derive(serde::Serialize)]
+    struct ListArgs<'a> {
+        #[serde(rename = "projectId")]
+        project_id: &'a str,
+    }
+    let domains: Vec<Domain> = post_json(
+        creds,
+        "/api/fn/listProjectDomains",
+        &ListArgs { project_id },
+    )?;
+    domains
+        .into_iter()
+        .find(|d| d.hostname.eq_ignore_ascii_case(host_or_id) || d.id == host_or_id)
+        .ok_or_else(|| {
+            format!("no domain \"{host_or_id}\" on this project — run: pylon domains list")
+        })
+}
+
+/// The DNS records a domain needs, from the control plane's
+/// `getProjectDnsRecipe`.
+#[derive(Deserialize)]
+struct DnsRecipe {
+    hostname: String,
+    #[serde(rename = "cnameTarget")]
+    cname_target: Option<String>,
+    #[serde(rename = "txtRecords", default)]
+    txt_records: Vec<RecipeRecord>,
+    ipv4: Option<String>,
+    ipv6: Option<String>,
+    #[serde(default)]
+    apex: bool,
+}
+
+#[derive(Deserialize)]
+struct RecipeRecord {
+    name: String,
+    value: String,
+    purpose: String,
+}
+
+impl DnsRecipe {
+    /// Every record to add, as `{type, name, value, purpose}`.
+    fn records(&self) -> Vec<serde_json::Value> {
+        let mut out = Vec::new();
+        if self.apex {
+            if let Some(ip) = &self.ipv4 {
+                out.push(serde_json::json!({"type": "A", "name": self.hostname, "value": ip, "purpose": "Route the apex to the app"}));
+            }
+            if let Some(ip) = &self.ipv6 {
+                out.push(serde_json::json!({"type": "AAAA", "name": self.hostname, "value": ip, "purpose": "Route the apex to the app"}));
+            }
+        } else if let Some(target) = &self.cname_target {
+            out.push(serde_json::json!({"type": "CNAME", "name": self.hostname, "value": target, "purpose": "Route the hostname to the app"}));
+        }
+        for r in &self.txt_records {
+            // The control plane lists every proof here; the ones that are
+            // CNAMEs (Fly's origin validation) say so in their purpose.
+            let kind = if r.purpose.contains("(CNAME") {
+                "CNAME"
+            } else {
+                "TXT"
+            };
+            out.push(serde_json::json!({"type": kind, "name": r.name, "value": r.value, "purpose": r.purpose}));
+        }
+        out
+    }
+}
+
+fn fetch_recipe(creds: &Credentials, domain_id: &str) -> Result<DnsRecipe, String> {
+    #[derive(serde::Serialize)]
+    struct Args<'a> {
+        #[serde(rename = "domainId")]
+        domain_id: &'a str,
+    }
+    post_json(creds, "/api/fn/getProjectDnsRecipe", &Args { domain_id })
+}
+
+fn print_recipe(recipe: &DnsRecipe) {
+    let records = recipe.records();
+    if records.is_empty() {
+        return;
+    }
+    println!("  DNS records:");
+    for r in &records {
+        println!(
+            "    {:<5} {}  →  {}",
+            r["type"].as_str().unwrap_or(""),
+            r["name"].as_str().unwrap_or(""),
+            r["value"].as_str().unwrap_or("")
+        );
+        println!("          ({})", r["purpose"].as_str().unwrap_or(""));
     }
 }
 
@@ -330,4 +466,45 @@ fn resolve_project_id(creds: &Credentials, slug: &str) -> Result<String, String>
     let proj: ProjectIdResponse = post_json(creds, "/api/fn/getProjectForCli", &Args { slug })
         .map_err(|e| format!("Could not resolve project \"{slug}\": {e}"))?;
     Ok(proj.id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DnsRecipe;
+
+    fn recipe(json: serde_json::Value) -> DnsRecipe {
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn apex_recipe_lists_a_and_aaaa() {
+        let r = recipe(serde_json::json!({
+            "hostname": "acme.com", "cnameTarget": "pylon-acme.fly.dev",
+            "txtRecords": [], "ipv4": "66.241.124.1", "ipv6": "2a09:8280:1::1", "apex": true
+        }));
+        let records = r.records();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["type"], "A");
+        assert_eq!(records[0]["value"], "66.241.124.1");
+        assert_eq!(records[1]["type"], "AAAA");
+    }
+
+    #[test]
+    fn saas_recipe_types_each_proof_by_its_purpose() {
+        let r = recipe(serde_json::json!({
+            "hostname": "www.acme.com", "cnameTarget": "customers.stack0.app",
+            "txtRecords": [
+                {"name": "_acme-challenge.www.acme.com", "value": "tok", "purpose": "Certificate validation"},
+                {"name": "_acme-challenge.www.acme.com", "value": "www.acme.com.x.flydns.net.", "purpose": "Origin certificate validation (CNAME, DNS-only)"},
+                {"name": "_fly-ownership.www.acme.com", "value": "app-x", "purpose": "Origin certificate ownership (TXT, DNS-only)"}
+            ],
+            "ipv4": null, "ipv6": null, "saas": true
+        }));
+        let kinds: Vec<_> = r
+            .records()
+            .iter()
+            .map(|r| r["type"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(kinds, ["CNAME", "TXT", "CNAME", "TXT"]);
+    }
 }
