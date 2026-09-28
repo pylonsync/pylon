@@ -335,7 +335,9 @@ fn proxy_stream(
         Ok(s) => s,
         Err(e) => return unreachable(request, address, &e),
     };
-    let body = crate::server::SseBody::for_request(request, false);
+    // The body owns the connection so a stream that breaks off upstream
+    // can end the client's response without a terminal chunk.
+    let body = crate::server::SseBody::for_request(request, true);
     let address = address.to_string();
     let _ = std::thread::Builder::new()
         .name("pylon-shard-stream-proxy".into())
@@ -346,7 +348,11 @@ fn proxy_stream(
                 Ok((stream, status, headers, rest)) => {
                     let upstream =
                         std::io::BufReader::new(std::io::Cursor::new(rest).chain(stream));
-                    relay_stream(status, &headers, upstream, body);
+                    if relay_stream(status, &headers, upstream, body) == RelayEnd::Truncated {
+                        tracing::warn!(
+                            "[shards] stream from {address} broke off; cut off the client's"
+                        );
+                    }
                 }
                 Err(e) => {
                     tracing::warn!("[shards] proxy to {address} failed: {e}");
@@ -369,15 +375,29 @@ fn proxy_stream(
     200
 }
 
+/// How a relayed body ended.
+#[derive(Debug, PartialEq, Eq)]
+enum RelayEnd {
+    /// The machine's body ended (its terminal chunk, or its close for a
+    /// close-delimited body).
+    Complete,
+    /// The machine's body broke off mid-stream (read error, EOF before
+    /// the terminal chunk, malformed chunk).
+    Truncated,
+    /// The client went away.
+    ClientGone,
+}
+
 /// Relay the machine's response (its head already read) to the client.
 ///
-/// The client's connection outlives this response: tiny_http keeps an
-/// HTTP/1.1 connection open for the client's next request after the
-/// writer drops. So the body is re-framed for the client ([`SseBody`]:
-/// chunked on HTTP/1.1, close-delimited on HTTP/1.0) and always ended,
-/// including when the machine's stream breaks off mid-body. An SSE client
-/// then reconnects at once instead of waiting on a response that never
-/// ends. A body with a `Content-Length` is copied as is.
+/// The body is re-framed for the client ([`SseBody`]: chunked on
+/// HTTP/1.1, close-delimited on HTTP/1.0) on a connection the body owns.
+/// A complete body is ended (terminal chunk) and the connection closed.
+/// A body that broke off upstream is not ended: the connection closes
+/// without the terminal chunk, so the client sees a cut-off response,
+/// not a complete one, and an SSE client reconnects at once instead of
+/// waiting out an idle timeout. A body with a `Content-Length` is copied
+/// as is.
 ///
 /// [`SseBody`]: crate::server::SseBody
 fn relay_stream<R: std::io::BufRead, W: Write>(
@@ -385,7 +405,7 @@ fn relay_stream<R: std::io::BufRead, W: Write>(
     headers: &[(String, String)],
     mut upstream: R,
     mut body: crate::server::SseBody<W>,
-) {
+) -> RelayEnd {
     let header = |name: &str| {
         headers
             .iter()
@@ -419,62 +439,69 @@ fn relay_stream<R: std::io::BufRead, W: Write>(
         }
         head.push_str(&format!("Content-Length: {n}\r\n\r\n"));
         if body.write_head(&head).is_err() {
-            return;
+            return RelayEnd::ClientGone;
         }
         let mut writer = body.into_inner();
-        let _ = std::io::copy(&mut upstream.take(n), &mut writer);
-        let _ = writer.flush();
-        return;
+        return match std::io::copy(&mut upstream.take(n), &mut writer) {
+            Ok(copied) if copied == n => {
+                let _ = writer.flush();
+                RelayEnd::Complete
+            }
+            _ => RelayEnd::Truncated,
+        };
     }
     head.push_str(body.head_headers());
     head.push_str("\r\n");
     if body.write_head(&head).is_err() {
-        return;
+        return RelayEnd::ClientGone;
     }
-    let delivered = if chunked {
+    let end = if chunked {
         relay_chunks(&mut upstream, &mut body)
     } else {
         relay_until_eof(&mut upstream, &mut body)
     };
-    if delivered {
-        let _ = body.finish();
+    match end {
+        RelayEnd::Complete => {
+            let _ = body.finish();
+        }
+        RelayEnd::Truncated | RelayEnd::ClientGone => body.abort(),
     }
+    end
 }
 
 /// Copy a chunked body's data to `body`, one flush per chunk (SSE events
-/// must not wait in a buffer). Returns `false` when the client is gone;
-/// `true` when the machine's body ended, cleanly or not.
+/// must not wait in a buffer).
 fn relay_chunks<R: std::io::BufRead, W: Write>(
     upstream: &mut R,
     body: &mut crate::server::SseBody<W>,
-) -> bool {
+) -> RelayEnd {
     let mut line = String::new();
     let mut data = Vec::new();
     loop {
         line.clear();
         match upstream.read_line(&mut line) {
-            Ok(0) | Err(_) => return true,
+            Ok(0) | Err(_) => return RelayEnd::Truncated,
             Ok(_) => {}
         }
         let size_field = line.trim().split(';').next().unwrap_or("");
         let Ok(size) = u64::from_str_radix(size_field, 16) else {
-            return true;
+            return RelayEnd::Truncated;
         };
         if size == 0 {
-            return true;
+            return RelayEnd::Complete;
         }
         data.clear();
         match (&mut *upstream).take(size).read_to_end(&mut data) {
             Ok(n) if n as u64 == size => {}
-            _ => return true,
+            _ => return RelayEnd::Truncated,
         }
         // The CRLF after the chunk data.
         line.clear();
-        if upstream.read_line(&mut line).is_err() {
-            return true;
+        if !matches!(upstream.read_line(&mut line), Ok(n) if n > 0) {
+            return RelayEnd::Truncated;
         }
         if body.send(&data).is_err() {
-            return false;
+            return RelayEnd::ClientGone;
         }
     }
 }
@@ -483,14 +510,15 @@ fn relay_chunks<R: std::io::BufRead, W: Write>(
 fn relay_until_eof<R: Read, W: Write>(
     upstream: &mut R,
     body: &mut crate::server::SseBody<W>,
-) -> bool {
+) -> RelayEnd {
     let mut buf = [0u8; 16 * 1024];
     loop {
         match upstream.read(&mut buf) {
-            Ok(0) | Err(_) => return true,
+            Ok(0) => return RelayEnd::Complete,
+            Err(_) => return RelayEnd::Truncated,
             Ok(n) => {
                 if body.send(&buf[..n]).is_err() {
-                    return false;
+                    return RelayEnd::ClientGone;
                 }
             }
         }
@@ -650,14 +678,30 @@ mod tests {
         );
     }
 
-    /// Before, the relay copied the machine's bytes until it closed, so a
-    /// stream that broke off mid-body (the machine died) left the client
-    /// waiting on a response that never ended until the server's idle
-    /// timeout. Now the response ends and the SSE client reconnects.
+    /// A stream that broke off upstream (the machine died, a network cut)
+    /// must not look complete to the client: no terminal chunk. The relay
+    /// closes the client's connection instead, so an SSE client
+    /// reconnects at once.
     #[test]
-    fn a_stream_that_breaks_off_still_ends_for_the_client() {
-        let out = relayed(200, SSE, b"9\r\ndata: a\n\n\r\n1f\r\ndata: tru", true);
-        assert!(out.ends_with("9\r\ndata: a\n\n\r\n0\r\n\r\n"), "{out}");
+    fn a_stream_that_breaks_off_is_cut_off_for_the_client() {
+        let headers: Vec<(String, String)> = SSE
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let mut out = Vec::new();
+        let end = relay_stream(
+            200,
+            &headers,
+            std::io::BufReader::new(&b"9\r\ndata: a\n\n\r\n1f\r\ndata: tru"[..]),
+            crate::server::SseBody::new(&mut out, &tiny_http::HTTPVersion(1, 1)),
+        );
+        assert_eq!(end, RelayEnd::Truncated);
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.ends_with("9\r\ndata: a\n\n\r\n"), "{out}");
+        assert!(
+            !out.contains("0\r\n\r\n"),
+            "a cut-off stream ended cleanly: {out}"
+        );
     }
 
     /// Before, an HTTP/1.0 client got the machine's chunked encoding,
