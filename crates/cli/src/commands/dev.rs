@@ -1015,10 +1015,8 @@ fn collect_env_mtimes(paths: &[PathBuf]) -> HashMap<PathBuf, Option<SystemTime>>
         .collect()
 }
 
-/// Replace the current process with a fresh `pylon dev` invocation.
-/// On-disk state (sessions, DB, uploads) survives in `.pylon/`. WS
-/// connections drop and reconnect in ~100ms.
-/// Close every inherited descriptor above stdio, immediately before `exec`.
+/// Mark every inherited descriptor above stdio close-on-exec, immediately
+/// before `exec`.
 ///
 /// `exec` replaces the process image but does NOT close open file descriptors.
 /// Without this, every socket the outgoing image had already accepted survives
@@ -1031,27 +1029,35 @@ fn collect_env_mtimes(paths: &[PathBuf]) -> HashMap<PathBuf, Option<SystemTime>>
 /// coding agent saving files continuously, requests land in that window
 /// constantly, which reads as "hot reload keeps hanging".
 ///
-/// Closing them makes the peer see EOF at once and retry against the new image.
-/// Nothing needs to be inherited — the successor rebinds its listeners,
-/// reconnects the database pool, and respawns the Bun runner pool during its
-/// own boot. Dropping the runner pipes also lets orphaned runners from the
-/// outgoing image exit instead of lingering.
+/// Marking them close-on-exec makes the kernel close them at the exec, so the
+/// peer sees EOF at once and retries against the new image. Nothing needs to
+/// be inherited — the successor rebinds its listeners, reconnects the database
+/// pool, and respawns the Bun runner pool during its own boot. Dropping the
+/// runner pipes also lets orphaned runners from the outgoing image exit instead
+/// of lingering.
+///
+/// The descriptors are not closed here. Other threads (the accept loops, the
+/// file watcher, the database pool) still own them until the exec, and Rust
+/// aborts the process with "IO Safety violation: owned file descriptor already
+/// closed" when an owner touches a descriptor that was closed under it.
 ///
 /// stdin/stdout/stderr (0/1/2) are deliberately kept: the successor inherits
 /// the terminal.
 #[cfg(unix)]
-fn close_inherited_fds() {
+fn mark_inherited_fds_cloexec() {
     for fd in inherited_fds_to_close() {
-        // SAFETY: this process is about to be replaced by exec, so no other
-        // code can observe these descriptors afterwards. close() on an
-        // already-invalid fd just returns EBADF.
+        // SAFETY: fcntl only changes the descriptor flags. An fd that closed
+        // after the listing returns EBADF, which is harmless.
         unsafe {
-            libc::close(fd);
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags >= 0 {
+                libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+            }
         }
     }
 }
 
-/// The descriptors `close_inherited_fds` will close: everything currently open
+/// The descriptors `mark_inherited_fds_cloexec` marks: everything currently open
 /// above stdio. Split out from the closing loop so it can be tested without the
 /// test process closing its own harness descriptors.
 #[cfg(unix)]
@@ -1077,6 +1083,9 @@ fn inherited_fds_to_close() -> Vec<i32> {
     fds
 }
 
+/// Replace the current process with a fresh `pylon dev` invocation.
+/// On-disk state (sessions, DB, uploads) survives in `.pylon/`. WS
+/// connections drop and reconnect in ~100ms.
 fn exec_restart(_json_mode: bool) {
     let args: Vec<String> = std::env::args().collect();
     let exe = match std::env::current_exe() {
@@ -1094,7 +1103,7 @@ fn exec_restart(_json_mode: bool) {
         unsafe {
             std::env::set_var("PYLON_DEV_RELOAD", "1");
         }
-        close_inherited_fds();
+        mark_inherited_fds_cloexec();
         let err = std::process::Command::new(&exe).args(&args[1..]).exec();
         eprintln!("[dev] exec failed: {err}");
     }
@@ -1606,6 +1615,38 @@ mod tests {
             Path::new("/Users/me/dist/my-app/app/page.tsx"),
             nested
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mark_inherited_fds_cloexec_keeps_fds_open_and_sets_the_flag() {
+        use super::mark_inherited_fds_cloexec;
+
+        // Closing the descriptors before exec aborted `pylon dev` with "IO
+        // Safety violation: owned file descriptor already closed" when another
+        // thread still owned one. The marking must leave every fd open.
+        let mut fds = [0i32; 2];
+        // SAFETY: plain pipe(2); both ends are closed at the end of the test.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        for fd in fds {
+            // pipe(2) does not set FD_CLOEXEC.
+            assert_eq!(
+                unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC,
+                0
+            );
+        }
+
+        mark_inherited_fds_cloexec();
+
+        for fd in fds {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            assert!(flags >= 0, "fd {fd} must still be open");
+            assert_ne!(flags & libc::FD_CLOEXEC, 0, "fd {fd} must be close-on-exec");
+            unsafe { libc::close(fd) };
+        }
+        for stdio in [0, 1, 2] {
+            assert!(unsafe { libc::fcntl(stdio, libc::F_GETFD) } >= 0);
+        }
     }
 
     #[cfg(unix)]
