@@ -3730,9 +3730,14 @@ fn start_server(
         // `limiter_guards` is moved into the worker so the global +
         // per-IP slots stay reserved for the request's lifetime and
         // release when the worker thread exits.
+        //
+        // The stack is the std default (2 MiB). Only touched pages use
+        // memory. Request paths make outbound TLS calls (the HIBP password
+        // check, OAuth token exchange, webhooks), and a TLS handshake in a
+        // debug build overflows 512 KiB.
         let _ = std::thread::Builder::new()
             .name("pylon-http-worker".into())
-            .stack_size(512 * 1024)
+            .stack_size(2 * 1024 * 1024)
             .spawn(move || {
                 // Hold the slots for the worker's lifetime.
                 let _limiter_guards = limiter_guards;

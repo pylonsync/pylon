@@ -106,12 +106,7 @@ pub fn check_pwned(password: &str) -> Result<u64, String> {
     let hash = sha1_hex_upper(password.as_bytes());
     let (prefix, suffix) = hash.split_at(5);
     let url = format!("https://api.pwnedpasswords.com/range/{prefix}");
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(5))
-        .timeout_read(std::time::Duration::from_secs(5))
-        .user_agent("pylon-auth")
-        .build();
-    let body = agent
+    let body = hibp_agent()
         .get(&url)
         // "Add-Padding: true" makes responses constant-size so a
         // network-level observer can't infer pwned-ness from byte
@@ -122,6 +117,19 @@ pub fn check_pwned(password: &str) -> Result<u64, String> {
         .into_string()
         .map_err(|e| format!("hibp body: {e}"))?;
     Ok(parse_hibp_range(&body, suffix))
+}
+
+/// One agent for every HIBP request, so the TLS config and root store are
+/// built once and connections are reused.
+fn hibp_agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .timeout_connect(std::time::Duration::from_secs(5))
+            .timeout_read(std::time::Duration::from_secs(5))
+            .user_agent("pylon-auth")
+            .build()
+    })
 }
 
 /// Parse the HIBP range response (line-separated `SUFFIX:COUNT`) and
