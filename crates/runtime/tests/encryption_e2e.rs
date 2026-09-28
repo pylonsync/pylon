@@ -117,7 +117,7 @@ fn round_trip_encrypts_at_rest_and_decrypts_on_read() {
         // Codex P1: every public API decrypts, so we can't prove the
         // bytes on disk are ciphertext just by calling the API. Open
         // a raw rusqlite connection and SELECT the ssn column to
-        // confirm the storage layer holds the `enc:v1:` wire format.
+        // confirm the storage layer holds the `enc:v2:` wire format.
         // This is the LOAD-BEARING assertion that the feature
         // actually does anything.
         let raw_via_api = rt.list("Customer").unwrap();
@@ -131,7 +131,7 @@ fn round_trip_encrypts_at_rest_and_decrypts_on_read() {
             .unwrap();
         let raw_ssn: String = stmt.query_row([id], |r| r.get(0)).unwrap();
         assert!(
-            raw_ssn.starts_with("enc:v1:"),
+            raw_ssn.starts_with("enc:v2:"),
             "Storage layer must hold ciphertext, not plaintext. Got: {raw_ssn}"
         );
         assert_ne!(raw_ssn, "111-22-3333", "Plaintext leaked to disk!");
@@ -284,7 +284,7 @@ fn tx_store_path_encrypts() {
             .unwrap();
         let raw_ssn: String = stmt.query_row([id], |r| r.get(0)).unwrap();
         assert!(
-            raw_ssn.starts_with("enc:v1:"),
+            raw_ssn.starts_with("enc:v2:"),
             "TxStore (insert_with_conn) must encrypt. Got plaintext: {raw_ssn}"
         );
         // And confirm the read-back via _with_conn decrypts.
@@ -311,4 +311,113 @@ fn update_re_encrypts_field() {
         let row = rt.get_by_id("Customer", &id).unwrap().unwrap();
         assert_eq!(row["ssn"], "new-ssn");
     });
+}
+
+const OLD_KEY: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+const NEW_KEY: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
+fn raw_ssn(rt: &Runtime, id: &str) -> String {
+    let conn = rt.lock_conn_pub().unwrap();
+    let mut stmt = conn
+        .prepare("SELECT ssn FROM Customer WHERE id = ?1")
+        .unwrap();
+    stmt.query_row([id], |r| r.get(0)).unwrap()
+}
+
+/// Open a file-backed runtime with the given current and previous keys.
+fn open_with_keys(path: &str, current: &str, previous: &str) -> Runtime {
+    std::env::set_var("PYLON_ENCRYPTION_KEY", current);
+    if previous.is_empty() {
+        std::env::remove_var("PYLON_ENCRYPTION_PREVIOUS_KEYS");
+    } else {
+        std::env::set_var("PYLON_ENCRYPTION_PREVIOUS_KEYS", previous);
+    }
+    let rt = Runtime::open(path, manifest_with_encrypted_ssn()).unwrap();
+    std::env::remove_var("PYLON_ENCRYPTION_KEY");
+    std::env::remove_var("PYLON_ENCRYPTION_PREVIOUS_KEYS");
+    rt
+}
+
+#[test]
+fn key_rotation_reads_old_values_and_reencrypts_them_with_the_new_key() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let dir = std::env::temp_dir().join(format!("pylon-rotate-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("app.db");
+    let path = path.to_str().unwrap();
+    let ids = [
+        "aaaa1234ef567890abcd1234ef567890abcd1234",
+        "bbbb1234ef567890abcd1234ef567890abcd1234",
+    ];
+
+    // Written under the old key.
+    {
+        let rt = open_with_keys(path, OLD_KEY, "");
+        for (i, id) in ids.iter().enumerate() {
+            rt.insert(
+                "Customer",
+                &json!({ "id": id, "name": "n", "ssn": format!("ssn-{i}") }),
+            )
+            .unwrap();
+        }
+    }
+
+    // Rotate: new current key, old key kept for reads.
+    let old_id;
+    let new_id;
+    {
+        let rt = open_with_keys(path, NEW_KEY, OLD_KEY);
+        let key_ids: Vec<String> = raw_ssn(&rt, ids[0])
+            .strip_prefix("enc:v2:")
+            .unwrap()
+            .split(':')
+            .take(1)
+            .map(str::to_string)
+            .collect();
+        old_id = key_ids[0].clone();
+        // Reads still work before the pass.
+        assert_eq!(
+            rt.get_by_id("Customer", ids[0]).unwrap().unwrap()["ssn"],
+            "ssn-0"
+        );
+
+        let report = rt.rotate_encrypted_fields(1).unwrap();
+        assert_eq!(report.rotated, 2, "{report:?}");
+        assert_eq!(report.failed, 0);
+        new_id = raw_ssn(&rt, ids[0])
+            .strip_prefix("enc:v2:")
+            .unwrap()
+            .split(':')
+            .next()
+            .unwrap()
+            .to_string();
+        assert_ne!(new_id, old_id);
+
+        // A second pass has nothing left to do.
+        let again = rt.rotate_encrypted_fields(10).unwrap();
+        assert_eq!((again.rotated, again.failed), (0, 0));
+    }
+
+    // The old key is no longer needed.
+    {
+        let rt = open_with_keys(path, NEW_KEY, "");
+        for (i, id) in ids.iter().enumerate() {
+            assert_eq!(
+                rt.get_by_id("Customer", id).unwrap().unwrap()["ssn"],
+                format!("ssn-{i}")
+            );
+            assert!(raw_ssn(&rt, id).starts_with(&format!("enc:v2:{new_id}:")));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn previous_keys_without_a_current_key_fail_boot() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    std::env::remove_var("PYLON_ENCRYPTION_KEY");
+    std::env::set_var("PYLON_ENCRYPTION_PREVIOUS_KEYS", OLD_KEY);
+    let result = Runtime::in_memory(manifest_with_encrypted_ssn());
+    std::env::remove_var("PYLON_ENCRYPTION_PREVIOUS_KEYS");
+    assert!(result.is_err());
 }

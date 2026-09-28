@@ -3,74 +3,96 @@
 //! AEAD primitive: ChaCha20-Poly1305 (via `ring`). Same family
 //! pylon-auth uses for session cookies — no new system dependency.
 //!
-//! Wire format on disk: `enc:v1:<base64(nonce)>:<base64(ciphertext)>`
-//! - `v1` versions the format so future rotations (key derivation,
-//!   AEAD swap) can co-exist with v1 records.
+//! Wire format on disk: `enc:v2:<key-id>:<base64(nonce)>:<base64(ciphertext)>`
+//! - `key-id` names the key that sealed the value (see [`key_id`]), so
+//!   several keys can be active at once and a value is opened with the
+//!   right one.
 //! - 96-bit nonce, generated fresh per cell from `SystemRandom`.
 //! - Ciphertext includes the 16-byte Poly1305 tag (`Aead::seal_in_place_append_tag`).
+//! - `enc:v1:<nonce>:<ciphertext>` values (no key id) still decrypt: each
+//!   configured key is tried in turn.
 //!
 //! Threat model:
 //! - Protects against DB file copy, SQL dump leak, unauthorized
 //!   physical access to the disk.
 //! - Does NOT protect against an attacker with code execution on the
-//!   Pylon process — the key lives in env / process memory.
+//!   Pylon process — the keys live in env / process memory.
 //! - Does NOT defend against side-channel attacks against the AEAD
 //!   itself (constant-time deps from ring).
 //! - Encrypted fields are NOT queryable. Indexes + WHERE filters on
 //!   encrypted fields don't work (ciphertext differs across writes).
 //!
-//! Key sourcing: `PYLON_ENCRYPTION_KEY` env. Either raw 32 bytes
-//! base64-encoded, OR a 64-char hex string. Loading happens once at
-//! boot via [`EncryptionKey::from_env`].
+//! Keys: `PYLON_ENCRYPTION_KEY` is the current key; every write uses it.
+//! `PYLON_ENCRYPTION_PREVIOUS_KEYS` (comma-separated) lists old keys that
+//! are used only to decrypt, during a rotation. Each key is raw 32 bytes,
+//! base64-encoded, or a 64-char hex string. Loading happens once at boot
+//! via [`EncryptionKey::from_env`].
 
 use std::sync::Arc;
 
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305};
 use ring::rand::{SecureRandom, SystemRandom};
 
-/// Wire-format prefix every encrypted cell starts with. Older
-/// records that don't start with `ENC_PREFIX` are returned as-is
-/// from [`decrypt_if_needed`] so a manifest gaining `encrypted: true`
-/// on a populated table doesn't break existing plaintext rows —
-/// rows get re-encrypted on next write through the mutation
-/// pipeline.
-pub const ENC_PREFIX: &str = "enc:v1:";
+/// Prefix of the current wire format: `enc:v2:<key-id>:<nonce>:<ct>`.
+pub const ENC_PREFIX: &str = "enc:v2:";
+
+/// Prefix of the first wire format, which has no key id:
+/// `enc:v1:<nonce>:<ct>`. Still decrypted; never written.
+pub const ENC_PREFIX_V1: &str = "enc:v1:";
 
 const NONCE_LEN: usize = 12;
 
+/// Length in hex characters of a key id.
+const KEY_ID_LEN: usize = 16;
+
+/// A set of field-encryption keys: one current key that seals every new
+/// value, plus previous keys that only open values sealed before a
+/// rotation. Cheap to clone.
 #[derive(Clone)]
 pub struct EncryptionKey {
     inner: Arc<EncryptionKeyInner>,
 }
 
 struct EncryptionKeyInner {
-    key: LessSafeKey,
+    current: KeyEntry,
+    previous: Vec<KeyEntry>,
     rng: SystemRandom,
+}
+
+struct KeyEntry {
+    id: String,
+    key: LessSafeKey,
 }
 
 #[derive(Debug)]
 pub enum EncryptionError {
-    /// PYLON_ENCRYPTION_KEY env was set but couldn't be decoded
-    /// (wrong length, invalid base64/hex). Boot-time error.
+    /// A key env var was set but couldn't be decoded (wrong length,
+    /// invalid base64/hex). Boot-time error.
     InvalidKey(String),
     /// Encrypt / decrypt operation failed at runtime.
     CryptoFailed,
-    /// Decrypt called on data that doesn't have the `enc:v1:` prefix.
+    /// Decrypt called on data that doesn't have an `enc:` prefix.
     /// Callers usually ignore this (legacy plaintext rows).
     NotEncrypted,
     /// Wire format violated after the prefix.
     MalformedWireFormat,
+    /// The value was sealed with a key that is not configured. Add it to
+    /// `PYLON_ENCRYPTION_PREVIOUS_KEYS` to read the value.
+    UnknownKey(String),
 }
 
 impl std::fmt::Display for EncryptionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidKey(reason) => {
-                write!(f, "Invalid PYLON_ENCRYPTION_KEY: {reason}")
-            }
+            Self::InvalidKey(reason) => write!(f, "Invalid encryption key: {reason}"),
             Self::CryptoFailed => write!(f, "AEAD operation failed"),
             Self::NotEncrypted => write!(f, "Value is not encrypted"),
             Self::MalformedWireFormat => write!(f, "Malformed encrypted wire format"),
+            Self::UnknownKey(id) => write!(
+                f,
+                "Value was encrypted with key {id}, which is not configured; \
+                 add that key to PYLON_ENCRYPTION_PREVIOUS_KEYS"
+            ),
         }
     }
 }
@@ -78,44 +100,91 @@ impl std::fmt::Display for EncryptionError {
 impl std::error::Error for EncryptionError {}
 
 impl EncryptionKey {
-    /// Load the encryption key from `PYLON_ENCRYPTION_KEY` env.
-    /// Returns `Ok(None)` when the env is unset — the caller is
-    /// responsible for rejecting writes to `encrypted: true` fields
-    /// in that case. Returns `Err` when the env IS set but the
-    /// value is malformed (boot-time failure; don't start serving).
+    /// Load keys from `PYLON_ENCRYPTION_KEY` (current) and
+    /// `PYLON_ENCRYPTION_PREVIOUS_KEYS` (comma-separated, decrypt only).
+    /// Returns `Ok(None)` when no current key is set — the caller is
+    /// responsible for rejecting writes to `encrypted: true` fields in
+    /// that case. Returns `Err` when a value is malformed, or previous
+    /// keys are set without a current key (boot-time failure; don't start
+    /// serving).
     pub fn from_env() -> Result<Option<Self>, EncryptionError> {
-        let raw = match std::env::var("PYLON_ENCRYPTION_KEY") {
-            Ok(s) if !s.is_empty() => s,
-            _ => return Ok(None),
-        };
-        Self::from_raw(&raw).map(Some)
+        let current = std::env::var("PYLON_ENCRYPTION_KEY").unwrap_or_default();
+        let previous = std::env::var("PYLON_ENCRYPTION_PREVIOUS_KEYS").unwrap_or_default();
+        if current.trim().is_empty() {
+            if !previous.trim().is_empty() {
+                return Err(EncryptionError::InvalidKey(
+                    "PYLON_ENCRYPTION_PREVIOUS_KEYS is set but PYLON_ENCRYPTION_KEY is not".into(),
+                ));
+            }
+            return Ok(None);
+        }
+        let previous: Vec<&str> = previous
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        Self::from_raw_keys(&current, &previous).map(Some)
     }
 
-    /// Build a key from the raw `PYLON_ENCRYPTION_KEY` string.
-    /// Accepts either:
+    /// Build a key set with one key and no previous keys. Accepts either:
     /// - 64-char hex (e.g. `openssl rand -hex 32`)
     /// - 44-char standard base64 with padding (e.g. `openssl rand -base64 32`)
     /// - 43-char base64 without padding (URL-safe or standard)
     pub fn from_raw(raw: &str) -> Result<Self, EncryptionError> {
-        let bytes = decode_key(raw)?;
-        if bytes.len() != 32 {
-            return Err(EncryptionError::InvalidKey(format!(
-                "expected 32 bytes after decode, got {}",
-                bytes.len()
-            )));
+        Self::from_raw_keys(raw, &[])
+    }
+
+    /// Build a key set from a current key and decrypt-only previous keys.
+    pub fn from_raw_keys(current: &str, previous: &[&str]) -> Result<Self, EncryptionError> {
+        let current = KeyEntry::from_raw(current)?;
+        let mut entries: Vec<KeyEntry> = Vec::with_capacity(previous.len());
+        for raw in previous {
+            let entry = KeyEntry::from_raw(raw)?;
+            if entry.id == current.id || entries.iter().any(|e| e.id == entry.id) {
+                return Err(EncryptionError::InvalidKey(format!(
+                    "key {} is listed more than once",
+                    entry.id
+                )));
+            }
+            entries.push(entry);
         }
-        let unbound = UnboundKey::new(&CHACHA20_POLY1305, &bytes)
-            .map_err(|_| EncryptionError::InvalidKey("ring rejected the key material".into()))?;
         Ok(Self {
             inner: Arc::new(EncryptionKeyInner {
-                key: LessSafeKey::new(unbound),
+                current,
+                previous: entries,
                 rng: SystemRandom::new(),
             }),
         })
     }
 
-    /// Encrypt a plaintext string. Returns the wire-format encrypted
-    /// value (`enc:v1:<nonce-b64>:<ct-b64>`).
+    /// Id of the key new values are sealed with.
+    pub fn current_key_id(&self) -> &str {
+        &self.inner.current.id
+    }
+
+    /// Ids of the decrypt-only previous keys.
+    pub fn previous_key_ids(&self) -> Vec<&str> {
+        self.inner.previous.iter().map(|e| e.id.as_str()).collect()
+    }
+
+    /// True when `wire` is ciphertext that is not sealed with the current
+    /// key (a v1 value, or a v2 value with another key id). Rotation
+    /// re-encrypts these.
+    pub fn needs_rotation(&self, wire: &str) -> bool {
+        if wire.starts_with(ENC_PREFIX_V1) {
+            return true;
+        }
+        match wire
+            .strip_prefix(ENC_PREFIX)
+            .and_then(|r| r.split_once(':'))
+        {
+            Some((id, _)) => id != self.inner.current.id,
+            None => false,
+        }
+    }
+
+    /// Encrypt a plaintext string with the current key. Returns the
+    /// wire-format value (`enc:v2:<key-id>:<nonce-b64>:<ct-b64>`).
     ///
     /// AAD binds `entity || \0 || field_name || \0 || row_id` to the
     /// AEAD tag. An attacker who copies a ciphertext blob between
@@ -145,6 +214,7 @@ impl EncryptionKey {
         let aad = build_aad(entity, field, row_id);
         let mut in_out = plaintext.as_bytes().to_vec();
         self.inner
+            .current
             .key
             .seal_in_place_append_tag(nonce, Aad::from(aad.as_slice()), &mut in_out)
             .map_err(|_| EncryptionError::CryptoFailed)?;
@@ -152,15 +222,16 @@ impl EncryptionKey {
         use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
         let nonce_b64 = STANDARD_NO_PAD.encode(nonce_bytes);
         let ct_b64 = STANDARD_NO_PAD.encode(&in_out);
-        Ok(format!("{ENC_PREFIX}{nonce_b64}:{ct_b64}"))
+        Ok(format!(
+            "{ENC_PREFIX}{}:{nonce_b64}:{ct_b64}",
+            self.inner.current.id
+        ))
     }
 
-    /// Decrypt a wire-format encrypted string. Errors if the input
-    /// doesn't have the `enc:v1:` prefix or fails AEAD verification.
-    ///
-    /// Tries AAD with `row_id` first, then without — forwards/backwards
-    /// compat with rows encrypted before the row-id binding was
-    /// added.
+    /// Decrypt a wire-format value. A v2 value is opened with the key its
+    /// id names; a v1 value is tried against the current key, then each
+    /// previous key. Errors if the input has no `enc:` prefix, names an
+    /// unconfigured key, or fails AEAD verification.
     pub fn decrypt(
         &self,
         wire: &str,
@@ -168,52 +239,127 @@ impl EncryptionKey {
         field: &str,
         row_id: Option<&str>,
     ) -> Result<String, EncryptionError> {
-        let rest = wire
-            .strip_prefix(ENC_PREFIX)
-            .ok_or(EncryptionError::NotEncrypted)?;
-        let (nonce_b64, ct_b64) = rest
-            .split_once(':')
-            .ok_or(EncryptionError::MalformedWireFormat)?;
-
-        use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
-        let nonce_bytes = STANDARD_NO_PAD
-            .decode(nonce_b64)
-            .map_err(|_| EncryptionError::MalformedWireFormat)?;
-        if nonce_bytes.len() != NONCE_LEN {
-            return Err(EncryptionError::MalformedWireFormat);
+        if let Some(rest) = wire.strip_prefix(ENC_PREFIX) {
+            let (id, body) = rest
+                .split_once(':')
+                .ok_or(EncryptionError::MalformedWireFormat)?;
+            let entry = std::iter::once(&self.inner.current)
+                .chain(self.inner.previous.iter())
+                .find(|e| e.id == id)
+                .ok_or_else(|| EncryptionError::UnknownKey(id.to_string()))?;
+            let (nonce, ct) = parse_body(body)?;
+            return entry.open(nonce, ct, entity, field, row_id);
         }
-        let mut ct = STANDARD_NO_PAD
-            .decode(ct_b64)
-            .map_err(|_| EncryptionError::MalformedWireFormat)?;
+        if let Some(body) = wire.strip_prefix(ENC_PREFIX_V1) {
+            let (nonce, ct) = parse_body(body)?;
+            for entry in std::iter::once(&self.inner.current).chain(self.inner.previous.iter()) {
+                if let Ok(plain) = entry.open(nonce, ct.clone(), entity, field, row_id) {
+                    return Ok(plain);
+                }
+            }
+            return Err(EncryptionError::CryptoFailed);
+        }
+        Err(EncryptionError::NotEncrypted)
+    }
+}
 
-        let mut nonce_arr = [0u8; NONCE_LEN];
-        nonce_arr.copy_from_slice(&nonce_bytes);
-        let nonce = Nonce::assume_unique_for_key(nonce_arr);
+impl KeyEntry {
+    fn from_raw(raw: &str) -> Result<Self, EncryptionError> {
+        let bytes = decode_key(raw)?;
+        if bytes.len() != 32 {
+            return Err(EncryptionError::InvalidKey(format!(
+                "expected 32 bytes after decode, got {}",
+                bytes.len()
+            )));
+        }
+        let unbound = UnboundKey::new(&CHACHA20_POLY1305, &bytes)
+            .map_err(|_| EncryptionError::InvalidKey("ring rejected the key material".into()))?;
+        Ok(Self {
+            id: key_id(&bytes),
+            key: LessSafeKey::new(unbound),
+        })
+    }
 
-        // Try AAD with row_id binding first (current encrypt path);
-        // fall back to legacy AAD without row_id for rows written
-        // before the binding was added. ring's open_in_place
-        // consumes `ct`, so make a copy for the fallback.
-        let ct_for_fallback = ct.clone();
-        let aad_with_row = build_aad(entity, field, row_id);
-        if let Ok(plain) =
-            self.inner
-                .key
-                .open_in_place(nonce, Aad::from(aad_with_row.as_slice()), &mut ct)
-        {
+    /// Open `ct` with AAD bound to the row id first, then without it
+    /// (rows written before the row-id binding was added).
+    fn open(
+        &self,
+        nonce: [u8; NONCE_LEN],
+        ct: Vec<u8>,
+        entity: &str,
+        field: &str,
+        row_id: Option<&str>,
+    ) -> Result<String, EncryptionError> {
+        let mut with_row = ct.clone();
+        let aad = build_aad(entity, field, row_id);
+        if let Ok(plain) = self.key.open_in_place(
+            Nonce::assume_unique_for_key(nonce),
+            Aad::from(aad.as_slice()),
+            &mut with_row,
+        ) {
             return String::from_utf8(plain.to_vec()).map_err(|_| EncryptionError::CryptoFailed);
         }
-        // Fall back to AAD without row_id (legacy rows).
-        let mut ct2 = ct_for_fallback;
-        let nonce2 = Nonce::assume_unique_for_key(nonce_arr);
-        let aad_legacy = build_aad(entity, field, None);
+        let mut legacy = ct;
+        let aad = build_aad(entity, field, None);
         let plain = self
-            .inner
             .key
-            .open_in_place(nonce2, Aad::from(aad_legacy.as_slice()), &mut ct2)
+            .open_in_place(
+                Nonce::assume_unique_for_key(nonce),
+                Aad::from(aad.as_slice()),
+                &mut legacy,
+            )
             .map_err(|_| EncryptionError::CryptoFailed)?;
         String::from_utf8(plain.to_vec()).map_err(|_| EncryptionError::CryptoFailed)
     }
+}
+
+/// Stable id for a key: the first 8 bytes of SHA-256 over a fixed label
+/// and the key, in hex. It identifies which key sealed a value without
+/// revealing anything useful about the key.
+pub fn key_id(key: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::new()
+        .chain_update(b"pylon-encryption-key-id:v1:")
+        .chain_update(key)
+        .finalize();
+    digest
+        .iter()
+        .take(KEY_ID_LEN / 2)
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Split `<nonce-b64>:<ct-b64>` into its decoded parts.
+fn parse_body(body: &str) -> Result<([u8; NONCE_LEN], Vec<u8>), EncryptionError> {
+    use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
+    let (nonce_b64, ct_b64) = body
+        .split_once(':')
+        .ok_or(EncryptionError::MalformedWireFormat)?;
+    let nonce_bytes = STANDARD_NO_PAD
+        .decode(nonce_b64)
+        .map_err(|_| EncryptionError::MalformedWireFormat)?;
+    if nonce_bytes.len() != NONCE_LEN {
+        return Err(EncryptionError::MalformedWireFormat);
+    }
+    let ct = STANDARD_NO_PAD
+        .decode(ct_b64)
+        .map_err(|_| EncryptionError::MalformedWireFormat)?;
+    let mut nonce = [0u8; NONCE_LEN];
+    nonce.copy_from_slice(&nonce_bytes);
+    Ok((nonce, ct))
+}
+
+/// Result of one [`crate::Runtime::rotate_encrypted_fields`] pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct RotationReport {
+    pub rows_scanned: u64,
+    /// Values re-encrypted with the current key.
+    pub rotated: u64,
+    /// Values that changed between the read and the write; the writer
+    /// sealed them with the current key.
+    pub skipped_changed: u64,
+    /// Values no configured key could decrypt. Left unchanged.
+    pub failed: u64,
 }
 
 /// Bind the (entity, field [, row_id]) tuple as additional
@@ -240,7 +386,7 @@ fn build_aad(entity: &str, field: &str, row_id: Option<&str>) -> Vec<u8> {
 /// stay as plaintext until next write, and reading them must not
 /// fail.
 pub fn looks_encrypted(value: &str) -> bool {
-    value.starts_with(ENC_PREFIX)
+    value.starts_with(ENC_PREFIX) || value.starts_with(ENC_PREFIX_V1)
 }
 
 /// Decode the raw key string into bytes. Tries hex first (most
@@ -281,10 +427,10 @@ fn hex_decode(s: &str) -> Result<Vec<u8>, EncryptionError> {
 // ---------------------------------------------------------------------------
 
 /// Encrypt every field in `row` named in `encrypted_fields`. Strings
-/// + JSON values get encrypted in place; null/missing fields are
-/// skipped. Already-encrypted values (already start with `enc:v1:`)
-/// are passed through — avoids double-wrapping when a row is
-/// re-written without changing the encrypted field.
+/// and JSON values get encrypted in place; null/missing fields are
+/// skipped. Already-encrypted values (with an `enc:` prefix) are
+/// passed through — avoids double-wrapping when a row is re-written
+/// without changing the encrypted field.
 ///
 /// AAD binds (entity, field_name) per cell — see `EncryptionKey::encrypt`.
 pub fn encrypt_row_fields(
@@ -454,9 +600,10 @@ mod tests {
     #[test]
     fn looks_encrypted_distinguishes_plaintext() {
         assert!(looks_encrypted("enc:v1:abcd:efgh"));
+        assert!(looks_encrypted("enc:v2:0011223344556677:abcd:efgh"));
         assert!(!looks_encrypted("hello world"));
         assert!(!looks_encrypted(""));
-        assert!(!looks_encrypted("enc:v2:..."));
+        assert!(!looks_encrypted("enc:v3:..."));
     }
 
     #[test]
@@ -534,5 +681,109 @@ mod tests {
         encrypt_row_fields(&key, "C", &mut row, &["ssn"]).unwrap();
         decrypt_row_fields(&key, "C", &mut row, &["ssn"]).unwrap();
         assert_eq!(row["ssn"], serde_json::Value::String("12345".into()));
+    }
+
+    const K1: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const K2: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
+    /// Seal a value in the v1 format (no key id), as releases before key
+    /// ids wrote it.
+    fn seal_v1(raw_key: &str, plain: &str, entity: &str, field: &str, row: &str) -> String {
+        use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
+        let bytes = decode_key(raw_key).unwrap();
+        let key = LessSafeKey::new(UnboundKey::new(&CHACHA20_POLY1305, &bytes).unwrap());
+        let nonce = [7u8; NONCE_LEN];
+        let mut buf = plain.as_bytes().to_vec();
+        let aad = build_aad(entity, field, Some(row));
+        key.seal_in_place_append_tag(
+            Nonce::assume_unique_for_key(nonce),
+            Aad::from(aad.as_slice()),
+            &mut buf,
+        )
+        .unwrap();
+        format!(
+            "{ENC_PREFIX_V1}{}:{}",
+            STANDARD_NO_PAD.encode(nonce),
+            STANDARD_NO_PAD.encode(&buf)
+        )
+    }
+
+    #[test]
+    fn new_values_carry_the_current_key_id() {
+        let ring = EncryptionKey::from_raw_keys(K2, &[K1]).unwrap();
+        let ct = ring.encrypt("x", "E", "f", Some("r")).unwrap();
+        let id = ct
+            .strip_prefix(ENC_PREFIX)
+            .unwrap()
+            .split(':')
+            .next()
+            .unwrap();
+        assert_eq!(id, ring.current_key_id());
+        assert_eq!(id.len(), KEY_ID_LEN);
+        assert!(!ring.needs_rotation(&ct));
+    }
+
+    #[test]
+    fn previous_keys_open_old_values_and_mark_them_for_rotation() {
+        let old = EncryptionKey::from_raw(K1).unwrap();
+        let old_ct = old.encrypt("ssn-1", "Customer", "ssn", Some("r1")).unwrap();
+        let legacy = seal_v1(K1, "ssn-legacy", "Customer", "ssn", "r2");
+
+        let rotated = EncryptionKey::from_raw_keys(K2, &[K1]).unwrap();
+        assert_eq!(
+            rotated
+                .decrypt(&old_ct, "Customer", "ssn", Some("r1"))
+                .unwrap(),
+            "ssn-1"
+        );
+        assert_eq!(
+            rotated
+                .decrypt(&legacy, "Customer", "ssn", Some("r2"))
+                .unwrap(),
+            "ssn-legacy"
+        );
+        assert!(rotated.needs_rotation(&old_ct));
+        assert!(rotated.needs_rotation(&legacy));
+        assert!(!rotated.needs_rotation("plain text"));
+        assert_eq!(rotated.previous_key_ids(), vec![old.current_key_id()]);
+    }
+
+    #[test]
+    fn a_value_from_a_removed_key_names_the_missing_key() {
+        let old = EncryptionKey::from_raw(K1).unwrap();
+        let ct = old.encrypt("x", "E", "f", Some("r")).unwrap();
+        let only_new = EncryptionKey::from_raw(K2).unwrap();
+        match only_new.decrypt(&ct, "E", "f", Some("r")) {
+            Err(EncryptionError::UnknownKey(id)) => assert_eq!(id, old.current_key_id()),
+            other => panic!("expected UnknownKey, got {other:?}"),
+        }
+        // A v1 value from a removed key fails the tag check.
+        let legacy = seal_v1(K1, "x", "E", "f", "r");
+        assert!(only_new.decrypt(&legacy, "E", "f", Some("r")).is_err());
+    }
+
+    #[test]
+    fn a_forged_key_id_cannot_open_a_value() {
+        // Relabel a K1 value with K2's id: K2 then fails the tag check.
+        let ring = EncryptionKey::from_raw_keys(K2, &[K1]).unwrap();
+        let k1 = EncryptionKey::from_raw(K1).unwrap();
+        let ct = k1.encrypt("x", "E", "f", Some("r")).unwrap();
+        let forged = ct.replacen(k1.current_key_id(), ring.current_key_id(), 1);
+        assert!(ring.decrypt(&forged, "E", "f", Some("r")).is_err());
+    }
+
+    #[test]
+    fn duplicate_keys_are_rejected() {
+        assert!(EncryptionKey::from_raw_keys(K1, &[K1]).is_err());
+        assert!(EncryptionKey::from_raw_keys(K1, &[K2, K2]).is_err());
+    }
+
+    #[test]
+    fn key_ids_are_stable_and_distinct() {
+        let a = EncryptionKey::from_raw(K1).unwrap();
+        let b = EncryptionKey::from_raw(K1).unwrap();
+        let c = EncryptionKey::from_raw(K2).unwrap();
+        assert_eq!(a.current_key_id(), b.current_key_id());
+        assert_ne!(a.current_key_id(), c.current_key_id());
     }
 }

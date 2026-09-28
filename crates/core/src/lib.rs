@@ -1082,7 +1082,7 @@ pub struct ManifestField {
     ///
     /// Backed by `PYLON_ENCRYPTION_KEY` (32-byte URL-safe base64 key).
     /// AEAD = ChaCha20-Poly1305. Per-cell random nonce stored alongside
-    /// the ciphertext. Wire format: `enc:v1:<base64(nonce)>:<base64(ct)>`.
+    /// the ciphertext. Wire format: `enc:v2:<key-id>:<base64(nonce)>:<base64(ct)>`.
     ///
     /// Only valid for `string`/`text`/`json` field types. Booleans, ints,
     /// timestamps stay queryable + indexable. Indexed encrypted fields

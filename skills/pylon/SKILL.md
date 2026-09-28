@@ -164,7 +164,7 @@ encryptable. The matching arg validator is `v.json()`.
 - `.serverOnly()` — never serialized in HTTP responses (secrets, `passwordHash`, `stripeCustomerId`). Still readable inside functions via `ctx.db.*`.
 - `.syncOmit()` — stripped from REPLICATION only (snapshots, delta events, WS fanout, reconcile fetches); direct reads (`db.get`, lists, queries, SSR `serverData`) keep it. For heavy-but-not-secret columns — multi-KB JSON blobs, render plans, generated markdown — that would otherwise stream into every browser's replica on every sync. The replica row simply lacks the column; fetch by id when a detail view needs it. Declare such fields `.optional()` so the replica-row type is honest.
 - `.readonly()` — settable on insert, rejected on client update (closes IDOR-via-PATCH).
-- `.encrypted()` — AEAD-encrypted at rest (needs `PYLON_ENCRYPTION_KEY`).
+- `.encrypted()` — AEAD-encrypted at rest (needs `PYLON_ENCRYPTION_KEY`; rotate by moving the old key to `PYLON_ENCRYPTION_PREVIOUS_KEYS` — a background pass re-encrypts, `POST /api/admin/encryption/rotate` runs one now).
 - `.crdt("text")` — upgrade string/richtext to LoroText for collaborative merge
 
 `field.enum(["pending", "paid", "failed"])` also exists (stored as a string with allowed-values metadata so codegen emits a precise literal union). Note: there is **no `v.enum()`** validator counterpart — validate an enum arg with `v.union(v.literal("pending"), v.literal("paid"), ...)` or a plain `v.string()`.

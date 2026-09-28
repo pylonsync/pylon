@@ -2471,6 +2471,33 @@ fn start_server(
                 JobResult::Success
             }),
         );
+        // Re-encrypt values sealed with a previous field-encryption key.
+        // Runs only while PYLON_ENCRYPTION_PREVIOUS_KEYS is set; once a pass
+        // reports nothing rotated and nothing failed, the previous keys can
+        // be removed.
+        if runtime
+            .encryption_key_for_test()
+            .is_some_and(|k| !k.previous_key_ids().is_empty())
+        {
+            let rt_rotate = Arc::clone(&runtime);
+            let _ = scheduler.schedule(
+                "pylon.encryption.rotate",
+                "*/10 * * * *",
+                Arc::new(move |_job| match rt_rotate.rotate_encrypted_fields(500) {
+                    Ok(report) => {
+                        tracing::info!(
+                            "[encryption] rotation pass: {} rows scanned, {} rotated, {} changed concurrently, {} failed",
+                            report.rows_scanned,
+                            report.rotated,
+                            report.skipped_changed,
+                            report.failed
+                        );
+                        JobResult::Success
+                    }
+                    Err(e) => JobResult::Failure(format!("{}: {}", e.code, e.message)),
+                }),
+            );
+        }
         // Prune the jobs table itself. The cleanups above each leave a
         // `completed` row every run; unpruned they accumulate into thousands of
         // rows + a multi-MB WAL that slows boot. Keep ~1h of history.
@@ -5513,6 +5540,53 @@ fn start_server(
             );
             let _ = request.respond(response);
             mt.record_request("POST", status);
+            return;
+        }
+
+        // Field-encryption key status and on-demand rotation. Admin only.
+        //   GET  /api/admin/encryption         → current + previous key ids
+        //   POST /api/admin/encryption/rotate  → one re-encryption pass
+        if url == "/api/admin/encryption" || url == "/api/admin/encryption/rotate" {
+            let (status, body) = if !auth_ctx.is_admin {
+                (
+                    403u16,
+                    json_error("FORBIDDEN", "this endpoint requires admin auth"),
+                )
+            } else if url == "/api/admin/encryption" && method == Method::Get {
+                match rt.encryption_key_for_test() {
+                    Some(key) => (
+                        200,
+                        serde_json::json!({
+                            "configured": true,
+                            "currentKeyId": key.current_key_id(),
+                            "previousKeyIds": key.previous_key_ids(),
+                        })
+                        .to_string(),
+                    ),
+                    None => (200, serde_json::json!({ "configured": false }).to_string()),
+                }
+            } else if url == "/api/admin/encryption/rotate" && method == Method::Post {
+                match rt.rotate_encrypted_fields(500) {
+                    Ok(report) => (
+                        200,
+                        serde_json::to_string(&report).unwrap_or_else(|_| "{}".into()),
+                    ),
+                    Err(e) => (500, json_error(&e.code, &e.message)),
+                }
+            } else {
+                (
+                    405,
+                    json_error("METHOD_NOT_ALLOWED", "GET /api/admin/encryption or POST .../rotate"),
+                )
+            };
+            let response = with_security_headers(
+                Response::from_string(&body)
+                    .with_status_code(status)
+                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+                    .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap()),
+            );
+            let _ = request.respond(response);
+            mt.record_request(method.as_str(), status);
             return;
         }
 

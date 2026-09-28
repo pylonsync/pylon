@@ -32,7 +32,7 @@ export default entity("Customer", {
 
 After deploy, run any mutation that touches the encrypted field once
 to migrate legacy plaintext rows; reads of rows written before
-`encrypted()` was set pass through transparently (no `enc:v1:`
+`encrypted()` was set pass through transparently (no `enc:`
 prefix → no decrypt attempt).
 
 ## Threat model
@@ -60,17 +60,23 @@ Manager → systemd `EnvironmentFile`).
 
 ## Configuration
 
-The key is loaded once at boot from `PYLON_ENCRYPTION_KEY`. Format
-options:
+Keys are loaded once at boot:
+
+| Variable | |
+| --- | --- |
+| `PYLON_ENCRYPTION_KEY` | The current key. Every write uses it. |
+| `PYLON_ENCRYPTION_PREVIOUS_KEYS` | Optional. Comma-separated old keys, used only to decrypt values written before a rotation. |
+
+Each key is 32 bytes in one of these formats:
 
 | Format    | Example                                                            |
 | --------- | ------------------------------------------------------------------ |
 | 64-char hex | `0123456789abcdef...` (use `openssl rand -hex 32`)               |
 | Base64     | `AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=` (use `openssl rand -base64 32`) |
 
-The key must decode to exactly 32 bytes. Anything else fails fast at
-boot with `ENCRYPTION_NOT_CONFIGURED` instead of silently writing
-plaintext.
+A key that does not decode to exactly 32 bytes, a key listed twice, or
+previous keys without a current key fail boot with
+`ENCRYPTION_KEY_INVALID` instead of silently writing plaintext.
 
 When the manifest declares encrypted fields but `PYLON_ENCRYPTION_KEY`
 is unset, writes to those fields reject with `ENCRYPTION_NOT_CONFIGURED`.
@@ -82,15 +88,23 @@ than discovering it on disaster recovery.
 Encrypted values on disk look like:
 
 ```
-enc:v1:<base64(nonce)>:<base64(ciphertext + tag)>
+enc:v2:<key-id>:<base64(nonce)>:<base64(ciphertext + tag)>
 ```
 
+- **Key id**: 16 hex characters, the first 8 bytes of
+  SHA-256(`pylon-encryption-key-id:v1:` + key). It names the key that
+  sealed the value and reveals nothing useful about the key.
+  `GET /api/admin/encryption` shows the ids of the configured keys.
 - **AEAD**: ChaCha20-Poly1305 (via `ring`).
 - **Nonce**: 12 bytes, random per cell (`ring::rand::SystemRandom`).
 - **Tag**: Poly1305 16-byte MAC appended to the ciphertext.
-- **Version prefix** (`v1`): future rotations (key derivation
-  scheme, AEAD swap) will introduce `v2:` and coexist with v1
-  records.
+- **AAD**: entity, field, and row id, so a value copied to another
+  row or column fails to decrypt.
+
+Values written by releases before key ids (`enc:v1:<nonce>:<ct>`)
+still decrypt: Pylon tries the current key, then each previous key.
+New writes always use `enc:v2:`. A release older than this one cannot
+read `enc:v2:` values, so do not downgrade after encrypted writes.
 
 The wire format is the value stored in the SQL column. CRDT projection,
 FTS shadow tables, change-log events, and sync push/pull all
@@ -168,7 +182,7 @@ export default action({
   async handler(ctx) {
     const rows = await ctx.db.list("Customer");
     for (const row of rows) {
-      if (typeof row.ssn === "string" && !row.ssn.startsWith("enc:v1:")) {
+      if (typeof row.ssn === "string" && !row.ssn.startsWith("enc:")) {
         await ctx.db.update("Customer", row.id as string, { ssn: row.ssn });
       }
     }
@@ -177,20 +191,49 @@ export default action({
 ```
 
 Reading any row that still carries plaintext returns the plaintext as-is
-(the framework's decrypt logic skips values without the `enc:v1:` prefix).
+(the framework's decrypt logic skips values without an `enc:` prefix).
 Adding `encrypted()` is a non-breaking deployment. Old rows keep
 working until they're rewritten.
 
 ### Key rotation
 
-Out of scope for v1. The framework supports a single key; rotating
-means re-encrypting every row with the new key (read with the old
-key, write with the new). A future release will support key
-versioning (`PYLON_ENCRYPTION_KEY_V1`, `PYLON_ENCRYPTION_KEY_V2`) so
-old rows can be read while new writes use the new key.
+1. Generate a new key: `openssl rand -hex 32`.
+2. Deploy with the new key as `PYLON_ENCRYPTION_KEY` and the old key in
+   `PYLON_ENCRYPTION_PREVIOUS_KEYS`. New writes use the new key. Old
+   values still decrypt.
+3. Pylon re-encrypts old values in the background every 10 minutes
+   while previous keys are set. Each pass logs
+   `[encryption] rotation pass: N rows scanned, N rotated, ...`. To run
+   a pass now:
 
-Do not rotate the key until versioned keys are supported. If rotation is
-unavoidable, use an offline migration.
+   ```bash
+   curl -X POST https://<app>/api/admin/encryption/rotate \
+     -H "Authorization: Bearer $PYLON_ADMIN_TOKEN"
+   # {"rows_scanned":1200,"rotated":1200,"skipped_changed":0,"failed":0}
+   ```
+
+4. When a pass reports `"rotated":0` and `"failed":0`, every value uses
+   the new key. Remove `PYLON_ENCRYPTION_PREVIOUS_KEYS` and redeploy.
+
+A pass replaces a value only if it still holds the ciphertext it read,
+so it never overwrites a concurrent write. Values no configured key can
+decrypt are counted in `failed` and left as they are. Rotation writes
+do not produce change events: the plaintext does not change, and
+encrypted fields are server-only. On Postgres, one replica runs each
+scheduled pass.
+
+If a value names a key that is not configured, reads of that field
+log `Value was encrypted with key <id>, which is not configured` and
+return the ciphertext. Add the key back to
+`PYLON_ENCRYPTION_PREVIOUS_KEYS`.
+
+Rotation covers every `field.encrypted()` value, including the OAuth
+tokens `connections` stores in the `_Connection` entity.
+
+When `PYLON_JWT_SECRET` is not set, Pylon signs file URLs and shard
+tickets with `PYLON_ENCRYPTION_KEY`. Changing the key then invalidates
+file URLs and shard tickets signed before the change. Set
+`PYLON_JWT_SECRET` before a rotation to keep them valid.
 
 ### Backup + restore
 

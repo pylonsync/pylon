@@ -1824,3 +1824,88 @@ fn prune_crdt_snapshots_on_postgres() {
         0
     );
 }
+
+#[test]
+fn encryption_key_rotation_reencrypts_postgres_rows() {
+    let Some(url) = pg_url() else {
+        return;
+    };
+    const OLD_KEY: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const NEW_KEY: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+    let field = |name: &str, encrypted: bool| ManifestField {
+        name: name.into(),
+        field_type: "string".into(),
+        optional: false,
+        unique: false,
+        crdt: None,
+        server_only: encrypted,
+        readonly: false,
+        default: None,
+        enum_values: None,
+        encrypted,
+        sync_omit: false,
+    };
+    let manifest = AppManifest {
+        entities: vec![ManifestEntity {
+            name: "Secret".into(),
+            fields: vec![field("name", false), field("ssn", true)],
+            indexes: vec![],
+            relations: vec![],
+            crdt: false,
+            sync: true,
+            search: None,
+            ..Default::default()
+        }],
+        ..empty_manifest()
+    };
+    let mut adapter = pylon_storage::postgres::live::LivePostgresAdapter::connect(&url).unwrap();
+    adapter
+        .exec_raw("DROP TABLE IF EXISTS \"Secret\" CASCADE")
+        .unwrap();
+    let plan = adapter.plan_from_live(&manifest).unwrap();
+    adapter.apply_plan(&plan).unwrap();
+
+    let open = |current: &str, previous: Option<&str>| {
+        std::env::set_var("PYLON_ENCRYPTION_KEY", current);
+        match previous {
+            Some(p) => std::env::set_var("PYLON_ENCRYPTION_PREVIOUS_KEYS", p),
+            None => std::env::remove_var("PYLON_ENCRYPTION_PREVIOUS_KEYS"),
+        }
+        let rt = Runtime::open_postgres(&url, manifest.clone()).unwrap();
+        std::env::remove_var("PYLON_ENCRYPTION_KEY");
+        std::env::remove_var("PYLON_ENCRYPTION_PREVIOUS_KEYS");
+        rt
+    };
+    let raw = |id: &str| -> String {
+        let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+        client
+            .query_one("SELECT ssn FROM \"Secret\" WHERE id = $1", &[&id])
+            .unwrap()
+            .get(0)
+    };
+
+    let id = open(OLD_KEY, None)
+        .insert(
+            "Secret",
+            &serde_json::json!({ "name": "a", "ssn": "123-45-6789" }),
+        )
+        .unwrap();
+    let before = raw(&id);
+
+    let rt = open(NEW_KEY, Some(OLD_KEY));
+    assert_eq!(
+        rt.get_by_id("Secret", &id).unwrap().unwrap()["ssn"],
+        "123-45-6789"
+    );
+    let report = rt.rotate_encrypted_fields(100).unwrap();
+    assert_eq!((report.rotated, report.failed), (1, 0), "{report:?}");
+    let after = raw(&id);
+    assert_ne!(before, after);
+    assert!(after.starts_with("enc:v2:"));
+
+    let only_new = open(NEW_KEY, None);
+    assert_eq!(
+        only_new.get_by_id("Secret", &id).unwrap().unwrap()["ssn"],
+        "123-45-6789"
+    );
+}

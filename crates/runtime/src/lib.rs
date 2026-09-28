@@ -2853,7 +2853,7 @@ impl Runtime {
     /// pre-snapshots) for BOTH storage engines:
     ///
     ///  1. decrypt every field declared `encrypted: true` (plaintext
-    ///     values without the `enc:v1:` prefix pass through, so rows
+    ///     values without an `enc:` prefix pass through, so rows
     ///     written before the field gained `encrypted: true` stay
     ///     readable);
     ///  2. parse `json`-typed fields from their stored serialized TEXT
@@ -2881,8 +2881,170 @@ impl Runtime {
         }
     }
 
-    /// Crate-internal accessor for the loaded encryption key.
-    /// Connections + future at-rest primitives consult it.
+    /// Re-encrypt every encrypted field value that is not sealed with the
+    /// current key (v1 values and values sealed with a previous key).
+    /// Reads `batch` rows at a time per entity.
+    ///
+    /// Each value is replaced only if it still holds the ciphertext that
+    /// was read, so a concurrent write to the same field is never
+    /// overwritten. Values that fail to decrypt are counted and left as
+    /// they are. Rotation writes bypass the change log: the plaintext is
+    /// unchanged, and encrypted fields are server-only.
+    pub fn rotate_encrypted_fields(
+        &self,
+        batch: usize,
+    ) -> Result<encryption::RotationReport, RuntimeError> {
+        let mut report = encryption::RotationReport::default();
+        let Some(key) = self.encryption_key.clone() else {
+            return Ok(report);
+        };
+        let batch = batch.clamp(1, 10_000);
+        let mut entities: Vec<(&String, &Vec<String>)> = self.encrypted_fields.iter().collect();
+        entities.sort();
+        for (entity, fields) in entities {
+            let mut after: Option<String> = None;
+            loop {
+                let rows = self.list_after_stored(entity, after.as_deref(), batch)?;
+                let Some(last) = rows.last() else { break };
+                after = last.get("id").and_then(|v| v.as_str()).map(str::to_string);
+                for row in &rows {
+                    report.rows_scanned += 1;
+                    let Some(id) = row.get("id").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    for field in fields {
+                        let Some(old) = row.get(field).and_then(|v| v.as_str()) else {
+                            continue;
+                        };
+                        if !key.needs_rotation(old) {
+                            continue;
+                        }
+                        let plain = match key.decrypt(old, entity, field, Some(id)) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                tracing::warn!(
+                                    "[encryption] cannot rotate {entity}.{field} on {id}: {e}"
+                                );
+                                report.failed += 1;
+                                continue;
+                            }
+                        };
+                        let new = key.encrypt(&plain, entity, field, Some(id)).map_err(|e| {
+                            RuntimeError {
+                                code: "ENCRYPTION_FAILED".into(),
+                                message: e.to_string(),
+                            }
+                        })?;
+                        if self.replace_stored_value(entity, id, field, old, &new)? {
+                            report.rotated += 1;
+                        } else {
+                            // Written concurrently; the new value was sealed
+                            // with the current key by that write.
+                            report.skipped_changed += 1;
+                        }
+                    }
+                }
+                if rows.len() < batch {
+                    break;
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    /// Rows in id order as stored: encrypted fields stay ciphertext and
+    /// `json` fields stay serialized.
+    fn list_after_stored(
+        &self,
+        entity: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>, RuntimeError> {
+        if let Some(pg) = self.pg_backend() {
+            return pylon_http::DataStore::list_after(&pg.store, entity, after, limit)
+                .map_err(data_err_to_runtime);
+        }
+        let ent = self.require_entity(entity)?;
+        let conn = self.lock_read_conn()?;
+        let table = quote_ident(entity);
+        let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match after {
+            Some(cursor) => (
+                format!("SELECT * FROM {table} WHERE \"id\" > ?1 ORDER BY \"id\" LIMIT ?2"),
+                vec![Box::new(cursor.to_string()), Box::new(limit as i64)],
+            ),
+            None => (
+                format!("SELECT * FROM {table} ORDER BY \"id\" LIMIT ?1"),
+                vec![Box::new(limit as i64)],
+            ),
+        };
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|v| v.as_ref()).collect();
+        let mut stmt = conn.prepare_cached(&sql).map_err(|e| RuntimeError {
+            code: "QUERY_FAILED".into(),
+            message: format!("Failed to prepare query: {e}"),
+        })?;
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |row| {
+                Ok(row_to_json(row, &ent.fields))
+            })
+            .map_err(|e| RuntimeError {
+                code: "QUERY_FAILED".into(),
+                message: format!("Query failed: {e}"),
+            })?;
+        Ok(rows.flatten().collect())
+    }
+
+    /// Set `field` of row `id` to `new` only if it still equals `old`.
+    /// Returns whether the row changed.
+    fn replace_stored_value(
+        &self,
+        entity: &str,
+        id: &str,
+        field: &str,
+        old: &str,
+        new: &str,
+    ) -> Result<bool, RuntimeError> {
+        let ent = self.require_entity(entity)?;
+        if !ent.fields.iter().any(|f| f.name == field) {
+            return Err(RuntimeError {
+                code: "UNKNOWN_FIELD".into(),
+                message: format!("{entity} has no field {field}"),
+            });
+        }
+        if let Some(pg) = self.pg_backend() {
+            let sql = format!(
+                "UPDATE {} SET {} = $1 WHERE id = $2 AND {} = $3",
+                pylon_storage::postgres::quote_ident_pub(entity),
+                pylon_storage::postgres::quote_ident_pub(field),
+                pylon_storage::postgres::quote_ident_pub(field),
+            );
+            return pg
+                .store
+                .with_transaction_raw(|tx| -> Result<bool, RuntimeError> {
+                    tx.execute(&sql, &[&new, &id, &old])
+                        .map(|n| n == 1)
+                        .map_err(|e| RuntimeError {
+                            code: "QUERY_FAILED".into(),
+                            message: format!("rotate {entity}.{field}: {e}"),
+                        })
+                });
+        }
+        let conn = self.lock_write_conn()?;
+        let sql = format!(
+            "UPDATE {} SET {} = ?1 WHERE \"id\" = ?2 AND {} = ?3",
+            quote_ident(entity),
+            quote_ident(field),
+            quote_ident(field),
+        );
+        conn.execute(&sql, rusqlite::params![new, id, old])
+            .map(|n| n == 1)
+            .map_err(|e| RuntimeError {
+                code: "QUERY_FAILED".into(),
+                message: format!("rotate {entity}.{field}: {e}"),
+            })
+    }
+
+    /// The loaded field-encryption key set, if any.
     pub(crate) fn encryption_key_for_test(&self) -> Option<encryption::EncryptionKey> {
         self.encryption_key.clone()
     }
@@ -3101,7 +3263,7 @@ impl Runtime {
             data
         };
         // Encrypt encrypted-field values before the storage backend
-        // sees the row. The `enc:v1:<nonce>:<ct>` strings persist
+        // sees the row. The `enc:v2:<key-id>:<nonce>:<ct>` strings persist
         // through CRDT projection, FTS indexing, JSON change events —
         // the wire never sees plaintext for these fields again.
         let encrypted_owned;
@@ -8730,7 +8892,7 @@ mod tests {
         // #353: a server-side ctx.db.query() / queryGraph() must return
         // PLAINTEXT for field.encrypted() columns, exactly like ctx.db.get().
         // Before the fix query_filtered skipped read normalization and returned
-        // the raw `enc:v1:...` ciphertext — so a function that queried then
+        // the raw `enc:v2:...` ciphertext — so a function that queried then
         // read a "decrypted" SSN got garbage. CI runs --test-threads=1, so
         // mutating the key env here is safe.
         std::env::set_var(
