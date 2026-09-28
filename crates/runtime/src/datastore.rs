@@ -6362,7 +6362,8 @@ fn install_llm_stream_hook(runner: &Arc<FnRunner>, client: Option<crate::llm::Ll
     runner.set_llm_stream_hook(Box::new(
         move |req: &serde_json::Value,
               auth: &AuthInfo,
-              on_event: &mut dyn FnMut(serde_json::Value)|
+              on_event: &mut dyn FnMut(serde_json::Value),
+              cancel: &std::sync::atomic::AtomicBool|
               -> Result<serde_json::Value, (String, String)> {
             let client = llm_preflight(req, auth, &client, "ctx.llm.stream")?;
 
@@ -6379,17 +6380,22 @@ fn install_llm_stream_hook(runner: &Arc<FnRunner>, client: Option<crate::llm::Ll
                     on_event(value);
                 }
             };
-            let resp = client.stream(parsed, &mut forward).map_err(|e| {
-                // Same containment as the non-streaming hook: the typed
-                // code reaches the handler, the provider body stays in
-                // the server log (it can echo prompt fragments).
-                tracing::warn!(
-                    "[llm] hook stream failed code={} detail={}",
-                    e.code,
-                    e.message
-                );
-                (e.code, sanitized_llm_caller_message(&e.message))
-            })?;
+            let resp = client
+                .stream_cancellable(parsed, &mut forward, cancel)
+                .map_err(|e| {
+                    if e.code == "LLM_CANCELLED" {
+                        return (e.code, e.message);
+                    }
+                    // Same containment as the non-streaming hook: the typed
+                    // code reaches the handler, the provider body stays in
+                    // the server log (it can echo prompt fragments).
+                    tracing::warn!(
+                        "[llm] hook stream failed code={} detail={}",
+                        e.code,
+                        e.message
+                    );
+                    (e.code, sanitized_llm_caller_message(&e.message))
+                })?;
             serde_json::to_value(&resp).map_err(|e| {
                 (
                     "SERIALIZE_FAILED".to_string(),

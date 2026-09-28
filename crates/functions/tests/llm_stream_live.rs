@@ -1,0 +1,315 @@
+//! `ctx.llm.stream` through the real Bun runtime (`packages/functions`).
+//!
+//! The provider is a stub `LlmStreamHook` that emits tokens with delays.
+//! The function forwards each token to `ctx.stream.write`, as the agent
+//! loop does. The tests check what the client (`on_stream`) sees and
+//! when:
+//!
+//!   - tokens reach the client while the provider is still generating,
+//!     not all at once after it returns
+//!   - a call that ends while its stream is still running cancels the
+//!     provider request
+//!   - a provider that is silent for longer than the idle timeout does
+//!     not time the call out while it is still running
+//!
+//! Skipped (with a message) when `bun` is not on PATH.
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use pylon_functions::protocol::{AuthInfo, FnType};
+use pylon_functions::runner::{FnRunner, StreamChunk};
+use pylon_http::{DataError, DataStore};
+
+fn bun_available() -> bool {
+    std::process::Command::new("bun")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn runtime_ts() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packages/functions/src/runtime.ts")
+        .canonicalize()
+        .expect("packages/functions/src/runtime.ts")
+}
+
+/// A temp app dir with `functions/<name>.ts` for each entry.
+fn app_dir(tag: &str, files: &[(&str, &str)]) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "pylon-llm-stream-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(dir.join("functions")).unwrap();
+    for (name, src) in files {
+        std::fs::write(dir.join("functions").join(format!("{name}.ts")), src).unwrap();
+    }
+    dir
+}
+
+fn start_runner(dir: &Path) -> FnRunner {
+    let runner = FnRunner::new(16);
+    let script = format!(
+        "cd '{}' && exec bun '{}' functions",
+        dir.display(),
+        runtime_ts().display()
+    );
+    runner
+        .start("sh", &["-c", &script])
+        .expect("bun runtime starts");
+    runner
+}
+
+fn auth() -> AuthInfo {
+    AuthInfo {
+        user_id: Some("u1".into()),
+        is_admin: false,
+        tenant_id: None,
+        roles: vec![],
+        is_guest: false,
+    }
+}
+
+fn response(text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "model": "stub",
+        "content": [{ "type": "text", "text": text }],
+        "stop_reason": "end_turn",
+        "usage": { "input_tokens": 1, "output_tokens": 1 },
+    })
+}
+
+const FORWARDING_FN: &str = r#"
+export default {
+  type: "action",
+  handler: async (ctx) => {
+    const res = await ctx.llm.stream({ messages: [{ role: "user", content: "hi" }] }, (e) => {
+      if (e.type === "text_delta") ctx.stream.write(e.text);
+    });
+    return { stop: res.stop_reason };
+  },
+};
+"#;
+
+#[test]
+fn stream_frames_reach_the_client_while_the_provider_generates() {
+    if !bun_available() {
+        eprintln!("skipped: bun is not on PATH");
+        return;
+    }
+    let dir = app_dir("live", &[("streamer", FORWARDING_FN)]);
+    let runner = start_runner(&dir);
+
+    let provider_done: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+    let done_for_hook = Arc::clone(&provider_done);
+    runner.set_llm_stream_hook(Box::new(move |_req, _auth, on_event, _cancel| {
+        for token in ["a", "b", "c"] {
+            on_event(serde_json::json!({ "type": "text_delta", "text": token }));
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        *done_for_hook.lock().unwrap() = Some(Instant::now());
+        Ok(response("abc"))
+    }));
+
+    let received: Arc<Mutex<Vec<(String, Instant)>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&received);
+    let (value, _) = runner
+        .call(
+            &NullStore,
+            "streamer",
+            FnType::Action,
+            serde_json::json!({}),
+            auth(),
+            Some(Box::new(move |chunk: StreamChunk<'_>| {
+                sink.lock()
+                    .unwrap()
+                    .push((chunk.data.to_string(), Instant::now()));
+            })),
+            None,
+            None,
+        )
+        .expect("call succeeds");
+    assert_eq!(value["stop"], "end_turn");
+
+    let received = received.lock().unwrap().clone();
+    let tokens: Vec<&str> = received.iter().map(|(t, _)| t.as_str()).collect();
+    assert_eq!(tokens, ["a", "b", "c"]);
+    let done = provider_done.lock().unwrap().expect("provider finished");
+    // The first token was written ~600ms before the provider returned.
+    // Delivered live, it arrives well before that; buffered behind the
+    // provider call, it arrives after.
+    let first = received[0].1;
+    assert!(
+        first + Duration::from_millis(300) < done,
+        "the first token reached the client {:?} after the provider finished",
+        first.saturating_duration_since(done)
+    );
+    runner.kill();
+}
+
+#[test]
+fn a_call_that_ends_cancels_its_running_stream() {
+    if !bun_available() {
+        eprintln!("skipped: bun is not on PATH");
+        return;
+    }
+    // Starts a stream and returns without awaiting it.
+    let dir = app_dir(
+        "detached",
+        &[(
+            "detached",
+            r#"
+export default {
+  type: "action",
+  handler: async (ctx) => {
+    ctx.llm.stream({ messages: [] }, () => {}).catch(() => {});
+    await new Promise((r) => setTimeout(r, 200));
+    return { ok: true };
+  },
+};
+"#,
+        )],
+    );
+    let runner = start_runner(&dir);
+
+    let emitted = Arc::new(AtomicUsize::new(0));
+    let saw_cancel = Arc::new(AtomicBool::new(false));
+    let (emitted_h, saw_cancel_h) = (Arc::clone(&emitted), Arc::clone(&saw_cancel));
+    runner.set_llm_stream_hook(Box::new(move |_req, _auth, on_event, cancel| {
+        for _ in 0..100 {
+            if cancel.load(Ordering::SeqCst) {
+                saw_cancel_h.store(true, Ordering::SeqCst);
+                return Err(("LLM_CANCELLED".into(), "cancelled".into()));
+            }
+            on_event(serde_json::json!({ "type": "text_delta", "text": "x" }));
+            emitted_h.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Ok(response("x"))
+    }));
+
+    let started = Instant::now();
+    let (value, _) = runner
+        .call(
+            &NullStore,
+            "detached",
+            FnType::Action,
+            serde_json::json!({}),
+            auth(),
+            None,
+            None,
+            None,
+        )
+        .expect("call succeeds");
+    assert_eq!(value["ok"], true);
+    // The call returns on its own schedule, not after the 5s stream.
+    assert!(started.elapsed() < Duration::from_secs(3));
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !saw_cancel.load(Ordering::SeqCst) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        saw_cancel.load(Ordering::SeqCst),
+        "the provider call was not cancelled when the call ended"
+    );
+    assert!(emitted.load(Ordering::SeqCst) < 100);
+    runner.kill();
+}
+
+#[test]
+fn a_silent_provider_does_not_trip_the_idle_timeout() {
+    if !bun_available() {
+        eprintln!("skipped: bun is not on PATH");
+        return;
+    }
+    let dir = app_dir("silent", &[("streamer", FORWARDING_FN)]);
+    let runner = start_runner(&dir);
+    runner.set_call_timeout(Duration::from_millis(700));
+    runner.set_llm_stream_hook(Box::new(|_req, _auth, on_event, _cancel| {
+        // Thinking: nothing for longer than the idle timeout.
+        std::thread::sleep(Duration::from_millis(1500));
+        on_event(serde_json::json!({ "type": "text_delta", "text": "done" }));
+        Ok(response("done"))
+    }));
+    let (value, _) = runner
+        .call(
+            &NullStore,
+            "streamer",
+            FnType::Action,
+            serde_json::json!({}),
+            auth(),
+            None,
+            None,
+            None,
+        )
+        .expect("a running provider keeps the call alive");
+    assert_eq!(value["stop"], "end_turn");
+    runner.kill();
+}
+
+/// The functions under test never touch `ctx.db`.
+struct NullStore;
+
+impl DataStore for NullStore {
+    fn manifest(&self) -> &pylon_kernel::AppManifest {
+        static M: std::sync::OnceLock<pylon_kernel::AppManifest> = std::sync::OnceLock::new();
+        M.get_or_init(pylon_kernel::AppManifest::default)
+    }
+    fn insert(&self, _: &str, _: &serde_json::Value) -> Result<String, DataError> {
+        unreachable!()
+    }
+    fn get_by_id(&self, _: &str, _: &str) -> Result<Option<serde_json::Value>, DataError> {
+        Ok(None)
+    }
+    fn list(&self, _: &str) -> Result<Vec<serde_json::Value>, DataError> {
+        Ok(vec![])
+    }
+    fn list_after(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<serde_json::Value>, DataError> {
+        Ok(vec![])
+    }
+    fn update(&self, _: &str, _: &str, _: &serde_json::Value) -> Result<bool, DataError> {
+        unreachable!()
+    }
+    fn delete(&self, _: &str, _: &str) -> Result<bool, DataError> {
+        unreachable!()
+    }
+    fn lookup(&self, _: &str, _: &str, _: &str) -> Result<Option<serde_json::Value>, DataError> {
+        Ok(None)
+    }
+    fn link(&self, _: &str, _: &str, _: &str, _: &str) -> Result<bool, DataError> {
+        unreachable!()
+    }
+    fn unlink(&self, _: &str, _: &str, _: &str) -> Result<bool, DataError> {
+        unreachable!()
+    }
+    fn query_filtered(
+        &self,
+        _: &str,
+        _: &serde_json::Value,
+    ) -> Result<Vec<serde_json::Value>, DataError> {
+        Ok(vec![])
+    }
+    fn query_graph(&self, _: &serde_json::Value) -> Result<serde_json::Value, DataError> {
+        Ok(serde_json::json!({}))
+    }
+    fn transact(
+        &self,
+        _: &[serde_json::Value],
+    ) -> Result<(bool, Vec<serde_json::Value>), DataError> {
+        unreachable!()
+    }
+}

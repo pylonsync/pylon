@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -233,20 +233,27 @@ pub type LlmHook = Box<
 
 /// Callback for `ctx.llm.stream(...)`. Same contract as [`LlmHook`],
 /// plus an `on_event` sink the host calls for each provider event as
-/// it arrives. The hook blocks until the stream completes and returns
-/// the assembled final response.
+/// it arrives and a `cancel` flag. The hook blocks until the stream
+/// completes and returns the assembled final response.
+///
+/// The runner calls the hook on its own thread, so the call's read loop
+/// keeps serving the handler's frames (`ctx.stream.write`, db ops) while
+/// the provider generates. `cancel` becomes true when the call ends or
+/// times out while the stream is still running; the hook must then
+/// stop reading the provider response and drop it, which closes the
+/// HTTP connection so the provider stops generating.
 ///
 /// `on_event` receives the serialized `StreamEvent`. It must not be
 /// retained past the call.
-pub type LlmStreamHook = Box<
-    dyn Fn(
-            &serde_json::Value,
-            &AuthInfo,
-            &mut dyn FnMut(serde_json::Value),
-        ) -> Result<serde_json::Value, (String, String)>
-        + Send
-        + Sync,
->;
+pub type LlmStreamHookFn = dyn Fn(
+        &serde_json::Value,
+        &AuthInfo,
+        &mut dyn FnMut(serde_json::Value),
+        &AtomicBool,
+    ) -> Result<serde_json::Value, (String, String)>
+    + Send
+    + Sync;
+pub type LlmStreamHook = Box<LlmStreamHookFn>;
 
 /// Callback for `ctx.llm.embed(texts)`. Same contract as [`LlmHook`]
 /// but routed to the embeddings provider (a separate config axis:
@@ -401,7 +408,10 @@ pub enum PolicyOp {
 pub struct FnRunner {
     process: Mutex<Option<Child>>,
     /// Stdin half — guarded so concurrent senders don't interleave bytes.
-    stdin: Mutex<Option<std::process::ChildStdin>>,
+    /// Shared (`Arc`) with the threads that run `ctx.llm.stream` provider
+    /// calls, which write `llm_event` frames and their terminal reply
+    /// while the call's read loop keeps running.
+    stdin: Arc<Mutex<Option<std::process::ChildStdin>>>,
     /// Per-call demux table for the CURRENT child. The reader thread routes
     /// each inbound message to the waiting call by `call_id`, so concurrent
     /// calls (renders, functions) multiplex over the one Bun connection
@@ -443,8 +453,10 @@ pub struct FnRunner {
     /// see the gap instead of getting a silent no-op.
     llm_hook: Mutex<Option<LlmHook>>,
     /// Optional handler for `ctx.llm.stream(...)`. Unset behaves like
-    /// `llm_hook` — an explicit LLM_NOT_CONFIGURED error.
-    llm_stream_hook: Mutex<Option<LlmStreamHook>>,
+    /// `llm_hook` — an explicit LLM_NOT_CONFIGURED error. An `Arc` so a
+    /// stream runs on its own thread without holding this lock (holding
+    /// it serialized every concurrent stream on the runner).
+    llm_stream_hook: Mutex<Option<Arc<LlmStreamHookFn>>>,
     /// Optional handler for `ctx.llm.embed(...)`. Unset returns an
     /// explicit EMBEDDINGS_NOT_CONFIGURED error.
     llm_embed_hook: Mutex<Option<LlmEmbedHook>>,
@@ -490,7 +502,7 @@ impl FnRunner {
     pub fn new(trace_capacity: usize) -> Self {
         Self {
             process: Mutex::new(None),
-            stdin: Mutex::new(None),
+            stdin: Arc::new(Mutex::new(None)),
             routes: Mutex::new(None),
             in_flight: Arc::new(AtomicUsize::new(0)),
             last_msg_at: Arc::new(AtomicU64::new(0)),
@@ -652,7 +664,7 @@ impl FnRunner {
     /// [`Self::set_llm_hook`]; the hook additionally pumps provider
     /// events back to the handler as they arrive.
     pub fn set_llm_stream_hook(&self, hook: LlmStreamHook) {
-        *self.llm_stream_hook.lock().unwrap() = Some(hook);
+        *self.llm_stream_hook.lock().unwrap() = Some(Arc::from(hook));
     }
 
     /// Install a callback for `ctx.llm.embed(texts)`. When unset, the
@@ -1560,6 +1572,10 @@ impl FnRunner {
         let strict_policies =
             std::env::var("PYLON_STRICT_FN_POLICIES").ok().as_deref() == Some("1");
 
+        // `ctx.llm.stream` provider calls this call started. Dropped on
+        // every exit path below, which cancels any still running.
+        let mut llm_streams = LlmStreamOps::default();
+
         // Process messages until we get a return or error.
         loop {
             let msg = match recv_on(&rx, deadline.min(hard_deadline)) {
@@ -1568,6 +1584,17 @@ impl FnRunner {
                     // hard_deadline above).
                     deadline = Instant::now() + timeout;
                     m
+                }
+                // A provider still generating is activity: the handler is
+                // awaiting it, and the provider's own request timeout
+                // bounds a stalled one. hard_deadline still applies.
+                Err(e)
+                    if e.code == "FN_TIMEOUT"
+                        && llm_streams.any_active()
+                        && Instant::now() < hard_deadline =>
+                {
+                    deadline = Instant::now() + timeout;
+                    continue;
                 }
                 Err(e) if e.code == "FN_TIMEOUT" => {
                     // Wedge test before deciding how to fail. A hung
@@ -2051,47 +2078,75 @@ impl FnRunner {
                         self.send(&reply)?;
                         continue;
                     }
-                    let auth_snapshot = current_auth_snapshot(&gate_auth, caller_is_admin);
-                    // Provider events are forwarded as they arrive, so
-                    // the handler can pump them into ctx.stream.write
-                    // while the model is still generating. Send errors
-                    // are swallowed inside the sink (its signature has
-                    // no failure channel); a dead pipe surfaces on the
-                    // terminal reply's `self.send(&reply)?` below.
-                    let stream_call_id = call_id.clone();
-                    let stream_op_id = req.op_id.clone();
-                    let result: Result<serde_json::Value, (String, String)> = {
-                        let hook = self.llm_stream_hook.lock().unwrap();
-                        match *hook {
-                            Some(ref cb) => {
-                                let mut on_event = |event: serde_json::Value| {
-                                    let msg = crate::protocol::LlmEventMessage::new(
-                                        stream_call_id.clone(),
-                                        stream_op_id.clone(),
-                                        event,
-                                    );
-                                    let _ = self.send(&msg);
-                                };
-                                cb(&req.request, &auth_snapshot, &mut on_event)
-                            }
-                            None => Err((
-                                "LLM_NOT_CONFIGURED".into(),
-                                "ctx.llm.stream: no LLM provider configured (set PYLON_LLM_PROVIDER + API key)".into(),
-                            )),
-                        }
-                    };
-                    let reply = match result {
-                        Ok(value) => {
-                            DbResultMessage::ok_with_op(call_id.clone(), req.op_id.clone(), value)
-                        }
-                        Err((code, msg)) => DbResultMessage::err_with_op(
+                    let hook = self.llm_stream_hook.lock().unwrap().clone();
+                    let Some(hook) = hook else {
+                        let reply = DbResultMessage::err_with_op(
                             call_id.clone(),
                             req.op_id.clone(),
-                            &code,
-                            &msg,
-                        ),
+                            "LLM_NOT_CONFIGURED",
+                            "ctx.llm.stream: no LLM provider configured (set PYLON_LLM_PROVIDER + API key)",
+                        );
+                        self.send(&reply)?;
+                        continue;
                     };
-                    self.send(&reply)?;
+                    // The provider call runs on its own thread so this
+                    // loop keeps serving the handler while tokens arrive:
+                    // the `ctx.stream.write` frames the handler sends from
+                    // its onEvent callback reach the client as they are
+                    // written, and ctx.db / runQuery calls made during the
+                    // generation are answered. The thread writes the
+                    // `llm_event` frames and the terminal reply itself.
+                    let cancel = Arc::new(AtomicBool::new(false));
+                    llm_streams
+                        .ops
+                        .push((req.op_id.clone(), Arc::clone(&cancel)));
+                    llm_streams.active.fetch_add(1, Ordering::SeqCst);
+                    let active = ActiveStreamGuard(Arc::clone(&llm_streams.active));
+                    let stdin = Arc::clone(&self.stdin);
+                    let auth_snapshot = current_auth_snapshot(&gate_auth, caller_is_admin);
+                    let stream_call_id = call_id.clone();
+                    let op_id = req.op_id.clone();
+                    let spawned = std::thread::Builder::new()
+                        .name("pylon-llm-stream".into())
+                        .spawn(move || {
+                            let _active = active;
+                            // Nothing is written once the stream is
+                            // cancelled: the call is over and its route
+                            // is gone.
+                            let mut on_event = |event: serde_json::Value| {
+                                if cancel.load(Ordering::SeqCst) {
+                                    return;
+                                }
+                                let msg = crate::protocol::LlmEventMessage::new(
+                                    stream_call_id.clone(),
+                                    op_id.clone(),
+                                    event,
+                                );
+                                let _ = write_frame(&stdin, &msg);
+                            };
+                            let result = hook(&req.request, &auth_snapshot, &mut on_event, &cancel);
+                            if cancel.load(Ordering::SeqCst) {
+                                return;
+                            }
+                            let reply = match result {
+                                Ok(value) => {
+                                    DbResultMessage::ok_with_op(stream_call_id, op_id, value)
+                                }
+                                Err((code, msg)) => {
+                                    DbResultMessage::err_with_op(stream_call_id, op_id, &code, &msg)
+                                }
+                            };
+                            let _ = write_frame(&stdin, &reply);
+                        });
+                    if let Err(e) = spawned {
+                        let reply = DbResultMessage::err_with_op(
+                            call_id.clone(),
+                            req.op_id.clone(),
+                            "LLM_STREAM_FAILED",
+                            &format!("could not start the stream thread: {e}"),
+                        );
+                        self.send(&reply)?;
+                    }
                 }
 
                 TsMessage::RoomBroadcast(req) if req.call_id == call_id => {
@@ -2226,28 +2281,7 @@ impl FnRunner {
     }
 
     fn send<T: serde::Serialize>(&self, msg: &T) -> Result<(), FnCallError> {
-        let mut stdin_guard = self.stdin.lock().unwrap();
-        let stdin = stdin_guard.as_mut().ok_or_else(|| FnCallError {
-            code: "RUNNER_NOT_STARTED".into(),
-            message: "TypeScript function runner is not running".into(),
-        })?;
-
-        let mut line = serde_json::to_string(msg).map_err(|e| FnCallError {
-            code: "SERIALIZE_FAILED".into(),
-            message: format!("Failed to serialize message: {e}"),
-        })?;
-        line.push('\n');
-
-        stdin.write_all(line.as_bytes()).map_err(|e| FnCallError {
-            code: "IO_ERROR".into(),
-            message: format!("Failed to write to runner: {e}"),
-        })?;
-        stdin.flush().map_err(|e| FnCallError {
-            code: "IO_ERROR".into(),
-            message: format!("Failed to flush runner stdin: {e}"),
-        })?;
-
-        Ok(())
+        write_frame(&self.stdin, msg)
     }
 
     /// Register a demux route for `call_id` and return its receiver + an RAII
@@ -2334,6 +2368,70 @@ impl FnRunner {
             }
             Err(e) => Err(e),
         }
+    }
+}
+
+/// Serialize `msg` as one NDJSON line and write it to the child's stdin.
+/// The lock keeps concurrent writers (call loops, stream threads) from
+/// interleaving bytes within a frame.
+fn write_frame<T: serde::Serialize>(
+    stdin: &Mutex<Option<std::process::ChildStdin>>,
+    msg: &T,
+) -> Result<(), FnCallError> {
+    let mut line = serde_json::to_string(msg).map_err(|e| FnCallError {
+        code: "SERIALIZE_FAILED".into(),
+        message: format!("Failed to serialize message: {e}"),
+    })?;
+    line.push('\n');
+
+    let mut stdin_guard = stdin.lock().unwrap();
+    let stdin = stdin_guard.as_mut().ok_or_else(|| FnCallError {
+        code: "RUNNER_NOT_STARTED".into(),
+        message: "TypeScript function runner is not running".into(),
+    })?;
+    stdin.write_all(line.as_bytes()).map_err(|e| FnCallError {
+        code: "IO_ERROR".into(),
+        message: format!("Failed to write to runner: {e}"),
+    })?;
+    stdin.flush().map_err(|e| FnCallError {
+        code: "IO_ERROR".into(),
+        message: format!("Failed to flush runner stdin: {e}"),
+    })?;
+    Ok(())
+}
+
+/// The `ctx.llm.stream` provider calls one function call has started.
+/// Each runs on its own thread. This tracks them so the call can hold
+/// off its idle timeout while a provider is still generating, and cancel
+/// all of them when the call ends for any reason (the drop).
+#[derive(Default)]
+struct LlmStreamOps {
+    ops: Vec<(Option<String>, Arc<AtomicBool>)>,
+    /// Streams whose thread has not finished yet.
+    active: Arc<AtomicUsize>,
+}
+
+impl LlmStreamOps {
+    fn any_active(&self) -> bool {
+        self.active.load(Ordering::SeqCst) > 0
+    }
+}
+
+impl Drop for LlmStreamOps {
+    fn drop(&mut self) {
+        for (_, flag) in &self.ops {
+            flag.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+/// Decrements the active-stream count when a stream thread exits,
+/// including by panic.
+struct ActiveStreamGuard(Arc<AtomicUsize>);
+
+impl Drop for ActiveStreamGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 

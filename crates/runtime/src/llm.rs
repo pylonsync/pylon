@@ -19,6 +19,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -427,9 +428,26 @@ impl LlmClient {
     /// `Done` event (same shape as `complete`).
     pub fn stream(
         &self,
-        mut req: LlmCompleteRequest,
+        req: LlmCompleteRequest,
         on_event: &mut dyn FnMut(StreamEvent),
     ) -> Result<LlmCompleteResponse, LlmError> {
+        self.stream_cancellable(req, on_event, &AtomicBool::new(false))
+    }
+
+    /// [`Self::stream`] that stops when `cancel` becomes true. The flag
+    /// is checked before the request is sent and after every line of the
+    /// provider's SSE response. On cancel the response is dropped, which
+    /// closes the HTTP connection, so the provider stops generating (and
+    /// billing) tokens; the call returns `LLM_CANCELLED`.
+    pub fn stream_cancellable(
+        &self,
+        mut req: LlmCompleteRequest,
+        on_event: &mut dyn FnMut(StreamEvent),
+        cancel: &AtomicBool,
+    ) -> Result<LlmCompleteResponse, LlmError> {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(cancelled_error());
+        }
         req.model = Some(self.resolve_model(&req)?);
         let requested_max = req.max_tokens.unwrap_or(4096);
         req.max_tokens = Some(match self.inner.max_tokens_cap {
@@ -437,8 +455,8 @@ impl LlmClient {
             None => requested_max,
         });
         match self.inner.provider {
-            LlmProvider::Anthropic => self.stream_anthropic(req, on_event),
-            LlmProvider::Openai => self.stream_openai(req, on_event),
+            LlmProvider::Anthropic => self.stream_anthropic(req, on_event, cancel),
+            LlmProvider::Openai => self.stream_openai(req, on_event, cancel),
         }
     }
 
@@ -475,6 +493,7 @@ impl LlmClient {
         &self,
         req: LlmCompleteRequest,
         on_event: &mut dyn FnMut(StreamEvent),
+        cancel: &AtomicBool,
     ) -> Result<LlmCompleteResponse, LlmError> {
         let body = anthropic_request_body(&req, true);
         let resp = self
@@ -504,6 +523,9 @@ impl LlmClient {
 
         let reader = BufReader::new(resp.into_reader());
         for line in reader.lines() {
+            if cancel.load(Ordering::SeqCst) {
+                return Err(cancelled_error());
+            }
             let line = match line {
                 Ok(l) => l,
                 Err(e) => {
@@ -693,6 +715,7 @@ impl LlmClient {
         &self,
         req: LlmCompleteRequest,
         on_event: &mut dyn FnMut(StreamEvent),
+        cancel: &AtomicBool,
     ) -> Result<LlmCompleteResponse, LlmError> {
         let body = openai_request_body(&req, true, self.uses_legacy_token_param());
         let resp = self
@@ -716,6 +739,9 @@ impl LlmClient {
 
         let reader = BufReader::new(resp.into_reader());
         for line in reader.lines() {
+            if cancel.load(Ordering::SeqCst) {
+                return Err(cancelled_error());
+            }
             let line = line.map_err(|e| LlmError {
                 code: "STREAM_READ_FAILED".into(),
                 message: format!("Read failed mid-stream: {e}"),
@@ -1176,6 +1202,13 @@ fn parse_openai_completion(v: serde_json::Value) -> Result<LlmCompleteResponse, 
         stop_reason,
         usage,
     })
+}
+
+fn cancelled_error() -> LlmError {
+    LlmError {
+        code: "LLM_CANCELLED".into(),
+        message: "The stream was cancelled".into(),
+    }
 }
 
 fn map_ureq_err(err: ureq::Error) -> LlmError {
@@ -2098,5 +2131,118 @@ mod tests {
         };
         let err = client.resolve_model(&req).unwrap_err();
         assert_eq!(err.code, "MODEL_NOT_CONFIGURED");
+    }
+
+    /// A provider that streams one text delta every 50ms for up to 200
+    /// deltas. Reports how many it wrote and whether the client closed
+    /// the connection before the end.
+    fn slow_anthropic_provider() -> (String, std::sync::mpsc::Receiver<(usize, bool)>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            // Read the request head. The body is small and unused.
+            let mut buf = vec![0u8; 64 * 1024];
+            let mut got = Vec::new();
+            while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = sock.read(&mut buf).unwrap();
+                got.extend_from_slice(&buf[..n]);
+            }
+            let head =
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n";
+            sock.write_all(head.as_bytes()).unwrap();
+            let start = concat!(
+                "event: message_start\n",
+                "data: {\"type\":\"message_start\",\"message\":{\"model\":\"m\",\"usage\":{\"input_tokens\":1}}}\n\n",
+                "event: content_block_start\n",
+                "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            );
+            sock.write_all(start.as_bytes()).unwrap();
+            let delta = concat!(
+                "event: content_block_delta\n",
+                "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"x\"}}\n\n",
+            );
+            let mut written = 0;
+            let mut closed = false;
+            for _ in 0..200 {
+                if sock
+                    .write_all(delta.as_bytes())
+                    .and_then(|_| sock.flush())
+                    .is_err()
+                {
+                    closed = true;
+                    break;
+                }
+                written += 1;
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let _ = tx.send((written, closed));
+        });
+        (base, rx)
+    }
+
+    fn client_for(base: &str) -> LlmClient {
+        LlmClient {
+            inner: Arc::new(LlmClientInner {
+                provider: LlmProvider::Anthropic,
+                api_key: "k".into(),
+                configured_model: Some("m".into()),
+                base_url: Some(base.into()),
+                agent: ureq::AgentBuilder::new().build(),
+                manifest_allowed: vec![],
+                max_tokens_cap: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn stream_cancellable_drops_the_provider_connection() {
+        let (base, provider) = slow_anthropic_provider();
+        let client = client_for(&base);
+        let cancel = AtomicBool::new(false);
+        let mut deltas = 0;
+        let started = std::time::Instant::now();
+        let err = client
+            .stream_cancellable(
+                LlmCompleteRequest::default(),
+                &mut |event| {
+                    if matches!(event, StreamEvent::TextDelta { .. }) {
+                        deltas += 1;
+                        if deltas == 3 {
+                            cancel.store(true, Ordering::SeqCst);
+                        }
+                    }
+                },
+                &cancel,
+            )
+            .unwrap_err();
+        assert_eq!(err.code, "LLM_CANCELLED");
+        assert_eq!(deltas, 3, "no delta is delivered after the cancel");
+        assert!(started.elapsed() < Duration::from_secs(3));
+
+        // The provider sees the connection close long before its 200
+        // deltas are written: generation stops instead of running on.
+        let (written, closed) = provider
+            .recv_timeout(Duration::from_secs(10))
+            .expect("provider thread reports");
+        assert!(closed, "the client never closed the provider connection");
+        assert!(written < 50, "provider kept writing: {written} deltas");
+    }
+
+    #[test]
+    fn stream_cancellable_sends_nothing_when_already_cancelled() {
+        // Port 9 (discard) is closed on a dev machine: a request would
+        // fail with a transport error, not LLM_CANCELLED.
+        let client = client_for("http://127.0.0.1:9");
+        let err = client
+            .stream_cancellable(
+                LlmCompleteRequest::default(),
+                &mut |_| {},
+                &AtomicBool::new(true),
+            )
+            .unwrap_err();
+        assert_eq!(err.code, "LLM_CANCELLED");
     }
 }
