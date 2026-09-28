@@ -31,6 +31,14 @@ export interface ReplicaPersistence {
   saveRow(entity: string, id: string, data: Row): Promise<boolean>;
   deleteRow(entity: string, id: string): Promise<boolean>;
   clear(): Promise<boolean>;
+  /**
+   * Optional: write a batch of row changes, in order, and (when given) the
+   * cursor in ONE atomic transaction. Resolves `true` when the whole batch
+   * committed, `false` when it did not (nothing, cursor included, may be
+   * assumed on disk). The engine uses it to commit many live change frames
+   * at once; without it the engine writes row by row, then the cursor.
+   */
+  saveBatch?(changes: ChangeEvent[], cursor: SyncCursor | null): Promise<boolean>;
 }
 
 // ---------------------------------------------------------------------------
@@ -154,6 +162,29 @@ export class IndexedDBPersistence implements ReplicaPersistence {
     const store = tx.objectStore(STORE_NAME);
     store.put({ _key: `${entity}:${id}`, entity, id, data });
     return this.commit(tx, "saveRow");
+  }
+
+  /** Write row puts/deletes in order plus the cursor in ONE readwrite
+   *  transaction. Rows and cursor commit or abort together, so the
+   *  on-disk cursor can never get ahead of the on-disk rows. */
+  async saveBatch(changes: ChangeEvent[], cursor: SyncCursor | null): Promise<boolean> {
+    if (!this.db) return false;
+    const tx = this.db.transaction([STORE_NAME, CURSOR_STORE], "readwrite");
+    const rows = tx.objectStore(STORE_NAME);
+    for (const change of changes) {
+      if (change.kind === "delete") {
+        rows.delete(`${change.entity}:${change.row_id}`);
+      } else if (change.data) {
+        rows.put({
+          _key: `${change.entity}:${change.row_id}`,
+          entity: change.entity,
+          id: change.row_id,
+          data: change.data,
+        });
+      }
+    }
+    if (cursor) tx.objectStore(CURSOR_STORE).put({ key: "cursor", ...cursor });
+    return this.commit(tx, "saveBatch");
   }
 
   /** Fetch a row from IndexedDB by key. Used by `persistChange` on update

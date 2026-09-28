@@ -1418,63 +1418,134 @@ export class SyncEngine {
       this.pullHold.push(...changes);
       return Promise.resolve();
     }
-    const prev = this.applyQueue;
-    const next = prev.then(async () => {
-      // Per-event monotonic filter: re-applies of an already-seen seq
-      // are skipped before touching the store. Without that, a
-      // retransmit (WS + pull window overlap) would have us run
-      // applyChange twice against the local store.
-      const filtered = changes.filter(
-        (c) => typeof c.seq === "number" && c.seq > this.cursor.last_seq,
-      );
-      if (filtered.length > 0) {
+    // Group commit for live frames (WS events, tab broadcasts without a
+    // pull cursor). While an earlier batch is still applying and writing
+    // to IndexedDB, frames that arrive join the next queued batch instead
+    // of queueing one apply + two IDB transactions each. The first frame
+    // after an idle period starts its batch at once, so batching adds no
+    // latency; under load each batch is one store notify and one IDB
+    // transaction (rows + cursor).
+    if (!opts.isPull && targetCursor === undefined) {
+      const fromBroadcast = opts.fromBroadcast === true;
+      const open = this.liveBatch;
+      if (open && open.fromBroadcast === fromBroadcast) {
+        open.changes.push(...changes);
+        return open.promise;
+      }
+      const batch: LiveBatch = {
+        changes: [...changes],
+        fromBroadcast,
+        promise: Promise.resolve(),
+      };
+      batch.promise = this.chainApply(() => {
+        // Close the batch when it starts: frames from here on go into
+        // the next one, so each frame is applied exactly once, in order.
+        if (this.liveBatch === batch) this.liveBatch = null;
+        return this.applyBatch(batch.changes, undefined, { fromBroadcast });
+      });
+      this.liveBatch = batch;
+      return batch.promise;
+    }
+    return this.chainApply(() => this.applyBatch(changes, targetCursor, opts));
+  }
+
+  /** Live frames waiting for their apply to start. See `enqueueApply`. */
+  private liveBatch: LiveBatch | null = null;
+
+  /** Chain one apply step behind every queued one. Anything chained
+   *  here closes the open live batch first, so later live frames can
+   *  never be applied ahead of it. Errors stay scoped to the step. */
+  private chainApply(step: () => Promise<void>): Promise<void> {
+    if (this.liveBatch) this.liveBatch = null;
+    const next = this.applyQueue.then(step);
+    this.applyQueue = next.catch(() => {});
+    return next;
+  }
+
+  /** Apply one batch: seq-filter, apply to memory, persist rows and the
+   *  advanced cursor, and fan out to follower tabs. Runs on the apply
+   *  queue only. */
+  private async applyBatch(
+    changes: ChangeEvent[],
+    targetCursor: SyncCursor | undefined,
+    opts: { fromBroadcast?: boolean; isPull?: boolean },
+  ): Promise<void> {
+    // Per-event monotonic filter: re-applies of an already-seen seq
+    // are skipped before touching the store. Without that, a
+    // retransmit (WS + pull window overlap) would have us run
+    // applyChange twice against the local store. A live batch holds
+    // frames that used to apply one at a time, so it filters against a
+    // running high mark: a frame at or below an earlier frame's seq is
+    // dropped exactly as it was when that frame had already advanced the
+    // cursor. A pull page keeps every change above the cursor.
+    const live = targetCursor === undefined && !opts.isPull;
+    let high = this.cursor.last_seq;
+    const filtered: ChangeEvent[] = [];
+    for (const c of changes) {
+      if (typeof c.seq !== "number") continue;
+      if (live ? c.seq > high : c.seq > this.cursor.last_seq) {
+        filtered.push(c);
+        if (c.seq > high) high = c.seq;
+      }
+    }
+    // Pick the cursor target. Explicit `targetCursor` (from pull) wins
+    // — pull's response carries the server's authoritative current_seq
+    // even when no changes landed in this window. Otherwise derive
+    // from the last applied seq.
+    const candidate =
+      targetCursor ??
+      (filtered.length > 0
+        ? { last_seq: filtered[filtered.length - 1].seq }
+        : null);
+    const advance =
+      candidate && candidate.last_seq > this.cursor.last_seq ? candidate : null;
+    let cursorOnDisk = false;
+    if (filtered.length > 0) {
+      const persistence = this.persistence;
+      if (persistence?.saveBatch && this.store._persistFn) {
+        // One transaction for the rows and the advanced cursor: they
+        // commit or abort together. Once persistence degraded, the
+        // cursor stays frozen on disk (see `persistDegraded`).
+        const rows = this.store.applyInMemory(filtered);
+        const cursorToSave = advance && !this.persistDegraded ? advance : null;
+        const durable = await persistence.saveBatch(rows, cursorToSave);
+        if (!durable) this.persistDegraded = true;
+        cursorOnDisk = durable && cursorToSave !== null;
+      } else {
         const durable = await this.store.applyChangesAsync(filtered);
         // A row in this batch didn't reach disk (quota / abort). Latch
         // the degraded flag so we never persist a cursor ahead of the
         // durable replica — the next cold start must re-pull this gap.
         if (!durable) this.persistDegraded = true;
       }
-      // Pick the cursor target. Explicit `targetCursor` (from pull) wins
-      // — pull's response carries the server's authoritative current_seq
-      // even when no changes landed in this window. Otherwise derive
-      // from the last applied seq.
-      const candidate =
-        targetCursor ??
-        (filtered.length > 0
-          ? { last_seq: filtered[filtered.length - 1].seq }
-          : null);
-      if (candidate && candidate.last_seq > this.cursor.last_seq) {
-        // In-memory cursor ALWAYS advances — live sync stays correct.
-        this.cursor = candidate;
-        // The on-disk cursor only advances while persistence is healthy.
-        // Once degraded, freezing it keeps disk self-consistent (cursor
-        // never exceeds the rows actually written) so restart re-pulls.
-        if (this.persistence && !this.persistDegraded) {
-          await this.persistence.saveCursor(this.cursor);
-        }
+    }
+    if (advance) {
+      // In-memory cursor ALWAYS advances — live sync stays correct.
+      this.cursor = advance;
+      // The on-disk cursor only advances while persistence is healthy.
+      // Once degraded, freezing it keeps disk self-consistent (cursor
+      // never exceeds the rows actually written) so restart re-pulls.
+      if (this.persistence && !this.persistDegraded && !cursorOnDisk) {
+        await this.persistence.saveCursor(this.cursor);
       }
-      // Multi-tab: leader fans the batch out so follower replicas
-      // converge without their own WS. Skip when we ourselves
-      // RECEIVED this batch from another tab — otherwise a tab that
-      // was promoted between receiving and applying would re-broadcast
-      // its own copy, and even though the seq filter dedupes on
-      // arrival the round-trip is wasted bandwidth.
-      if (
-        this.isMultiTabLeader &&
-        !opts.fromBroadcast &&
-        filtered.length > 0
-      ) {
-        this.broadcastToTabs({
-          type: "applied",
-          changes: filtered,
-          targetCursor: candidate ?? undefined,
-        });
-      }
-    });
-    // Errors stay scoped to this batch — don't poison the chain for
-    // future applies.
-    this.applyQueue = next.catch(() => {});
-    return next;
+    }
+    // Multi-tab: leader fans the batch out so follower replicas
+    // converge without their own WS. Skip when we ourselves
+    // RECEIVED this batch from another tab — otherwise a tab that
+    // was promoted between receiving and applying would re-broadcast
+    // its own copy, and even though the seq filter dedupes on
+    // arrival the round-trip is wasted bandwidth.
+    if (
+      this.isMultiTabLeader &&
+      !opts.fromBroadcast &&
+      filtered.length > 0
+    ) {
+      this.broadcastToTabs({
+        type: "applied",
+        changes: filtered,
+        targetCursor: candidate ?? undefined,
+      });
+    }
   }
 
   /**
@@ -1492,8 +1563,7 @@ export class SyncEngine {
     tombstoneSeq: number,
     opts: { fromBroadcast?: boolean } = {},
   ): Promise<void> {
-    const prev = this.applyQueue;
-    const next = prev.then(async () => {
+    return this.chainApply(async () => {
       await this.store.applyReconcileBatch(
         entity,
         upserts,
@@ -1514,8 +1584,6 @@ export class SyncEngine {
         });
       }
     });
-    this.applyQueue = next.catch(() => {});
-    return next;
   }
 
   /** Stop the sync engine. */
@@ -3921,6 +3989,13 @@ export class SyncEngine {
 // ---------------------------------------------------------------------------
 // SSR / Hydration types
 // ---------------------------------------------------------------------------
+
+/** Live change frames queued for one apply step (see `enqueueApply`). */
+interface LiveBatch {
+  changes: ChangeEvent[];
+  fromBroadcast: boolean;
+  promise: Promise<void>;
+}
 
 /** Data shape for hydrating the client from server-rendered content. */
 export interface HydrationData {

@@ -111,6 +111,20 @@ public actor SyncEngine {
     /// pull they're discarded — the cursor never reached their seqs, so
     /// the next pull re-fetches them from the log.
     private var pullHold: [ChangeEvent]? = nil
+    // Group commit (TS parity: live frames share one IndexedDB
+    // transaction). Rows and the cursor queue here and a single writer
+    // drains them: everything queued while a write is in flight goes to
+    // disk in the next transaction, in order, with the newest cursor.
+    private var pendingWrites: [ChangeEvent] = []
+    private var pendingCursor: SyncCursor? = nil
+    private var writerRunning = false
+    private var writeWaiters: [CheckedContinuation<Void, Never>] = []
+    /// Set when a batch failed to write; the on-disk cursor then stays
+    /// frozen so a restart re-pulls the gap (TS `persistDegraded`).
+    private var persistDegraded = false
+    /// Bumped by `resetReplica`: a batch taken before the wipe must not
+    /// land after it.
+    private var writeEpoch: UInt64 = 0
     private var lastSeenToken: String? = nil
     private var lastSeenTokenObserved = false
     private var lastSeenTenant: String? = nil
@@ -396,15 +410,15 @@ public actor SyncEngine {
                     // (WS + pull window overlap) is not applied twice.
                     // Parity with TS `enqueueApply`.
                     let fresh = changes.filter { $0.seq > self.cursor.last_seq }
-                    if !fresh.isEmpty {
-                        await self.store.applyChangesAsync(fresh)
-                    }
+                    let rows = fresh.isEmpty ? [] : self.store.applyChangesInMemory(fresh)
+                    var advance: SyncCursor? = nil
                     if respCursor.last_seq > self.cursor.last_seq {
                         self.cursor = respCursor
-                        if let persistence = self.persistence {
-                            try? await persistence.saveCursor(respCursor)
-                        }
+                        advance = respCursor
                     }
+                    // Rows and cursor land in one transaction; the pull
+                    // waits for it before the next page applies.
+                    await self.persistInOrder(rows, cursor: advance, wait: true)
                 }
                 // No-progress guard: a page that reports more but does
                 // not advance the cursor would refetch itself forever.
@@ -1106,14 +1120,67 @@ public actor SyncEngine {
     /// Apply one live change event through the seq gate: already-seen
     /// seqs are dropped, newer ones apply and advance (+persist) the
     /// cursor. Shared by the direct WS path and the post-pull replay.
+    ///
+    /// The frame applies to memory at once; its row and the cursor queue
+    /// for the writer and reach disk in the next transaction (group
+    /// commit), so a burst of frames costs one SQLite transaction per
+    /// write in flight instead of two per frame.
     private func applyLiveEvent(_ change: ChangeEvent) async {
         if change.seq > cursor.last_seq {
-            await store.applyChangesAsync([change])
+            let rows = store.applyChangesInMemory([change])
             cursor = SyncCursor(last_seq: change.seq)
-            if let persistence {
-                try? await persistence.saveCursor(cursor)
-            }
+            await persistInOrder(rows, cursor: cursor, wait: false)
         }
+    }
+
+    /// Queue rows (+ cursor) for the writer. `wait: true` returns once
+    /// they are on disk. The writer runs one batch at a time, in FIFO
+    /// order, so disk order matches memory order.
+    private func persistInOrder(_ rows: [ChangeEvent], cursor: SyncCursor?, wait: Bool) async {
+        guard persistence != nil else { return }
+        if rows.isEmpty && cursor == nil { return }
+        pendingWrites.append(contentsOf: rows)
+        if let cursor, !persistDegraded { pendingCursor = cursor }
+        if !writerRunning {
+            writerRunning = true
+            Task { await self.runWriter() }
+        }
+        if wait {
+            await withCheckedContinuation { writeWaiters.append($0) }
+        }
+    }
+
+    private func runWriter() async {
+        while !pendingWrites.isEmpty || pendingCursor != nil {
+            let batch = pendingWrites
+            let batchCursor = pendingCursor
+            let waiters = writeWaiters
+            let epoch = writeEpoch
+            pendingWrites = []
+            pendingCursor = nil
+            writeWaiters = []
+            if let persistence, epoch == writeEpoch {
+                do {
+                    try await persistence.persistBatch(batch, cursor: persistDegraded ? nil : batchCursor)
+                } catch {
+                    // The transaction rolled back: keep memory authoritative
+                    // and freeze the on-disk cursor so a restart re-pulls.
+                    persistDegraded = true
+                }
+            }
+            for w in waiters { w.resume() }
+        }
+        writerRunning = false
+        let idle = writeWaiters
+        writeWaiters = []
+        for w in idle { w.resume() }
+    }
+
+    /// Wait until every queued write is on disk. Tests and `resetReplica`
+    /// use it.
+    func waitForPersistIdle() async {
+        if !writerRunning { return }
+        await withCheckedContinuation { writeWaiters.append($0) }
     }
 
     private func scheduleReconnect() {
@@ -1257,6 +1324,13 @@ public actor SyncEngine {
     public func resetReplica(wipeMutations: Bool = false) async {
         cursor = SyncCursor()
         store.clearAll()
+        // Drop writes queued for the old replica and let an in-flight batch
+        // finish BEFORE clearing disk, so none of it lands after the wipe.
+        pendingWrites = []
+        pendingCursor = nil
+        writeEpoch &+= 1
+        await waitForPersistIdle()
+        persistDegraded = false
         if let persistence {
             try? await persistence.clearRows()
             try? await persistence.saveCursor(cursor)
@@ -1450,4 +1524,15 @@ public protocol SyncPersistence: MutationQueuePersistence {
     /// "cross-identity read leak". Does NOT touch the cursor or the mutation
     /// queue (the engine resets those explicitly).
     func clearRows() async throws
+    /// Write row changes in order and, when given, the cursor, as ONE
+    /// atomic transaction. The default writes row by row, then the
+    /// cursor; `SQLitePersistence` overrides it with a transaction.
+    func persistBatch(_ changes: [ChangeEvent], cursor: SyncCursor?) async throws
+}
+
+extension SyncPersistence {
+    public func persistBatch(_ changes: [ChangeEvent], cursor: SyncCursor?) async throws {
+        for change in changes { try await persist(change) }
+        if let cursor { try await saveCursor(cursor) }
+    }
 }

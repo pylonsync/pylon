@@ -125,25 +125,53 @@ public final class SQLitePersistence: SyncPersistence, @unchecked Sendable {
 
     public func persist(_ change: ChangeEvent) async throws {
         try await withQueue {
-            switch change.kind {
-            case .insert, .update:
-                guard let data = change.data else { return }
-                let json = try self.encoder.encode(data)
-                guard let s = String(data: json, encoding: .utf8) else { return }
-                try self.execStatement(
-                    "INSERT OR REPLACE INTO rows (entity, row_id, data) VALUES (?, ?, ?)"
-                ) { stmt in
-                    sqlite3_bind_text(stmt, 1, change.entity, -1, Self.SQLITE_TRANSIENT)
-                    sqlite3_bind_text(stmt, 2, change.row_id, -1, Self.SQLITE_TRANSIENT)
-                    sqlite3_bind_text(stmt, 3, s, -1, Self.SQLITE_TRANSIENT)
+            try self.writeRow(change)
+        }
+    }
+
+    /// Write the rows in order plus the cursor in one transaction: they
+    /// commit or roll back together, so the on-disk cursor never gets
+    /// ahead of the on-disk rows.
+    public func persistBatch(_ changes: [ChangeEvent], cursor: SyncCursor?) async throws {
+        try await withQueue {
+            try self.execStatement("BEGIN") { _ in }
+            do {
+                for change in changes { try self.writeRow(change) }
+                if let cursor {
+                    try self.execStatement(
+                        "INSERT OR REPLACE INTO cursors (key, last_seq) VALUES (?, ?)"
+                    ) { stmt in
+                        sqlite3_bind_text(stmt, 1, "cursor", -1, Self.SQLITE_TRANSIENT)
+                        sqlite3_bind_int64(stmt, 2, cursor.last_seq)
+                    }
                 }
-            case .delete:
-                try self.execStatement(
-                    "DELETE FROM rows WHERE entity = ? AND row_id = ?"
-                ) { stmt in
-                    sqlite3_bind_text(stmt, 1, change.entity, -1, Self.SQLITE_TRANSIENT)
-                    sqlite3_bind_text(stmt, 2, change.row_id, -1, Self.SQLITE_TRANSIENT)
-                }
+                try self.execStatement("COMMIT") { _ in }
+            } catch {
+                try? self.execStatement("ROLLBACK") { _ in }
+                throw error
+            }
+        }
+    }
+
+    private func writeRow(_ change: ChangeEvent) throws {
+        switch change.kind {
+        case .insert, .update:
+            guard let data = change.data else { return }
+            let json = try self.encoder.encode(data)
+            guard let s = String(data: json, encoding: .utf8) else { return }
+            try self.execStatement(
+                "INSERT OR REPLACE INTO rows (entity, row_id, data) VALUES (?, ?, ?)"
+            ) { stmt in
+                sqlite3_bind_text(stmt, 1, change.entity, -1, Self.SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 2, change.row_id, -1, Self.SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 3, s, -1, Self.SQLITE_TRANSIENT)
+            }
+        case .delete:
+            try self.execStatement(
+                "DELETE FROM rows WHERE entity = ? AND row_id = ?"
+            ) { stmt in
+                sqlite3_bind_text(stmt, 1, change.entity, -1, Self.SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 2, change.row_id, -1, Self.SQLITE_TRANSIENT)
             }
         }
     }

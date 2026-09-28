@@ -504,8 +504,10 @@ describe("IDB warm-load hydration", () => {
       // so we assert it does NOT advance to 50 below.
       const onDiskBefore = (await persistence.loadCursor())?.last_seq ?? 0;
 
-      // Abort the next ENTITIES (row) readwrite, leaving the separate
-      // CURSOR-store tx alone — mirrors a quota abort on a row write.
+      // Abort the next readwrite that writes rows — mirrors a quota abort
+      // on a row write. The batch path writes rows and cursor in one
+      // transaction, so the cursor write aborts with it; a separate
+      // cursor-only transaction is left alone.
       const db = persistence.connection!;
       const realTx = db.transaction.bind(db);
       let armed = true;
@@ -517,15 +519,7 @@ describe("IDB warm-load hydration", () => {
         const touchesEntities = Array.isArray(stores)
           ? stores.includes("entities")
           : stores === "entities";
-        const touchesCursors = Array.isArray(stores)
-          ? stores.includes("cursors")
-          : stores === "cursors";
-        if (
-          armed &&
-          String(args[1]) === "readwrite" &&
-          touchesEntities &&
-          !touchesCursors
-        ) {
+        if (armed && String(args[1]) === "readwrite" && touchesEntities) {
           armed = false;
           queueMicrotask(() => {
             try {

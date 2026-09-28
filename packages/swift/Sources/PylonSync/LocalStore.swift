@@ -97,6 +97,19 @@ public final class LocalStore: @unchecked Sendable {
         }
     }
 
+    /// Apply to memory and notify once, WITHOUT persisting. Returns each
+    /// change with `data` set to the full merged row (deletes unchanged),
+    /// ready to write to disk. The engine writes the batch itself, in one
+    /// transaction (`SyncPersistence.persistBatch`).
+    public func applyChangesInMemory(_ changes: [ChangeEvent]) -> [ChangeEvent] {
+        let (snapshot, listeners) = withLock {
+            for change in changes { applyChangeLocked(change) }
+            return (changes.map { hydrateFromMemoryLocked($0) }, Array(self.listeners.values))
+        }
+        for l in listeners { l() }
+        return snapshot
+    }
+
     private func withLock<T>(_ body: () -> T) -> T {
         lock.lock(); defer { lock.unlock() }
         return body()

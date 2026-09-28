@@ -201,6 +201,20 @@ export class LocalStore {
   }
 
   /**
+   * Apply to memory and notify once, WITHOUT persisting. Returns each
+   * change with `data` set to the full merged row (deletes unchanged),
+   * ready to write to disk. The engine uses it to write a whole batch in
+   * one transaction (`ReplicaPersistence.saveBatch`).
+   */
+  applyInMemory(changes: ChangeEvent[]): ChangeEvent[] {
+    for (const change of changes) {
+      this.applyChange(change);
+    }
+    this.notify();
+    return changes.map((c) => this.hydrateFromMemory(c));
+  }
+
+  /**
    * Apply + persist, awaiting disk writes before returning. Callers
    * that are about to advance a cursor based on `changes` MUST use
    * this path — otherwise cursor durability is broken: a crash
