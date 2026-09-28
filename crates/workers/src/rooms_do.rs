@@ -68,7 +68,8 @@ use worker::{
 /// - `POST /leave`       body: `{"user_id":...}`                  → `{"presence":...}`
 /// - `POST /presence`    body: `{"user_id":..., "data":...}`     → `{"presence":...}`
 /// - `POST /broadcast`   body: `{"sender":..., "topic":..., "data":...}` → `{"delivered":N}`
-/// - `GET  /members`                                              → `[<presence>, ...]`
+/// - `POST /is_in_room`  body: `{"user_id":...}`                  → `true` / `false`
+/// - `GET  /members`                                           → `[<presence>, ...]`
 /// - `GET  /size`                                                 → `{"size":N}`
 /// - `GET  /ws`                                                   → 101 WebSocket upgrade
 #[durable_object]
@@ -110,6 +111,7 @@ impl DurableObject for PylonRoom {
             (Method::Post, "/leave") => self.handle_leave(&mut req).await,
             (Method::Post, "/presence") => self.handle_presence(&mut req).await,
             (Method::Post, "/broadcast") => self.handle_broadcast(&mut req).await,
+            (Method::Post, "/is_in_room") => self.handle_is_in_room(&mut req).await,
             (Method::Get, "/members") => self.handle_members().await,
             (Method::Get, "/size") => self.handle_size().await,
             (Method::Get, "/ws") => self.handle_websocket_upgrade().await,
@@ -276,6 +278,15 @@ impl PylonRoom {
         Response::from_json(&serde_json::json!({ "delivered": delivered }))
     }
 
+    async fn handle_is_in_room(&self, req: &mut Request) -> Result<Response> {
+        #[derive(serde::Deserialize)]
+        struct Body {
+            user_id: String,
+        }
+        let body: Body = req.json().await?;
+        Response::from_json(&self.members.borrow().contains_key(&body.user_id))
+    }
+
     async fn handle_members(&self) -> Result<Response> {
         let entries: Vec<serde_json::Value> = self.members.borrow().values().cloned().collect();
         Response::from_json(&entries)
@@ -440,9 +451,9 @@ impl RoomOps for WorkersRooms {
 
     fn is_in_room(&self, room: &str, user_id: &str) -> bool {
         // Defense-in-depth membership check used by /api/rooms/broadcast
-        // — see crates/router/src/routes/rooms.rs. Issues a HEAD-style
-        // probe to the DO so we don't pay the cost of pulling the full
-        // members array client-side. Fails closed on transport error.
+        // — see crates/router/src/routes/rooms.rs. The DO answers from
+        // its member map, so the adapter does not pull the full members
+        // array. Fails closed on transport error.
         let body = serde_json::json!({ "user_id": user_id });
         self.do_request(room, Method::Post, "/is_in_room", Some(body))
             .ok()
