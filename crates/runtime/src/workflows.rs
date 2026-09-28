@@ -62,7 +62,202 @@ pub struct WorkflowInstance {
     pub current_step: usize,
     /// Max retries per step.
     pub max_retries: u32,
+    /// Lookup key set at start (for example a lead id). At most one
+    /// non-terminal run exists per workflow name and key.
+    #[serde(default)]
+    pub key: Option<String>,
+    /// If waiting for an event with a timeout, when the wait expires
+    /// (unix timestamp seconds).
+    #[serde(default)]
+    pub wait_deadline: Option<u64>,
+    /// Events sent while the run was not waiting for them, oldest first.
+    /// The next matching `waitForEvent` consumes the oldest match.
+    #[serde(default)]
+    pub pending_events: Vec<BufferedEvent>,
+    /// The reason passed to `cancel`, if the run was cancelled.
+    #[serde(default)]
+    pub cancel_reason: Option<String>,
+    /// Sequence numbers of buffered events consumed since the last save.
+    /// The Postgres store deletes these rows in the same transaction that
+    /// records the step, so an event is never both consumed and kept.
+    #[serde(skip)]
+    pub consumed_events: Vec<u64>,
 }
+
+/// An event delivered to a run that was not waiting for it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BufferedEvent {
+    pub seq: u64,
+    pub event: String,
+    pub data: serde_json::Value,
+    pub received_at: String,
+}
+
+/// Result of [`WorkflowEngine::send_event`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct EventDelivery {
+    /// The run was waiting for this event and resumes now.
+    pub delivered: bool,
+    /// The run was not waiting for this event; the event is queued for
+    /// its next matching `waitForEvent`.
+    pub buffered: bool,
+}
+
+/// Result of [`WorkflowEngine::start_with_key`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartOutcome {
+    pub id: String,
+    /// False when a non-terminal run with the same name and key already
+    /// existed; `id` is then that run's id.
+    pub created: bool,
+}
+
+/// Which runs [`WorkflowEngine::list_filtered`] returns.
+#[derive(Debug, Clone, Default)]
+pub struct WorkflowFilter {
+    pub status: Option<StatusFilter>,
+    pub name: Option<String>,
+    pub key: Option<String>,
+    /// Max rows returned. 0 means [`DEFAULT_LIST_LIMIT`].
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatusFilter {
+    Is(WorkflowStatus),
+    /// Any non-terminal status.
+    Active,
+}
+
+impl StatusFilter {
+    /// Parse the lowercase names used by the HTTP API and `ctx.workflows`.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "active" => StatusFilter::Active,
+            "pending" => StatusFilter::Is(WorkflowStatus::Pending),
+            "running" => StatusFilter::Is(WorkflowStatus::Running),
+            "sleeping" => StatusFilter::Is(WorkflowStatus::Sleeping),
+            "waiting" => StatusFilter::Is(WorkflowStatus::WaitingForEvent),
+            "completed" => StatusFilter::Is(WorkflowStatus::Completed),
+            "failed" => StatusFilter::Is(WorkflowStatus::Failed),
+            "cancelled" => StatusFilter::Is(WorkflowStatus::Cancelled),
+            _ => return None,
+        })
+    }
+
+    fn matches(&self, status: &WorkflowStatus) -> bool {
+        match self {
+            StatusFilter::Is(s) => s == status,
+            StatusFilter::Active => !status.is_terminal(),
+        }
+    }
+}
+
+impl WorkflowStatus {
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            WorkflowStatus::Completed | WorkflowStatus::Failed | WorkflowStatus::Cancelled
+        )
+    }
+
+    /// Lowercase name used by the HTTP API and `ctx.workflows`.
+    pub fn api_name(&self) -> &'static str {
+        match self {
+            WorkflowStatus::Pending => "pending",
+            WorkflowStatus::Running => "running",
+            WorkflowStatus::Sleeping => "sleeping",
+            WorkflowStatus::WaitingForEvent => "waiting",
+            WorkflowStatus::Completed => "completed",
+            WorkflowStatus::Failed => "failed",
+            WorkflowStatus::Cancelled => "cancelled",
+        }
+    }
+}
+
+impl WorkflowInstance {
+    /// The run's state without step history or buffered event payloads.
+    pub fn summary(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.id,
+            "name": self.name,
+            "key": self.key,
+            "status": self.status.api_name(),
+            "input": self.input,
+            "output": self.output,
+            "error": self.error,
+            "cancelReason": self.cancel_reason,
+            "waitingFor": self.waiting_for,
+            "waitDeadline": self.wait_deadline,
+            "wakeAt": self.wake_at,
+            "bufferedEvents": self.pending_events.len(),
+            "createdAt": stamp_secs(&self.created_at),
+            "startedAt": self.started_at.as_deref().and_then(stamp_secs),
+            "completedAt": self.completed_at.as_deref().and_then(stamp_secs),
+        })
+    }
+
+    /// Resolve the current `waitForEvent` and record it as a completed
+    /// step: `event:<name>` with the event data, or `timeout:<name>` with
+    /// no output. The TS executor replays these records in order.
+    fn resolve_wait(&mut self, event: &str, data: Option<serde_json::Value>) {
+        let name = match data {
+            Some(_) => format!("event:{event}"),
+            None => format!("timeout:{event}"),
+        };
+        self.steps.push(StepResult {
+            step_id: format!("step_{}", self.steps.len()),
+            name,
+            status: StepStatus::Completed,
+            output: data,
+            error: None,
+            started_at: Some(now_iso()),
+            completed_at: Some(now_iso()),
+            duration_ms: None,
+            retry_count: 0,
+        });
+        self.current_step += 1;
+        self.status = WorkflowStatus::Running;
+        self.waiting_for = None;
+        self.wait_deadline = None;
+    }
+
+    /// Remove and return the oldest buffered event named `event`.
+    fn take_buffered(&mut self, event: &str) -> Option<serde_json::Value> {
+        let pos = self.pending_events.iter().position(|e| e.event == event)?;
+        let taken = self.pending_events.remove(pos);
+        self.consumed_events.push(taken.seq);
+        Some(taken.data)
+    }
+
+    /// Whether a paused run has work to do right now.
+    fn has_due_work(&self, now: u64) -> bool {
+        match self.status {
+            WorkflowStatus::Pending | WorkflowStatus::Running => true,
+            WorkflowStatus::Sleeping => self.wake_at.is_none_or(|t| t <= now),
+            WorkflowStatus::WaitingForEvent => {
+                self.wait_deadline.is_some_and(|t| t <= now)
+                    || self
+                        .waiting_for
+                        .as_deref()
+                        .is_some_and(|event| self.pending_events.iter().any(|e| e.event == event))
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Default and max row count for [`WorkflowEngine::list_filtered`].
+pub const DEFAULT_LIST_LIMIT: usize = 100;
+pub const MAX_LIST_LIMIT: usize = 1000;
+/// Max buffered events per run. Further sends fail until the run
+/// consumes some.
+pub const MAX_BUFFERED_EVENTS: usize = 100;
+/// How long finished runs stay listable before `prune_terminal` drops them.
+pub const TERMINAL_HISTORY_SECS: u64 = 24 * 3600;
+const MAX_KEY_LEN: usize = 256;
+const MAX_EVENT_NAME_LEN: usize = 200;
+const MAX_CANCEL_REASON_LEN: usize = 1000;
 
 /// A registered workflow definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,11 +284,13 @@ pub struct WorkflowDef {
 pub type WorkflowRunnerHook =
     std::sync::Arc<dyn Fn(&serde_json::Value) -> Result<serde_json::Value, String> + Send + Sync>;
 
-/// Nudges the driver: "instance `id` has work". Installed by the server
-/// to enqueue a `pylon.workflow.advance` job — start/send_event/wake
-/// must never execute steps inline on the caller's thread (an HTTP
-/// route would block for the whole segment).
-pub type WorkflowKickHook = Box<dyn Fn(&str) + Send + Sync>;
+/// Nudges the driver: "instance `id` has work in `delay_secs` seconds".
+/// Installed by the server to enqueue a `pylon.workflow.advance` job —
+/// start/send_event/wake must never execute steps inline on the caller's
+/// thread (an HTTP route would block for the whole segment). A delay is
+/// used for sleep and wait-timeout deadlines, so they fire on time
+/// instead of on the next minute tick.
+pub type WorkflowKickHook = Box<dyn Fn(&str, u64) + Send + Sync>;
 
 const DISTRIBUTED_WORKFLOW_LEASE_SECS: u64 = 30;
 const DISTRIBUTED_WORKFLOW_HEARTBEAT_SECS: u64 = 10;
@@ -284,10 +481,92 @@ impl WorkflowEngine {
         }))
     }
 
-    pub(crate) fn kick(&self, workflow_id: &str) {
-        if let Some(hook) = self.kick_hook.lock().unwrap().as_ref() {
-            hook(workflow_id);
+    /// Persist `workflow_id`'s in-memory state and return the saved copy.
+    ///
+    /// The SQLite store writes while the instance map is still locked, so
+    /// two writers for the same run cannot reach disk out of order. The
+    /// Postgres store writes after the map is unlocked; the lease token
+    /// and the Cancelled fence in the store order its writes.
+    fn persist_locked(
+        &self,
+        mut instances: std::sync::MutexGuard<'_, HashMap<String, WorkflowInstance>>,
+        workflow_id: &str,
+    ) -> Result<WorkflowInstance, String> {
+        let snapshot = instances
+            .get(workflow_id)
+            .cloned()
+            .ok_or_else(|| format!("Workflow '{}' not found", workflow_id))?;
+        if self.pg_store().is_some() {
+            drop(instances);
+            self.persist(&snapshot)?;
+            if let Some(inst) = self.instances.lock().unwrap().get_mut(workflow_id) {
+                inst.consumed_events.clear();
+            }
+        } else {
+            self.persist(&snapshot)?;
+            if let Some(inst) = instances.get_mut(workflow_id) {
+                inst.consumed_events.clear();
+            }
         }
+        Ok(snapshot)
+    }
+
+    /// After a failed Postgres write, return Cancelled if the run was
+    /// cancelled concurrently (the store fences writes to cancelled runs),
+    /// otherwise the original error.
+    fn cancelled_or(&self, workflow_id: &str, err: String) -> Result<WorkflowStatus, String> {
+        if let Some(store) = self.pg_store() {
+            if let Ok(Some(latest)) = store.load(workflow_id) {
+                if latest.status == WorkflowStatus::Cancelled {
+                    self.instances
+                        .lock()
+                        .unwrap()
+                        .insert(workflow_id.to_string(), latest);
+                    return Ok(WorkflowStatus::Cancelled);
+                }
+            }
+        }
+        Err(err)
+    }
+
+    pub(crate) fn kick(&self, workflow_id: &str) {
+        self.kick_after(workflow_id, 0);
+    }
+
+    fn kick_after(&self, workflow_id: &str, delay_secs: u64) {
+        if let Some(hook) = self.kick_hook.lock().unwrap().as_ref() {
+            hook(workflow_id, delay_secs);
+        }
+    }
+
+    /// Schedule a kick for the run's next deadline (sleep wake-up or
+    /// wait timeout), if it has one.
+    fn kick_at_deadline(&self, instance: &WorkflowInstance) {
+        let deadline = match instance.status {
+            WorkflowStatus::Sleeping => instance.wake_at,
+            WorkflowStatus::WaitingForEvent => instance.wait_deadline,
+            _ => None,
+        };
+        if let Some(at) = deadline {
+            self.kick_after(&instance.id, at.saturating_sub(now_secs()));
+        }
+    }
+
+    /// Whether the run has work right now. Postgres reads the shared row
+    /// and inbox, because other processes deliver events there.
+    fn needs_drive(&self, workflow_id: &str) -> bool {
+        let now = now_secs();
+        if let Some(store) = self.pg_store() {
+            return store.has_due_work(workflow_id, now).unwrap_or_else(|e| {
+                tracing::warn!("[workflows] due-work check failed for {workflow_id}: {e}");
+                false
+            });
+        }
+        self.instances
+            .lock()
+            .unwrap()
+            .get(workflow_id)
+            .is_some_and(|inst| inst.has_due_work(now))
     }
 
     /// Register a workflow definition.
@@ -300,10 +579,33 @@ impl WorkflowEngine {
 
     /// Start a new workflow instance. Returns the instance ID.
     pub fn start(&self, name: &str, input: serde_json::Value) -> Result<String, String> {
-        let defs = self.definitions.lock().unwrap();
-        let def = defs
-            .get(name)
-            .ok_or_else(|| format!("Workflow '{}' not registered", name))?;
+        self.start_with_key(name, input, None).map(|o| o.id)
+    }
+
+    /// Start a workflow instance with an optional lookup key. When `key`
+    /// is set and a non-terminal run of `name` with that key exists, no
+    /// new run starts and the existing run's id is returned with
+    /// `created: false`.
+    pub fn start_with_key(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+        key: Option<&str>,
+    ) -> Result<StartOutcome, String> {
+        if let Some(k) = key {
+            if k.is_empty() || k.len() > MAX_KEY_LEN {
+                return Err(format!(
+                    "workflow key must be 1-{MAX_KEY_LEN} bytes, got {}",
+                    k.len()
+                ));
+            }
+        }
+        let max_retries = {
+            let defs = self.definitions.lock().unwrap();
+            defs.get(name)
+                .ok_or_else(|| format!("Workflow '{}' not registered", name))?
+                .max_retries
+        };
 
         let id = format!(
             "wf_{}_{}",
@@ -324,15 +626,46 @@ impl WorkflowEngine {
             wake_at: None,
             waiting_for: None,
             current_step: 0,
-            max_retries: def.max_retries,
+            max_retries,
+            key: key.map(str::to_string),
+            wait_deadline: None,
+            pending_events: Vec::new(),
+            cancel_reason: None,
+            consumed_events: Vec::new(),
         };
 
-        self.persist(&instance)?;
-        self.instances.lock().unwrap().insert(id.clone(), instance);
+        if let Some(store) = self.pg_store() {
+            // The store's partial unique index on (name, key) over
+            // non-terminal runs decides which of two concurrent starts wins.
+            if let Some(existing) = store.insert_new(&instance)? {
+                return Ok(StartOutcome {
+                    id: existing,
+                    created: false,
+                });
+            }
+            self.instances.lock().unwrap().insert(id.clone(), instance);
+        } else {
+            let mut instances = self.instances.lock().unwrap();
+            if let Some(k) = key {
+                if let Some(existing) = instances.values().find(|i| {
+                    i.name == name && i.key.as_deref() == Some(k) && !i.status.is_terminal()
+                }) {
+                    return Ok(StartOutcome {
+                        id: existing.id.clone(),
+                        created: false,
+                    });
+                }
+            }
+            instances.insert(id.clone(), instance);
+            if let Err(e) = self.persist_locked(instances, &id) {
+                self.instances.lock().unwrap().remove(&id);
+                return Err(e);
+            }
+        }
         // Hand the new instance to the driver — steps never run on the
         // caller's thread.
         self.kick(&id);
-        Ok(id)
+        Ok(StartOutcome { id, created: true })
     }
 
     /// Drive a workflow until it pauses (sleep / wait_event) or reaches a
@@ -407,9 +740,12 @@ impl WorkflowEngine {
         })();
         drop(_guard);
         drop(distributed_lease);
-        if matches!(result, Ok(WorkflowStatus::Running)) {
-            // Budget exhausted mid-run — re-kick so the driver picks the
-            // instance up on a fresh job instead of monopolizing a worker.
+        // Re-kick when work remains: the step budget ran out mid-run, or
+        // an event or deadline arrived while this driver held the run. A
+        // kick sent during that window found the run busy and did
+        // nothing, so this check runs after the guard and lease are
+        // released.
+        if result.is_ok() && self.needs_drive(workflow_id) {
             self.kick(workflow_id);
         }
         result
@@ -463,15 +799,45 @@ impl WorkflowEngine {
                 }
                 // Timer expired -- fall through to advance.
             }
+            WorkflowStatus::WaitingForEvent => {
+                // Resume only when a matching event is buffered or the
+                // wait timed out; otherwise there is nothing to run.
+                self.refresh_inbox(workflow_id)?;
+                let mut instances = self.instances.lock().unwrap();
+                let Some(inst) = instances.get_mut(workflow_id) else {
+                    return Err(format!("Workflow '{}' not found", workflow_id));
+                };
+                if inst.status != WorkflowStatus::WaitingForEvent {
+                    return Ok(inst.status.clone());
+                }
+                let event = inst.waiting_for.clone().unwrap_or_default();
+                if let Some(data) = inst.take_buffered(&event) {
+                    inst.resolve_wait(&event, Some(data));
+                } else if inst.wait_deadline.is_some_and(|t| t <= now_secs()) {
+                    inst.resolve_wait(&event, None);
+                } else {
+                    return Ok(WorkflowStatus::WaitingForEvent);
+                }
+                if let Err(e) = self.persist_locked(instances, workflow_id) {
+                    return self.cancelled_or(workflow_id, e);
+                }
+            }
             _ => {}
         }
+        let instance = {
+            let instances = self.instances.lock().unwrap();
+            instances
+                .get(workflow_id)
+                .cloned()
+                .ok_or_else(|| format!("Workflow '{}' not found", workflow_id))?
+        };
 
         let request = serde_json::json!({
             "workflow_id": workflow_id,
             "workflow_name": instance.name,
             "input": instance.input,
             "current_step": instance.current_step,
-            "completed_steps": instance.steps,
+            "completed_steps": runner_steps(&instance.steps),
         });
 
         // A transport failure (runner call error, slice idle-timeout) goes
@@ -526,76 +892,112 @@ impl WorkflowEngine {
         result
     }
 
-    /// Send an event to a waiting workflow.
+    /// Send an event to a workflow run.
+    ///
+    /// If the run is waiting for `event`, it resumes. Otherwise the event
+    /// is buffered and the run's next `waitForEvent(event)` consumes it.
+    /// Sending never waits for a step in progress. Terminal runs reject
+    /// events. Null data is stored as `{}`, so a `waitForEvent` with a
+    /// timeout resolves to null only when it timed out.
     pub fn send_event(
         &self,
         workflow_id: &str,
         event: &str,
         data: serde_json::Value,
-    ) -> Result<(), String> {
-        let lease = match self.acquire_distributed_lease(workflow_id)? {
-            Some(lease) => Some(lease),
-            None if self.pg_store().is_some() => {
-                return Err("Workflow is currently advancing; retry the event".into());
-            }
-            None => None,
-        };
-        self.refresh_distributed(workflow_id)?;
-        let mut instances = self.instances.lock().unwrap();
-        let inst = instances.get_mut(workflow_id).ok_or("Workflow not found")?;
-
-        if inst.status != WorkflowStatus::WaitingForEvent {
-            return Err("Workflow is not waiting for an event".into());
-        }
-
-        if inst.waiting_for.as_deref() != Some(event) {
+    ) -> Result<EventDelivery, String> {
+        if event.is_empty() || event.len() > MAX_EVENT_NAME_LEN {
             return Err(format!(
-                "Workflow is waiting for '{}', not '{event}'",
-                inst.waiting_for.as_deref().unwrap_or("")
+                "event name must be 1-{MAX_EVENT_NAME_LEN} bytes, got {}",
+                event.len()
             ));
         }
+        let data = if data.is_null() {
+            serde_json::json!({})
+        } else {
+            data
+        };
 
-        inst.steps.push(StepResult {
-            step_id: format!("step_{}", inst.steps.len()),
-            name: format!("event:{event}"),
-            status: StepStatus::Completed,
-            output: Some(data),
-            error: None,
-            started_at: Some(now_iso()),
-            completed_at: Some(now_iso()),
-            duration_ms: None,
-            retry_count: 0,
-        });
-        inst.current_step += 1;
-        inst.status = WorkflowStatus::Running;
-        inst.waiting_for = None;
-        let snapshot = inst.clone();
-        drop(instances);
-        self.persist(&snapshot)?;
-        drop(lease);
-        self.kick(workflow_id);
+        if let Some(store) = self.pg_store() {
+            // Lease-free: the event lands in the shared inbox even while
+            // another process runs a step. The driver consumes it at the
+            // run's next wait (see run_to_pause for the lost-kick check).
+            let delivery = store.push_event(workflow_id, event, &data, MAX_BUFFERED_EVENTS)?;
+            if delivery.delivered {
+                self.kick(workflow_id);
+            }
+            return Ok(delivery);
+        }
 
-        Ok(())
+        let mut instances = self.instances.lock().unwrap();
+        let inst = instances
+            .get_mut(workflow_id)
+            .ok_or_else(|| format!("Workflow '{}' not found", workflow_id))?;
+        if inst.status.is_terminal() {
+            return Err(format!(
+                "Workflow is {}; it no longer accepts events",
+                inst.status.api_name()
+            ));
+        }
+        let waiting = inst.status == WorkflowStatus::WaitingForEvent
+            && inst.waiting_for.as_deref() == Some(event);
+        if waiting {
+            inst.resolve_wait(event, Some(data));
+        } else {
+            if inst.pending_events.len() >= MAX_BUFFERED_EVENTS {
+                return Err(format!(
+                    "Workflow has {MAX_BUFFERED_EVENTS} buffered events; it must consume some before more can be sent"
+                ));
+            }
+            let seq = inst.pending_events.iter().map(|e| e.seq).max().unwrap_or(0) + 1;
+            inst.pending_events.push(BufferedEvent {
+                seq,
+                event: event.to_string(),
+                data,
+                received_at: now_iso(),
+            });
+        }
+        self.persist_locked(instances, workflow_id)?;
+        if waiting {
+            self.kick(workflow_id);
+        }
+        Ok(EventDelivery {
+            delivered: waiting,
+            buffered: !waiting,
+        })
     }
 
-    /// Cancel a workflow.
-    pub fn cancel(&self, workflow_id: &str) -> Result<(), String> {
-        let _lease = match self.acquire_distributed_lease(workflow_id)? {
-            Some(lease) => Some(lease),
-            None if self.pg_store().is_some() => {
-                return Err("Workflow is currently advancing; retry cancellation".into());
+    /// Cancel a workflow run. Returns false when the run had already
+    /// finished (completed, failed, or cancelled).
+    ///
+    /// Cancellation never waits for a step in progress. That step may
+    /// finish, but its result is discarded and no further step runs.
+    pub fn cancel(&self, workflow_id: &str, reason: Option<&str>) -> Result<bool, String> {
+        let reason = reason.map(|r| truncate_utf8(r, MAX_CANCEL_REASON_LEN).to_string());
+        if let Some(store) = self.pg_store() {
+            let cancelled = store.cancel(workflow_id, reason.as_deref(), now_secs())?;
+            if let Some(latest) = store.load(workflow_id)? {
+                self.instances
+                    .lock()
+                    .unwrap()
+                    .insert(workflow_id.to_string(), latest);
             }
-            None => None,
-        };
-        self.refresh_distributed(workflow_id)?;
+            return Ok(cancelled);
+        }
         let mut instances = self.instances.lock().unwrap();
-        let inst = instances.get_mut(workflow_id).ok_or("Workflow not found")?;
+        let inst = instances
+            .get_mut(workflow_id)
+            .ok_or_else(|| format!("Workflow '{}' not found", workflow_id))?;
+        if inst.status.is_terminal() {
+            return Ok(false);
+        }
         inst.status = WorkflowStatus::Cancelled;
         inst.completed_at = Some(now_iso());
-        let snapshot = inst.clone();
-        drop(instances);
-        self.persist(&snapshot)?;
-        Ok(())
+        inst.cancel_reason = reason;
+        inst.waiting_for = None;
+        inst.wait_deadline = None;
+        inst.wake_at = None;
+        self.persist_locked(instances, workflow_id)?;
+        Ok(true)
     }
 
     /// Get a workflow instance by ID.
@@ -629,6 +1031,64 @@ impl WorkflowEngine {
             })
             .cloned()
             .collect()
+    }
+
+    /// List runs matching `filter`, newest first. `include_steps: false`
+    /// skips loading step history (Postgres reads it per row).
+    pub fn list_filtered(
+        &self,
+        filter: &WorkflowFilter,
+        include_steps: bool,
+    ) -> Result<Vec<WorkflowInstance>, String> {
+        let limit = match filter.limit {
+            0 => DEFAULT_LIST_LIMIT,
+            n => n.min(MAX_LIST_LIMIT),
+        };
+        if let Some(store) = self.pg_store() {
+            return store.list_filtered(filter, limit, include_steps);
+        }
+        let instances = self.instances.lock().unwrap();
+        let mut rows: Vec<WorkflowInstance> = instances
+            .values()
+            .filter(|i| filter.status.as_ref().is_none_or(|s| s.matches(&i.status)))
+            .filter(|i| filter.name.as_deref().is_none_or(|n| i.name == n))
+            .filter(|i| {
+                filter
+                    .key
+                    .as_deref()
+                    .is_none_or(|k| i.key.as_deref() == Some(k))
+            })
+            .cloned()
+            .collect();
+        drop(instances);
+        rows.sort_by(|a, b| {
+            stamp_secs(&b.created_at)
+                .cmp(&stamp_secs(&a.created_at))
+                .then_with(|| b.id.cmp(&a.id))
+        });
+        rows.truncate(limit);
+        if !include_steps {
+            for row in &mut rows {
+                row.steps.clear();
+            }
+        }
+        Ok(rows)
+    }
+
+    /// Load the Postgres inbox for `workflow_id` into the in-memory copy.
+    /// Other processes insert events there without the lease.
+    fn refresh_inbox(&self, workflow_id: &str) -> Result<(), String> {
+        let Some(store) = self.pg_store() else {
+            return Ok(());
+        };
+        let events = store.load_events(workflow_id)?;
+        if let Some(inst) = self.instances.lock().unwrap().get_mut(workflow_id) {
+            inst.pending_events = events
+                .into_iter()
+                .filter(|e| !inst.consumed_events.contains(&e.seq))
+                .collect();
+        }
+        Ok(())
     }
 
     /// List registered workflow definitions.
@@ -746,6 +1206,17 @@ impl WorkflowEngine {
                 self.kick(&current.id);
                 woken.push(current.id);
             }
+            // Waits that timed out or have a matching buffered event. The
+            // driver resolves them; kicking is enough.
+            match store.due_wait_ids(now) {
+                Ok(ids) => {
+                    for id in ids {
+                        self.kick(&id);
+                        woken.push(id);
+                    }
+                }
+                Err(e) => tracing::warn!("[workflows] failed to find due waits: {e}"),
+            }
             return woken;
         }
         let now = SystemTime::now()
@@ -755,7 +1226,6 @@ impl WorkflowEngine {
         let mut woken = Vec::new();
         let mut instances = self.instances.lock().unwrap();
 
-        let mut snapshots = Vec::new();
         for (id, inst) in instances.iter_mut() {
             if inst.status == WorkflowStatus::Sleeping {
                 if let Some(wake_at) = inst.wake_at {
@@ -763,20 +1233,26 @@ impl WorkflowEngine {
                         inst.status = WorkflowStatus::Running;
                         inst.wake_at = None;
                         woken.push(id.clone());
-                        snapshots.push(inst.clone());
                     }
                 }
             }
         }
-        drop(instances);
-        for snapshot in &snapshots {
-            if let Err(e) = self.persist(snapshot) {
-                tracing::warn!(
-                    "[workflows] failed to persist wake for {}: {e}",
-                    snapshot.id
-                );
+        for id in &woken {
+            if let Some(snapshot) = instances.get(id) {
+                if let Err(e) = self.persist(snapshot) {
+                    tracing::warn!("[workflows] failed to persist wake for {id}: {e}");
+                }
             }
         }
+        // Waits that timed out or have a matching buffered event. The
+        // driver resolves them; kicking is enough.
+        let due_waits: Vec<String> = instances
+            .values()
+            .filter(|i| i.status == WorkflowStatus::WaitingForEvent && i.has_due_work(now))
+            .map(|i| i.id.clone())
+            .collect();
+        drop(instances);
+        woken.extend(due_waits);
         for id in &woken {
             self.kick(id);
         }
@@ -828,6 +1304,14 @@ impl WorkflowEngine {
                 count += 1;
             }
         }
+        // Recent finished runs, for `list`. Not counted: they need no
+        // driver. prune_terminal drops them after the same window.
+        for wf in store
+            .load_recent_terminal(TERMINAL_HISTORY_SECS)
+            .unwrap_or_default()
+        {
+            instances.entry(wf.id.clone()).or_insert(wf);
+        }
 
         count
     }
@@ -847,6 +1331,25 @@ impl WorkflowEngine {
             .and_then(|v| v.as_str())
             .unwrap_or("fail");
 
+        // A wait timeout that doesn't parse fails the run at once instead
+        // of defaulting to zero (an immediate timeout). Retrying the same
+        // code cannot fix it.
+        let mut wait_timeout: Option<u64> = None;
+        let mut invalid_timeout: Option<String> = None;
+        if action == "wait_event" {
+            if let Some(raw) = response.get("timeout").filter(|v| !v.is_null()) {
+                match raw.as_str().and_then(parse_duration_strict) {
+                    Some(secs) => wait_timeout = Some(secs),
+                    None => {
+                        invalid_timeout = Some(format!(
+                            "invalid waitForEvent timeout {raw}; use a duration like \"60s\", \"5m\", or \"24h\""
+                        ))
+                    }
+                }
+            }
+            self.refresh_inbox(workflow_id)?;
+        }
+
         let mut instances = self.instances.lock().unwrap();
         let inst = instances
             .get_mut(workflow_id)
@@ -855,11 +1358,9 @@ impl WorkflowEngine {
         // A response for a terminal instance is DROPPED, not applied. The
         // race this closes: cancel() lands while a slice is executing;
         // without this check the slice's step_complete flips the status
-        // back to Running and the cancelled run keeps going.
-        if matches!(
-            inst.status,
-            WorkflowStatus::Completed | WorkflowStatus::Failed | WorkflowStatus::Cancelled
-        ) {
+        // back to Running and the cancelled run keeps going. Postgres
+        // cancels from other processes are fenced in the store instead.
+        if inst.status.is_terminal() {
             return Ok(inst.status.clone());
         }
 
@@ -909,16 +1410,31 @@ impl WorkflowEngine {
 
                 Ok(WorkflowStatus::Sleeping)
             }
+            "wait_event" if invalid_timeout.is_some() => {
+                inst.status = WorkflowStatus::Failed;
+                inst.error = invalid_timeout;
+                inst.completed_at = Some(now_iso());
+                Ok(WorkflowStatus::Failed)
+            }
             "wait_event" => {
                 let event = response
                     .get("event")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                inst.status = WorkflowStatus::WaitingForEvent;
-                inst.waiting_for = Some(event);
-
-                Ok(WorkflowStatus::WaitingForEvent)
+                if let Some(data) = inst.take_buffered(&event) {
+                    // Sent before the run reached this wait.
+                    inst.resolve_wait(&event, Some(data));
+                    Ok(WorkflowStatus::Running)
+                } else if wait_timeout == Some(0) {
+                    inst.resolve_wait(&event, None);
+                    Ok(WorkflowStatus::Running)
+                } else {
+                    inst.status = WorkflowStatus::WaitingForEvent;
+                    inst.waiting_for = Some(event);
+                    inst.wait_deadline = wait_timeout.map(|secs| now_secs().saturating_add(secs));
+                    Ok(WorkflowStatus::WaitingForEvent)
+                }
             }
             "complete" => {
                 inst.status = WorkflowStatus::Completed;
@@ -969,12 +1485,14 @@ impl WorkflowEngine {
             }
             _ => Err(format!("Unknown action: {action}")),
         };
-        let snapshot = inst.clone();
-        drop(instances);
-        if result.is_ok() {
-            self.persist(&snapshot)?;
+        let status = result?;
+        match self.persist_locked(instances, workflow_id) {
+            Ok(snapshot) => {
+                self.kick_at_deadline(&snapshot);
+                Ok(status)
+            }
+            Err(e) => self.cancelled_or(workflow_id, e),
         }
-        result
     }
 
     /// Execute one workflow slice: the in-process hook (the Bun function
@@ -1046,6 +1564,83 @@ impl WorkflowEngine {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Step records in the runner wire format (`WorkflowStepResult` in
+/// packages/functions/src/workflows.ts), which uses lowercase statuses.
+/// The admin API serializes `StepStatus` with serde's variant names
+/// ("Completed"); the TS executor matches on "completed".
+fn runner_steps(steps: &[StepResult]) -> serde_json::Value {
+    serde_json::Value::Array(
+        steps
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "step_id": s.step_id,
+                    "name": s.name,
+                    "status": match s.status {
+                        StepStatus::Pending => "pending",
+                        StepStatus::Running => "running",
+                        StepStatus::Completed => "completed",
+                        StepStatus::Failed => "failed",
+                        StepStatus::Skipped => "skipped",
+                    },
+                    "output": s.output,
+                    "error": s.error,
+                    "started_at": s.started_at,
+                    "completed_at": s.completed_at,
+                    "duration_ms": s.duration_ms,
+                    "retry_count": s.retry_count,
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Parse a duration like "24h", "30m", "5s", "1d", or bare seconds
+/// ("60"). Returns None for anything else.
+fn parse_duration_strict(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let (digits, unit) = match s.char_indices().last()? {
+        (i, c) if c.is_ascii_alphabetic() => (&s[..i], c),
+        _ => (s, 's'),
+    };
+    let digits = digits.trim();
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let n: u64 = digits.parse().ok()?;
+    let mult = match unit {
+        's' => 1,
+        'm' => 60,
+        'h' => 3600,
+        'd' => 86400,
+        _ => return None,
+    };
+    n.checked_mul(mult)
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Seconds from an engine timestamp ("<epoch-secs>Z").
+fn stamp_secs(s: &str) -> Option<u64> {
+    s.trim_end_matches('Z').parse().ok()
+}
+
+fn truncate_utf8(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
 
 /// Parse a human-readable duration like "24h", "30m", "5s", "1d".
 fn parse_duration_str(s: &str) -> u64 {
@@ -1306,7 +1901,7 @@ mod tests {
     }
 
     #[test]
-    fn send_event_wrong_name_errors() {
+    fn send_event_other_name_is_buffered() {
         let e = engine();
         let id = e.start("onboarding", serde_json::json!({})).unwrap();
 
@@ -1316,21 +1911,32 @@ mod tests {
         )
         .unwrap();
 
-        let err = e
+        // A different event is buffered; the run keeps waiting.
+        let delivery = e
             .send_event(&id, "wrong_event", serde_json::json!({}))
-            .unwrap_err();
-        assert!(err.contains("waiting for 'user_confirmed'"));
+            .unwrap();
+        assert_eq!(
+            delivery,
+            EventDelivery {
+                delivered: false,
+                buffered: true
+            }
+        );
+        let inst = e.get(&id).unwrap();
+        assert_eq!(inst.status, WorkflowStatus::WaitingForEvent);
+        assert_eq!(inst.pending_events.len(), 1);
     }
 
     #[test]
-    fn send_event_not_waiting_errors() {
+    fn send_event_to_finished_run_errors() {
         let e = engine();
         let id = e.start("onboarding", serde_json::json!({})).unwrap();
+        e.cancel(&id, None).unwrap();
 
         let err = e
             .send_event(&id, "anything", serde_json::json!({}))
             .unwrap_err();
-        assert!(err.contains("not waiting"));
+        assert!(err.contains("no longer accepts events"), "{err}");
     }
 
     // -- Cancel -------------------------------------------------------------
@@ -1340,7 +1946,7 @@ mod tests {
         let e = engine();
         let id = e.start("onboarding", serde_json::json!({})).unwrap();
 
-        e.cancel(&id).unwrap();
+        e.cancel(&id, None).unwrap();
 
         let inst = e.get(&id).unwrap();
         assert_eq!(inst.status, WorkflowStatus::Cancelled);
@@ -1350,7 +1956,7 @@ mod tests {
     #[test]
     fn cancel_unknown_workflow_errors() {
         let e = engine();
-        let err = e.cancel("wf_nonexistent").unwrap_err();
+        let err = e.cancel("wf_nonexistent", None).unwrap_err();
         assert!(err.contains("not found"));
     }
 
@@ -1582,6 +2188,11 @@ mod tests {
             waiting_for: None,
             current_step: 0,
             max_retries: 3,
+            key: None,
+            wait_deadline: None,
+            pending_events: Vec::new(),
+            cancel_reason: None,
+            consumed_events: Vec::new(),
         };
 
         // Save a sleeping workflow.
@@ -1610,6 +2221,11 @@ mod tests {
             waiting_for: None,
             current_step: 1,
             max_retries: 3,
+            key: None,
+            wait_deadline: None,
+            pending_events: Vec::new(),
+            cancel_reason: None,
+            consumed_events: Vec::new(),
         };
 
         // Save a completed workflow (should NOT be restored).
@@ -1628,6 +2244,11 @@ mod tests {
             waiting_for: None,
             current_step: 0,
             max_retries: 3,
+            key: None,
+            wait_deadline: None,
+            pending_events: Vec::new(),
+            cancel_reason: None,
+            consumed_events: Vec::new(),
         };
 
         store.save(&wf_pending).unwrap();
@@ -1659,7 +2280,7 @@ mod tests {
         // step_complete used to flip the status back to Running.
         let e = engine();
         let id = e.start("onboarding", serde_json::json!({})).unwrap();
-        e.cancel(&id).unwrap();
+        e.cancel(&id, None).unwrap();
         let status = e
             .advance_with_response(
                 &id,
@@ -1771,7 +2392,7 @@ mod tests {
         let e = engine();
         let kicks = std::sync::Arc::new(AtomicUsize::new(0));
         let kicks_ref = std::sync::Arc::clone(&kicks);
-        e.set_kick_hook(Box::new(move |_id| {
+        e.set_kick_hook(Box::new(move |_id, _delay| {
             kicks_ref.fetch_add(1, Ordering::SeqCst);
         }));
 
@@ -1789,15 +2410,18 @@ mod tests {
             .unwrap();
         assert_eq!(kicks.load(Ordering::SeqCst), 2);
 
-        // A woken sleeper — another kick.
+        // Entering a sleep schedules a kick for its wake time.
         e.advance_with_response(
             &id,
             serde_json::json!({"action": "sleep", "duration": "0s"}),
         )
         .unwrap();
+        assert_eq!(kicks.load(Ordering::SeqCst), 3);
+
+        // The minute sweep also wakes it — another kick.
         let woken = e.wake_sleeping();
         assert_eq!(woken, vec![id.clone()]);
-        assert_eq!(kicks.load(Ordering::SeqCst), 3);
+        assert_eq!(kicks.load(Ordering::SeqCst), 4);
     }
 
     #[test]
@@ -1816,7 +2440,7 @@ mod tests {
         }));
         let kicks = std::sync::Arc::new(AtomicUsize::new(0));
         let kicks_ref = std::sync::Arc::clone(&kicks);
-        e.set_kick_hook(Box::new(move |_id| {
+        e.set_kick_hook(Box::new(move |_id, _delay| {
             kicks_ref.fetch_add(1, Ordering::SeqCst);
         }));
 
@@ -1846,5 +2470,490 @@ mod tests {
         let persisted = store.load(&id).unwrap().unwrap();
         assert_eq!(persisted.status, WorkflowStatus::Completed);
         assert_eq!(persisted.steps.len(), 2);
+    }
+
+    // -----------------------------------------------------------------
+    // Buffered events, wait timeouts, keys, cancel from code.
+    // -----------------------------------------------------------------
+
+    fn wait(e: &WorkflowEngine, id: &str, event: &str, timeout: Option<&str>) -> WorkflowStatus {
+        let mut resp = serde_json::json!({"action": "wait_event", "event": event});
+        if let Some(t) = timeout {
+            resp["timeout"] = serde_json::json!(t);
+        }
+        e.advance_with_response(id, resp).unwrap()
+    }
+
+    #[test]
+    fn event_sent_before_the_wait_is_consumed_by_the_wait() {
+        let e = engine();
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
+        let d = e
+            .send_event(&id, "seller_replied", serde_json::json!({"body": "yes"}))
+            .unwrap();
+        assert!(d.buffered && !d.delivered);
+
+        let status = wait(&e, &id, "seller_replied", Some("60s"));
+        assert_eq!(status, WorkflowStatus::Running);
+        let inst = e.get(&id).unwrap();
+        assert!(inst.pending_events.is_empty());
+        assert_eq!(inst.current_step, 1);
+        let last = inst.steps.last().unwrap();
+        assert_eq!(last.name, "event:seller_replied");
+        assert_eq!(last.output, Some(serde_json::json!({"body": "yes"})));
+    }
+
+    #[test]
+    fn buffered_events_are_consumed_oldest_first_per_name() {
+        let e = engine();
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
+        e.send_event(&id, "a", serde_json::json!({"n": 1})).unwrap();
+        e.send_event(&id, "b", serde_json::json!({"n": 2})).unwrap();
+        e.send_event(&id, "a", serde_json::json!({"n": 3})).unwrap();
+
+        wait(&e, &id, "a", None);
+        wait(&e, &id, "a", None);
+        let inst = e.get(&id).unwrap();
+        let outputs: Vec<_> = inst
+            .steps
+            .iter()
+            .map(|s| s.output.clone().unwrap())
+            .collect();
+        assert_eq!(
+            outputs,
+            vec![serde_json::json!({"n": 1}), serde_json::json!({"n": 3})]
+        );
+        assert_eq!(inst.pending_events.len(), 1);
+        assert_eq!(inst.pending_events[0].event, "b");
+    }
+
+    #[test]
+    fn null_event_data_is_stored_as_an_empty_object() {
+        let e = engine();
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
+        wait(&e, &id, "go", Some("1h"));
+        e.send_event(&id, "go", serde_json::Value::Null).unwrap();
+        let inst = e.get(&id).unwrap();
+        assert_eq!(
+            inst.steps.last().unwrap().output,
+            Some(serde_json::json!({}))
+        );
+    }
+
+    #[test]
+    fn wait_timeout_sets_a_deadline_and_schedules_a_kick() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let e = engine();
+        let last_delay = std::sync::Arc::new(AtomicU64::new(u64::MAX));
+        let d = std::sync::Arc::clone(&last_delay);
+        e.set_kick_hook(Box::new(move |_id, delay| d.store(delay, Ordering::SeqCst)));
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
+
+        assert_eq!(
+            wait(&e, &id, "reply", Some("60s")),
+            WorkflowStatus::WaitingForEvent
+        );
+        let inst = e.get(&id).unwrap();
+        let deadline = inst.wait_deadline.expect("deadline set");
+        assert!(deadline.abs_diff(now_secs() + 60) <= 1);
+        let delay = last_delay.load(Ordering::SeqCst);
+        assert!((59..=60).contains(&delay), "delay {delay}");
+    }
+
+    #[test]
+    fn expired_wait_resolves_as_a_timeout_and_the_run_continues() {
+        let e = engine();
+        e.set_runner_hook(std::sync::Arc::new(|request| {
+            let steps = request["completed_steps"].as_array().unwrap();
+            Ok(match steps.len() {
+                0 => {
+                    serde_json::json!({"action": "wait_event", "event": "reply", "timeout": "60s"})
+                }
+                _ => serde_json::json!({"action": "complete", "output": {"saw": steps[0]["name"]}}),
+            })
+        }));
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
+        assert_eq!(
+            e.run_to_pause(&id, 10).unwrap(),
+            WorkflowStatus::WaitingForEvent
+        );
+
+        // Not due yet: advancing does nothing.
+        assert_eq!(
+            e.run_to_pause(&id, 10).unwrap(),
+            WorkflowStatus::WaitingForEvent
+        );
+        assert!(e.wake_sleeping().is_empty());
+
+        // Move the deadline into the past, as if 60 s elapsed.
+        e.instances
+            .lock()
+            .unwrap()
+            .get_mut(&id)
+            .unwrap()
+            .wait_deadline = Some(now_secs() - 1);
+        assert_eq!(e.wake_sleeping(), vec![id.clone()]);
+        assert_eq!(e.run_to_pause(&id, 10).unwrap(), WorkflowStatus::Completed);
+        let inst = e.get(&id).unwrap();
+        assert_eq!(inst.steps[0].name, "timeout:reply");
+        assert_eq!(inst.steps[0].output, None);
+        assert_eq!(
+            inst.output,
+            Some(serde_json::json!({"saw": "timeout:reply"}))
+        );
+    }
+
+    #[test]
+    fn zero_timeout_resolves_immediately() {
+        let e = engine();
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
+        assert_eq!(wait(&e, &id, "reply", Some("0s")), WorkflowStatus::Running);
+        assert_eq!(e.get(&id).unwrap().steps[0].name, "timeout:reply");
+    }
+
+    #[test]
+    fn invalid_timeout_fails_the_run_without_retries() {
+        let e = engine();
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
+        assert_eq!(wait(&e, &id, "reply", Some("soon")), WorkflowStatus::Failed);
+        let inst = e.get(&id).unwrap();
+        assert!(inst.error.unwrap().contains("invalid waitForEvent timeout"));
+    }
+
+    #[test]
+    fn event_sent_while_a_step_runs_is_not_lost() {
+        // The Miles case: a seller replies while the run is inside a step.
+        let e = std::sync::Arc::new(engine());
+        let sender = std::sync::Arc::downgrade(&e);
+        e.set_runner_hook(std::sync::Arc::new(move |request| {
+            let id = request["workflow_id"].as_str().unwrap().to_string();
+            let steps = request["completed_steps"].as_array().unwrap().len();
+            Ok(match steps {
+                0 => {
+                    // The reply lands mid-step, before the run waits.
+                    let e = sender.upgrade().unwrap();
+                    let d = e.send_event(&id, "reply", serde_json::json!({"t": 1})).unwrap();
+                    assert!(d.buffered);
+                    serde_json::json!({"action": "step_complete", "step_name": "send_sms", "output": null})
+                }
+                1 => serde_json::json!({"action": "wait_event", "event": "reply", "timeout": "60s"}),
+                _ => serde_json::json!({"action": "complete", "output": null}),
+            })
+        }));
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
+        assert_eq!(e.run_to_pause(&id, 10).unwrap(), WorkflowStatus::Completed);
+        let names: Vec<_> = e
+            .get(&id)
+            .unwrap()
+            .steps
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        assert_eq!(names, vec!["send_sms", "event:reply"]);
+    }
+
+    #[test]
+    fn has_due_work_covers_buffered_matches_and_expired_waits() {
+        let e = engine();
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
+        wait(&e, &id, "reply", Some("1h"));
+        let now = now_secs();
+        let mut inst = e.get(&id).unwrap();
+        assert!(!inst.has_due_work(now));
+        inst.pending_events.push(BufferedEvent {
+            seq: 1,
+            event: "other".into(),
+            data: serde_json::json!({}),
+            received_at: now_iso(),
+        });
+        assert!(!inst.has_due_work(now));
+        inst.pending_events[0].event = "reply".into();
+        assert!(inst.has_due_work(now));
+        inst.pending_events.clear();
+        inst.wait_deadline = Some(now);
+        assert!(inst.has_due_work(now));
+    }
+
+    #[test]
+    fn buffer_is_bounded() {
+        let e = engine();
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
+        for i in 0..MAX_BUFFERED_EVENTS {
+            e.send_event(&id, "x", serde_json::json!({"i": i})).unwrap();
+        }
+        let err = e.send_event(&id, "x", serde_json::json!({})).unwrap_err();
+        assert!(err.contains("buffered events"), "{err}");
+    }
+
+    #[test]
+    fn cancel_records_reason_and_reports_whether_it_changed_anything() {
+        let e = engine();
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
+        wait(&e, &id, "reply", Some("1h"));
+        assert!(e.cancel(&id, Some("seller texted STOP")).unwrap());
+        let inst = e.get(&id).unwrap();
+        assert_eq!(inst.status, WorkflowStatus::Cancelled);
+        assert_eq!(inst.cancel_reason.as_deref(), Some("seller texted STOP"));
+        assert_eq!(inst.wait_deadline, None);
+        assert!(!e.cancel(&id, Some("again")).unwrap());
+        assert_eq!(
+            e.get(&id).unwrap().cancel_reason.as_deref(),
+            Some("seller texted STOP")
+        );
+    }
+
+    #[test]
+    fn key_dedupes_active_runs_and_frees_up_when_the_run_ends() {
+        let e = engine();
+        let a = e
+            .start_with_key("onboarding", serde_json::json!({}), Some("lead_1"))
+            .unwrap();
+        assert!(a.created);
+        let b = e
+            .start_with_key("onboarding", serde_json::json!({}), Some("lead_1"))
+            .unwrap();
+        assert_eq!(
+            b,
+            StartOutcome {
+                id: a.id.clone(),
+                created: false
+            }
+        );
+        let other = e
+            .start_with_key("onboarding", serde_json::json!({}), Some("lead_2"))
+            .unwrap();
+        assert!(other.created);
+
+        e.cancel(&a.id, None).unwrap();
+        let c = e
+            .start_with_key("onboarding", serde_json::json!({}), Some("lead_1"))
+            .unwrap();
+        assert!(c.created);
+        assert_ne!(c.id, a.id);
+        assert!(e
+            .start_with_key("onboarding", serde_json::json!({}), Some(""))
+            .is_err());
+    }
+
+    #[test]
+    fn list_filters_by_key_name_and_active_status() {
+        let e = engine();
+        let a = e
+            .start_with_key("onboarding", serde_json::json!({}), Some("lead_1"))
+            .unwrap();
+        let _b = e
+            .start_with_key("onboarding", serde_json::json!({}), Some("lead_2"))
+            .unwrap();
+        e.cancel(&a.id, None).unwrap();
+        let c = e
+            .start_with_key("onboarding", serde_json::json!({}), Some("lead_1"))
+            .unwrap();
+
+        let by_key = e
+            .list_filtered(
+                &WorkflowFilter {
+                    key: Some("lead_1".into()),
+                    ..Default::default()
+                },
+                false,
+            )
+            .unwrap();
+        assert_eq!(by_key.len(), 2);
+        let active = e
+            .list_filtered(
+                &WorkflowFilter {
+                    key: Some("lead_1".into()),
+                    status: Some(StatusFilter::Active),
+                    ..Default::default()
+                },
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            active.iter().map(|i| i.id.clone()).collect::<Vec<_>>(),
+            vec![c.id]
+        );
+        let none = e
+            .list_filtered(
+                &WorkflowFilter {
+                    name: Some("other".into()),
+                    ..Default::default()
+                },
+                false,
+            )
+            .unwrap();
+        assert!(none.is_empty());
+        assert_eq!(StatusFilter::parse("bogus"), None);
+    }
+
+    #[test]
+    fn buffered_events_deadline_and_key_survive_restart() {
+        let store = std::sync::Arc::new(crate::workflow_store::WorkflowStore::in_memory().unwrap());
+        let e = engine();
+        e.attach_store(std::sync::Arc::clone(&store));
+        let id = e
+            .start_with_key("onboarding", serde_json::json!({}), Some("lead_9"))
+            .unwrap()
+            .id;
+        wait(&e, &id, "reply", Some("24h"));
+        e.send_event(&id, "rep_took_over", serde_json::json!({"rep": "r1"}))
+            .unwrap();
+        let before = e.get(&id).unwrap();
+
+        let restored = engine();
+        assert_eq!(restored.restore_from(&store), 1);
+        let after = restored.get(&id).unwrap();
+        assert_eq!(after.status, WorkflowStatus::WaitingForEvent);
+        assert_eq!(after.key.as_deref(), Some("lead_9"));
+        assert_eq!(after.wait_deadline, before.wait_deadline);
+        assert_eq!(after.pending_events, before.pending_events);
+
+        e.cancel(&id, Some("booked")).unwrap();
+        let loaded = store.load(&id).unwrap().unwrap();
+        assert_eq!(loaded.cancel_reason.as_deref(), Some("booked"));
+
+        // A recently finished run is listable after another restart.
+        let again = engine();
+        assert_eq!(again.restore_from(&store), 0);
+        let listed = again
+            .list_filtered(
+                &WorkflowFilter {
+                    key: Some("lead_9".into()),
+                    ..Default::default()
+                },
+                false,
+            )
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].status, WorkflowStatus::Cancelled);
+    }
+
+    #[test]
+    fn parse_duration_strict_rejects_garbage() {
+        assert_eq!(parse_duration_strict("60s"), Some(60));
+        assert_eq!(parse_duration_strict("5m"), Some(300));
+        assert_eq!(parse_duration_strict("24h"), Some(86400));
+        assert_eq!(parse_duration_strict("7d"), Some(604800));
+        assert_eq!(parse_duration_strict("90"), Some(90));
+        assert_eq!(parse_duration_strict("abc"), None);
+        assert_eq!(parse_duration_strict("5x"), None);
+        assert_eq!(parse_duration_strict("-5s"), None);
+        assert_eq!(parse_duration_strict(""), None);
+        assert_eq!(parse_duration_strict("99999999999999999999d"), None);
+    }
+
+    fn pg_engine() -> Option<std::sync::Arc<WorkflowEngine>> {
+        let url = std::env::var("PYLON_TEST_PG_URL").ok()?;
+        let pool = pylon_storage::pg_datastore::PgPool::connect(
+            &url,
+            4,
+            std::time::Duration::from_secs(5),
+        )
+        .expect("test Postgres pool");
+        let store = crate::pg_workflow_store::PgWorkflowStore::open(
+            pool,
+            format!("engine_{}", pylon_cluster::new_instance_id()),
+        )
+        .expect("pg workflow store");
+        let e = engine();
+        e.attach_pg_store(std::sync::Arc::new(store));
+        Some(std::sync::Arc::new(e))
+    }
+
+    #[test]
+    fn postgres_event_sent_during_a_step_is_consumed_at_the_next_wait() {
+        let Some(e) = pg_engine() else {
+            eprintln!("skipping: PYLON_TEST_PG_URL not set");
+            return;
+        };
+        let sender = std::sync::Arc::downgrade(&e);
+        e.set_runner_hook(std::sync::Arc::new(move |request| {
+            let id = request["workflow_id"].as_str().unwrap().to_string();
+            let steps = request["completed_steps"].as_array().unwrap().len();
+            Ok(match steps {
+                0 => {
+                    // The driver holds the lease here; the send must not fail.
+                    let e = sender.upgrade().unwrap();
+                    let d = e.send_event(&id, "reply", serde_json::json!({"t": 1})).unwrap();
+                    assert!(d.buffered);
+                    serde_json::json!({"action": "step_complete", "step_name": "send_sms", "output": null})
+                }
+                1 => serde_json::json!({"action": "wait_event", "event": "reply", "timeout": "60s"}),
+                _ => serde_json::json!({"action": "complete", "output": null}),
+            })
+        }));
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
+        assert_eq!(e.run_to_pause(&id, 10).unwrap(), WorkflowStatus::Completed);
+        let inst = e.get(&id).unwrap();
+        let names: Vec<_> = inst.steps.iter().map(|s| s.name.clone()).collect();
+        assert_eq!(names, vec!["send_sms", "event:reply"]);
+        assert!(inst.pending_events.is_empty());
+    }
+
+    #[test]
+    fn postgres_cancel_during_a_step_discards_the_step_result() {
+        let Some(e) = pg_engine() else {
+            eprintln!("skipping: PYLON_TEST_PG_URL not set");
+            return;
+        };
+        let canceller = std::sync::Arc::downgrade(&e);
+        e.set_runner_hook(std::sync::Arc::new(move |request| {
+            let id = request["workflow_id"].as_str().unwrap().to_string();
+            let e = canceller.upgrade().unwrap();
+            assert!(e.cancel(&id, Some("STOP")).unwrap());
+            Ok(serde_json::json!({"action": "step_complete", "step_name": "call", "output": null}))
+        }));
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
+        assert_eq!(e.run_to_pause(&id, 10).unwrap(), WorkflowStatus::Cancelled);
+        let inst = e.get(&id).unwrap();
+        assert_eq!(inst.status, WorkflowStatus::Cancelled);
+        assert!(inst.steps.is_empty());
+        assert_eq!(inst.cancel_reason.as_deref(), Some("STOP"));
+    }
+
+    #[test]
+    fn postgres_expired_wait_times_out() {
+        let Some(e) = pg_engine() else {
+            eprintln!("skipping: PYLON_TEST_PG_URL not set");
+            return;
+        };
+        e.set_runner_hook(std::sync::Arc::new(|request| {
+            let steps = request["completed_steps"].as_array().unwrap();
+            Ok(match steps.len() {
+                0 => serde_json::json!({"action": "wait_event", "event": "reply", "timeout": "0s"}),
+                _ => serde_json::json!({"action": "complete", "output": steps[0]["name"]}),
+            })
+        }));
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
+        assert_eq!(e.run_to_pause(&id, 10).unwrap(), WorkflowStatus::Completed);
+        assert_eq!(
+            e.get(&id).unwrap().output,
+            Some(serde_json::json!("timeout:reply"))
+        );
+    }
+
+    #[test]
+    fn runner_request_uses_the_ts_wire_format_for_step_status() {
+        // The TS executor replays a step only when its record has
+        // status "completed" (lowercase). Serde's "Completed" made every
+        // multi-slice workflow fail with a replay mismatch.
+        let seen = std::sync::Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let seen_ref = std::sync::Arc::clone(&seen);
+        let e = engine();
+        e.set_runner_hook(std::sync::Arc::new(move |request| {
+            seen_ref.lock().unwrap().push(request.clone());
+            let n = request["completed_steps"].as_array().unwrap().len();
+            Ok(if n == 0 {
+                serde_json::json!({"action": "step_complete", "step_name": "one", "output": 1})
+            } else {
+                serde_json::json!({"action": "complete", "output": null})
+            })
+        }));
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
+        e.run_to_pause(&id, 10).unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[1]["completed_steps"][0]["status"], "completed");
+        assert_eq!(seen[1]["completed_steps"][0]["name"], "one");
+        assert_eq!(seen[1]["completed_steps"][0]["output"], 1);
     }
 }

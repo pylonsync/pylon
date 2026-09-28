@@ -566,14 +566,25 @@ impl TsMessage {
     }
 }
 
-/// `ctx.workflows.start(name, input)` / `ctx.workflows.sendEvent(id,
-/// event, data)` from app code. `op` selects which; unused fields stay
-/// None. Replied to with a `result` frame.
+/// `ctx.workflows.*` from app code. `op` selects the operation; unused
+/// fields stay None. Replied to with a `result` frame.
 #[derive(Debug, Clone, Deserialize)]
 pub struct WorkflowOpMessage {
     pub call_id: String,
-    /// "start" | "send_event"
+    /// "start" | "send_event" | "cancel" | "get" | "list"
     pub op: String,
+    /// start: lookup key. list: key filter.
+    #[serde(default)]
+    pub key: Option<String>,
+    /// cancel: reason stored on the run.
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// list: status filter.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// list: max rows.
+    #[serde(default)]
+    pub limit: Option<usize>,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]

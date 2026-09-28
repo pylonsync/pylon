@@ -33,6 +33,7 @@ import type {
   LlmStreamEvent,
   Rooms,
   Workflows,
+  WorkflowRunSummary,
   Connections,
   Domains,
   TenantDomainResult,
@@ -987,13 +988,14 @@ export function buildRooms(callId: string): Rooms {
  */
 export function buildWorkflows(callId: string): Workflows {
   return {
-    async start(name: string, input?: unknown) {
+    async start(name: string, input?: unknown, opts?: { key?: string }) {
       return (await rpc(callId, {
         type: "workflow_op",
         op: "start",
         name,
         input: input ?? null,
-      })) as { id: string };
+        key: opts?.key ?? null,
+      })) as { id: string; created: boolean };
     },
     async sendEvent(workflowId: string, event: string, data?: unknown) {
       return (await rpc(callId, {
@@ -1002,7 +1004,32 @@ export function buildWorkflows(callId: string): Workflows {
         workflow_id: workflowId,
         event,
         data: data ?? null,
-      })) as { delivered: boolean };
+      })) as { delivered: boolean; buffered: boolean };
+    },
+    async cancel(workflowId: string, opts?: { reason?: string }) {
+      return (await rpc(callId, {
+        type: "workflow_op",
+        op: "cancel",
+        workflow_id: workflowId,
+        reason: opts?.reason ?? null,
+      })) as { cancelled: boolean };
+    },
+    async get(workflowId: string) {
+      return (await rpc(callId, {
+        type: "workflow_op",
+        op: "get",
+        workflow_id: workflowId,
+      })) as WorkflowRunSummary | null;
+    },
+    async list(filter) {
+      return (await rpc(callId, {
+        type: "workflow_op",
+        op: "list",
+        name: filter?.name ?? null,
+        key: filter?.key ?? null,
+        status: filter?.status ?? null,
+        limit: filter?.limit ?? null,
+      })) as WorkflowRunSummary[];
     },
   };
 }

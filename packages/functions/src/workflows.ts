@@ -53,7 +53,7 @@ export interface WorkflowRunRequest {
 export type WorkflowRunnerResponse =
   | { action: "step_complete"; step_name: string; output: unknown; duration_ms: number }
   | { action: "sleep"; duration: string }
-  | { action: "wait_event"; event: string }
+  | { action: "wait_event"; event: string; timeout?: string }
   | { action: "complete"; output: unknown }
   | { action: "fail"; error: string; step_name?: string };
 
@@ -72,11 +72,42 @@ export interface WorkflowRun<TInput = unknown> {
   /** Pause the workflow for a duration ("30s", "5m", "24h", "7d"). */
   sleep(duration: string): Promise<void>;
   /**
-   * Pause until `POST /api/workflows/<id>/event` delivers this event.
-   * Resolves with the event's data payload.
+   * Pause until the event arrives through `ctx.workflows.sendEvent` or
+   * `POST /api/workflows/<id>/event`. Resolves with the event's data
+   * (`{}` when it was sent without data).
+   *
+   * Events sent while the run is not waiting for them are buffered. The
+   * next `waitForEvent` with that name consumes the oldest buffered
+   * event, so an event that arrives during a step is not lost.
+   *
+   * The same event name can be awaited more than once in a run; each
+   * call consumes one event.
    */
   waitForEvent<T = unknown>(eventName: string): Promise<T>;
+  /**
+   * Same as above, but resolves with `null` if no event arrives within
+   * `timeout` ("60s", "5m", "24h", "7d"). The timeout is durable: it
+   * survives restarts, like `sleep`.
+   */
+  waitForEvent<T = unknown>(
+    eventName: string,
+    opts: { timeout: string },
+  ): Promise<T | null>;
 }
+
+const DURATION_RE = /^\s*\d+\s*[smhd]?\s*$/;
+
+/** Throw unless `value` is a duration the engine accepts. */
+function assertDuration(what: string, value: unknown): asserts value is string {
+  if (typeof value !== "string" || !DURATION_RE.test(value)) {
+    throw new Error(
+      `${what}: invalid duration ${JSON.stringify(value)} — use a string like "30s", "5m", "24h", or "7d"`,
+    );
+  }
+}
+
+/** Step names the engine uses for recorded event waits. */
+const RESERVED_STEP_PREFIXES = ["event:", "timeout:"];
 
 export interface WorkflowDefinition<TInput = unknown> {
   readonly __pylonWorkflow: true;
@@ -159,12 +190,13 @@ export async function executeWorkflowSlice(
 ): Promise<WorkflowRunnerResponse> {
   let index = 0;
   let currentStepName = "";
-  // Name uniqueness is enforced, not just documented: the replay cache
-  // is name-keyed, so a duplicate step name would silently replay the
-  // FIRST record's output into the second call — wrong data in a
-  // durability primitive. Same for repeated waitForEvent names.
+  // Step name uniqueness is enforced, not just documented: the replay
+  // cache is name-keyed, so a duplicate step name would silently replay
+  // the FIRST record's output into the second call. Event waits replay
+  // by order instead, so one event name can be awaited many times.
   const seenNames = new Set<string>();
-  const claimName = (kind: "step" | "event", name: string) => {
+  const eventOccurrences = new Map<string, number>();
+  const claimName = (kind: "step", name: string) => {
     const key = `${kind}:${name}`;
     if (seenNames.has(key)) {
       throw new Error(
@@ -179,6 +211,11 @@ export async function executeWorkflowSlice(
     input: request.input,
 
     async step<T>(name: string, fn: () => Promise<T> | T): Promise<T> {
+      if (RESERVED_STEP_PREFIXES.some((p) => name.startsWith(p))) {
+        throw new Error(
+          `step name "${name}" is reserved — names starting with "event:" or "timeout:" record event waits`,
+        );
+      }
       claimName("step", name);
       const myIndex = index++;
       if (myIndex < request.current_step) {
@@ -215,25 +252,50 @@ export async function executeWorkflowSlice(
     },
 
     async sleep(duration: string): Promise<void> {
+      assertDuration("wf.sleep", duration);
       const myIndex = index++;
       if (myIndex < request.current_step) return; // already slept
       throw new WorkflowPaused({ action: "sleep", duration });
     },
 
-    async waitForEvent<T>(eventName: string): Promise<T> {
-      claimName("event", eventName);
-      const myIndex = index++;
-      // A delivered event is recorded as a completed step named
-      // `event:<name>` (the Rust engine's send_event writes it).
-      const delivered = request.completed_steps.find(
-        (s) => s.name === `event:${eventName}` && s.status === "completed",
-      );
-      if (myIndex < request.current_step && delivered) {
-        return delivered.output as T;
+    async waitForEvent<T>(
+      eventName: string,
+      opts?: { timeout: string },
+    ): Promise<T | null> {
+      if (typeof eventName !== "string" || eventName.length === 0) {
+        throw new Error("wf.waitForEvent: event name must be a non-empty string");
       }
-      throw new WorkflowPaused({ action: "wait_event", event: eventName });
+      const timeout = opts?.timeout;
+      if (timeout !== undefined) assertDuration("wf.waitForEvent timeout", timeout);
+      const myIndex = index++;
+      // The engine records each resolved wait as a completed step named
+      // `event:<name>` (with the event data) or `timeout:<name>` (no
+      // output). The k-th wait on a name replays the k-th record for it.
+      const occurrence = eventOccurrences.get(eventName) ?? 0;
+      eventOccurrences.set(eventName, occurrence + 1);
+      if (myIndex < request.current_step) {
+        const records = request.completed_steps.filter(
+          (s) =>
+            s.status === "completed" &&
+            (s.name === `event:${eventName}` || s.name === `timeout:${eventName}`),
+        );
+        const record = records[occurrence];
+        if (!record) {
+          throw new Error(
+            `workflow replay mismatch: waitForEvent("${eventName}") #${occurrence + 1} (index ${myIndex}) has no recorded result — ` +
+              "the step sequence must be deterministic across replays",
+          );
+        }
+        if (record.name.startsWith("timeout:")) return null;
+        return record.output as T;
+      }
+      throw new WorkflowPaused({
+        action: "wait_event",
+        event: eventName,
+        ...(timeout !== undefined ? { timeout } : {}),
+      });
     },
-  };
+  } as WorkflowRun;
 
   try {
     const output = await def.fn(wf, ctx);

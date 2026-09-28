@@ -342,15 +342,40 @@ pub trait SchedulerOps: Send + Sync {
     fn trigger(&self, name: &str) -> bool;
 }
 
+/// Filters for [`WorkflowOps::list`]. `status` takes the lowercase names
+/// (`pending`, `running`, `sleeping`, `waiting`, `completed`, `failed`,
+/// `cancelled`) or `active` for any non-terminal status.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WorkflowListQuery<'a> {
+    pub status: Option<&'a str>,
+    pub name: Option<&'a str>,
+    pub key: Option<&'a str>,
+    pub limit: Option<usize>,
+}
+
 /// Workflow engine operations used by the router.
 pub trait WorkflowOps: Send + Sync {
     fn definitions(&self) -> serde_json::Value;
-    fn start(&self, name: &str, input: serde_json::Value) -> Result<String, String>;
-    fn list(&self, status_filter: Option<&str>) -> serde_json::Value;
+    /// Start a run. Returns `{ id, created }`; `created` is false when a
+    /// non-terminal run with the same name and key already exists.
+    fn start(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+        key: Option<&str>,
+    ) -> Result<serde_json::Value, String>;
+    fn list(&self, query: &WorkflowListQuery<'_>) -> Result<serde_json::Value, String>;
     fn get(&self, id: &str) -> Option<serde_json::Value>;
     fn advance(&self, id: &str) -> Result<String, String>;
-    fn send_event(&self, id: &str, event: &str, data: serde_json::Value) -> Result<(), String>;
-    fn cancel(&self, id: &str) -> Result<(), String>;
+    /// Returns `{ delivered, buffered }`.
+    fn send_event(
+        &self,
+        id: &str,
+        event: &str,
+        data: serde_json::Value,
+    ) -> Result<serde_json::Value, String>;
+    /// Returns false when the run had already finished.
+    fn cancel(&self, id: &str, reason: Option<&str>) -> Result<bool, String>;
 }
 
 /// File storage operations used by the router.
@@ -3338,11 +3363,16 @@ mod auth_gate_tests {
         fn definitions(&self) -> serde_json::Value {
             serde_json::json!([])
         }
-        fn start(&self, _name: &str, _input: serde_json::Value) -> Result<String, String> {
-            Ok("wf-id".into())
+        fn start(
+            &self,
+            _name: &str,
+            _input: serde_json::Value,
+            _key: Option<&str>,
+        ) -> Result<serde_json::Value, String> {
+            Ok(serde_json::json!({"id": "wf-id", "created": true}))
         }
-        fn list(&self, _status: Option<&str>) -> serde_json::Value {
-            serde_json::json!([])
+        fn list(&self, _query: &WorkflowListQuery<'_>) -> Result<serde_json::Value, String> {
+            Ok(serde_json::json!([]))
         }
         fn get(&self, _id: &str) -> Option<serde_json::Value> {
             None
@@ -3355,11 +3385,11 @@ mod auth_gate_tests {
             _id: &str,
             _event: &str,
             _data: serde_json::Value,
-        ) -> Result<(), String> {
-            Ok(())
+        ) -> Result<serde_json::Value, String> {
+            Ok(serde_json::json!({"delivered": true, "buffered": false}))
         }
-        fn cancel(&self, _id: &str) -> Result<(), String> {
-            Ok(())
+        fn cancel(&self, _id: &str, _reason: Option<&str>) -> Result<bool, String> {
+            Ok(true)
         }
     }
     impl FileOps for StubFiles {

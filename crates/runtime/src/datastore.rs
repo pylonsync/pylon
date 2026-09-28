@@ -2306,40 +2306,136 @@ impl pylon_router::WorkflowOps for WorkflowEngine {
         to_json_array(WorkflowEngine::definitions(self))
     }
 
-    fn start(&self, name: &str, input: serde_json::Value) -> Result<String, String> {
-        WorkflowEngine::start(self, name, input)
+    fn start(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+        key: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        WorkflowEngine::start_with_key(self, name, input, key)
+            .map(|o| serde_json::json!({ "id": o.id, "created": o.created }))
     }
 
-    fn list(&self, status_filter: Option<&str>) -> serde_json::Value {
-        // Convert string filter to WorkflowStatus for the engine.
-        let filter = status_filter.and_then(|s| match s {
-            "pending" => Some(crate::workflows::WorkflowStatus::Pending),
-            "running" => Some(crate::workflows::WorkflowStatus::Running),
-            "sleeping" => Some(crate::workflows::WorkflowStatus::Sleeping),
-            "waiting" => Some(crate::workflows::WorkflowStatus::WaitingForEvent),
-            "completed" => Some(crate::workflows::WorkflowStatus::Completed),
-            "failed" => Some(crate::workflows::WorkflowStatus::Failed),
-            "cancelled" => Some(crate::workflows::WorkflowStatus::Cancelled),
-            _ => None,
-        });
-        to_json_array(WorkflowEngine::list(self, filter.as_ref()))
+    fn list(
+        &self,
+        query: &pylon_router::WorkflowListQuery<'_>,
+    ) -> Result<serde_json::Value, String> {
+        let filter = workflow_filter(query)?;
+        WorkflowEngine::list_filtered(self, &filter, true).map(to_json_array)
     }
 
     fn get(&self, id: &str) -> Option<serde_json::Value> {
-        WorkflowEngine::get(self, id).map(|inst| to_json(inst))
+        WorkflowEngine::get(self, id).map(to_json)
     }
 
     fn advance(&self, id: &str) -> Result<String, String> {
         WorkflowEngine::advance(self, id).map(|status| format!("{:?}", status))
     }
 
-    fn send_event(&self, id: &str, event: &str, data: serde_json::Value) -> Result<(), String> {
-        WorkflowEngine::send_event(self, id, event, data)
+    fn send_event(
+        &self,
+        id: &str,
+        event: &str,
+        data: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        WorkflowEngine::send_event(self, id, event, data).map(to_json)
     }
 
-    fn cancel(&self, id: &str) -> Result<(), String> {
-        WorkflowEngine::cancel(self, id)
+    fn cancel(&self, id: &str, reason: Option<&str>) -> Result<bool, String> {
+        WorkflowEngine::cancel(self, id, reason)
     }
+}
+
+/// Handle one `ctx.workflows.*` frame from app code. Errors are
+/// `(code, message)` pairs sent back as a rejected promise.
+pub(crate) fn handle_workflow_op(
+    engine: &WorkflowEngine,
+    req: &pylon_functions::protocol::WorkflowOpMessage,
+) -> Result<serde_json::Value, (String, String)> {
+    fn bad(msg: &str) -> (String, String) {
+        ("WORKFLOW_BAD_REQUEST".to_string(), msg.to_string())
+    }
+    let workflow_id = || {
+        req.workflow_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| bad(&format!("{} requires a workflow id", req.op)))
+    };
+    match req.op.as_str() {
+        "start" => {
+            let name = req
+                .name
+                .as_deref()
+                .ok_or_else(|| bad("start requires a name"))?;
+            let input = req.input.clone().unwrap_or(serde_json::Value::Null);
+            engine
+                .start_with_key(name, input, req.key.as_deref())
+                .map(|o| serde_json::json!({ "id": o.id, "created": o.created }))
+                .map_err(|e| ("WORKFLOW_START_FAILED".to_string(), e))
+        }
+        "send_event" => {
+            let id = workflow_id()?;
+            let event = req
+                .event
+                .as_deref()
+                .ok_or_else(|| bad("send_event requires an event name"))?;
+            let data = req.data.clone().unwrap_or(serde_json::Value::Null);
+            engine
+                .send_event(id, event, data)
+                .map(to_json)
+                .map_err(|e| ("WORKFLOW_EVENT_FAILED".to_string(), e))
+        }
+        "cancel" => {
+            let id = workflow_id()?;
+            engine
+                .cancel(id, req.reason.as_deref())
+                .map(|cancelled| serde_json::json!({ "cancelled": cancelled }))
+                .map_err(|e| ("WORKFLOW_CANCEL_FAILED".to_string(), e))
+        }
+        "get" => {
+            let id = workflow_id()?;
+            Ok(engine
+                .get(id)
+                .map(|inst| inst.summary())
+                .unwrap_or(serde_json::Value::Null))
+        }
+        "list" => {
+            let query = pylon_router::WorkflowListQuery {
+                status: req.status.as_deref(),
+                name: req.name.as_deref(),
+                key: req.key.as_deref(),
+                limit: req.limit,
+            };
+            let filter = workflow_filter(&query).map_err(|e| bad(&e))?;
+            engine
+                .list_filtered(&filter, false)
+                .map(|rows| serde_json::Value::Array(rows.iter().map(|r| r.summary()).collect()))
+                .map_err(|e| ("WORKFLOW_LIST_FAILED".to_string(), e))
+        }
+        other => Err(bad(&format!("unknown workflow op \"{other}\""))),
+    }
+}
+
+/// Convert router/ctx list filters into an engine filter. An unknown
+/// status is an error, not "no filter", so a typo can't return every run.
+pub(crate) fn workflow_filter(
+    query: &pylon_router::WorkflowListQuery<'_>,
+) -> Result<crate::workflows::WorkflowFilter, String> {
+    let status = match query.status {
+        None => None,
+        Some(s) => Some(crate::workflows::StatusFilter::parse(s).ok_or_else(|| {
+            format!(
+                "unknown workflow status \"{s}\"; use active, pending, running, sleeping, \
+                 waiting, completed, failed, or cancelled"
+            )
+        })?),
+    };
+    Ok(crate::workflows::WorkflowFilter {
+        status,
+        name: query.name.map(str::to_string),
+        key: query.key.map(str::to_string),
+        limit: query.limit.unwrap_or(0),
+    })
 }
 
 // ---------------------------------------------------------------------------

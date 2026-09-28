@@ -46,29 +46,50 @@ pub(crate) fn handle(
             None => return Some((400, json_error("MISSING_FIELD", "\"name\" is required"))),
         };
         let input = data.get("input").cloned().unwrap_or(serde_json::json!({}));
-        return Some(match ctx.workflows.start(&name, input) {
-            Ok(id) => (201, serde_json::json!({"id": id}).to_string()),
+        let key = data.get("key").and_then(|v| v.as_str());
+        return Some(match ctx.workflows.start(&name, input, key) {
+            Ok(started) => {
+                let status = if started.get("created") == Some(&serde_json::Value::Bool(false)) {
+                    200
+                } else {
+                    201
+                };
+                (status, started.to_string())
+            }
             Err(e) => (400, json_error("WORKFLOW_START_FAILED", &e)),
         });
     }
 
-    // GET /api/workflows (list, status filter)
-    if url.starts_with("/api/workflows")
-        && !url.starts_with("/api/workflows/")
-        && method == HttpMethod::Get
+    // GET /api/workflows?status=&name=&key=&limit=
+    if (url == "/api/workflows" || url.starts_with("/api/workflows?")) && method == HttpMethod::Get
     {
         if let Some(err) = require_admin(ctx) {
             return Some(err);
         }
-        let status_filter = url
-            .split("status=")
-            .nth(1)
-            .and_then(|s| s.split('&').next());
-        let instances = ctx.workflows.list(status_filter);
-        return Some((
-            200,
-            serde_json::to_string(&instances).unwrap_or_else(|_| "[]".into()),
-        ));
+        let params = crate::parse_query(url.split_once('?').map(|(_, q)| q).unwrap_or(""));
+        let limit = match params.get("limit").map(|v| v.parse::<usize>()) {
+            None => None,
+            Some(Ok(n)) => Some(n),
+            Some(Err(_)) => {
+                return Some((
+                    400,
+                    json_error("INVALID_QUERY", "\"limit\" must be a non-negative integer"),
+                ))
+            }
+        };
+        let query = crate::WorkflowListQuery {
+            status: params.get("status").map(String::as_str),
+            name: params.get("name").map(String::as_str),
+            key: params.get("key").map(String::as_str),
+            limit,
+        };
+        return Some(match ctx.workflows.list(&query) {
+            Ok(instances) => (
+                200,
+                serde_json::to_string(&instances).unwrap_or_else(|_| "[]".into()),
+            ),
+            Err(e) => (400, json_error("WORKFLOW_LIST_FAILED", &e)),
+        });
     }
 
     // /api/workflows/<id> + sub-actions
@@ -133,7 +154,11 @@ pub(crate) fn handle(
                     };
                     let event_data = data.get("data").cloned().unwrap_or(serde_json::json!({}));
                     return Some(match ctx.workflows.send_event(wf_id, &event, event_data) {
-                        Ok(()) => (200, serde_json::json!({"ok": true}).to_string()),
+                        Ok(delivery) => {
+                            let mut out = delivery;
+                            out["ok"] = serde_json::Value::Bool(true);
+                            (200, out.to_string())
+                        }
                         Err(e) => (400, json_error("WORKFLOW_EVENT_FAILED", &e)),
                     });
                 }
@@ -141,8 +166,14 @@ pub(crate) fn handle(
                     if let Some(err) = require_admin(ctx) {
                         return Some(err);
                     }
-                    return Some(match ctx.workflows.cancel(wf_id) {
-                        Ok(()) => (200, serde_json::json!({"cancelled": true}).to_string()),
+                    // Body is optional: `{ "reason": "..." }`.
+                    let reason = serde_json::from_str::<serde_json::Value>(body)
+                        .ok()
+                        .and_then(|v| v.get("reason").and_then(|r| r.as_str()).map(str::to_string));
+                    return Some(match ctx.workflows.cancel(wf_id, reason.as_deref()) {
+                        Ok(cancelled) => {
+                            (200, serde_json::json!({"cancelled": cancelled}).to_string())
+                        }
                         Err(e) => (400, json_error("WORKFLOW_CANCEL_FAILED", &e)),
                     });
                 }

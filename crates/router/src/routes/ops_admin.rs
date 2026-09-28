@@ -63,7 +63,13 @@ fn jobs_view(ctx: &RouterContext) -> serde_json::Value {
 }
 
 fn workflows_view(ctx: &RouterContext) -> serde_json::Value {
-    let raw = ctx.workflows.list(None);
+    let raw = ctx
+        .workflows
+        .list(&crate::WorkflowListQuery {
+            limit: Some(1000),
+            ..Default::default()
+        })
+        .unwrap_or_else(|_| serde_json::json!([]));
     extract_rows(raw)
 }
 

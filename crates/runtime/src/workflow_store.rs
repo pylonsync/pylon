@@ -8,7 +8,11 @@
 use rusqlite::Connection;
 use std::sync::Mutex;
 
-use crate::workflows::{StepResult, StepStatus, WorkflowInstance, WorkflowStatus};
+use crate::workflows::{BufferedEvent, StepResult, StepStatus, WorkflowInstance, WorkflowStatus};
+
+const WORKFLOW_COLUMNS: &str = "id, name, input, status, output, error, created_at, \
+     started_at, completed_at, wake_at, waiting_for, current_step, max_retries, \
+     key, wait_deadline, cancel_reason";
 
 /// SQLite-backed persistent storage for workflow instances.
 pub struct WorkflowStore {
@@ -77,7 +81,40 @@ impl WorkflowStore {
                 PRIMARY KEY (workflow_id, step_index),
                 FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS workflow_events (
+                workflow_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                event TEXT NOT NULL,
+                data TEXT NOT NULL,
+                received_at TEXT NOT NULL,
+                PRIMARY KEY (workflow_id, seq)
+            );
         ",
+        )
+        .map_err(|e| format!("Schema init failed: {e}"))?;
+
+        // Columns added after the first release. SQLite has no
+        // ADD COLUMN IF NOT EXISTS, so check table_info first.
+        let existing: std::collections::HashSet<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('workflows')")
+            .and_then(|mut stmt| {
+                stmt.query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<Result<_, _>>()
+            })
+            .map_err(|e| format!("Schema inspect failed: {e}"))?;
+        for (column, ty) in [
+            ("key", "TEXT"),
+            ("wait_deadline", "INTEGER"),
+            ("cancel_reason", "TEXT"),
+        ] {
+            if !existing.contains(column) {
+                conn.execute_batch(&format!("ALTER TABLE workflows ADD COLUMN {column} {ty}"))
+                    .map_err(|e| format!("Schema migrate failed: {e}"))?;
+            }
+        }
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_wf_key ON workflows(key) WHERE key IS NOT NULL",
         )
         .map_err(|e| format!("Schema init failed: {e}"))
     }
@@ -89,8 +126,9 @@ impl WorkflowStore {
         conn.execute(
             "INSERT OR REPLACE INTO workflows \
              (id, name, input, status, output, error, created_at, started_at, \
-              completed_at, wake_at, waiting_for, current_step, max_retries) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+              completed_at, wake_at, waiting_for, current_step, max_retries, \
+              key, wait_deadline, cancel_reason) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             rusqlite::params![
                 wf.id,
                 wf.name,
@@ -105,9 +143,34 @@ impl WorkflowStore {
                 wf.waiting_for,
                 wf.current_step as i64,
                 wf.max_retries,
+                wf.key,
+                wf.wait_deadline.map(|v| v as i64),
+                wf.cancel_reason,
             ],
         )
         .map_err(|e| format!("Save workflow failed: {e}"))?;
+
+        // The engine is the only writer in SQLite mode and saves the whole
+        // inbox, so replace it like the steps.
+        conn.execute(
+            "DELETE FROM workflow_events WHERE workflow_id = ?1",
+            rusqlite::params![wf.id],
+        )
+        .map_err(|e| format!("Delete events failed: {e}"))?;
+        for ev in &wf.pending_events {
+            conn.execute(
+                "INSERT INTO workflow_events (workflow_id, seq, event, data, received_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    wf.id,
+                    ev.seq as i64,
+                    ev.event,
+                    ev.data.to_string(),
+                    ev.received_at
+                ],
+            )
+            .map_err(|e| format!("Insert event failed: {e}"))?;
+        }
 
         // Replace all steps: delete then re-insert.
         conn.execute(
@@ -149,11 +212,10 @@ impl WorkflowStore {
     pub fn load(&self, id: &str) -> Result<Option<WorkflowInstance>, String> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
-            .prepare(
-                "SELECT id, name, input, status, output, error, created_at, \
-                 started_at, completed_at, wake_at, waiting_for, current_step, max_retries \
-                 FROM workflows WHERE id = ?1",
-            )
+            .prepare(&format!(
+                "SELECT {WORKFLOW_COLUMNS} \
+                 FROM workflows WHERE id = ?1"
+            ))
             .map_err(|e| format!("Prepare failed: {e}"))?;
 
         let wf = stmt
@@ -163,6 +225,7 @@ impl WorkflowStore {
         match wf {
             Some(mut wf) => {
                 wf.steps = load_steps(&conn, &wf.id)?;
+                wf.pending_events = load_events(&conn, &wf.id)?;
                 Ok(Some(wf))
             }
             None => Ok(None),
@@ -173,13 +236,12 @@ impl WorkflowStore {
     pub fn load_active(&self) -> Result<Vec<WorkflowInstance>, String> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
-            .prepare(
-                "SELECT id, name, input, status, output, error, created_at, \
-                 started_at, completed_at, wake_at, waiting_for, current_step, max_retries \
+            .prepare(&format!(
+                "SELECT {WORKFLOW_COLUMNS} \
                  FROM workflows \
                  WHERE status IN ('Pending', 'Running', 'WaitingForEvent') \
-                 ORDER BY created_at ASC",
-            )
+                 ORDER BY created_at ASC"
+            ))
             .map_err(|e| format!("Prepare failed: {e}"))?;
 
         let rows = stmt
@@ -190,6 +252,7 @@ impl WorkflowStore {
         for row in rows {
             if let Ok(mut wf) = row {
                 wf.steps = load_steps(&conn, &wf.id)?;
+                wf.pending_events = load_events(&conn, &wf.id)?;
                 workflows.push(wf);
             }
         }
@@ -200,13 +263,12 @@ impl WorkflowStore {
     pub fn load_sleeping(&self) -> Result<Vec<WorkflowInstance>, String> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
-            .prepare(
-                "SELECT id, name, input, status, output, error, created_at, \
-                 started_at, completed_at, wake_at, waiting_for, current_step, max_retries \
+            .prepare(&format!(
+                "SELECT {WORKFLOW_COLUMNS} \
                  FROM workflows \
                  WHERE status = 'Sleeping' \
-                 ORDER BY wake_at ASC",
-            )
+                 ORDER BY wake_at ASC"
+            ))
             .map_err(|e| format!("Prepare failed: {e}"))?;
 
         let rows = stmt
@@ -217,8 +279,40 @@ impl WorkflowStore {
         for row in rows {
             if let Ok(mut wf) = row {
                 wf.steps = load_steps(&conn, &wf.id)?;
+                wf.pending_events = load_events(&conn, &wf.id)?;
                 workflows.push(wf);
             }
+        }
+        Ok(workflows)
+    }
+
+    /// Load terminal workflows that finished within `max_age_secs`, so
+    /// `list` shows recent history after a restart.
+    pub fn load_recent_terminal(&self, max_age_secs: u64) -> Result<Vec<WorkflowInstance>, String> {
+        let conn = self.conn.lock().unwrap();
+        let cutoff = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .saturating_sub(max_age_secs);
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {WORKFLOW_COLUMNS} FROM workflows \
+                 WHERE status IN ('Completed', 'Failed', 'Cancelled') \
+                 AND completed_at IS NOT NULL \
+                 AND CAST(rtrim(completed_at, 'Z') AS INTEGER) >= ?1"
+            ))
+            .map_err(|e| format!("Prepare failed: {e}"))?;
+        let rows = stmt
+            .query_map(rusqlite::params![cutoff as i64], |row| {
+                Ok(row_to_workflow(row))
+            })
+            .map_err(|e| format!("Query failed: {e}"))?;
+        let mut workflows = Vec::new();
+        for mut wf in rows.flatten() {
+            wf.steps = load_steps(&conn, &wf.id)?;
+            wf.pending_events = load_events(&conn, &wf.id)?;
+            workflows.push(wf);
         }
         Ok(workflows)
     }
@@ -237,8 +331,15 @@ impl WorkflowStore {
             .as_secs()
             .saturating_sub(max_age_secs);
         let cutoff_str = format!("{cutoff}Z");
-        // Steps deleted explicitly: ON DELETE CASCADE only fires with
-        // foreign_keys=ON, which is per-connection and not guaranteed.
+        // Steps and events deleted explicitly: ON DELETE CASCADE only
+        // fires with foreign_keys=ON, which is per-connection and not
+        // guaranteed.
+        let _ = conn.execute(
+            "DELETE FROM workflow_events WHERE workflow_id IN \
+             (SELECT id FROM workflows WHERE status IN ('Completed','Failed','Cancelled') \
+              AND completed_at IS NOT NULL AND completed_at < ?1)",
+            rusqlite::params![cutoff_str],
+        );
         let _ = conn.execute(
             "DELETE FROM workflow_steps WHERE workflow_id IN \
              (SELECT id FROM workflows WHERE status IN ('Completed','Failed','Cancelled') \
@@ -289,7 +390,34 @@ fn row_to_workflow(row: &rusqlite::Row<'_>) -> WorkflowInstance {
         current_step: row.get::<_, i64>(11).unwrap_or(0) as usize,
         max_retries: row.get(12).unwrap_or(3),
         steps: Vec::new(), // filled in by caller
+        key: row.get(13).ok().flatten(),
+        wait_deadline: row.get::<_, i64>(14).ok().map(|v| v as u64),
+        pending_events: Vec::new(), // filled in by caller
+        cancel_reason: row.get(15).ok().flatten(),
+        consumed_events: Vec::new(),
     }
+}
+
+fn load_events(conn: &Connection, workflow_id: &str) -> Result<Vec<BufferedEvent>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT seq, event, data, received_at FROM workflow_events \
+             WHERE workflow_id = ?1 ORDER BY seq ASC",
+        )
+        .map_err(|e| format!("Prepare events failed: {e}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params![workflow_id], |row| {
+            Ok(BufferedEvent {
+                seq: row.get::<_, i64>(0)?.max(0) as u64,
+                event: row.get(1)?,
+                data: serde_json::from_str(&row.get::<_, String>(2)?)
+                    .unwrap_or(serde_json::Value::Null),
+                received_at: row.get(3)?,
+            })
+        })
+        .map_err(|e| format!("Query events failed: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Read events failed: {e}"))
 }
 
 fn load_steps(conn: &Connection, workflow_id: &str) -> Result<Vec<StepResult>, String> {
@@ -401,6 +529,11 @@ mod tests {
             waiting_for: None,
             current_step: 0,
             max_retries: 3,
+            key: None,
+            wait_deadline: None,
+            pending_events: Vec::new(),
+            cancel_reason: None,
+            consumed_events: Vec::new(),
         }
     }
 

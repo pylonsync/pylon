@@ -265,15 +265,23 @@ impl WorkflowOps for NoopAll {
         serde_json::Value::Array(names)
     }
 
-    fn start(&self, _name: &str, _input: serde_json::Value) -> Result<String, String> {
+    fn start(
+        &self,
+        _name: &str,
+        _input: serde_json::Value,
+        _key: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
         Err(
             "WORKFLOWS_BINDING_REQUIRED: Cloudflare Workflows binding not wired in this target"
                 .into(),
         )
     }
 
-    fn list(&self, _status_filter: Option<&str>) -> serde_json::Value {
-        serde_json::json!([])
+    fn list(
+        &self,
+        _query: &pylon_router::WorkflowListQuery<'_>,
+    ) -> Result<serde_json::Value, String> {
+        Ok(serde_json::json!([]))
     }
 
     fn get(&self, _id: &str) -> Option<serde_json::Value> {
@@ -287,14 +295,19 @@ impl WorkflowOps for NoopAll {
         )
     }
 
-    fn send_event(&self, _id: &str, _event: &str, _data: serde_json::Value) -> Result<(), String> {
+    fn send_event(
+        &self,
+        _id: &str,
+        _event: &str,
+        _data: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
         Err(
             "WORKFLOWS_BINDING_REQUIRED: Cloudflare Workflows binding not wired in this target"
                 .into(),
         )
     }
 
-    fn cancel(&self, _id: &str) -> Result<(), String> {
+    fn cancel(&self, _id: &str, _reason: Option<&str>) -> Result<bool, String> {
         Err(
             "WORKFLOWS_BINDING_REQUIRED: Cloudflare Workflows binding not wired in this target"
                 .into(),
@@ -550,7 +563,9 @@ mod tests {
         let (status, body) = adapter.upload("");
         assert_eq!(status, 503);
         assert!(body.contains("R2_BINDING_REQUIRED"));
-        let err = adapter.start("any", serde_json::json!({})).unwrap_err();
+        let err = adapter
+            .start("any", serde_json::json!({}), None)
+            .unwrap_err();
         assert!(err.contains("WORKFLOWS_BINDING_REQUIRED"));
         let join_err = adapter.join("r1", "u1", None).unwrap_err();
         assert_eq!(join_err.code, "DO_BINDING_REQUIRED");

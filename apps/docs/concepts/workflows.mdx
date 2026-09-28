@@ -73,12 +73,82 @@ export default mutation({
 });
 ```
 
-Deliver an event to a run paused on `waitForEvent` the same way, for
-example from the webhook action that received the confirmation:
+Deliver an event to a run the same way, for example from the webhook
+action that received the confirmation:
 
 ```ts
 await ctx.workflows.sendEvent(workflowId, "email_confirmed", { ok: true });
 ```
+
+`sendEvent` resolves `{ delivered, buffered }`. If the run is waiting for
+the event, it resumes (`delivered: true`). If the run is doing something
+else, for example running a step, the event is buffered
+(`buffered: true`) and the run's next `waitForEvent` with that name
+consumes it. Buffered events are consumed oldest first, and survive
+restarts. A run holds at most 100 buffered events. An event sent without
+data arrives as `{}`. Sending to a finished run rejects.
+
+## Waiting with a timeout
+
+Pass `timeout` to stop waiting after a duration. The call resolves with
+`null` when the timeout passes first:
+
+```ts
+// workflows/leadCadence.ts
+export default workflow("lead-cadence", async (wf, ctx) => {
+  await wf.step("send-sms", () => ctx.runAction("sendIntroSms", wf.input));
+
+  const reply = await wf.waitForEvent("seller_replied", { timeout: "60s" });
+  if (reply === null) {
+    await wf.step("call", () => ctx.runAction("startCall", wf.input));
+  }
+
+  // The same event name can be awaited again later.
+  const later = await wf.waitForEvent("seller_replied", { timeout: "24h" });
+  return { replied: later !== null };
+});
+```
+
+Timeouts are durable, like `sleep`: they survive restarts and fire
+within about a second of the deadline. Durations use `s`, `m`, `h`, or
+`d` ("60s", "5m", "24h", "7d"). An invalid duration fails the run.
+
+## Keys, listing, and cancel
+
+Give a run a `key` at start, for example the id of the record it works
+on. At most one active run exists per workflow name and key. Starting
+again with the same key returns the existing run with `created: false`,
+so a retried webhook does not start a second run:
+
+```ts
+const { id, created } = await ctx.workflows.start(
+  "lead-cadence",
+  { leadId },
+  { key: leadId },
+);
+```
+
+Cancel runs from any mutation or action. No further step runs. A step
+already in progress can finish, but its result is discarded:
+
+```ts
+// functions/inboundSms.ts — the seller texted STOP.
+const runs = await ctx.workflows.list({ key: leadId, status: "active" });
+for (const run of runs) {
+  await ctx.workflows.cancel(run.id, { reason: "STOP" });
+}
+```
+
+`cancel` resolves `{ cancelled: false }` when the run had already
+finished. Cancel and `sendEvent` never wait for a step in progress,
+including on Postgres replicas.
+
+`ctx.workflows.list({ name, key, status, limit })` returns runs newest
+first, without step history. `status` is one of `pending`, `running`,
+`sleeping`, `waiting`, `completed`, `failed`, `cancelled`, or `active`
+(any unfinished run). `limit` defaults to 100, max 1000.
+`ctx.workflows.get(id)` returns one run, or `null`. Finished runs are
+kept for 24 hours.
 
 Steps execute through the background job queue, and sleeps wake on
 schedule. SQLite stores state in `<app-db>.workflows.db`. Postgres
@@ -86,9 +156,11 @@ stores state in shared application tables. The admin API drives the same engine 
 `POST /api/workflows/start`, `POST /api/workflows/<id>/event` (both
 with `Authorization: Bearer $PYLON_ADMIN_TOKEN`).
 
-Inspect runs at `GET /api/workflows` or `GET /api/workflows/<id>`
-(step-by-step results, timings, retry counts), or cancel a run with
-`POST /api/workflows/<id>/cancel`.
+Inspect runs at `GET /api/workflows` (query parameters `status`, `name`,
+`key`, `limit`) or `GET /api/workflows/<id>` (step-by-step results,
+timings, retry counts). Cancel a run with
+`POST /api/workflows/<id>/cancel` and an optional `{ "reason": "..." }`
+body. `POST /api/workflows/start` accepts an optional `key`.
 
 ## The determinism contract
 
@@ -105,7 +177,10 @@ identical on every replay, for the same input and step outputs.**
   recorded output.
 - Step names must be unique within a run. The replay cache is
   name-keyed, so a mismatch fails the run loudly rather than reusing
-  the wrong output.
+  the wrong output. Names starting with `event:` or `timeout:` are
+  reserved.
+- `waitForEvent` calls replay in order: the second wait on a name
+  replays the second recorded event for that name.
 
 ## Retries and failure
 

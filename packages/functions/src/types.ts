@@ -604,18 +604,91 @@ export interface Workflows {
   /**
    * Start a workflow instance by name. Returns immediately with the
    * instance id — the engine's background driver executes the steps.
+   *
+   * With `key` (for example a lead id), at most one non-terminal run
+   * exists per workflow name and key. If one exists, no new run starts
+   * and its id is returned with `created: false`. A finished run frees
+   * the key.
    */
-  start(name: string, input?: unknown): Promise<{ id: string }>;
+  start(
+    name: string,
+    input?: unknown,
+    opts?: { key?: string },
+  ): Promise<{ id: string; created: boolean }>;
   /**
-   * Deliver an event to an instance paused on
-   * `wf.waitForEvent(event)`. Rejects when the instance isn't waiting
-   * for that event.
+   * Send an event to a run. If the run is waiting for it
+   * (`wf.waitForEvent(event)`), the run resumes and `delivered` is true.
+   * Otherwise the event is buffered (`buffered: true`) and the run's next
+   * `waitForEvent(event)` consumes it. Rejects when the run has finished
+   * or already holds 100 buffered events. Events sent without data
+   * arrive as `{}`.
    */
   sendEvent(
     workflowId: string,
     event: string,
     data?: unknown,
-  ): Promise<{ delivered: boolean }>;
+  ): Promise<{ delivered: boolean; buffered: boolean }>;
+  /**
+   * Cancel a run. No further step runs. A step already in progress may
+   * finish, but its result is discarded. Resolves `cancelled: false` when
+   * the run had already finished. Rejects for an unknown id.
+   */
+  cancel(
+    workflowId: string,
+    opts?: { reason?: string },
+  ): Promise<{ cancelled: boolean }>;
+  /** Read one run, or null if the id is unknown. */
+  get(workflowId: string): Promise<WorkflowRunSummary | null>;
+  /**
+   * List runs, newest first. `status: "active"` matches every
+   * non-terminal status. `limit` defaults to 100 (max 1000).
+   *
+   * ```ts
+   * // Seller texted STOP: end every cadence for the lead.
+   * const runs = await ctx.workflows.list({ key: leadId, status: "active" });
+   * for (const run of runs) {
+   *   await ctx.workflows.cancel(run.id, { reason: "STOP" });
+   * }
+   * ```
+   */
+  list(filter?: {
+    name?: string;
+    key?: string;
+    status?: WorkflowRunStatus | "active";
+    limit?: number;
+  }): Promise<WorkflowRunSummary[]>;
+}
+
+export type WorkflowRunStatus =
+  | "pending"
+  | "running"
+  | "sleeping"
+  | "waiting"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+/** A workflow run without its step history. Times are unix seconds. */
+export interface WorkflowRunSummary {
+  id: string;
+  name: string;
+  key: string | null;
+  status: WorkflowRunStatus;
+  input: unknown;
+  output: unknown;
+  error: string | null;
+  cancelReason: string | null;
+  /** Event name the run is waiting for, when `status` is "waiting". */
+  waitingFor: string | null;
+  /** When the current wait times out, if it has a timeout. */
+  waitDeadline: number | null;
+  /** When the current sleep ends. */
+  wakeAt: number | null;
+  /** Events sent but not yet consumed by a `waitForEvent`. */
+  bufferedEvents: number;
+  createdAt: number | null;
+  startedAt: number | null;
+  completedAt: number | null;
 }
 
 export interface LlmMessage {

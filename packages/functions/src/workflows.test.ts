@@ -177,18 +177,85 @@ describe("executeWorkflowSlice", () => {
     expect((res as { error: string }).error).toContain("duplicate step name");
   });
 
-  test("duplicate waitForEvent names fail loudly too", async () => {
-    const dup = workflow("dup-ev", async (wf) => {
-      await wf.waitForEvent("go");
-      await wf.waitForEvent("go");
+  test("the same event name can be awaited repeatedly; each wait replays in order", async () => {
+    const cadence = workflow("cadence", async (wf) => {
+      const first = await wf.waitForEvent<{ n: number }>("reply");
+      const second = await wf.waitForEvent<{ n: number }>("reply");
+      return { first: first.n, second: second.n };
     });
-    const res = await executeWorkflowSlice(
-      dup,
-      req(1, [done("event:go", { n: 1 })]),
+    const paused = await executeWorkflowSlice(
+      cadence,
+      req(1, [done("event:reply", { n: 1 })]),
       ctx,
     );
+    expect(paused).toEqual({ action: "wait_event", event: "reply" });
+    const res = await executeWorkflowSlice(
+      cadence,
+      req(2, [done("event:reply", { n: 1 }), done("event:reply", { n: 2 })]),
+      ctx,
+    );
+    expect(res).toEqual({ action: "complete", output: { first: 1, second: 2 } });
+  });
+
+  test("waitForEvent with a timeout sends the timeout and resolves null on timeout", async () => {
+    const lead = workflow("lead", async (wf) => {
+      await wf.step("send-sms", () => "sent");
+      const reply = await wf.waitForEvent("seller_replied", { timeout: "60s" });
+      if (reply === null) {
+        await wf.step("call", () => "called");
+        return "called";
+      }
+      return "replied";
+    });
+    const paused = await executeWorkflowSlice(lead, req(1, [done("send-sms", "sent")]), ctx);
+    expect(paused).toEqual({ action: "wait_event", event: "seller_replied", timeout: "60s" });
+
+    const timedOut = await executeWorkflowSlice(
+      lead,
+      req(2, [done("send-sms", "sent"), done("timeout:seller_replied", null)]),
+      ctx,
+    );
+    expect(timedOut).toMatchObject({ action: "step_complete", step_name: "call" });
+
+    const replied = await executeWorkflowSlice(
+      lead,
+      req(2, [done("send-sms", "sent"), done("event:seller_replied", { body: "hi" })]),
+      ctx,
+    );
+    expect(replied).toEqual({ action: "complete", output: "replied" });
+  });
+
+  test("an invalid timeout or sleep duration fails the slice", async () => {
+    const badWait = workflow("bad-wait", async (wf) => {
+      await wf.waitForEvent("x", { timeout: "soon" });
+    });
+    const res = await executeWorkflowSlice(badWait, req(0, []), ctx);
     expect(res.action).toBe("fail");
-    expect((res as { error: string }).error).toContain("duplicate event name");
+    expect((res as { error: string }).error).toContain("invalid duration");
+
+    const badSleep = workflow("bad-sleep", async (wf) => {
+      await wf.sleep("5 minutes");
+    });
+    const res2 = await executeWorkflowSlice(badSleep, req(0, []), ctx);
+    expect(res2.action).toBe("fail");
+  });
+
+  test("a replayed wait with no record fails loudly", async () => {
+    const w = workflow("w", async (wf) => {
+      await wf.waitForEvent("x");
+    });
+    const res = await executeWorkflowSlice(w, req(1, [done("other", 1)]), ctx);
+    expect(res.action).toBe("fail");
+    expect((res as { error: string }).error).toContain("replay mismatch");
+  });
+
+  test("step names that collide with event records are rejected", async () => {
+    const w = workflow("w", async (wf) => {
+      await wf.step("event:x", () => 1);
+    });
+    const res = await executeWorkflowSlice(w, req(0, []), ctx);
+    expect(res.action).toBe("fail");
+    expect((res as { error: string }).error).toContain("reserved");
   });
 
   test("a stepless workflow completes on its first slice", async () => {

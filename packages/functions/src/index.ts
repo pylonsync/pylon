@@ -80,6 +80,8 @@ export type {
   ShardTransfer,
   MemberRow,
   Workflows,
+  WorkflowRunSummary,
+  WorkflowRunStatus,
   VectorSearchQuery,
   VectorSearchResult,
   SearchResult,

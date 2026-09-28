@@ -369,7 +369,7 @@ fn workflow_terminal_states_are_idempotent() {
     let id2 = engine
         .start("terminal_test", serde_json::json!({}))
         .unwrap();
-    engine.cancel(&id2).unwrap();
+    engine.cancel(&id2, None).unwrap();
 
     let status = engine
         .advance_with_response(
