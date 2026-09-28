@@ -97,6 +97,9 @@ fn open_stream(port: u16, token: &str, sid: &str) -> TcpStream {
 fn start(config: ShardConfig) -> (u16, Arc<ShardRegistry<Zone>>) {
     unsafe {
         std::env::set_var("PYLON_DEV_MODE", "1");
+        // One test mints 200 guest sessions from 127.0.0.1, past the
+        // per-IP default meant for real clients.
+        std::env::set_var("PYLON_AUTH_GUEST_IP_PER_MIN", "100000");
     }
     let registry: Arc<ShardRegistry<Zone>> = Arc::new(ShardRegistry::new());
     registry.insert(Shard::new("zone", Zone, config));
