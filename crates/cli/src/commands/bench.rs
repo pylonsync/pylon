@@ -6,6 +6,9 @@
 //!
 //! - `--join <function>`: a guest session (`POST /api/auth/guest`), then the
 //!   app's join function, which returns `{ shardId, subscriberId, ticket }`.
+//!   The server caps guest sessions per client address
+//!   (`PYLON_AUTH_GUEST_IP_PER_MIN`, 30 per minute by default); raise it on
+//!   the server when many bots run from one machine.
 //! - `--shard <id>`: connect to a running shard with tickets minted here.
 //!   The key is `PYLON_SHARD_TICKET_SECRET`, or the one `pylon dev` derives
 //!   in this directory, so run it from the app directory for a local shard.
@@ -803,7 +806,19 @@ fn join_with_function(config: &BenchConfig, function: &str) -> Result<Join, Stri
     let guest: serde_json::Value = agent
         .post(&format!("{}/api/auth/guest", config.url))
         .send_json(serde_json::json!({}))
-        .map_err(|e| short_http_error("guest sign-in", e))?
+        .map_err(|e| {
+            let limited = matches!(e, ureq::Error::Status(429, _));
+            let msg = short_http_error("guest sign-in", e);
+            if limited {
+                format!(
+                    "{msg} (the server allows PYLON_AUTH_GUEST_IP_PER_MIN guest sessions \
+                     per minute from one address, 30 by default; raise it on the server \
+                     for a load test)"
+                )
+            } else {
+                msg
+            }
+        })?
         .into_json()
         .map_err(|e| format!("guest sign-in: bad JSON: {e}"))?;
     let token = guest["token"]

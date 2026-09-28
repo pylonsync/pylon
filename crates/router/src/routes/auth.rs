@@ -995,6 +995,33 @@ mod truncate_chars_tests {
     }
 }
 
+/// Per-IP cap on minting guest sessions (`/api/auth/guest` and its alias
+/// `/api/auth/anonymous`). Both routes share one bucket, so an alias can't
+/// double the allowance. `ctx.peer_ip` is the client IP after the
+/// runtime's trusted-proxy resolution. The cap is
+/// `PYLON_AUTH_GUEST_IP_PER_MIN` (default 30 per minute).
+fn guest_issue_rate_limited(ctx: &RouterContext) -> Option<(u16, String)> {
+    let rl = pylon_auth::rate_limit::AuthRateLimiter::shared();
+    match rl.check(
+        pylon_auth::rate_limit::AuthBucket::GuestIssue,
+        ctx.peer_ip,
+        None,
+    ) {
+        pylon_auth::rate_limit::RateLimitDecision::Allow => None,
+        pylon_auth::rate_limit::RateLimitDecision::Deny { retry_after_secs } => {
+            ctx.add_response_header("Retry-After", retry_after_secs.to_string());
+            Some((
+                429,
+                json_error_with_hint(
+                    "RATE_LIMITED",
+                    "Too many guest sessions from this address",
+                    &format!("Try again in {retry_after_secs}s"),
+                ),
+            ))
+        }
+    }
+}
+
 fn maybe_merge_anonymous(
     ctx: &RouterContext,
     to_user_id: &str,
@@ -1228,6 +1255,9 @@ pub(crate) fn handle(
 
     // POST /api/auth/guest
     if url == "/api/auth/guest" && method == HttpMethod::Post {
+        if let Some(denied) = guest_issue_rate_limited(ctx) {
+            return Some(denied);
+        }
         let session = ctx.session_store.create_guest();
         ctx.maybe_set_session_cookie(&session.token);
         return Some((
@@ -7275,21 +7305,8 @@ pub(crate) fn handle(
     // behavior is /api/auth/guest; this is the better-auth-compatible
     // alias).
     if url == "/api/auth/anonymous" && method == HttpMethod::Post {
-        // Wave-6 codex P2: rate limit so a botnet can't spawn
-        // unbounded guest sessions. No per-account dimension —
-        // anonymous by definition has no account.
-        let rl = pylon_auth::rate_limit::AuthRateLimiter::shared();
-        if let pylon_auth::rate_limit::RateLimitDecision::Deny { retry_after_secs } =
-            rl.check(pylon_auth::rate_limit::AuthBucket::Send, ctx.peer_ip, None)
-        {
-            return Some((
-                429,
-                json_error_with_hint(
-                    "RATE_LIMITED",
-                    "Too many anonymous sessions",
-                    &format!("Try again in {retry_after_secs}s"),
-                ),
-            ));
+        if let Some(denied) = guest_issue_rate_limited(ctx) {
+            return Some(denied);
         }
         let session = ctx.session_store.create_guest();
         ctx.maybe_set_session_cookie(&session.token);

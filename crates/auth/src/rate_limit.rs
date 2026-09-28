@@ -42,6 +42,12 @@ pub enum AuthBucket {
     /// protection; the background sweeper only evicts after a
     /// grace window).
     NonceIssue,
+    /// `/api/auth/guest`, `/api/auth/anonymous` — mint a guest session
+    /// with no credential at all. Without a cap one client can create
+    /// unlimited sessions (and guest user ids), which also uses up any
+    /// per-app guest quota for everyone else. Per-IP only: a guest has
+    /// no account to key on.
+    GuestIssue,
 }
 
 impl AuthBucket {
@@ -83,6 +89,12 @@ impl AuthBucket {
             // account binding (the address is attacker-chosen).
             Self::NonceIssue => {
                 return (env_cap("PYLON_AUTH_NONCE_IP_PER_MIN", 30), 0);
+            }
+            // 30 guest sessions/min/IP. A browser mints one per new
+            // visitor; a shared NAT (office, school, carrier CGNAT) needs
+            // headroom. Load tests (`pylon bench --join`) raise it.
+            Self::GuestIssue => {
+                return (env_cap("PYLON_AUTH_GUEST_IP_PER_MIN", 30), 0);
             }
         };
         (env_cap(ip_env, ip_default), env_cap(acct_env, acct_default))
@@ -276,6 +288,23 @@ mod tests {
             RateLimitDecision::Deny { retry_after_secs } => assert!(retry_after_secs <= 60),
             _ => panic!("expected Deny after burst"),
         }
+    }
+
+    /// `GuestIssue` caps guest-session minting per IP, and one IP's
+    /// burst does not deny another IP.
+    #[test]
+    fn guest_issue_is_per_ip() {
+        let rl = AuthRateLimiter::new();
+        let bucket = AuthBucket::GuestIssue;
+        let (ip_cap, _) = bucket.caps();
+        for _ in 0..ip_cap {
+            assert_eq!(rl.check(bucket, "7.7.7.7", None), RateLimitDecision::Allow);
+        }
+        assert!(matches!(
+            rl.check(bucket, "7.7.7.7", None),
+            RateLimitDecision::Deny { .. }
+        ));
+        assert_eq!(rl.check(bucket, "7.7.7.8", None), RateLimitDecision::Allow);
     }
 
     #[test]

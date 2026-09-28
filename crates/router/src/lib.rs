@@ -3552,6 +3552,7 @@ mod auth_gate_tests {
             functions,
             manifest,
             store,
+            "127.0.0.1",
             f,
         );
     }
@@ -3578,6 +3579,7 @@ mod auth_gate_tests {
             functions_override,
             manifest,
             store,
+            "127.0.0.1",
             f,
         );
     }
@@ -3592,6 +3594,7 @@ mod auth_gate_tests {
         functions_override: Option<&dyn FnOps>,
         manifest: AppManifest,
         store: StubDataStore,
+        peer_ip: &str,
         f: F,
     ) where
         F: FnOnce(&RouterContext),
@@ -3667,11 +3670,34 @@ mod auth_gate_tests {
             auth_ctx: auth,
             is_dev,
             request_headers: &[],
-            peer_ip: "127.0.0.1",
+            peer_ip,
             cookie_config: &cookie_config,
             response_headers: RefCell::new(Vec::new()),
         };
         f(&ctx);
+    }
+
+    /// Route as a client at `peer_ip` (the runtime's resolved client
+    /// address). For per-IP limiter tests: each test picks its own
+    /// addresses so the process-wide limiter state never crosses tests.
+    fn with_ctx_peer<F>(peer_ip: &str, auth: &AuthContext, f: F)
+    where
+        F: FnOnce(&RouterContext),
+    {
+        let manifest = empty_manifest();
+        let store = StubDataStore::empty(manifest.clone());
+        with_ctx_store(
+            false,
+            auth,
+            &NoopPluginHooks,
+            None,
+            None,
+            None,
+            manifest,
+            store,
+            peer_ip,
+            f,
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -3809,6 +3835,7 @@ mod auth_gate_tests {
             None,
             manifest,
             store,
+            "127.0.0.1",
             |ctx| {
                 let (status, body, _ct) =
                     route(ctx, HttpMethod::Get, "/api/auth/session", "", None);
@@ -6754,6 +6781,41 @@ mod auth_gate_tests {
     /// (Select-org's push has the same shape; both routes funnel
     /// through `ctx.notifier.notify_session_changed` so one test
     /// covers the wiring of both.)
+    /// `POST /api/auth/guest` mints a session with no credential. Before
+    /// the per-IP cap, one client could mint guest sessions without limit.
+    /// The cap is per address, and `/api/auth/anonymous` (the alias) draws
+    /// from the same bucket.
+    #[test]
+    fn guest_sessions_are_rate_limited_per_ip() {
+        let anon = AuthContext::anonymous();
+        let mint = |ip: &str, url: &str| -> (u16, String) {
+            let mut out = (0, String::new());
+            with_ctx_peer(ip, &anon, |ctx| {
+                let (status, body, _ct) = route(ctx, HttpMethod::Post, url, "{}", None);
+                out = (status, body);
+            });
+            out
+        };
+        let abuser = "198.51.100.7";
+        let mut minted = 0;
+        loop {
+            let (status, body) = mint(abuser, "/api/auth/guest");
+            if status == 429 {
+                assert!(body.contains("RATE_LIMITED"), "{body}");
+                break;
+            }
+            assert_eq!(status, 201, "{body}");
+            minted += 1;
+            assert!(minted < 10_000, "guest minting was never rate limited");
+        }
+        assert!(minted > 0, "the first guest session was refused");
+        // The alias shares the bucket.
+        assert_eq!(mint(abuser, "/api/auth/anonymous").0, 429);
+        // Another address is unaffected.
+        assert_eq!(mint("198.51.100.8", "/api/auth/guest").0, 201);
+        assert_eq!(mint("198.51.100.9", "/api/auth/anonymous").0, 200);
+    }
+
     #[test]
     fn session_revoke_pushes_session_changed() {
         let notifier = RecordingNotifier::new();

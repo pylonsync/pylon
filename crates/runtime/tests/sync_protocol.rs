@@ -150,6 +150,10 @@ fn start_server(rt: Arc<Runtime>) -> u16 {
     DEV_MODE.call_once(|| {
         // SAFETY: exactly once, and before any server thread is spawned.
         unsafe { std::env::set_var("PYLON_DEV_MODE", "1") };
+        // Every test in this binary mints guest sessions from 127.0.0.1
+        // into one process-wide limiter; the per-IP default (30/min) is
+        // for real clients, not a test binary.
+        unsafe { std::env::set_var("PYLON_AUTH_GUEST_IP_PER_MIN", "100000") };
     });
     let rt2 = Arc::clone(&rt);
     // The server's own error is the only explanation for a bind
