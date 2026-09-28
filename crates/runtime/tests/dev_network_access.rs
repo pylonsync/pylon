@@ -44,6 +44,17 @@ fn free_port_block() -> u16 {
     panic!("no free port block");
 }
 
+/// Whether `addr` accepts a connection within 5 seconds.
+fn listening(addr: (&str, u16)) -> bool {
+    for _ in 0..100 {
+        if TcpStream::connect(addr).is_ok() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
 fn start() -> u16 {
     static ENV: std::sync::Once = std::sync::Once::new();
     ENV.call_once(|| {
@@ -140,14 +151,12 @@ fn local(port: u16) -> SocketAddr {
 #[test]
 fn every_port_listens_on_loopback_only() {
     let port = start();
-    // HTTP and WebSocket answer on both loopback families.
+    // HTTP and WebSocket answer on both loopback families. `start` waits
+    // only for the HTTP port; the WebSocket listener binds a moment later.
     for p in [port, port + 1] {
-        assert!(
-            TcpStream::connect(("127.0.0.1", p)).is_ok(),
-            "127.0.0.1:{p}"
-        );
+        assert!(listening(("127.0.0.1", p)), "127.0.0.1:{p}");
         if std::net::TcpListener::bind("[::1]:0").is_ok() {
-            assert!(TcpStream::connect(("::1", p)).is_ok(), "[::1]:{p}");
+            assert!(listening(("::1", p)), "[::1]:{p}");
         }
     }
     // Nothing answers on the machine's network address.
