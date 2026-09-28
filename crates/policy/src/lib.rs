@@ -3331,6 +3331,24 @@ mod tests {
     }
 
     #[test]
+    fn the_documented_optional_field_limit_allows_a_missing_value() {
+        let user = AuthContext::authenticated("u1".into());
+        let expr = "data.bio == null || len(data.bio) <= 5";
+        for (row, allowed) in [
+            (serde_json::json!({}), true),
+            (serde_json::json!({ "bio": null }), true),
+            (serde_json::json!({ "bio": "hello" }), true),
+            (serde_json::json!({ "bio": "hello!" }), false),
+        ] {
+            assert_eq!(
+                evaluate_allow(expr, &user, Some(&row), None).is_allowed(),
+                allowed,
+                "{row}"
+            );
+        }
+    }
+
+    #[test]
     fn len_needs_one_path() {
         let user = AuthContext::authenticated("u1".into());
         let data = serde_json::json!({ "bio": "x" });

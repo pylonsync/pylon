@@ -5914,18 +5914,10 @@ pub(crate) fn validate_field_lengths(
     ent: &pylon_kernel::ManifestEntity,
     data: &serde_json::Value,
 ) -> Result<(), RuntimeError> {
-    let Some(obj) = data.as_object() else {
-        return Ok(());
-    };
-    for f in &ent.fields {
-        if f.max_length.is_none() {
-            continue;
-        }
-        if let Some(value) = obj.get(&f.name) {
-            check_field_length(ent, f, value)?;
-        }
+    match ent.max_length_violation(data) {
+        Some(message) => Err(field_too_long(message)),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// The `maxLength` check for one field's value. See
@@ -5935,25 +5927,17 @@ pub(crate) fn check_field_length(
     field: &pylon_kernel::ManifestField,
     value: &serde_json::Value,
 ) -> Result<(), RuntimeError> {
-    let (Some(max), serde_json::Value::String(s)) = (field.max_length, value) else {
-        return Ok(());
-    };
-    // A string is never longer in characters than in bytes, so most
-    // values skip the count.
-    if s.len() <= max as usize {
-        return Ok(());
+    match field.max_length_violation(&ent.name, value) {
+        Some(message) => Err(field_too_long(message)),
+        None => Ok(()),
     }
-    let chars = s.chars().count();
-    if chars > max as usize {
-        return Err(RuntimeError {
-            code: "FIELD_TOO_LONG".into(),
-            message: format!(
-                "{}.{} is {chars} characters; the limit is {max}",
-                ent.name, field.name
-            ),
-        });
+}
+
+fn field_too_long(message: String) -> RuntimeError {
+    RuntimeError {
+        code: "FIELD_TOO_LONG".into(),
+        message,
     }
-    Ok(())
 }
 
 /// Reject writes whose vector-field values are not finite number

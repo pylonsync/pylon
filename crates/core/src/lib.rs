@@ -1154,6 +1154,42 @@ fn is_false_ref(b: &bool) -> bool {
     !*b
 }
 
+impl ManifestField {
+    /// When `value` is a string longer than this field's `maxLength`,
+    /// the message for the `FIELD_TOO_LONG` error. Length counts
+    /// characters (Unicode code points). Non-strings, `null`, and fields
+    /// without a limit pass. Every store runs this on its writes.
+    pub fn max_length_violation(&self, entity: &str, value: &serde_json::Value) -> Option<String> {
+        let (Some(max), serde_json::Value::String(s)) = (self.max_length, value) else {
+            return None;
+        };
+        // A string is never longer in characters than in bytes, so most
+        // values skip the count.
+        if s.len() <= max as usize {
+            return None;
+        }
+        let chars = s.chars().count();
+        (chars > max as usize).then(|| {
+            format!(
+                "{entity}.{} is {chars} characters; the limit is {max}",
+                self.name
+            )
+        })
+    }
+}
+
+impl ManifestEntity {
+    /// [`ManifestField::max_length_violation`] for every field `data`
+    /// (a row or a patch) sets. Fields the write omits pass.
+    pub fn max_length_violation(&self, data: &serde_json::Value) -> Option<String> {
+        let obj = data.as_object()?;
+        self.fields.iter().find_map(|f| {
+            obj.get(&f.name)
+                .and_then(|v| f.max_length_violation(&self.name, v))
+        })
+    }
+}
+
 impl Default for ManifestField {
     /// Convenience for test fixtures — `ManifestField { name: ..., field_type: ...,
     /// ..Default::default() }`. The shipped manifest serialization

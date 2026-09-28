@@ -71,6 +71,17 @@ impl<E: D1Executor> D1DataStore<E> {
 
 use pylon_kernel::util::quote_ident;
 
+/// `maxLength` (`field.string().max(n)`), as every other store enforces it.
+fn check_max_lengths(ent: &ManifestEntity, data: &Value) -> Result<(), DataError> {
+    match ent.max_length_violation(data) {
+        Some(message) => Err(DataError {
+            code: "FIELD_TOO_LONG".into(),
+            message,
+        }),
+        None => Ok(()),
+    }
+}
+
 fn generate_id() -> String {
     // Simple time-based ID. D1 runs in isolates with precise time.
     let now = std::time::SystemTime::now()
@@ -95,6 +106,7 @@ impl<E: D1Executor> DataStore for D1DataStore<E> {
             code: "INVALID_DATA".into(),
             message: "Insert data must be a JSON object".into(),
         })?;
+        check_max_lengths(ent, data)?;
 
         let id = generate_id();
         let mut cols = vec![quote_ident("id")];
@@ -192,6 +204,7 @@ impl<E: D1Executor> DataStore for D1DataStore<E> {
             code: "INVALID_DATA".into(),
             message: "Update data must be a JSON object".into(),
         })?;
+        check_max_lengths(ent, data)?;
 
         let mut sets = Vec::new();
         let mut params: Vec<Value> = Vec::new();
@@ -563,6 +576,27 @@ mod tests {
         let store = D1DataStore::new(exec, empty_manifest());
         let rows = store.list("Lot").unwrap();
         assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn d1_enforces_max_length() {
+        let exec = MockExecutor {
+            rows: Mutex::new(vec![]),
+        };
+        let mut manifest = empty_manifest();
+        manifest.entities[0].fields[0].max_length = Some(3);
+        let store = D1DataStore::new(exec, manifest);
+        let err = store
+            .insert("Lot", &serde_json::json!({"title": "four"}))
+            .unwrap_err();
+        assert_eq!(err.code, "FIELD_TOO_LONG");
+        let err = store
+            .update("Lot", "a", &serde_json::json!({"title": "four"}))
+            .unwrap_err();
+        assert_eq!(err.code, "FIELD_TOO_LONG");
+        store
+            .insert("Lot", &serde_json::json!({"title": "abc"}))
+            .unwrap();
     }
 
     #[test]

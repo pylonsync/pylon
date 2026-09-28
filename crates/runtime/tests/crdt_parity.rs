@@ -63,7 +63,10 @@ fn manifest() -> AppManifest {
         entities: vec![ManifestEntity {
             name: "Doc".into(),
             fields: vec![
-                field("title", "string", None, false),
+                ManifestField {
+                    max_length: Some(50),
+                    ..field("title", "string", None, false)
+                },
                 field("meta", "json", None, false),
                 field("tags", "json", Some(CrdtAnnotation::List), false),
                 field("order", "json", Some(CrdtAnnotation::MovableList), true),
@@ -356,6 +359,45 @@ fn a_push_past_max_length_is_refused() {
             "{}",
             env.name()
         );
+    });
+}
+
+/// A value over a limit added after it was stored does not block a push
+/// that leaves that field alone, even on a row with no doc (whose fields
+/// all look new to the merge).
+#[test]
+fn an_old_over_limit_value_does_not_block_a_push_to_another_field() {
+    on_both(|env| {
+        let id = env.bare_row();
+        let long = "t".repeat(80);
+        match &env.backend {
+            Backend::Sqlite(dir) => {
+                let conn = rusqlite::Connection::open(dir.path().join("app.db")).unwrap();
+                conn.execute(
+                    "UPDATE \"Doc\" SET \"title\" = ?1 WHERE id = ?2",
+                    [&long, &id],
+                )
+                .unwrap();
+            }
+            Backend::Postgres(url) => {
+                let mut client = postgres::Client::connect(url, postgres::NoTls).unwrap();
+                client
+                    .execute(
+                        "UPDATE \"Doc\" SET \"title\" = $1 WHERE id = $2",
+                        &[&long, &id],
+                    )
+                    .unwrap();
+            }
+        }
+        if let Backend::Sqlite(_) = env.backend {
+            env.rt.crdt_store().clear_cache();
+        }
+        let offline = client_doc(1, 0);
+        patch(&offline, json!({"done": true}));
+        env.push(&id, &offline, &Default::default());
+        let row = env.row(&id);
+        assert_eq!(row["done"], true, "{}", env.name());
+        assert_eq!(row["title"], long.as_str(), "{}", env.name());
     });
 }
 

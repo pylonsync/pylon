@@ -1249,12 +1249,8 @@ impl DataStore for Runtime {
                             })
                             .map(|(k, v)| (k.clone(), v.clone()))
                             .collect();
-                        for (key, val) in &changes {
-                            if let Some(field) = ent.fields.iter().find(|f| &f.name == key) {
-                                crate::check_field_length(&ent, field, val)
-                                    .map_err(into_data_error)?;
-                            }
-                        }
+                        self.check_crdt_push_lengths(&ent, &projected, &row)
+                            .map_err(into_data_error)?;
                         if !changes.is_empty() {
                             let changes = serde_json::Value::Object(changes);
                             let stored = crate::serialize_json_fields_for_storage(&ent, &changes)
@@ -1312,10 +1308,8 @@ impl DataStore for Runtime {
             crate::with_write_tx(self, &conn, || -> Result<Vec<u8>, crate::RuntimeError> {
                 // A row a delete removed after the router's check: no snapshot
                 // for a row that does not exist (as on Postgres).
-                if self
-                    .crdt_row_for_doc(&conn, &ent, row_id, &crdt_fields)?
-                    .is_none()
-                {
+                let Some(row_before) = self.crdt_row_for_doc(&conn, &ent, row_id, &crdt_fields)?
+                else {
                     return Err(crate::RuntimeError {
                         code: "ENTITY_NOT_FOUND".into(),
                         message: format!(
@@ -1323,7 +1317,7 @@ impl DataStore for Runtime {
                          materialized row — refusing to commit an orphan snapshot."
                         ),
                     });
-                }
+                };
                 let (has_doc, before) =
                     self.prepare_crdt_doc_for_push(&conn, &ent, row_id, &crdt_fields)?;
                 // Apply the update to the LoroDoc + persist the new snapshot
@@ -1368,6 +1362,7 @@ impl DataStore for Runtime {
                         message: e.message,
                     }
                 })?;
+                self.check_crdt_push_lengths(&ent, &projected, &row_before)?;
 
                 // Re-project into the materialized SQLite row so SELECT
                 // queries see the merged content. Build SET clauses from
@@ -1394,9 +1389,6 @@ impl DataStore for Runtime {
                         && crate::same_json_value(before_push.get(key).unwrap_or(&null), val)
                     {
                         continue;
-                    }
-                    if let Some(field) = ent.fields.iter().find(|f| &f.name == key) {
-                        crate::check_field_length(&ent, field, val)?;
                     }
                     set_clauses.push(format!("{} = ?{idx}", crate::quote_ident(key.as_str())));
                     // Typed bind, not the raw shape-driven one: a `json`
@@ -1450,6 +1442,34 @@ impl DataStore for Runtime {
 }
 
 impl Runtime {
+    /// `maxLength` for a CRDT push: every limited field whose merged value
+    /// differs from the row as it was before the push. A field the push
+    /// left alone keeps its value even when it is over a limit added
+    /// later. Measured on the value as read (decrypted), not on the
+    /// stored ciphertext of an encrypted field.
+    fn check_crdt_push_lengths(
+        &self,
+        ent: &pylon_kernel::ManifestEntity,
+        projected: &serde_json::Value,
+        row_before: &serde_json::Value,
+    ) -> Result<(), crate::RuntimeError> {
+        if ent.fields.iter().all(|f| f.max_length.is_none()) {
+            return Ok(());
+        }
+        let as_read = self.projection_as_read(&ent.name, projected);
+        let null = serde_json::Value::Null;
+        for field in ent.fields.iter().filter(|f| f.max_length.is_some()) {
+            let Some(stored) = projected.get(&field.name) else {
+                continue;
+            };
+            if crate::same_json_value(row_before.get(&field.name).unwrap_or(&null), stored) {
+                continue;
+            }
+            crate::check_field_length(ent, field, as_read.get(&field.name).unwrap_or(&null))?;
+        }
+        Ok(())
+    }
+
     /// A CRDT projection in the shape `get_by_id` returns: encrypted fields
     /// decrypted, JSON fields parsed. The doc holds values as stored, so
     /// without this every encrypted column would look changed next to the

@@ -781,6 +781,26 @@ pub fn validate_field_limits(manifest: &AppManifest) -> Vec<Diagnostic> {
                     span: None,
                     hint: Some(".max(n) applies to field.string() and field.richtext()".into()),
                 });
+            } else if let Some(default) = field
+                .default
+                .as_ref()
+                .and_then(|d| d.as_str())
+                .filter(|d| *d != "now" && d.chars().count() > max as usize)
+            {
+                // The default is applied after the write check, so a
+                // longer one would land unchecked on every insert.
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Error,
+                    code: "FIELD_MAX_LENGTH_DEFAULT".into(),
+                    message: format!(
+                        "Field \"{}\" in entity \"{}\" has a default of {} characters, over its maxLength {max}",
+                        field.name,
+                        entity.name,
+                        default.chars().count()
+                    ),
+                    span: None,
+                    hint: Some("Shorten the default or raise the limit".into()),
+                });
             } else if max == 0 {
                 diagnostics.push(Diagnostic {
                     severity: Severity::Error,
@@ -867,6 +887,14 @@ mod tests {
                     field("body", "richtext", 10_000),
                     field("count", "int", 5),
                     field("empty", "string", 0),
+                    pylon_kernel::ManifestField {
+                        default: Some("too long".into()),
+                        ..field("tag", "string", 3)
+                    },
+                    pylon_kernel::ManifestField {
+                        default: Some("ok".into()),
+                        ..field("short", "string", 3)
+                    },
                 ],
                 ..Default::default()
             }],
@@ -876,7 +904,14 @@ mod tests {
             .into_iter()
             .map(|d| d.code)
             .collect();
-        assert_eq!(codes, ["FIELD_MAX_LENGTH_TYPE", "FIELD_MAX_LENGTH_ZERO"]);
+        assert_eq!(
+            codes,
+            [
+                "FIELD_MAX_LENGTH_TYPE",
+                "FIELD_MAX_LENGTH_ZERO",
+                "FIELD_MAX_LENGTH_DEFAULT"
+            ]
+        );
     }
 
     #[test]

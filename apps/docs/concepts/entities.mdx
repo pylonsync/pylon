@@ -123,7 +123,7 @@ const Profile = entity("Profile", {
 });
 ```
 
-For a limit that depends on the caller, compare `len(...)` in a policy, which counts characters the same way: `allowUpdate: "auth.isAdmin || len(data.bio) <= 280"`.
+For a limit that depends on the caller, compare `len(...)` in a policy, which counts characters the same way. `len` of a missing or `null` value is `null`, and a comparison with `null` denies, so let an optional field be empty explicitly: `allowUpdate: "auth.isAdmin || data.bio == null || len(data.bio) <= 280"`.
 
 **`.readonly()`** — the field is settable on insert but rejected on update. A client write that sets the field returns `400 READONLY_FIELD` before the policy runs. That covers `PATCH /api/entities/<entity>/<id>`, an update in `/api/sync/push`, `/api/link` and `/api/unlink` on a readonly foreign key, and a CRDT push that changes the field. Closes the canonical IDOR-via-update-payload shape:
 
