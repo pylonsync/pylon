@@ -2550,6 +2550,13 @@ pub trait SessionBackend: Send + Sync {
     fn load_all(&self) -> Vec<Session>;
     fn save(&self, session: &Session);
     fn remove(&self, token: &str);
+    /// Remove several sessions. Backends override it with one statement;
+    /// the default removes them one at a time.
+    fn remove_many(&self, tokens: &[String]) {
+        for token in tokens {
+            self.remove(token);
+        }
+    }
 }
 
 /// A session store. In-memory by default; optionally backed by a
@@ -2570,12 +2577,13 @@ pub struct SessionStore {
     end_listeners: Mutex<Vec<SessionEndListener>>,
 }
 
-/// Called with the user id of each session that ended: revoked (sign-out,
-/// password change or reset, account deletion, a guest merge), rotated
-/// away by [`SessionStore::refresh`], or swept after expiry. Runs on the
-/// thread that ended the session, after the store's lock is released, so
+/// Called with the user ids (each once) whose sessions ended in one
+/// operation: revoked (sign-out, password change or reset, account
+/// deletion, a guest merge), rotated away by [`SessionStore::refresh`],
+/// or swept after expiry (one call for the whole sweep). Runs on the
+/// thread that ended the sessions, after the store's lock is released, so
 /// it may read the store.
-pub type SessionEndListener = Arc<dyn Fn(&str) + Send + Sync>;
+pub type SessionEndListener = Arc<dyn Fn(&[String]) + Send + Sync>;
 
 impl Default for SessionStore {
     fn default() -> Self {
@@ -2608,13 +2616,24 @@ impl SessionStore {
             return;
         }
         let mut seen = std::collections::HashSet::new();
-        for user_id in user_ids {
-            if !seen.insert(user_id) {
-                continue;
-            }
-            for listener in &listeners {
-                listener(user_id);
-            }
+        let users: Vec<String> = user_ids
+            .into_iter()
+            .filter(|u| seen.insert(*u))
+            .map(str::to_string)
+            .collect();
+        if users.is_empty() {
+            return;
+        }
+        for listener in &listeners {
+            listener(&users);
+        }
+    }
+
+    /// Remove `tokens` from the persistent backend, in one call. Call with
+    /// the sessions lock released: a backend write is I/O.
+    fn remove_from_backend(&self, tokens: &[String]) {
+        if let (Some(b), false) = (&self.backend, tokens.is_empty()) {
+            b.remove_many(tokens);
         }
     }
 
@@ -2773,52 +2792,38 @@ impl SessionStore {
     }
 
     fn revoke_all_for_user_inner(&self, user_id: &str) -> usize {
-        let mut sessions = self.sessions.lock().unwrap();
-        let tokens: Vec<String> = sessions
-            .iter()
-            .filter_map(|(t, s)| {
-                if s.user_id == user_id {
-                    Some(t.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        let n = tokens.len();
-        for t in &tokens {
-            sessions.remove(t);
-            if let Some(b) = &self.backend {
-                b.remove(t);
+        let tokens: Vec<String> = {
+            let mut sessions = self.sessions.lock().unwrap();
+            let tokens: Vec<String> = sessions
+                .iter()
+                .filter(|(_, s)| s.user_id == user_id)
+                .map(|(t, _)| t.clone())
+                .collect();
+            for t in &tokens {
+                sessions.remove(t);
             }
-        }
-        n
+            tokens
+        };
+        self.remove_from_backend(&tokens);
+        tokens.len()
     }
 
     /// Sweep expired sessions. Returns the count removed.
     pub fn sweep_expired(&self) -> usize {
-        let ended_users: Vec<String> = {
+        let (expired, ended_users): (Vec<String>, Vec<String>) = {
             let mut sessions = self.sessions.lock().unwrap();
             let expired: Vec<String> = sessions
                 .iter()
-                .filter_map(|(t, s)| {
-                    if s.is_expired() {
-                        Some(t.clone())
-                    } else {
-                        None
-                    }
-                })
+                .filter(|(_, s)| s.is_expired())
+                .map(|(t, _)| t.clone())
                 .collect();
-            let mut users = Vec::with_capacity(expired.len());
-            for t in &expired {
-                if let Some(s) = sessions.remove(t) {
-                    users.push(s.user_id);
-                }
-                if let Some(b) = &self.backend {
-                    b.remove(t);
-                }
-            }
-            users
+            let users = expired
+                .iter()
+                .filter_map(|t| sessions.remove(t).map(|s| s.user_id))
+                .collect();
+            (expired, users)
         };
+        self.remove_from_backend(&expired);
         self.sessions_ended(ended_users.iter().map(String::as_str));
         ended_users.len()
     }
@@ -4206,11 +4211,13 @@ mod tests {
             let seen = Arc::new(Mutex::new(Vec::<String>::new()));
             let sink = Arc::clone(&seen);
             let weak = Arc::downgrade(store);
-            store.on_session_end(Arc::new(move |user_id: &str| {
-                if let Some(store) = weak.upgrade() {
-                    let _ = store.list_for_user(user_id);
+            store.on_session_end(Arc::new(move |user_ids: &[String]| {
+                for user_id in user_ids {
+                    if let Some(store) = weak.upgrade() {
+                        let _ = store.list_for_user(user_id);
+                    }
+                    sink.lock().unwrap().push(user_id.to_string());
                 }
-                sink.lock().unwrap().push(user_id.to_string());
             }));
             seen
         };
@@ -4247,6 +4254,73 @@ mod tests {
         }
         assert_eq!(store.sweep_expired(), 2);
         assert_eq!(taken(&seen), ["dave"]);
+    }
+
+    /// Review P3: the sweep ran every backend DELETE while holding the
+    /// sessions lock (every request waited), one statement per token, and
+    /// called the listeners once per user (each call scanned every
+    /// WebSocket). Now the backend gets one batched call with the lock
+    /// released, and the listeners one call for the whole sweep.
+    #[test]
+    fn a_sweep_batches_backend_deletes_and_listener_calls() {
+        use std::sync::{Arc, Mutex, Weak};
+        struct Recording {
+            store: Mutex<Weak<SessionStore>>,
+            batches: Mutex<Vec<(usize, bool)>>,
+        }
+        struct Backend(Arc<Recording>);
+        impl SessionBackend for Backend {
+            fn load_all(&self) -> Vec<Session> {
+                Vec::new()
+            }
+            fn save(&self, _: &Session) {}
+            fn remove(&self, _: &str) {
+                self.0.batches.lock().unwrap().push((1, false));
+            }
+            fn remove_many(&self, tokens: &[String]) {
+                let unlocked = self
+                    .0
+                    .store
+                    .lock()
+                    .unwrap()
+                    .upgrade()
+                    .is_some_and(|s| s.sessions.try_lock().is_ok());
+                self.0
+                    .batches
+                    .lock()
+                    .unwrap()
+                    .push((tokens.len(), unlocked));
+            }
+        }
+        let rec = Arc::new(Recording {
+            store: Mutex::new(Weak::new()),
+            batches: Mutex::new(Vec::new()),
+        });
+        let store = Arc::new(SessionStore::with_backend(Box::new(Backend(Arc::clone(
+            &rec,
+        )))));
+        *rec.store.lock().unwrap() = Arc::downgrade(&store);
+        let calls = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+        let sink = Arc::clone(&calls);
+        store.on_session_end(Arc::new(move |users: &[String]| {
+            sink.lock().unwrap().push(users.to_vec());
+        }));
+        for user in ["a", "b", "c", "c"] {
+            let mut expired = Session::new(user.into());
+            expired.expires_at = 1;
+            store
+                .sessions
+                .lock()
+                .unwrap()
+                .insert(expired.token.clone(), expired);
+        }
+        assert_eq!(store.sweep_expired(), 4);
+        assert_eq!(*rec.batches.lock().unwrap(), [(4, true)]);
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        let mut users = calls[0].clone();
+        users.sort();
+        assert_eq!(users, ["a", "b", "c"]);
     }
 
     // -- Guest auth --

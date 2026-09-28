@@ -138,6 +138,23 @@ impl SessionBackend for SqliteSessionBackend {
             );
         }
     }
+
+    fn remove_many(&self, tokens: &[String]) {
+        let Ok(mut guard) = self.conn.lock() else {
+            return;
+        };
+        let Ok(tx) = guard.transaction() else {
+            return;
+        };
+        if let Ok(mut stmt) = tx.prepare(&format!("DELETE FROM {TABLE} WHERE token = ?1")) {
+            for token in tokens {
+                let _ = stmt.execute(rusqlite::params![token]);
+            }
+        }
+        if let Err(e) = tx.commit() {
+            tracing::warn!("[sqlite] session remove_many failed: {e}");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +266,17 @@ mod pg {
                 )
             }) {
                 tracing::warn!("[pg] session remove failed: {e}");
+            }
+        }
+
+        fn remove_many(&self, tokens: &[String]) {
+            if let Err(e) = self.conn.with_client(|c| {
+                c.execute(
+                    &format!("DELETE FROM {PG_TABLE} WHERE token = ANY($1)"),
+                    &[&tokens],
+                )
+            }) {
+                tracing::warn!("[pg] session remove_many failed: {e}");
             }
         }
     }

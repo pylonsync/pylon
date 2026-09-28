@@ -3516,11 +3516,11 @@ fn start_server(
     {
         let hub = Arc::downgrade(&ws_hub);
         let reactive = Arc::downgrade(&reactive_registry);
-        session_store.on_session_end(Arc::new(move |user_id: &str| {
+        session_store.on_session_end(Arc::new(move |user_ids: &[String]| {
             let Some(hub) = hub.upgrade() else {
                 return;
             };
-            let ended = hub.revalidate_user(user_id);
+            let ended = hub.revalidate_users(user_ids);
             if let Some(reactive) = reactive.upgrade() {
                 for id in ended {
                     reactive.disconnect_client(id);

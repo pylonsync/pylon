@@ -802,8 +802,8 @@ impl Shard {
         clients.iter().map(|(id, h)| (*id, Arc::clone(h))).collect()
     }
 
-    /// The connections in this shard authenticated as `user_id`.
-    fn clients_of_user(&self, user_id: &str) -> Vec<(u64, ClientSocket)> {
+    /// The connections in this shard authenticated as one of `users`.
+    fn clients_of_users(&self, users: &HashSet<&str>) -> Vec<(u64, ClientSocket)> {
         let clients = self.clients.lock().unwrap();
         clients
             .iter()
@@ -812,7 +812,7 @@ impl Shard {
                     Ok(g) => g,
                     Err(poisoned) => poisoned.into_inner(),
                 };
-                auth.user_id.as_deref() == Some(user_id)
+                auth.user_id.as_deref().is_some_and(|u| users.contains(u))
             })
             .map(|(id, h)| (*id, Arc::clone(h)))
             .collect()
@@ -1499,7 +1499,14 @@ impl WsHub {
     /// token it holds now: a refreshed one, or none after a logout. Its
     /// reader thread processes no further messages.
     pub fn revalidate_user(&self, user_id: &str) -> Vec<u64> {
-        self.revalidate(Some(user_id))
+        self.revalidate_users(&[user_id.to_string()])
+    }
+
+    /// [`WsHub::revalidate_user`] for several users in one pass over the
+    /// connections (a session sweep ends many at once).
+    pub fn revalidate_users(&self, user_ids: &[String]) -> Vec<u64> {
+        let users: HashSet<&str> = user_ids.iter().map(String::as_str).collect();
+        self.revalidate(Some(&users))
     }
 
     /// [`WsHub::revalidate_user`] for every authenticated connection.
@@ -1509,7 +1516,7 @@ impl WsHub {
         self.revalidate(None)
     }
 
-    fn revalidate(&self, only_user: Option<&str>) -> Vec<u64> {
+    fn revalidate(&self, only_users: Option<&HashSet<&str>>) -> Vec<u64> {
         let resolver = match self.auth_resolver.lock() {
             Ok(g) => g.clone(),
             Err(poisoned) => poisoned.into_inner().clone(),
@@ -1519,8 +1526,8 @@ impl WsHub {
         };
         let mut ended = Vec::new();
         for shard in &self.shards {
-            let handles: Vec<(u64, ClientSocket)> = match only_user {
-                Some(user_id) => shard.clients_of_user(user_id),
+            let handles: Vec<(u64, ClientSocket)> = match only_users {
+                Some(users) => shard.clients_of_users(users),
                 None => shard.all_clients(),
             };
             for (id, handle) in handles {

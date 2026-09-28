@@ -47,6 +47,14 @@ fn session_backend_roundtrip() {
     b.remove(&s.token);
     let all = b.load_all();
     assert!(!all.iter().any(|x| x.token == s.token));
+    // A batched remove takes several at once.
+    let a = Session::new("user_pg_a".into());
+    let c = Session::new("user_pg_b".into());
+    b.save(&a);
+    b.save(&c);
+    b.remove_many(&[a.token.clone(), c.token.clone()]);
+    let all = b.load_all();
+    assert!(!all.iter().any(|x| x.token == a.token || x.token == c.token));
 }
 
 #[test]
