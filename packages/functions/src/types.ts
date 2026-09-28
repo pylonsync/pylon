@@ -1223,14 +1223,32 @@ export interface TenantDomainResult {
   status: string;
   /** Whether the hostname + TLS certificate are both active. */
   active?: boolean;
-  /** The single CNAME the customer points their hostname at. */
-  cnameTarget: string;
+  /**
+   * True for an apex domain (`acme.com`). An apex cannot be a CNAME, so the
+   * customer adds A/AAAA records pointing at the app instead.
+   */
+  apex?: boolean;
+  /**
+   * Every DNS record the customer adds, for both kinds of domain: a CNAME
+   * (subdomain) or A/AAAA (apex), plus ownership and certificate records.
+   */
+  records?: TenantDomainRecord[];
+  /** The CNAME the customer points a subdomain at; null for an apex. */
+  cnameTarget: string | null;
   /** TXT record proving domain ownership before DNS cutover (or null). */
   ownership: TenantDomainDns | null;
   /** TXT records that issue the DV certificate. */
   dcv: TenantDomainDns[];
   /** Human-readable provisioning errors, empty when healthy. */
   errors: string[];
+}
+
+export interface TenantDomainRecord {
+  type: "A" | "AAAA" | "CNAME" | "TXT";
+  name: string;
+  value: string;
+  /** What the record is for, to show the customer. */
+  purpose: string;
 }
 
 /**

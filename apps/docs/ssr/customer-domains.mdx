@@ -28,13 +28,20 @@ export default action({
   args: { hostname: v.string() },
   async handler(ctx, args) {
     const d = await ctx.domains.add(args.hostname);
-    // Show the customer:
-    //   CNAME  d.hostname  →  d.cnameTarget
-    //   plus the TXT records in d.ownership and d.dcv
+    // Show the customer every record in d.records:
+    //   { type: "CNAME" | "A" | "AAAA" | "TXT", name, value, purpose }
     return d;
   },
 });
 ```
+
+Both subdomains (`sell.acme.com`) and apex domains (`acme.com`) work:
+
+- A subdomain gets a `CNAME` to `d.cnameTarget`, plus `TXT` records for
+  ownership and the certificate.
+- An apex cannot be a CNAME, so `d.apex` is `true` and the customer adds
+  `A` and `AAAA` records pointing at your app, plus a `CNAME` and `TXT`
+  record for the certificate. `d.cnameTarget` is `null`.
 
 Then poll `ctx.domains.status(hostname)`. When `status` is `"ready"`, the
 certificate is active and your app accepts requests for the host. Pylon

@@ -105,6 +105,7 @@ export type {
   // results (the DNS the end-customer must set).
   Domains,
   TenantDomainResult,
+  TenantDomainRecord,
   TenantDomainDns,
   DomainAvailability,
   DomainContact,
