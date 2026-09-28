@@ -1026,20 +1026,25 @@ fn maybe_merge_anonymous(
 /// provider's assertion): accept every pending invite addressed to it.
 fn accept_invites_for_verified_email(ctx: &RouterContext, user_id: &str, email: &str) {
     for m in ctx.orgs.accept_pending_for_verified_email(user_id, email) {
-        ctx.audit.log(
-            audit(ctx, pylon_auth::audit::AuditAction::OrgInviteAccept)
-                .user(user_id.to_string())
-                .actor(user_id.to_string())
-                .tenant(m.org_id.clone())
-                .meta("method", "verified_email")
-                .build(),
-        );
+        audit_invite_accept(ctx, user_id, &m.org_id, "verified_email");
     }
 }
 
-/// The signed-in user's email when it is verified (`emailVerified` set on
-/// the User row). Errors when there is no session, no email, or no
-/// verification; a User entity without an `emailVerified` field can never
+/// Record an accepted invite. `method` names the route that accepted it.
+fn audit_invite_accept(ctx: &RouterContext, user_id: &str, org_id: &str, method: &str) {
+    ctx.audit.log(
+        audit(ctx, pylon_auth::audit::AuditAction::OrgInviteAccept)
+            .user(user_id.to_string())
+            .actor(user_id.to_string())
+            .tenant(org_id.to_string())
+            .meta("method", method)
+            .build(),
+    );
+}
+
+/// The signed-in user's email when it is verified (`emailVerified` on the
+/// User row is `true` or a valid timestamp). Errors when there is no
+/// session, no email, or no verification; a User entity without an `emailVerified` field can never
 /// be verified here.
 fn verified_email(ctx: &RouterContext) -> Result<(String, String), (u16, String)> {
     let user_id = ctx
@@ -1057,10 +1062,7 @@ fn verified_email(ctx: &RouterContext) -> Result<(String, String), (u16, String)
         .get("email")
         .and_then(|v| v.as_str())
         .ok_or_else(|| (400, json_error("NO_EMAIL", "Account has no email")))?;
-    let verified = row
-        .get("emailVerified")
-        .is_some_and(|v| !v.is_null() && v != &serde_json::Value::Bool(false));
-    if !verified {
+    if !oidc_email_is_verified(Some(&row)) {
         return Err((
             403,
             json_error(
@@ -5064,10 +5066,14 @@ pub(crate) fn handle(
         };
         return Some(
             match ctx.orgs.accept_invite_by_id(invite_id, &user_id, &email) {
-                Ok(m) => (
-                    200,
-                    serde_json::json!({ "org_id": m.org_id, "role": m.role.as_str() }).to_string(),
-                ),
+                Ok(m) => {
+                    audit_invite_accept(ctx, &user_id, &m.org_id, "invite_id");
+                    (
+                        200,
+                        serde_json::json!({ "org_id": m.org_id, "role": m.role.as_str() })
+                            .to_string(),
+                    )
+                }
                 Err(e) => {
                     let code = match e {
                         pylon_auth::org::AcceptError::NotFound => "INVITE_NOT_FOUND",
@@ -5110,7 +5116,11 @@ pub(crate) fn handle(
                     _ => return redirect(ctx, format!("{base}/login?invite_error=AUTH_REQUIRED")),
                 };
                 return match ctx.orgs.accept_invite(token, &user_id, &email) {
-                    Ok(_) | Err(pylon_auth::org::AcceptError::AlreadyMember) => {
+                    Ok(m) => {
+                        audit_invite_accept(ctx, &user_id, &m.org_id, "invite_link");
+                        redirect(ctx, format!("{base}/?invite=accepted"))
+                    }
+                    Err(pylon_auth::org::AcceptError::AlreadyMember) => {
                         redirect(ctx, format!("{base}/?invite=accepted"))
                     }
                     Err(pylon_auth::org::AcceptError::AlreadyAccepted) => {
@@ -5154,6 +5164,7 @@ pub(crate) fn handle(
                 };
                 match ctx.orgs.accept_invite(token, &user_id, email) {
                     Ok(m) => {
+                        audit_invite_accept(ctx, &user_id, &m.org_id, "invite_token");
                         return Some((
                             200,
                             serde_json::json!({

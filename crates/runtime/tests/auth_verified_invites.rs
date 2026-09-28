@@ -5,6 +5,9 @@
 //! - `GET /api/auth/invites/mine` and `POST /api/auth/invites/by-id/:id/accept`
 //!   work only once the User row records `emailVerified`.
 //! - The org invite list shows pending invites only.
+//! - `emailVerified` must be `true` or a valid timestamp; an empty or
+//!   malformed string is not a verification.
+//! - Every accepted invite writes an `org_invite_accept` audit event.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -89,10 +92,13 @@ fn manifest() -> AppManifest {
     }
 }
 
+const ADMIN_TOKEN: &str = "verified-invites-admin-token";
+
 fn start() -> (u16, Arc<Runtime>) {
     // SAFETY: set before any server thread in this binary starts.
     unsafe {
         std::env::set_var("PYLON_DEV_MODE", "1");
+        std::env::set_var("PYLON_ADMIN_TOKEN", ADMIN_TOKEN);
     }
     let port = loop {
         let base = 20_000 + rand::random::<u16>() % 8_000;
@@ -148,9 +154,19 @@ fn call(
 
 /// A signed-in session for a new user with `email`.
 fn session_for(port: u16, rt: &Runtime, email: &str, verified: bool) -> (String, String) {
+    session_with_verification(port, rt, email, verified.then_some("2026-09-28T00:00:00Z"))
+}
+
+/// A signed-in session for a new user whose `emailVerified` is `verified`.
+fn session_with_verification(
+    port: u16,
+    rt: &Runtime,
+    email: &str,
+    verified: Option<&str>,
+) -> (String, String) {
     let mut row = serde_json::json!({ "email": email });
-    if verified {
-        row["emailVerified"] = "2026-09-28T00:00:00Z".into();
+    if let Some(v) = verified {
+        row["emailVerified"] = v.into();
     }
     let id = rt.insert("User", &row).unwrap();
     let (status, s) = call(
@@ -266,4 +282,50 @@ fn invites_attach_to_a_verified_email() {
     );
     assert_eq!(status, 200, "{accepted}");
     assert!(members(&rt, &org_id).contains(&dave));
+
+    // Both accepts are in the audit log, with the route that accepted them.
+    let (status, events) = call(
+        port,
+        "GET",
+        &format!("/api/admin/audit?action=org_invite_accept&tenant={org_id}"),
+        Some(ADMIN_TOKEN),
+        "",
+    );
+    assert_eq!(status, 200, "{events}");
+    let mut methods: Vec<(String, String)> = events
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["subject"].as_str().unwrap().to_string(),
+                e["meta"]["method"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    methods.sort();
+    let mut expected = vec![
+        (
+            bob["id"].as_str().unwrap().to_string(),
+            "verified_email".to_string(),
+        ),
+        (dave, "invite_id".to_string()),
+    ];
+    expected.sort();
+    assert_eq!(methods, expected, "{events}");
+}
+
+#[test]
+fn malformed_email_verified_is_not_a_verification() {
+    let (port, rt) = start();
+    for (email, value) in [
+        ("empty@dealer.test", ""),
+        ("word@dealer.test", "yes"),
+        ("date@dealer.test", "2026-13-45"),
+    ] {
+        let (_, tok) = session_with_verification(port, &rt, email, Some(value));
+        let (status, err) = call(port, "GET", "/api/auth/invites/mine", Some(&tok), "");
+        assert_eq!(status, 403, "emailVerified={value:?}: {err}");
+        assert_eq!(err["error"]["code"], "EMAIL_NOT_VERIFIED");
+    }
 }
