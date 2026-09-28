@@ -56,10 +56,12 @@ COMBOS=(
 	"todo|expo"
 	"todo|web,ios,mac,expo"
 	"consumer|web"
+	# ios / expo scaffold the native apps on backend/consumer; mac is
+	# ignored (unified app), and mixing it with a native app is rejected.
 	"consumer|ios"
 	"consumer|mac"
 	"consumer|expo"
-	"consumer|web,ios,mac,expo"
+	"consumer|ios,expo"
 	"chat|web"
 	"chat|ios"
 	"chat|mac"

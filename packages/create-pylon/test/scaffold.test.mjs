@@ -193,9 +193,19 @@ test("consumer --platforms ios,expo scaffolds the native apps on the shared back
 	}
 });
 
-test("consumer rejects a platform it has no native app for", () => {
+test("consumer with only non-native platforms stays the single SSR app", () => {
+	for (const platforms of ["web", "mac"]) {
+		const dir = mkdtempSync(join(tmpdir(), "cp-consumer-ignored-"));
+		const res = runScaffold({ name: "myapp", template: "consumer", cwd: dir, platforms });
+		assert.equal(res.status, 0, `--platforms ${platforms}: exit ${res.status}\n${res.stderr}`);
+		assert.ok(existsSync(join(dir, "myapp", "app.ts")), `--platforms ${platforms}: app.ts missing`);
+		assert.ok(!existsSync(join(dir, "myapp", "apps")), `--platforms ${platforms}: created apps/`);
+	}
+});
+
+test("consumer rejects mixing a native app with a platform it has no native app for", () => {
 	const dir = mkdtempSync(join(tmpdir(), "cp-consumer-bad-"));
-	const res = runScaffold({ name: "myapp", template: "consumer", cwd: dir, platforms: "web" });
+	const res = runScaffold({ name: "myapp", template: "consumer", cwd: dir, platforms: "web,ios" });
 	assert.notEqual(res.status, 0, "expected a non-zero exit");
 	assert.match(res.stderr, /doesn't support platform\(s\): web/);
 });

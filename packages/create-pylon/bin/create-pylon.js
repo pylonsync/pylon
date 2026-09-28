@@ -387,10 +387,16 @@ if (!flags.template) {
 flags.template = resolveTemplate(flags.template);
 // `unified` templates (default) are a single app, not a monorepo — they take
 // no platforms. Skip the platform prompt + validation for them entirely,
-// unless the template has native apps and --platforms asked for them.
+// unless the template has native apps and --platforms names one of them
+// (any other platform list is ignored, as for every unified template).
 const templateEntry = TEMPLATE_REGISTRY[flags.template];
-const wantsNative =
-	Boolean(flags.platforms) && (templateEntry?.nativePlatforms?.length ?? 0) > 0;
+const requestedPlatforms = (flags.platforms ?? "")
+	.split(",")
+	.map((p) => p.trim().toLowerCase())
+	.filter(Boolean);
+const wantsNative = requestedPlatforms.some((p) =>
+	(templateEntry?.nativePlatforms ?? []).includes(p),
+);
 const isUnified = templateEntry?.unified === true && !wantsNative;
 if (!isUnified && !flags.platforms) {
 	const supported = TEMPLATE_REGISTRY[flags.template].platforms.join(", ");
