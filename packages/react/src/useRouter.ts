@@ -251,16 +251,19 @@ function sameLoader(e: LoaderEntry, source: string, deps: readonly unknown[]): b
   return true;
 }
 
-/** Find or create the cached promise for this loader call. A synchronous
- *  loader result becomes an already-fulfilled thenable, which `use()` reads
- *  without suspending. */
-function loaderEntry(
-  source: string,
-  deps: readonly unknown[],
-  loader: () => unknown,
-): LoaderEntry {
-  const hit = pendingLoaders.find((e) => sameLoader(e, source, deps));
-  if (hit) return hit;
+/** Server renders: entries keyed by the first object in `deps` (the
+ *  page's per-request `serverData`), so a render's retries share one
+ *  promise and nothing is shared between requests. Loaders whose deps
+ *  hold no object are not cached on the server. */
+const serverLoaders = new WeakMap<object, LoaderEntry[]>();
+
+/** How long a rejected load stays cached. React re-renders the suspended
+ *  component once the promise rejects; that render must see the same
+ *  rejected promise so the error reaches the error boundary. A retry
+ *  after this window runs the loader again. */
+const REJECTED_ENTRY_TTL_MS = 1_000;
+
+function makeEntry(source: string, deps: readonly unknown[], loader: () => unknown): LoaderEntry {
   const value = loader();
   let promise: Promise<unknown>;
   if (value != null && typeof (value as { then?: unknown }).then === "function") {
@@ -270,16 +273,44 @@ function loaderEntry(
     // React reads `status` / `value` on a thenable to skip suspending.
     Object.assign(promise, { status: "fulfilled", value });
   }
-  const entry: LoaderEntry = { source, deps: [...deps], promise };
-  // Server render: the module is shared by every request, and the key
-  // (loader source + deps) does not identify the request, so a shared
-  // entry could hand one request's data to another. Each server render
-  // gets its own promise.
-  if (typeof window === "undefined") return entry;
+  return { source, deps: [...deps], promise };
+}
+
+/** Find or create the cached promise for this loader call. A synchronous
+ *  loader result becomes an already-fulfilled thenable, which `use()` reads
+ *  without suspending. */
+function loaderEntry(
+  source: string,
+  deps: readonly unknown[],
+  loader: () => unknown,
+): LoaderEntry {
+  if (typeof window === "undefined") {
+    // The module is shared by every request; the key must include the
+    // request (see `serverLoaders`).
+    const scope = deps.find(
+      (d): d is object => d !== null && (typeof d === "object" || typeof d === "function"),
+    );
+    if (!scope) return makeEntry(source, deps, loader);
+    let list = serverLoaders.get(scope);
+    if (!list) {
+      list = [];
+      serverLoaders.set(scope, list);
+    }
+    const hit = list.find((e) => sameLoader(e, source, deps));
+    if (hit) return hit;
+    const entry = makeEntry(source, deps, loader);
+    list.push(entry);
+    return entry;
+  }
+  const hit = pendingLoaders.find((e) => sameLoader(e, source, deps));
+  if (hit) return hit;
+  const entry = makeEntry(source, deps, loader);
   pendingLoaders.push(entry);
-  // A failed load must not stay cached: an error-boundary retry has to
-  // run the loader again.
-  promise.then(undefined, () => releaseLoaderEntry(entry));
+  // A failed load must not stay cached forever: an error-boundary retry
+  // has to run the loader again.
+  entry.promise.then(undefined, () => {
+    setTimeout(() => releaseLoaderEntry(entry), REJECTED_ENTRY_TTL_MS);
+  });
   if (pendingLoaders.length > PENDING_LOADERS_MAX) pendingLoaders.shift();
   return entry;
 }

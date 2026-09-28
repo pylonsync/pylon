@@ -9,7 +9,7 @@
 // resolves in this test runtime, so every Suspense test would hang.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { Suspense, type ReactNode } from "react";
+import { Component, Suspense, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 import { __routeDataCacheInternals, useRouteData } from "./useRouter";
@@ -115,7 +115,7 @@ describe("useRouteData", () => {
 });
 
 describe("useRouteData promise cache", () => {
-  test("a server render never shares a cached promise between requests", () => {
+  test("a server render shares a promise only within one request", () => {
     __routeDataCacheInternals.clear();
     const g = globalThis as { window?: unknown };
     const saved = g.window;
@@ -126,17 +126,25 @@ describe("useRouteData promise cache", () => {
         calls += 1;
         return Promise.resolve(`user-${calls}`);
       };
-      const a = __routeDataCacheInternals.lookup("src", ["slug"], loader);
-      const b = __routeDataCacheInternals.lookup("src", ["slug"], loader);
-      expect(a).not.toBe(b);
+      const requestA = { request: "A" };
+      const requestB = { request: "B" };
+      const a1 = __routeDataCacheInternals.lookup("src", [requestA, "slug"], loader);
+      const a2 = __routeDataCacheInternals.lookup("src", [requestA, "slug"], loader);
+      const b = __routeDataCacheInternals.lookup("src", [requestB, "slug"], loader);
+      expect(a1).toBe(a2);
+      expect(b).not.toBe(a1);
       expect(calls).toBe(2);
+      // No per-request object in deps: never cached on the server.
+      const p1 = __routeDataCacheInternals.lookup("src", ["slug"], loader);
+      const p2 = __routeDataCacheInternals.lookup("src", ["slug"], loader);
+      expect(p1).not.toBe(p2);
       expect(__routeDataCacheInternals.size()).toBe(0);
     } finally {
       g.window = saved;
     }
   });
 
-  test("a rejected load leaves the cache so a retry runs the loader again", async () => {
+  test("a rejected load stays long enough for the error boundary, then leaves", async () => {
     __routeDataCacheInternals.clear();
     let calls = 0;
     const loader = () => {
@@ -145,9 +153,46 @@ describe("useRouteData promise cache", () => {
     };
     const first = __routeDataCacheInternals.lookup("src-err", ["x"], loader);
     await first.promise.catch(() => {});
-    await Promise.resolve();
+    // React's re-render after the rejection sees the same promise.
+    expect(__routeDataCacheInternals.lookup("src-err", ["x"], loader)).toBe(first);
+    expect(calls).toBe(1);
+    await new Promise((r) => setTimeout(r, 1_100));
     __routeDataCacheInternals.lookup("src-err", ["x"], loader).promise.catch(() => {});
     expect(calls).toBe(2);
     __routeDataCacheInternals.clear();
+  });
+
+  test("a failing loader renders the error boundary without a retry loop", async () => {
+    let calls = 0;
+    class Boundary extends Component<{ children: ReactNode }, { error: string | null }> {
+      state = { error: null as string | null };
+      static getDerivedStateFromError(e: Error) {
+        return { error: e.message };
+      }
+      render() {
+        return this.state.error ? <p>{`error:${this.state.error}`}</p> : this.props.children;
+      }
+    }
+    function Item() {
+      const v = useRouteData(() => {
+        calls += 1;
+        return new Promise<string>((_, reject) => setTimeout(() => reject(new Error("boom")), 5));
+      }, ["failing"]);
+      return <p>{v}</p>;
+    }
+    const logs = captureConsoleError();
+    try {
+      root!.render(
+        <Boundary>
+          <Suspense fallback={<p>loading</p>}>
+            <Item />
+          </Suspense>
+        </Boundary>,
+      );
+      await until("error:boom");
+    } finally {
+      logs.restore();
+    }
+    expect(calls).toBe(1);
   });
 });
