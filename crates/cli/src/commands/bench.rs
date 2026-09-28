@@ -7,7 +7,7 @@
 //! - `--join <function>`: a guest session (`POST /api/auth/guest`), then the
 //!   app's join function, which returns `{ shardId, subscriberId, ticket }`.
 //!   The server caps guest sessions per client address
-//!   (`PYLON_AUTH_GUEST_IP_PER_MIN`, 30 per minute by default); raise it on
+//!   (`PYLON_AUTH_GUEST_IP_PER_MIN`, 120 per minute by default); raise it on
 //!   the server when many bots run from one machine.
 //! - `--shard <id>`: connect to a running shard with tickets minted here.
 //!   The key is `PYLON_SHARD_TICKET_SECRET`, or the one `pylon dev` derives
@@ -812,7 +812,7 @@ fn join_with_function(config: &BenchConfig, function: &str) -> Result<Join, Stri
             if limited {
                 format!(
                     "{msg} (the server allows PYLON_AUTH_GUEST_IP_PER_MIN guest sessions \
-                     per minute from one address, 30 by default; raise it on the server \
+                     per minute from one address, 120 by default; raise it on the server \
                      for a load test)"
                 )
             } else {

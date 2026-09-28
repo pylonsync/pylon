@@ -1041,8 +1041,9 @@ mod truncate_chars_tests {
 /// `/api/auth/anonymous`). Both routes share one bucket, so an alias can't
 /// double the allowance. `ctx.peer_ip` is the client IP after the
 /// runtime's trusted-proxy resolution. The cap is
-/// `PYLON_AUTH_GUEST_IP_PER_MIN` (default 30 per minute).
+/// `PYLON_AUTH_GUEST_IP_PER_MIN` (default 120 per minute), keyed by /64 for IPv6.
 fn guest_issue_rate_limited(ctx: &RouterContext) -> Option<(u16, String)> {
+    warn_on_shared_guest_address(ctx);
     let rl = pylon_auth::rate_limit::AuthRateLimiter::shared();
     match rl.check(
         pylon_auth::rate_limit::AuthBucket::GuestIssue,
@@ -1076,6 +1077,36 @@ fn guest_issue_rate_limited(ctx: &RouterContext) -> Option<(u16, String)> {
 /// - Does NOT delete the guest user row. Apps may have FK constraints
 ///   that prevent deletion, and an orphan guest row with zero
 ///   referencing entities is harmless.
+/// Warn (at most every 10 minutes) when a production guest session is
+/// minted for a loopback or private address. That address is a reverse
+/// proxy or a shared NAT, so every client behind it shares one guest cap.
+fn warn_on_shared_guest_address(ctx: &RouterContext) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST_WARNED: AtomicU64 = AtomicU64::new(0);
+    if ctx.is_dev || !pylon_auth::rate_limit::is_non_public_ip(ctx.peer_ip) {
+        return;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last = LAST_WARNED.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < 600
+        || LAST_WARNED
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+    {
+        return;
+    }
+    tracing::warn!(
+        "[auth] guest session minted for {}, a private or loopback address. Behind a \
+         reverse proxy every client shares that address and one guest-session cap \
+         (PYLON_AUTH_GUEST_IP_PER_MIN). Set PYLON_TRUST_PROXY_HOPS or \
+         PYLON_CLIENT_IP_HEADER so limits key on the real client.",
+        ctx.peer_ip
+    );
+}
+
 fn maybe_merge_anonymous(
     ctx: &RouterContext,
     to_user_id: &str,

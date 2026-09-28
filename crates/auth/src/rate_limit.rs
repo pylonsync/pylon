@@ -90,11 +90,11 @@ impl AuthBucket {
             Self::NonceIssue => {
                 return (env_cap("PYLON_AUTH_NONCE_IP_PER_MIN", 30), 0);
             }
-            // 30 guest sessions/min/IP. A browser mints one per new
+            // 120 guest sessions/min/IP. A browser mints one per new
             // visitor; a shared NAT (office, school, carrier CGNAT) needs
             // headroom. Load tests (`pylon bench --join`) raise it.
             Self::GuestIssue => {
-                return (env_cap("PYLON_AUTH_GUEST_IP_PER_MIN", 30), 0);
+                return (env_cap("PYLON_AUTH_GUEST_IP_PER_MIN", 120), 0);
             }
         };
         (env_cap(ip_env, ip_default), env_cap(acct_env, acct_default))
@@ -172,7 +172,7 @@ impl AuthRateLimiter {
         let (ip_cap, acct_cap) = bucket.caps();
         let now = now_secs();
         // 1-minute window for IP, 1-hour window for account.
-        if let Some(retry) = bump(&self.per_ip, (bucket, ip.to_string()), 60, ip_cap, now) {
+        if let Some(retry) = bump(&self.per_ip, (bucket, ip_key(ip)), 60, ip_cap, now) {
             return RateLimitDecision::Deny {
                 retry_after_secs: retry,
             };
@@ -191,6 +191,43 @@ impl AuthRateLimiter {
             }
         }
         RateLimitDecision::Allow
+    }
+}
+
+/// The per-IP bucket key for `ip`. An IPv6 address is keyed by its /64:
+/// one subscriber usually holds a whole /64 and can use any address in
+/// it, so per-address keys would let one client take 2^64 buckets. An
+/// IPv4-mapped IPv6 address is keyed as the IPv4 address. Anything that
+/// does not parse is keyed as given.
+pub fn ip_key(ip: &str) -> String {
+    match ip.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(v6)) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => {
+                let s = v6.segments();
+                let prefix = std::net::Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0);
+                format!("{prefix}/64")
+            }
+        },
+        Ok(std::net::IpAddr::V4(v4)) => v4.to_string(),
+        Err(_) => ip.to_string(),
+    }
+}
+
+/// Whether `ip` is a loopback, private (RFC 1918), link-local, or IPv6
+/// unique-local address: the address of a proxy or a shared NAT, not of
+/// one client on the internet.
+pub fn is_non_public_ip(ip: &str) -> bool {
+    match ip.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        Ok(std::net::IpAddr::V6(v6)) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return v4.is_loopback() || v4.is_private() || v4.is_link_local();
+            }
+            let first = v6.segments()[0];
+            v6.is_loopback() || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+        }
+        Err(_) => false,
     }
 }
 
@@ -305,6 +342,53 @@ mod tests {
             RateLimitDecision::Deny { .. }
         ));
         assert_eq!(rl.check(bucket, "7.7.7.8", None), RateLimitDecision::Allow);
+    }
+
+    /// IPv6 clients are keyed by /64: addresses in one /64 share a
+    /// bucket, other /64s do not; IPv4 and IPv4-mapped addresses are per
+    /// address.
+    #[test]
+    fn ipv6_is_keyed_by_its_64() {
+        assert_eq!(ip_key("2001:db8:1:2:aaaa::1"), "2001:db8:1:2::/64");
+        assert_eq!(ip_key("2001:db8:1:2:ffff::9"), "2001:db8:1:2::/64");
+        assert_eq!(ip_key("::ffff:203.0.113.5"), "203.0.113.5");
+        assert_eq!(ip_key("203.0.113.5"), "203.0.113.5");
+        assert_eq!(ip_key(""), "");
+
+        let rl = AuthRateLimiter::new();
+        let bucket = AuthBucket::GuestIssue;
+        let (ip_cap, _) = bucket.caps();
+        for i in 0..ip_cap {
+            let ip = format!("2001:db8:5:6:{i:x}::1");
+            assert_eq!(rl.check(bucket, &ip, None), RateLimitDecision::Allow);
+        }
+        assert!(matches!(
+            rl.check(bucket, "2001:db8:5:6:ffff::2", None),
+            RateLimitDecision::Deny { .. }
+        ));
+        assert_eq!(
+            rl.check(bucket, "2001:db8:5:7::1", None),
+            RateLimitDecision::Allow
+        );
+    }
+
+    #[test]
+    fn non_public_addresses() {
+        for ip in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.9",
+            "192.168.1.1",
+            "::1",
+            "fd00::1",
+            "fe80::1",
+            "::ffff:10.0.0.1",
+        ] {
+            assert!(is_non_public_ip(ip), "{ip}");
+        }
+        for ip in ["203.0.113.5", "2001:db8::1", "8.8.8.8", ""] {
+            assert!(!is_non_public_ip(ip), "{ip}");
+        }
     }
 
     #[test]

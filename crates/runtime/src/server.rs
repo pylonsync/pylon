@@ -867,6 +867,40 @@ mod client_ip_header_tests {
     }
 }
 
+/// The boot warning for a production server that keys per-client limits
+/// on the socket address: nothing says where the real client IP is, so
+/// behind a reverse proxy every client shares one bucket (guest sessions,
+/// sign-in attempts, function calls). `None` when a source is set or in
+/// dev mode.
+fn client_ip_source_warning(
+    is_dev: bool,
+    trust_proxy_hops: usize,
+    client_ip_headers: &[String],
+) -> Option<&'static str> {
+    if is_dev || trust_proxy_hops > 0 || !client_ip_headers.is_empty() {
+        return None;
+    }
+    Some(
+        "[net] no client-IP source configured (PYLON_TRUST_PROXY_HOPS, \
+         PYLON_CLIENT_IP_HEADER): per-client limits (guest sessions, sign-in \
+         attempts, function calls) key on the socket address. Behind a reverse \
+         proxy every client then shares one bucket; set one of the two.",
+    )
+}
+
+#[cfg(test)]
+mod client_ip_source_warning_tests {
+    use super::client_ip_source_warning;
+
+    #[test]
+    fn warns_only_in_production_with_no_source() {
+        assert!(client_ip_source_warning(false, 0, &[]).is_some());
+        assert!(client_ip_source_warning(true, 0, &[]).is_none());
+        assert!(client_ip_source_warning(false, 1, &[]).is_none());
+        assert!(client_ip_source_warning(false, 0, &["cf-connecting-ip".to_string()]).is_none());
+    }
+}
+
 fn resolve_client_ip(request: &tiny_http::Request, trust_proxy_hops: usize) -> String {
     let socket_ip = request
         .remote_addr()
@@ -3246,6 +3280,9 @@ fn start_server(
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
+    if let Some(warning) = client_ip_source_warning(is_dev, trust_proxy_hops, client_ip_headers()) {
+        tracing::warn!("{warning}");
+    }
 
     // Session cookie config — built once. Cookie name defaults to
     // `${app_name}_session` so multiple Pylon apps on the same parent
