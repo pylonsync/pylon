@@ -3628,9 +3628,17 @@ mod tests {
             "203.0.113.9"
         );
         // A configured client-IP header wins.
-        let cf = handshake(&[("CF-Connecting-IP", "198.51.100.4")]);
+        let tci = handshake(&[("True-Client-IP", "198.51.100.4")]);
         assert_eq!(
-            handshake_client_ip(&cf, proxy, &["cf-connecting-ip".to_string()], 0),
+            handshake_client_ip(&tci, proxy.clone(), &["true-client-ip".to_string()], 0),
+            "198.51.100.4"
+        );
+        // CF-Connecting-IP counts only from a Cloudflare edge peer.
+        let cf = handshake(&[("CF-Connecting-IP", "198.51.100.4")]);
+        let chain = ["cf-connecting-ip".to_string()];
+        assert_eq!(handshake_client_ip(&cf, proxy, &chain, 0), "10.0.0.2");
+        assert_eq!(
+            handshake_client_ip(&cf, "162.158.0.9".to_string(), &chain, 0),
             "198.51.100.4"
         );
 

@@ -834,8 +834,10 @@ pub struct RouterContext<'a> {
     /// to TypeScript actions. Empty slice on platforms that don't forward
     /// headers (e.g. internal calls).
     pub request_headers: &'a [(String, String)],
-    /// Client IP as the runtime resolved it from the socket. Used as
-    /// the rate-limit bucket key for unauthenticated callers — the
+    /// Client IP as the runtime resolved it: configured client-IP headers,
+    /// trusted X-Forwarded-For hops, then the socket address. Actions see it
+    /// as `ctx.request.clientIp`. Used as the rate-limit bucket key for
+    /// unauthenticated callers — the
     /// alternative ("anon" string) puts every unauth request worldwide
     /// into one shared bucket, which lets one attacker starve every
     /// other anonymous caller. Empty string on platforms that don't

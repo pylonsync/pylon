@@ -327,6 +327,7 @@ For work that can outlast an HTTP request, return early and continue in
 | `url` | Full URL the client requested (scheme, host, path, query). See below. |
 | `headers` | Header names lowercased; repeated headers joined with `, `. |
 | `rawBody` | The exact body bytes, for signature checks. |
+| `clientIp` | The client IP Pylon uses for rate limits and the audit log, or `null`. See below. |
 
 The action's `auth` mode applies. A provider does not sign in, so a
 receiver declares `auth: "public"` and verifies the provider's signature
@@ -394,6 +395,17 @@ app's domains. The scheme comes from `X-Forwarded-Proto` (`http` or
 trusted, the `PYLON_PUBLIC_URL` origin is used instead. Set
 `PYLON_PUBLIC_URL` in production so the URL matches what the provider
 signed.
+
+`ctx.request.clientIp` is the same client IP Pylon uses for its own rate
+limits and audit entries, so an action can rate-limit by IP without
+reading headers. Pylon takes it from the first header in
+`PYLON_CLIENT_IP_HEADER` that holds a valid IP, then from
+`X-Forwarded-For` with `PYLON_TRUST_PROXY_HOPS` trusted proxies, then from
+the socket address. `CF-Connecting-IP` counts only when the address that
+connected to the app is a Cloudflare edge address (on Fly, the
+`Fly-Client-IP` address), so a request sent straight to the origin cannot
+choose its IP. Stack0 Cloud sets
+`PYLON_CLIENT_IP_HEADER=CF-Connecting-IP,Fly-Client-IP`.
 
 ## Streaming LLM output
 

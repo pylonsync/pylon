@@ -1511,6 +1511,15 @@ export interface RequestInfo {
   url: string;
   headers: Record<string, string>;
   rawBody: string;
+  /**
+   * The client IP Pylon uses for rate limits and the audit log. It comes
+   * from `PYLON_CLIENT_IP_HEADER` (`CF-Connecting-IP` counts only when the
+   * connecting address is a Cloudflare edge), then `X-Forwarded-For` with
+   * `PYLON_TRUST_PROXY_HOPS` trusted proxies, then the socket address. A
+   * caller cannot set it with a header. `null` when the platform exposes no
+   * client address.
+   */
+  clientIp: string | null;
 }
 
 // ---------------------------------------------------------------------------

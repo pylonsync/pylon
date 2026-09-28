@@ -1269,6 +1269,10 @@ function buildActionCtx(
       url: String(r.url ?? ""),
       headers: (r.headers as Record<string, string>) ?? {},
       rawBody: String(r.raw_body ?? r.rawBody ?? ""),
+      clientIp:
+        typeof (r.client_ip ?? r.clientIp) === "string"
+          ? String(r.client_ip ?? r.clientIp)
+          : null,
     };
   }
   return {

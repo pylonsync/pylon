@@ -74,6 +74,13 @@ pub struct RequestInfo {
     /// signature verification (Stripe, GitHub) needs the bytes that were
     /// signed, so this is NOT the parsed JSON.
     pub raw_body: String,
+    /// The client IP the runtime resolved for rate limits and the audit
+    /// log: configured client-IP headers (CF-Connecting-IP only from a
+    /// Cloudflare edge), then X-Forwarded-For with the trusted proxy hops,
+    /// then the socket address. `None` when the platform exposes no peer
+    /// address.
+    #[serde(default)]
+    pub client_ip: Option<String>,
 }
 
 impl CallMessage {

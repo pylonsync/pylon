@@ -230,6 +230,7 @@ fn request_info(
         url: ctx.request_public_url(url),
         headers,
         raw_body: body.to_string(),
+        client_ip: (!ctx.peer_ip.is_empty()).then(|| ctx.peer_ip.to_string()),
     }
 }
 

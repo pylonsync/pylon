@@ -1007,44 +1007,276 @@ pub(crate) fn client_ip_from(
     client_ip_headers: &[String],
     trust_proxy_hops: usize,
 ) -> String {
+    static ON_FLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let on_fly = *ON_FLY.get_or_init(|| {
+        std::env::var_os("FLY_APP_NAME").is_some() || std::env::var_os("FLY_MACHINE_ID").is_some()
+    });
+    resolve_client_ip_with(
+        socket_ip,
+        header,
+        client_ip_headers,
+        trust_proxy_hops,
+        on_fly,
+    )
+}
+
+/// `ip` with an IPv4-mapped IPv6 address (`::ffff:1.2.3.4`, what a
+/// dual-stack listener reports for an IPv4 client) written as IPv4, so one
+/// client has one form whether it came from the socket or a header.
+fn canonical_ip(ip: String) -> String {
+    match ip.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(v6)) => v6.to_ipv4_mapped().map(|v4| v4.to_string()).unwrap_or(ip),
+        _ => ip,
+    }
+}
+
+/// [`client_ip_from`] with the Fly check passed in, so tests do not read the
+/// process env.
+///
+/// `CF-Connecting-IP` is used only when the address that connected to this
+/// server is a Cloudflare address: on Fly, `Fly-Client-IP` (set by Fly's
+/// proxy); elsewhere, the X-Forwarded-For entry the closest trusted proxy
+/// saw, or the socket address. A request that reached the origin directly
+/// can set `CF-Connecting-IP` itself; without this check it would choose
+/// its own client IP.
+fn resolve_client_ip_with(
+    socket_ip: String,
+    header: impl Fn(&str) -> Option<String>,
+    client_ip_headers: &[String],
+    trust_proxy_hops: usize,
+    on_fly: bool,
+) -> String {
+    let socket_ip = canonical_ip(socket_ip);
+    let forwarded = forwarded_client_ip(&header, trust_proxy_hops);
+    let edge_peer = || -> Option<std::net::IpAddr> {
+        if on_fly {
+            header("fly-client-ip").and_then(|v| v.trim().parse().ok())
+        } else {
+            forwarded
+                .as_deref()
+                .unwrap_or(socket_ip.as_str())
+                .parse()
+                .ok()
+        }
+    };
     // Edge client-IP header(s) take precedence, tried in priority order (e.g.
     // Cloudflare's CF-Connecting-IP, then Fly-Client-IP). Use the first one
     // present + parseable on this request; a configured header that's absent
     // (a direct hit that bypassed that edge) falls through to the next, then
     // to the X-Forwarded-For logic — never trust a missing value.
     for hdr in client_ip_headers {
-        if let Some(v) = header(hdr).map(|v| v.trim().to_string()) {
-            if v.parse::<std::net::IpAddr>().is_ok() {
-                return v;
-            }
+        let Some(v) = header(hdr).map(|v| v.trim().to_string()) else {
+            continue;
+        };
+        if v.parse::<std::net::IpAddr>().is_err() {
+            continue;
         }
+        if hdr == "cf-connecting-ip" && !edge_peer().is_some_and(is_cloudflare_ip) {
+            continue;
+        }
+        return canonical_ip(v);
     }
+    forwarded.map(canonical_ip).unwrap_or(socket_ip)
+}
+
+/// The X-Forwarded-For entry the closest of `trust_proxy_hops` trusted
+/// proxies observed, when it is a valid IP.
+fn forwarded_client_ip(
+    header: &impl Fn(&str) -> Option<String>,
+    trust_proxy_hops: usize,
+) -> Option<String> {
     if trust_proxy_hops == 0 {
-        return socket_ip;
+        return None;
     }
-    let xff = header("X-Forwarded-For");
-    let Some(xff) = xff else {
-        return socket_ip;
-    };
+    let xff = header("X-Forwarded-For")?;
     // XFF is "client, proxy1, proxy2" — the leftmost is whatever the
     // first hop SAID was the client (untrusted), and each subsequent
     // entry is what the next hop saw. With N trusted proxies, the
-    // Nth-from-right is the IP our closest trusted proxy verified.
+    // Nth-from-right is the IP our closest trusted proxy verified. Too
+    // few entries means a request that bypassed the expected chain.
     let entries: Vec<&str> = xff.split(',').map(str::trim).collect();
     if entries.len() < trust_proxy_hops {
-        // XFF doesn't have enough hops — operator misconfiguration
-        // or a request that bypassed the expected proxy chain.
-        // Fall back to socket IP rather than trusting whatever's
-        // there.
-        return socket_ip;
+        return None;
     }
     let candidate = entries[entries.len() - trust_proxy_hops];
     // Validate it parses as an IP before using as a bucket key —
     // garbage-in would let attackers poison the rate-limit map.
-    if candidate.parse::<std::net::IpAddr>().is_ok() {
-        candidate.to_string()
-    } else {
-        socket_ip
+    candidate
+        .parse::<std::net::IpAddr>()
+        .is_ok()
+        .then(|| candidate.to_string())
+}
+
+/// Cloudflare's published edge ranges (https://www.cloudflare.com/ips/,
+/// read 2026-09-28).
+const CLOUDFLARE_V4: &[([u8; 4], u8)] = &[
+    ([173, 245, 48, 0], 20),
+    ([103, 21, 244, 0], 22),
+    ([103, 22, 200, 0], 22),
+    ([103, 31, 4, 0], 22),
+    ([141, 101, 64, 0], 18),
+    ([108, 162, 192, 0], 18),
+    ([190, 93, 240, 0], 20),
+    ([188, 114, 96, 0], 20),
+    ([197, 234, 240, 0], 22),
+    ([198, 41, 128, 0], 17),
+    ([162, 158, 0, 0], 15),
+    ([104, 16, 0, 0], 13),
+    ([104, 24, 0, 0], 14),
+    ([172, 64, 0, 0], 13),
+    ([131, 0, 72, 0], 22),
+];
+const CLOUDFLARE_V6: &[([u16; 8], u8)] = &[
+    ([0x2400, 0xcb00, 0, 0, 0, 0, 0, 0], 32),
+    ([0x2606, 0x4700, 0, 0, 0, 0, 0, 0], 32),
+    ([0x2803, 0xf800, 0, 0, 0, 0, 0, 0], 32),
+    ([0x2405, 0xb500, 0, 0, 0, 0, 0, 0], 32),
+    ([0x2405, 0x8100, 0, 0, 0, 0, 0, 0], 32),
+    ([0x2a06, 0x98c0, 0, 0, 0, 0, 0, 0], 29),
+    ([0x2c0f, 0xf248, 0, 0, 0, 0, 0, 0], 32),
+];
+
+/// Whether `ip` is in one of Cloudflare's edge ranges. An IPv4-mapped IPv6
+/// address is checked as IPv4.
+fn is_cloudflare_ip(ip: std::net::IpAddr) -> bool {
+    let ip = match ip {
+        std::net::IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map(std::net::IpAddr::V4)
+            .unwrap_or(std::net::IpAddr::V6(v6)),
+        v4 => v4,
+    };
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let addr = u32::from(v4);
+            CLOUDFLARE_V4.iter().any(|(net, bits)| {
+                let mask = u32::MAX.checked_shl(32 - u32::from(*bits)).unwrap_or(0);
+                addr & mask == u32::from(std::net::Ipv4Addr::from(*net)) & mask
+            })
+        }
+        std::net::IpAddr::V6(v6) => {
+            let addr = u128::from(v6);
+            CLOUDFLARE_V6.iter().any(|(net, bits)| {
+                let mask = u128::MAX.checked_shl(128 - u32::from(*bits)).unwrap_or(0);
+                addr & mask == u128::from(std::net::Ipv6Addr::from(*net)) & mask
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod client_ip_resolution_tests {
+    use super::{is_cloudflare_ip, resolve_client_ip_with};
+
+    fn headers<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    fn cloud_chain() -> Vec<String> {
+        vec!["cf-connecting-ip".into(), "fly-client-ip".into()]
+    }
+
+    #[test]
+    fn cloudflare_ranges_match_and_neighbours_do_not() {
+        for ip in [
+            "104.16.0.1",
+            "172.71.255.254",
+            "2606:4700::1",
+            "::ffff:162.158.1.1",
+        ] {
+            assert!(is_cloudflare_ip(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in ["104.15.255.255", "8.8.8.8", "2606:4701::1", "10.0.0.1"] {
+            assert!(!is_cloudflare_ip(ip.parse().unwrap()), "{ip}");
+        }
+    }
+
+    #[test]
+    fn on_fly_through_cloudflare_uses_cf_connecting_ip() {
+        let h = [
+            ("CF-Connecting-IP", "203.0.113.7"),
+            ("Fly-Client-IP", "162.158.4.4"),
+        ];
+        let ip = resolve_client_ip_with("172.16.0.1".into(), headers(&h), &cloud_chain(), 0, true);
+        assert_eq!(ip, "203.0.113.7");
+    }
+
+    #[test]
+    fn on_fly_direct_hit_cannot_forge_cf_connecting_ip() {
+        // The caller connected to Fly directly and set CF-Connecting-IP.
+        let h = [
+            ("CF-Connecting-IP", "1.2.3.4"),
+            ("Fly-Client-IP", "198.51.100.9"),
+        ];
+        let ip = resolve_client_ip_with("172.16.0.1".into(), headers(&h), &cloud_chain(), 0, true);
+        assert_eq!(ip, "198.51.100.9");
+    }
+
+    #[test]
+    fn self_hosted_cf_header_needs_a_cloudflare_peer() {
+        let chain = vec!["cf-connecting-ip".to_string()];
+        let h = [("CF-Connecting-IP", "203.0.113.7")];
+        // Socket peer is a Cloudflare edge: honored.
+        assert_eq!(
+            resolve_client_ip_with("162.158.0.9".into(), headers(&h), &chain, 0, false),
+            "203.0.113.7"
+        );
+        // Socket peer is the caller: ignored.
+        assert_eq!(
+            resolve_client_ip_with("198.51.100.9".into(), headers(&h), &chain, 0, false),
+            "198.51.100.9"
+        );
+        // Behind one trusted proxy that saw a Cloudflare edge: honored.
+        let h = [
+            ("CF-Connecting-IP", "203.0.113.7"),
+            ("X-Forwarded-For", "203.0.113.7, 162.158.0.9"),
+        ];
+        assert_eq!(
+            resolve_client_ip_with("10.0.0.2".into(), headers(&h), &chain, 1, false),
+            "203.0.113.7"
+        );
+    }
+
+    #[test]
+    fn ipv4_mapped_addresses_are_written_as_ipv4() {
+        assert_eq!(
+            resolve_client_ip_with("::ffff:127.0.0.1".into(), headers(&[]), &[], 0, false),
+            "127.0.0.1"
+        );
+        let chain = vec!["true-client-ip".to_string()];
+        let h = [("True-Client-IP", "::ffff:203.0.113.8")];
+        assert_eq!(
+            resolve_client_ip_with("10.0.0.2".into(), headers(&h), &chain, 0, false),
+            "203.0.113.8"
+        );
+        assert_eq!(
+            resolve_client_ip_with("2001:db8::1".into(), headers(&[]), &[], 0, false),
+            "2001:db8::1"
+        );
+    }
+
+    #[test]
+    fn other_headers_and_xff_behave_as_before() {
+        let chain = vec!["true-client-ip".to_string()];
+        let h = [("True-Client-IP", "203.0.113.8")];
+        assert_eq!(
+            resolve_client_ip_with("10.0.0.2".into(), headers(&h), &chain, 0, false),
+            "203.0.113.8"
+        );
+        let h = [("X-Forwarded-For", "1.2.3.4, 203.0.113.9")];
+        assert_eq!(
+            resolve_client_ip_with("10.0.0.2".into(), headers(&h), &[], 1, false),
+            "203.0.113.9"
+        );
+        assert_eq!(
+            resolve_client_ip_with("10.0.0.2".into(), headers(&h), &[], 0, false),
+            "10.0.0.2"
+        );
     }
 }
 
