@@ -126,15 +126,23 @@ describe("useRouteData promise cache", () => {
         calls += 1;
         return Promise.resolve(`user-${calls}`);
       };
-      const requestA = { request: "A" };
-      const requestB = { request: "B" };
+      const serverData = () => ({
+        get: () => {}, list: () => {}, queryGraph: () => {}, paginate: () => {},
+      });
+      const requestA = serverData();
+      const requestB = serverData();
       const a1 = __routeDataCacheInternals.lookup("src", [requestA, "slug"], loader);
       const a2 = __routeDataCacheInternals.lookup("src", [requestA, "slug"], loader);
       const b = __routeDataCacheInternals.lookup("src", [requestB, "slug"], loader);
       expect(a1).toBe(a2);
       expect(b).not.toBe(a1);
       expect(calls).toBe(2);
-      // No per-request object in deps: never cached on the server.
+      // A module-level object (an API client) is not a request scope.
+      const api = { me: () => {} };
+      const m1 = __routeDataCacheInternals.lookup("src", [api, "me"], loader);
+      const m2 = __routeDataCacheInternals.lookup("src", [api, "me"], loader);
+      expect(m1).not.toBe(m2);
+      // No object at all: never cached on the server.
       const p1 = __routeDataCacheInternals.lookup("src", ["slug"], loader);
       const p2 = __routeDataCacheInternals.lookup("src", ["slug"], loader);
       expect(p1).not.toBe(p2);

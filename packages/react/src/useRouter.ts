@@ -251,11 +251,25 @@ function sameLoader(e: LoaderEntry, source: string, deps: readonly unknown[]): b
   return true;
 }
 
-/** Server renders: entries keyed by the first object in `deps` (the
- *  page's per-request `serverData`), so a render's retries share one
- *  promise and nothing is shared between requests. Loaders whose deps
- *  hold no object are not cached on the server. */
+/** Server renders: entries keyed by the page's `serverData` found in
+ *  `deps`. The SSR runtime builds a new `serverData` for every request,
+ *  so a render's retries share one promise and nothing is shared between
+ *  requests. Loaders whose deps hold no `serverData` are not cached on
+ *  the server (a module-level object in deps would be shared by every
+ *  request). */
 const serverLoaders = new WeakMap<object, LoaderEntry[]>();
+
+/** True for the SSR `serverData` object (see `ServerData` in ./ssr). */
+function isServerData(d: unknown): d is object {
+  if (d === null || typeof d !== "object") return false;
+  const o = d as Record<string, unknown>;
+  return (
+    typeof o.get === "function" &&
+    typeof o.list === "function" &&
+    typeof o.queryGraph === "function" &&
+    typeof o.paginate === "function"
+  );
+}
 
 /** How long a rejected load stays cached. React re-renders the suspended
  *  component once the promise rejects; that render must see the same
@@ -287,9 +301,7 @@ function loaderEntry(
   if (typeof window === "undefined") {
     // The module is shared by every request; the key must include the
     // request (see `serverLoaders`).
-    const scope = deps.find(
-      (d): d is object => d !== null && (typeof d === "object" || typeof d === "function"),
-    );
+    const scope = deps.find(isServerData);
     if (!scope) return makeEntry(source, deps, loader);
     let list = serverLoaders.get(scope);
     if (!list) {
@@ -300,6 +312,13 @@ function loaderEntry(
     if (hit) return hit;
     const entry = makeEntry(source, deps, loader);
     list.push(entry);
+    const scoped = list;
+    entry.promise.then(undefined, () => {
+      setTimeout(() => {
+        const i = scoped.indexOf(entry);
+        if (i !== -1) scoped.splice(i, 1);
+      }, REJECTED_ENTRY_TTL_MS);
+    });
     return entry;
   }
   const hit = pendingLoaders.find((e) => sameLoader(e, source, deps));
