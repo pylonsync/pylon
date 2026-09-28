@@ -2192,6 +2192,98 @@ pub(crate) fn announce_room_event(
     }
 }
 
+/// Remove room members idle past the RoomManager's timeout and deliver
+/// a leave for each through the notifier, the path the HTTP leave route
+/// uses. Returns the number of members removed.
+pub fn sweep_idle_room_members(
+    rooms: &RoomManager,
+    notifier: &dyn pylon_router::ChangeNotifier,
+) -> usize {
+    let events = rooms.cleanup_idle();
+    for event in &events {
+        announce_room_event(notifier, event);
+    }
+    events.len()
+}
+
+#[cfg(test)]
+mod room_sweep_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct PresenceLog {
+        frames: Mutex<Vec<serde_json::Value>>,
+    }
+    impl pylon_router::ChangeNotifier for PresenceLog {
+        fn notify(&self, _event: &pylon_sync::ChangeEvent) {}
+        fn notify_presence(&self, json: &str) {
+            self.frames
+                .lock()
+                .unwrap()
+                .push(serde_json::from_str(json).unwrap());
+        }
+        fn notify_crdt(
+            &self,
+            _entity: &str,
+            _row_id: &str,
+            _snapshot: &[u8],
+            _row: Option<&serde_json::Value>,
+            _seq: u64,
+        ) {
+        }
+    }
+
+    /// Members dropped by the idle sweep produce a leave event through
+    /// the notifier, the same frame an HTTP leave produces, so room
+    /// subscribers see them go.
+    #[test]
+    fn idle_sweep_announces_each_leave() {
+        let rooms = RoomManager::new(0);
+        rooms.join("doc:1", "alice", None).unwrap();
+        rooms.join("doc:1", "bob", None).unwrap();
+        rooms.join("doc:2", "alice", None).unwrap();
+        let log = PresenceLog::default();
+
+        let removed = sweep_idle_room_members(&rooms, &log);
+
+        assert_eq!(removed, 3);
+        assert!(rooms.list_rooms().is_empty());
+        let mut frames: Vec<(String, String, String)> = log
+            .frames
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|f| {
+                (
+                    f["type"].as_str().unwrap().to_string(),
+                    f["room"].as_str().unwrap().to_string(),
+                    f["user_id"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        frames.sort();
+        assert_eq!(
+            frames,
+            vec![
+                ("leave".into(), "doc:1".into(), "alice".into()),
+                ("leave".into(), "doc:1".into(), "bob".into()),
+                ("leave".into(), "doc:2".into(), "alice".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn idle_sweep_leaves_active_members_alone() {
+        let rooms = RoomManager::new(60);
+        rooms.join("doc:1", "alice", None).unwrap();
+        let log = PresenceLog::default();
+        assert_eq!(sweep_idle_room_members(&rooms, &log), 0);
+        assert!(rooms.is_in_room("doc:1", "alice"));
+        assert!(log.frames.lock().unwrap().is_empty());
+    }
+}
+
 /// Bridge from the WS reader to the RoomManager. Lets `room-subscribe`
 /// validate membership and snapshot peers without the WS layer
 /// depending on the concrete RoomManager type. A leave on WS close goes

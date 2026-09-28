@@ -96,7 +96,7 @@ impl JobStatus {
 /// privilege-escalation surface.
 ///
 /// `None` on a Job means "default anonymous" — used for the framework's
-/// built-in cron jobs (`pylon.cache.cleanup`, `pylon.rooms.cleanup`)
+/// built-in cron jobs (`pylon.cache.cleanup`, `pylon.streams.cleanup`)
 /// and any caller that explicitly opted out.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct JobAuth {
@@ -277,7 +277,7 @@ impl JobQueue {
     /// store; returns the number deleted (0 if no store is attached).
     ///
     /// Without this the jobs table grows unbounded: every run of the built-in
-    /// recurring jobs (`pylon.cache.cleanup`, `pylon.rooms.cleanup`,
+    /// recurring jobs (`pylon.cache.cleanup`, `pylon.streams.cleanup`,
     /// `pylon.ratelimit.cleanup`) leaves a `completed` row forever. On a
     /// long-lived app that's thousands of rows + a multi-MB WAL, which slowed
     /// boot (the store is read + WAL-recovered before the HTTP listener binds).

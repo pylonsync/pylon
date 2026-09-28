@@ -1308,6 +1308,12 @@ fn file_is_public(
 
 const DEFAULT_UPLOAD_MAX_BYTES: usize = 200 * 1024 * 1024;
 
+/// A room member with no join or presence update for this long is removed by the idle sweep.
+const ROOMS_IDLE_TIMEOUT_SECS: u64 = 120;
+
+/// How often the idle room sweep runs.
+const ROOMS_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
 fn upload_max_bytes_from(value: Option<&str>) -> usize {
     value
         .and_then(|value| value.parse::<usize>().ok())
@@ -2548,7 +2554,7 @@ fn start_server(
         }
         Arc::new(reg)
     });
-    let room_mgr = Arc::new(RoomManager::new(120)); // 2 min idle timeout
+    let room_mgr = Arc::new(RoomManager::new(ROOMS_IDLE_TIMEOUT_SECS));
     let ws_port = port + 1;
     let sse_port = port + 2;
 
@@ -2684,7 +2690,7 @@ fn start_server(
     // `job_queue.register(name, real)` BEFORE the schedule call is silently
     // OVERWRITTEN by schedule()'s own registration (last-write-wins HashMap),
     // so the prior pattern (register real handler, then schedule a no-op) made
-    // the cache + rooms cleanup never actually run → unbounded growth.
+    // the cache cleanup never actually run → unbounded growth.
     {
         let cache_ref = Arc::clone(&cache);
         let _ = scheduler.schedule(
@@ -2703,15 +2709,6 @@ fn start_server(
             "*/10 * * * *",
             Arc::new(move |_job| {
                 hub_ref.cleanup_expired();
-                JobResult::Success
-            }),
-        );
-        let rooms_ref = Arc::clone(&room_mgr);
-        let _ = scheduler.schedule(
-            "pylon.rooms.cleanup",
-            "*/5 * * * *",
-            Arc::new(move |_job| {
-                rooms_ref.cleanup_idle();
                 JobResult::Success
             }),
         );
@@ -3002,6 +2999,21 @@ fn start_server(
     let rooms_bridge: Arc<dyn crate::ws::RoomBridge> = Arc::new(
         crate::datastore::WsRoomBridge::new(Arc::clone(&room_mgr), Arc::clone(&rooms_notifier)),
     );
+    // Idle room sweep, once a minute on every machine. Room membership
+    // lives in this process's RoomManager, so the sweep is a thread here
+    // and not a scheduler job: cron runs only on the cluster leader and
+    // its jobs run on whichever machine takes them from the shared
+    // queue. Each removed member's leave goes to the room's subscribers.
+    {
+        let rooms = Arc::clone(&room_mgr);
+        let notifier = Arc::clone(&rooms_notifier);
+        let _ = std::thread::Builder::new()
+            .name("pylon-rooms-sweep".into())
+            .spawn(move || loop {
+                std::thread::sleep(ROOMS_SWEEP_INTERVAL);
+                crate::datastore::sweep_idle_room_members(&rooms, &*notifier);
+            });
+    }
     // Subscriber: inbound peer events → local hubs. Idempotent —
     // calling subscribe registers a handler; Noop never delivers, so
     // single-machine builds pay nothing for the call.
