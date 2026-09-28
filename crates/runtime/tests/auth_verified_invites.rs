@@ -9,6 +9,7 @@
 //!   malformed string is not a verification.
 //! - Every accepted invite writes an `org_invite_accept` audit event.
 //! - An accept that cannot create the membership leaves the invite pending.
+//! - `acceptedByUserId`, when the entity declares it, records who accepted.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -94,6 +95,7 @@ fn manifest() -> AppManifest {
                     string_field("createdAt", false),
                     datetime_field("expiresAt", false),
                     datetime_field("acceptedAt", true),
+                    string_field("acceptedByUserId", true),
                 ],
             ),
         ],
@@ -295,6 +297,20 @@ fn invites_attach_to_a_verified_email() {
     );
     assert_eq!(status, 200, "{accepted}");
     assert!(members(&rt, &org_id).contains(&dave));
+    let dave_invite = rt.get_by_id("OrgInvite", &invite_id).unwrap().unwrap();
+    assert_eq!(
+        dave_invite["acceptedByUserId"],
+        dave.as_str(),
+        "{dave_invite}"
+    );
+    let bob_invite = rt
+        .query_filtered(
+            "OrgInvite",
+            &serde_json::json!({ "email": "bob@dealer.test" }),
+        )
+        .unwrap()
+        .remove(0);
+    assert_eq!(bob_invite["acceptedByUserId"], bob["id"], "{bob_invite}");
 
     // Both accepts are in the audit log, with the route that accepted them.
     let (status, events) = call(
@@ -404,6 +420,10 @@ fn a_failed_membership_insert_leaves_the_invite_pending() {
     let invite = rt.get_by_id("OrgInvite", &invite_id).unwrap().unwrap();
     assert!(
         invite.get("acceptedAt").is_none_or(|v| v.is_null()),
+        "{invite}"
+    );
+    assert!(
+        invite.get("acceptedByUserId").is_none_or(|v| v.is_null()),
         "{invite}"
     );
     let (_, mine) = call(port, "GET", "/api/auth/invites/mine", Some(&erin_tok), "");

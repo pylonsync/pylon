@@ -34,6 +34,8 @@
 //!   - `createdAt: string`
 //!   - `expiresAt: string`
 //!   - `acceptedAt: string?` (null until consumed)
+//!   - `acceptedByUserId: string?` (optional; written on accept when the
+//!     entity declares it)
 //!
 //! Apps free to add any other fields. Reads return the full row;
 //! writes set only the framework-managed fields.
@@ -232,6 +234,16 @@ impl OrgStore {
         let mut roles = vec!["owner", "admin", "member"];
         roles.extend(self.declared_roles.iter().map(String::as_str));
         roles
+    }
+
+    /// Whether the invite entity declares `field`.
+    fn invite_declares(&self, field: &str) -> bool {
+        self.store
+            .manifest()
+            .entities
+            .iter()
+            .find(|e| e.name == self.cfg.invite_entity)
+            .is_some_and(|e| e.fields.iter().any(|f| f.name == field))
     }
 
     fn is_disabled(&self) -> bool {
@@ -843,13 +855,14 @@ impl OrgStore {
         let now_ms = now_millis();
         let now = now_ms / 1000;
         let stamp = iso_millis(now_ms);
+        let records_acceptor = self.invite_declares("acceptedByUserId");
+        let mut accept_patch = serde_json::json!({ "acceptedAt": stamp });
+        if records_acceptor {
+            accept_patch["acceptedByUserId"] = accepting_user_id.into();
+        }
         let updated = self
             .store
-            .update(
-                &self.cfg.invite_entity,
-                &invite.id,
-                &serde_json::json!({ "acceptedAt": stamp }),
-            )
+            .update(&self.cfg.invite_entity, &invite.id, &accept_patch)
             .unwrap_or(false);
         if !updated {
             return Err(AcceptError::NotFound);
@@ -880,11 +893,13 @@ impl OrgStore {
             .is_err()
         {
             // Give the invite back so the user can accept it again.
-            let _ = self.store.update(
-                &self.cfg.invite_entity,
-                &invite.id,
-                &serde_json::json!({ "acceptedAt": serde_json::Value::Null }),
-            );
+            let mut release = serde_json::json!({ "acceptedAt": serde_json::Value::Null });
+            if records_acceptor {
+                release["acceptedByUserId"] = serde_json::Value::Null;
+            }
+            let _ = self
+                .store
+                .update(&self.cfg.invite_entity, &invite.id, &release);
             return Err(AcceptError::NotFound);
         }
         Ok(Membership {
