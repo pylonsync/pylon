@@ -703,7 +703,7 @@ async function onSend(roomId: string, body: string) {
 | Server-side join / computed / aggregate value, live | `db.useReactiveQuery("fnName", args)` | Convex-style: a `query()` handler that auto-re-runs when its dep set changes. **See the footgun below.** |
 | Live count / sum / avg / groupBy | `db.useAggregate(...)` | |
 | Live full-text + faceted search | `db.useSearch("E", { query, filters, facets, sort, pageSize })` | re-runs on every keystroke AND every matching write; needs `.search({...})` on the entity |
-| Optimistic write with a "ghost" row | `db.useMutation("fnName")` / `db.useEntity` | inserts locally instantly; server broadcast reconciles in place |
+| Optimistic write with a "ghost" row | `db.useMutation("fnName")` / `db.useEntity` | inserts locally instantly; server broadcast reconciles in place. `db.insert` / `update` / `delete` (and `useEntity`'s) reject with `MutationRejectedError` (`code`, `message`) after rolling the row back when the server refuses the write, so catch it to show "not sent"; they resolve when the server applies the write or queues it offline |
 | Presence / cursors / typing / broadcast | `useRoom(roomId, userId, { initialPresence })` | ephemeral — `peers`, `setPresence(data)`, `broadcast(topic, data)`. NOT persisted. Receive relayed messages via `getSync().subscribeRoomMessages(roomId, cb)`. |
 | Server-generated output (agent tokens, job progress) pushed to everyone watching live | server side: `ctx.rooms.broadcast(room, topic, data)` | ephemeral, live-only (no replay on reconnect); client joins with `useRoom` + `subscribeRoomMessages` |
 | Server-generated output streamed back to the ONE client that called | server side: `ctx.stream.write(text)` | client reads with `db.streamFn(fn, args)`. RESUMABLE — a dropped connection auto-reconnects from its cursor; persist `onStreamId` + `resumeStream(id)` to survive a reload |
@@ -1232,7 +1232,7 @@ When the user is in a Swift project (Xcode, `Package.swift`, `*.swift` files):
 - **Install** via SPM: `.package(url: "https://github.com/pylonsync/pylon-swift.git", from: "0.3.0")`
 - **Auth**: `try await client.startMagicCode(email:)` then `try await client.verifyMagicCode(email:code:)`
 - **Sync**: `await SyncEngine(config: cfg, client: client, persistence: SQLitePersistence(...))`, then `await engine.start()`
-- **Mutations**: `await engine.insert("Todo", ["title": .string("x")])` (optimistic, queued, idempotent)
+- **Mutations**: `try await engine.insert("Todo", ["title": .string("x")])` (optimistic, queued, idempotent). Throws `MutationRejectedError` (`code`, `message`) after rolling back when the server rejects the write; returns when the server applies it or queues it offline.
 - **SwiftUI**: `@StateObject var todos = PylonQuery<Todo>(engine: engine, entity: "Todo")` — `todos.rows` re-renders on change
 - **CRDTs**: `PylonLoroDoc(entity:rowId:)` then `await crdtDoc.attach(to: engine)` — uses `loro-swift` internally
 - **Codegen**: `pylon codegen client manifest.json --target swift --out PylonGenerated.swift` produces typed structs + `PylonClient` extensions

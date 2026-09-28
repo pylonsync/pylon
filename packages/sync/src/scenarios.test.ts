@@ -760,7 +760,9 @@ describe("sync scenarios", () => {
     await env.flush();
 
     env.server.primeNextPushOutcome({ kind: "status", status: 403 });
-    await env.engine.update("Note", "n1", { title: "edited" });
+    await expect(
+      env.engine.update("Note", "n1", { title: "edited" }),
+    ).rejects.toMatchObject({ name: "MutationRejectedError" });
     await env.flush();
 
     const row = env.engine.store.get("Note", "n1") as { title?: string } | null;
@@ -780,7 +782,9 @@ describe("sync scenarios", () => {
     await env.flush();
 
     env.server.primeNextPushOutcome({ kind: "status", status: 403 });
-    await env.engine.delete("Note", "n1");
+    await expect(env.engine.delete("Note", "n1")).rejects.toMatchObject({
+      name: "MutationRejectedError",
+    });
     await env.flush();
     expect(env.engine.store.get("Note", "n1")).not.toBeNull();
 

@@ -137,7 +137,7 @@ final class SyncEngineIntegrationTests: XCTestCase {
         let beforeStore = await engine.store
         XCTAssertEqual(beforeStore.list("Todo").count, 0)
 
-        let _ = await engine.insert("Todo", ["title": "ship the swift sdk"])
+        let _ = try await engine.insert("Todo", ["title": "ship the swift sdk"])
         // After push, the server should hold the row.
         let serverRows = await server.rows
         XCTAssertEqual(serverRows["Todo"]?.count, 1)

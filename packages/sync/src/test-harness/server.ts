@@ -217,6 +217,17 @@ export class TestServer {
    *  reset) or an HTTP `status` (e.g. 403 permanent rejection, 503
    *  transient). Lets tests exercise the transient-vs-permanent
    *  classification in pushInner. */
+  /** When set, `/api/sync/push` waits for this promise before it
+   *  answers. Lets a test queue a write while a push is in flight. */
+  pushGate: Promise<void> | null = null;
+
+  /** Entities whose pushed writes are rejected per op, like a write
+   *  policy denial on the real server (HTTP 200 with a per-op error). */
+  private deniedWrites = new Map<string, { code: string; message: string }>();
+  denyWrites(entity: string, code = "POLICY_DENIED", message = "write denied by policy"): void {
+    this.deniedWrites.set(entity, { code, message });
+  }
+
   private nextPushOutcome:
     | { kind: "network" }
     | { kind: "status"; status: number }
@@ -375,6 +386,10 @@ export class TestServer {
     op_id?: string;
   }): { op_id?: string; status: "applied" | "error"; seq?: number; error?: { code: string; message: string } } {
     const { entity, row_id, kind, op_id } = change;
+    const denied = this.deniedWrites.get(entity);
+    if (denied) {
+      return { op_id, status: "error", error: denied };
+    }
     const exists = this.rows.get(entity)?.has(row_id) ?? false;
     if (kind === "insert") {
       this.insert(entity, { ...(change.data ?? {}), id: row_id } as Row);

@@ -23,6 +23,13 @@ final class SyncEngineParityP1Tests: XCTestCase {
             me = ["user_id": userId, "tenant_id": tenantId ?? NSNull(), "is_admin": false, "roles": []]
         }
         func primePush(_ statuses: [Int]) { pushOutcomes = statuses }
+        /// Entities whose pushed writes are rejected per op (HTTP 200 with
+        /// a per-op error), like a write policy denial.
+        var denied: [String: (code: String, message: String)] = [:]
+        func deny(_ entity: String, code: String, message: String) { denied[entity] = (code, message) }
+        /// When set, the next push waits for this many nanoseconds.
+        var pushDelayNanos: UInt64 = 0
+        func setPushDelay(_ n: UInt64) { pushDelayNanos = n }
         func seed(_ change: ChangeEvent) {
             seq = max(seq, change.seq)
             changes.append(change)
@@ -77,6 +84,11 @@ final class SyncEngineParityP1Tests: XCTestCase {
                 let push = try JSONDecoder().decode(PushRequest.self, from: body)
                 var results: [[String: Any]] = []
                 for change in push.changes {
+                    if let d = denied[change.entity] {
+                        results.append(["op_id": change.op_id ?? "", "status": "error",
+                                        "error": ["code": d.code, "message": d.message]])
+                        continue
+                    }
                     seq += 1
                     if rows[change.entity] == nil { rows[change.entity] = [:] }
                     switch change.kind {
@@ -92,7 +104,8 @@ final class SyncEngineParityP1Tests: XCTestCase {
                     results.append(["op_id": change.op_id ?? "", "status": "applied", "seq": seq])
                 }
                 let resp: [String: Any] = [
-                    "applied": push.changes.count, "errors": [], "cursor": ["last_seq": seq],
+                    "applied": results.filter { ($0["status"] as? String) == "applied" }.count,
+                    "errors": [], "cursor": ["last_seq": seq],
                     "results": results, "max_applied_seq": seq,
                 ]
                 return (200, try JSONSerialization.data(withJSONObject: resp))
@@ -163,7 +176,7 @@ final class SyncEngineParityP1Tests: XCTestCase {
         let server = Server()
         let (engine, _) = await makeEngine(server)
         await engine.pull()
-        let id = await engine.insert("Todo", ["title": "ship"])
+        let id = try await engine.insert("Todo", ["title": "ship"])
         XCTAssertEqual(id.count, 40, "Pylon-shaped id: 32 hex nanos + 8 hex counter")
         XCTAssertTrue(id.allSatisfy { $0.isHexDigit })
         let store = await engine.store
@@ -211,7 +224,7 @@ final class SyncEngineParityP1Tests: XCTestCase {
         await server.primePush([503])
         let (engine, _) = await makeEngine(server)
         await engine.pull()
-        let id = await engine.insert("Todo", ["title": "offline"])
+        let id = try await engine.insert("Todo", ["title": "offline"])
         // First push failed (503) and nothing else drives a retry in
         // WS/SSE mode — the engine's own backoff must.
         let v1 = await server.pushCount()
@@ -290,7 +303,7 @@ final class SyncEngineParityP1Tests: XCTestCase {
         XCTAssertEqual(v9, 5)
         // Queue an offline write under org-a: it must not survive the flip.
         await server.primePush([503])
-        _ = await engine.insert("Note", ["title": "draft"])
+        _ = try await engine.insert("Note", ["title": "draft"])
         let v10 = await engine.mutations.pending().count
         XCTAssertEqual(v10, 1)
 

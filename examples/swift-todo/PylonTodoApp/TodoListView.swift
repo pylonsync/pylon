@@ -93,8 +93,9 @@ struct TodoListView: View {
         Task {
             let userId = session.session.userId ?? ""
             let now = ISO8601DateFormatter().string(from: Date())
-            // Optimistic insert via the sync engine.
-            _ = await engine.insert("Todo", [
+            // Optimistic insert via the sync engine. A server rejection
+            // removes the row and throws; this view has no error UI.
+            _ = try? await engine.insert("Todo", [
                 "title":     .string(title),
                 "userId":    .string(userId),
                 "done":      .bool(false),
@@ -107,7 +108,7 @@ struct TodoListView: View {
     private func toggle(_ todo: Todo) {
         Task {
             let now = ISO8601DateFormatter().string(from: Date())
-            await engine.update("Todo", id: todo.id, [
+            try? await engine.update("Todo", id: todo.id, [
                 "done":        .bool(!todo.done),
                 "completedAt": todo.done ? .null : .string(now),
             ])
@@ -118,7 +119,7 @@ struct TodoListView: View {
         let openTodos = todos.rows.filter { !$0.done }
         for i in offsets {
             let todo = openTodos[i]
-            Task { await engine.delete("Todo", id: todo.id) }
+            Task { try? await engine.delete("Todo", id: todo.id) }
         }
     }
 
@@ -126,7 +127,7 @@ struct TodoListView: View {
         let doneTodos = todos.rows.filter(\.done)
         for i in offsets {
             let todo = doneTodos[i]
-            Task { await engine.delete("Todo", id: todo.id) }
+            Task { try? await engine.delete("Todo", id: todo.id) }
         }
     }
 }

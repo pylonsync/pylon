@@ -88,9 +88,9 @@ final class SyncConformanceTests: XCTestCase {
                 let bytes = try JSONEncoder().encode(step.frame!)
                 await engine.handleTextFrame(String(decoding: bytes, as: UTF8.self))
             case "update":
-                await engine.update(step.entity!, id: step.id!, step.data ?? [:])
+                try? await engine.update(step.entity!, id: step.id!, step.data ?? [:])
             case "delete":
-                await engine.delete(step.entity!, id: step.id!)
+                try? await engine.delete(step.entity!, id: step.id!)
             case "expectRow":
                 let row = store.get(step.entity!, id: step.id!)
                 if step.present == false {

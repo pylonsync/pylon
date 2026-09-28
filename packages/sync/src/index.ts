@@ -55,6 +55,7 @@ export type { PylonRequestInit, TransportConfig } from "./transport";
 export { LocalStore } from "./local-store";
 export {
   MutationQueue,
+  MutationRejectedError,
   type MutationQueuePersistence,
   type PendingMutation,
 } from "./mutation-queue";
@@ -1062,7 +1063,14 @@ export class SyncEngine {
         for (const id of opIds) this.mutations.markApplied(id);
         this.mutations.clear();
       },
-      onMutationsFailed: (ops: { opId: string; error: string }[]) => {
+      onMutationsQueued: (opIds: string[]) => {
+        // The leader's push failed transiently; the writes stay queued
+        // and the leader retries them. Release this tab's callers.
+        for (const id of opIds) this.mutations.settleQueued(id);
+      },
+      onMutationsFailed: (
+        ops: { opId: string; error: string; code?: string }[],
+      ) => {
         // The leader pushed this follower's forwarded mutation and the
         // server rejected it. Roll back the follower's OWN optimistic
         // ghost (the leader already rolled back its copy) — calling
@@ -1072,9 +1080,9 @@ export class SyncEngine {
         for (const op of ops) {
           const m = this.mutations.get(op.opId);
           if (m) {
-            this.failPushedMutation(m, op.error);
+            this.failPushedMutation(m, op.error, op.code);
           } else {
-            this.mutations.markFailed(op.opId, op.error);
+            this.mutations.markFailed(op.opId, op.error, op.code);
           }
         }
       },
@@ -2814,11 +2822,29 @@ export class SyncEngine {
    *  serializes against pull / reconcile / resetReplica so a push can't
    *  observe a half-reset cursor or a mid-reconcile replica. */
   async push(): Promise<void> {
-    return this.opQueue.enqueue("push", () => this.pushInner());
+    await this.opQueue.enqueue("push", () => this.pushInner());
+    // A call made while a push was already running got that push's
+    // promise, but that push had snapshotted its batch before this
+    // caller's mutation was queued. Send any mutation no push has
+    // attempted yet. Mutations that failed transiently were attempted
+    // and wait for their backoff retry instead.
+    if (this.mutations.pending().some((m) => !this.attemptedOps.has(m.id))) {
+      await this.push();
+    }
   }
+
+  /** Op ids of pending mutations that some push already sent (or
+   *  forwarded to the leader). */
+  private attemptedOps = new Set<string>();
 
   private async pushInner(): Promise<void> {
     const pending = this.mutations.pending();
+    // Keep the attempted set bounded to what is still pending.
+    const pendingIds = new Set(pending.map((m) => m.id));
+    for (const id of this.attemptedOps) {
+      if (!pendingIds.has(id)) this.attemptedOps.delete(id);
+    }
+    for (const id of pendingIds) this.attemptedOps.add(id);
     if (pending.length === 0) return;
 
     // Multi-tab follower: we don't own the network. Forward the
@@ -2881,7 +2907,11 @@ export class SyncEngine {
               typeof r.error === "string"
                 ? r.error
                 : r.error?.message ?? "unknown";
-            this.failPushedMutation(m, msg);
+            const code =
+              typeof r.error === "object" && r.error !== null
+                ? r.error.code
+                : undefined;
+            this.failPushedMutation(m, msg, code);
           }
         }
       } else {
@@ -2910,14 +2940,14 @@ export class SyncEngine {
       // dedupe) get neither — the leader will retry, and a later push
       // will broadcast a real ack.
       const ackedOpIds: string[] = [];
-      const failedOps: { opId: string; error: string }[] = [];
+      const failedOps: { opId: string; error: string; code?: string }[] = [];
       for (const m of pending) {
         const opId = m.change.op_id;
         if (typeof opId !== "string") continue;
         if (m.status === "applied") {
           ackedOpIds.push(opId);
         } else if (m.status === "failed") {
-          failedOps.push({ opId, error: m.error ?? "unknown" });
+          failedOps.push({ opId, error: m.error ?? "unknown", code: m.errorCode });
         }
       }
       if (ackedOpIds.length > 0) {
@@ -2971,13 +3001,14 @@ export class SyncEngine {
       //    roll back the optimistic ghost + surface mutations-failed.
       const msg = err instanceof Error ? err.message : String(err);
       const status = (err as { status?: number })?.status;
+      const code = (err as { code?: string })?.code;
       if (isPermanentPushError(status)) {
-        const failedOps: { opId: string; error: string }[] = [];
+        const failedOps: { opId: string; error: string; code?: string }[] = [];
         for (const m of pending) {
-          this.failPushedMutation(m, msg);
+          this.failPushedMutation(m, msg, code);
           const opId = m.change.op_id;
           if (typeof opId === "string") {
-            failedOps.push({ opId, error: msg });
+            failedOps.push({ opId, error: msg, code });
           }
         }
         if (failedOps.length > 0) {
@@ -2992,6 +3023,16 @@ export class SyncEngine {
         // per-op rejection). A 429 also pushes the WS reconnect out so a
         // rate-limited push doesn't drive a tight loop.
         if (status === 429) this.transport?.bumpReconnect(3);
+        // The writes stay queued and retry below. Release the callers
+        // awaiting them (here and in follower tabs): the optimistic rows
+        // are in place, and a later rejection shows up as a failed
+        // mutation.
+        const queuedOpIds: string[] = [];
+        for (const m of pending) {
+          this.mutations.settleQueued(m.id);
+          queuedOpIds.push(m.id);
+        }
+        this.broadcastToTabs({ type: "mutations-queued", opIds: queuedOpIds });
         const attempt = this.pushFailureCount;
         this.pushFailureCount += 1;
         const delayMs = Math.min(30_000, 1000 * 2 ** Math.min(attempt, 5));
@@ -3024,7 +3065,11 @@ export class SyncEngine {
    * insert; collaborative-edit is an update with a separate CRDT
    * channel) so insert-only rollback is the right shape to ship now.
    */
-  private failPushedMutation(m: PendingMutation, error: string): void {
+  private failPushedMutation(
+    m: PendingMutation,
+    error: string,
+    code?: string,
+  ): void {
     const { entity, row_id, kind } = m.change;
     if (kind === "insert") {
       // No tombstone — a future legitimate insert of this id must work.
@@ -3043,10 +3088,18 @@ export class SyncEngine {
         this.store.restoreRow(entity, row_id, m.prevRow);
       }
     }
-    this.mutations.markFailed(m.id, error);
+    this.mutations.markFailed(m.id, error, code);
   }
 
   /** Insert a row with optimistic local update.
+   *
+   *  The row is in the local store before this returns a promise. The
+   *  promise resolves with the row id once the server applies the write,
+   *  or once the write is queued because the server could not be reached
+   *  (offline, 5xx); a queued write that the server rejects later shows up
+   *  as a failed mutation. The promise rejects with a
+   *  `MutationRejectedError` when the server rejects the write (policy
+   *  denial, validation); the optimistic row is removed first.
    *
    *  Invariant: the optimistic ghost and the canonical server row
    *  share a single id. The client mints a Pylon-shaped id, threads
@@ -3057,17 +3110,29 @@ export class SyncEngine {
     const id = generateId();
     const dataWithId = { ...data, id };
     this.store.optimisticInsertWithId(entity, id, dataWithId);
-    this.mutations.add({
+    const opId = this.mutations.add({
       entity,
       row_id: id,
       kind: "insert",
       data: dataWithId,
     });
-    await this.push();
+    await this.sendAndAwait(opId);
     return id;
   }
 
-  /** Update a row with optimistic local update. */
+  /** Push, then wait for the mutation's outcome. The wait starts before
+   *  the push so an outcome that lands during the push is not missed. */
+  private async sendAndAwait(opId: string): Promise<void> {
+    const outcome = this.mutations.waitForOutcome(opId);
+    // Mark the promise handled: push() can settle it before we await it.
+    outcome.catch(() => {});
+    await this.push();
+    await outcome;
+  }
+
+  /** Update a row with optimistic local update. Settles like `insert`:
+   *  rejects with a `MutationRejectedError` (after restoring the prior
+   *  value) when the server rejects the write. */
   async update(entity: string, id: string, data: Partial<Row>): Promise<void> {
     // Snapshot the pre-update row BEFORE applying the optimistic merge so
     // a rejected push can restore the exact prior value (see
@@ -3075,7 +3140,7 @@ export class SyncEngine {
     const before = this.store.get(entity, id);
     const prev = before ? { ...before } : null;
     this.store.optimisticUpdate(entity, id, data);
-    this.mutations.add(
+    const opId = this.mutations.add(
       {
         entity,
         row_id: id,
@@ -3084,17 +3149,19 @@ export class SyncEngine {
       },
       prev,
     );
-    await this.push();
+    await this.sendAndAwait(opId);
   }
 
-  /** Delete a row with optimistic local update. */
+  /** Delete a row with optimistic local update. Settles like `insert`:
+   *  rejects with a `MutationRejectedError` (after restoring the row)
+   *  when the server rejects the delete. */
   async delete(entity: string, id: string): Promise<void> {
     // Snapshot the row before removing it so a rejected delete can bring
     // it back (and clear the optimistic tombstone).
     const before = this.store.get(entity, id);
     const prev = before ? { ...before } : null;
     this.store.optimisticDelete(entity, id);
-    this.mutations.add(
+    const opId = this.mutations.add(
       {
         entity,
         row_id: id,
@@ -3102,7 +3169,7 @@ export class SyncEngine {
       },
       prev,
     );
-    await this.push();
+    await this.sendAndAwait(opId);
   }
 
   // -----------------------------------------------------------------------
@@ -3776,8 +3843,22 @@ export class SyncEngine {
       // loop uses this to decide whether to back off.
       const err = new Error(`Sync request failed: ${res.status}`) as Error & {
         status?: number;
+        code?: string;
       };
       err.status = res.status;
+      // Carry the server's error envelope ({ error: { code, message } })
+      // so a rejected push can tell the caller why.
+      try {
+        const body = (await res.json()) as {
+          error?: { code?: string; message?: string };
+        };
+        if (typeof body?.error?.code === "string") err.code = body.error.code;
+        if (typeof body?.error?.message === "string") {
+          err.message = body.error.message;
+        }
+      } catch {
+        // Not JSON (proxy error page, empty body): keep the status text.
+      }
       throw err;
     }
 

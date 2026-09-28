@@ -12,11 +12,49 @@
 
 import type { ClientChange, Row } from "./types";
 
+/**
+ * Thrown by `SyncEngine.insert` / `update` / `delete` when the server
+ * rejects the write (policy denial, validation, conflict). The optimistic
+ * change is rolled back before the promise rejects.
+ *
+ * `code` is the server's error code when it sent one (`POLICY_DENIED`,
+ * `VALIDATION_FAILED`, ...). `DISCARDED` means the write never reached the
+ * server: an identity change dropped it from the queue.
+ */
+export class MutationRejectedError extends Error {
+  readonly code: string;
+  readonly opId: string;
+  readonly entity: string;
+  readonly rowId: string;
+  readonly kind: "insert" | "update" | "delete";
+
+  constructor(
+    message: string,
+    opts: {
+      code?: string;
+      opId: string;
+      entity: string;
+      rowId: string;
+      kind: "insert" | "update" | "delete";
+    },
+  ) {
+    super(message);
+    this.name = "MutationRejectedError";
+    this.code = opts.code ?? "REJECTED";
+    this.opId = opts.opId;
+    this.entity = opts.entity;
+    this.rowId = opts.rowId;
+    this.kind = opts.kind;
+  }
+}
+
 export interface PendingMutation {
   id: string;
   change: ClientChange;
   status: "pending" | "applied" | "failed";
   error?: string;
+  /** Server error code for a failed mutation, when the server sent one. */
+  errorCode?: string;
   /** Pre-mutation snapshot of the affected row, captured at optimistic-
    *  apply time for `update`/`delete`. On a server rejection,
    *  `failPushedMutation` restores this so the local replica reverts to
@@ -35,9 +73,17 @@ export interface MutationQueuePersistence {
   loadAll(): Promise<PendingMutation[]>;
 }
 
+interface OutcomeWaiter {
+  resolve: () => void;
+  reject: (err: MutationRejectedError) => void;
+}
+
 export class MutationQueue {
   private queue: PendingMutation[] = [];
   private persistence?: MutationQueuePersistence;
+  /** Callers waiting for a mutation's outcome, by op id. Memory-only:
+   *  a promise cannot outlive the page that created it. */
+  private waiters = new Map<string, OutcomeWaiter[]>();
 
   constructor(persistence?: MutationQueuePersistence) {
     this.persistence = persistence;
@@ -132,19 +178,65 @@ export class MutationQueue {
     return out;
   }
 
+  /**
+   * Resolve once the server applies the mutation or the mutation is
+   * queued behind a transient failure (`settleQueued`); reject with a
+   * `MutationRejectedError` once the server rejects it. Settles at once
+   * when the mutation already reached a terminal state.
+   */
+  waitForOutcome(id: string): Promise<void> {
+    const m = this.get(id);
+    if (m?.status === "applied") return Promise.resolve();
+    if (m?.status === "failed") return Promise.reject(rejectionFor(m));
+    return new Promise<void>((resolve, reject) => {
+      const list = this.waiters.get(id) ?? [];
+      list.push({ resolve, reject });
+      this.waiters.set(id, list);
+    });
+  }
+
+  /** Resolve the waiters of a mutation that stays queued after a
+   *  transient push failure (offline, 5xx). The mutation stays pending
+   *  and is retried; a later rejection shows up as `status: "failed"`. */
+  settleQueued(id: string): void {
+    this.resolveWaiters(id);
+  }
+
   markApplied(id: string): void {
     const m = this.queue.find((m) => m.id === id);
     if (m) m.status = "applied";
     this.flush();
+    this.resolveWaiters(id);
   }
 
-  markFailed(id: string, error: string): void {
+  markFailed(id: string, error: string, errorCode?: string): void {
     const m = this.queue.find((m) => m.id === id);
     if (m) {
       m.status = "failed";
       m.error = error;
+      if (errorCode) m.errorCode = errorCode;
     }
     this.flush();
+    const waiters = this.waiters.get(id);
+    if (!waiters) return;
+    this.waiters.delete(id);
+    const err = m
+      ? rejectionFor(m)
+      : new MutationRejectedError(error, {
+          code: errorCode,
+          opId: id,
+          entity: "",
+          rowId: "",
+          kind: "insert",
+        });
+    for (const w of waiters) w.reject(err);
+  }
+
+  private resolveWaiters(id: string): void {
+    const waiters = this.waiters.get(id);
+    if (!waiters) return;
+    this.waiters.delete(id);
+    for (const w of waiters) w.resolve();
   }
 
   /**
@@ -177,8 +269,27 @@ export class MutationQueue {
    * offline writes survive a snapshot refresh.
    */
   clearAll(): void {
+    const dropped = this.queue;
     this.queue = [];
     this.flush();
+    // Nobody will push these writes any more. Reject their waiters so a
+    // caller awaiting the outcome does not hang.
+    for (const m of dropped) {
+      const waiters = this.waiters.get(m.id);
+      if (!waiters) continue;
+      this.waiters.delete(m.id);
+      const err = new MutationRejectedError(
+        "The write was discarded because the signed-in identity changed.",
+        {
+          code: "DISCARDED",
+          opId: m.id,
+          entity: m.change.entity,
+          rowId: m.change.row_id,
+          kind: m.change.kind,
+        },
+      );
+      for (const w of waiters) w.reject(err);
+    }
   }
 
   /** Fire-and-forget persistence write. */
@@ -189,4 +300,14 @@ export class MutationQueue {
       console.warn("[sync] mutation-queue persist failed:", err);
     });
   }
+}
+
+function rejectionFor(m: PendingMutation): MutationRejectedError {
+  return new MutationRejectedError(m.error ?? "The server rejected the write.", {
+    code: m.errorCode,
+    opId: m.id,
+    entity: m.change.entity,
+    rowId: m.change.row_id,
+    kind: m.change.kind,
+  });
 }

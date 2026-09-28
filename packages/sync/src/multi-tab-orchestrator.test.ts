@@ -35,6 +35,7 @@ function makeRig(opts: { isLeader?: boolean } = {}) {
       onMutationsForwarded: record("mutationsForwarded"),
       onMutationsAcked: record("mutationsAcked"),
       onMutationsFailed: record("mutationsFailed"),
+      onMutationsQueued: record("mutationsQueued"),
       onBinaryReceived: record("binary"),
       onPeerLeft: record("peerLeft"),
       onReplayForwardedMutations: record("replayForwardedMutations"),

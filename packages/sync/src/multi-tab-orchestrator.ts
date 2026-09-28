@@ -83,7 +83,12 @@ export interface MultiTabOrchestratorHooks {
   /** Leader → follower: op_ids that were successfully pushed. */
   onMutationsAcked(opIds: string[]): void;
   /** Leader → follower: op_ids that failed server-side validation. */
-  onMutationsFailed(ops: { opId: string; error: string }[]): void;
+  onMutationsFailed(
+    ops: { opId: string; error: string; code?: string }[],
+  ): void;
+  /** Leader → followers: the leader's push failed transiently and
+   *  these op ids stay queued for retry. */
+  onMutationsQueued(opIds: string[]): void;
   /** Leader → follower: a binary frame from the WS. Engine routes
    *  to its local binary handlers. */
   onBinaryReceived(bytes: Uint8Array): void;
@@ -286,7 +291,9 @@ export class MultiTabOrchestrator {
   }
 
   /** Leader → followers: per-op failures with error strings. */
-  broadcastMutationsFailed(ops: { opId: string; error: string }[]): void {
+  broadcastMutationsFailed(
+    ops: { opId: string; error: string; code?: string }[],
+  ): void {
     this.broadcastRaw({ type: "mutations-failed", ops });
   }
 
@@ -369,9 +376,14 @@ export class MultiTabOrchestrator {
       }
       case "mutations-failed": {
         const ops = msg.ops as
-          | { opId: string; error: string }[]
+          | { opId: string; error: string; code?: string }[]
           | undefined;
         if (Array.isArray(ops)) this.hooks.onMutationsFailed(ops);
+        break;
+      }
+      case "mutations-queued": {
+        const opIds = msg.opIds as string[] | undefined;
+        if (Array.isArray(opIds)) this.hooks.onMutationsQueued(opIds);
         break;
       }
       case "sub-register": {

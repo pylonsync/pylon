@@ -56,8 +56,15 @@ let persistence = try SQLitePersistence(path: NSHomeDirectory() + "/.pylon.db")
 let engine = await SyncEngine(config: cfg, client: client, persistence: persistence)
 await engine.start()
 
-// 3. Optimistic mutations
-_ = await engine.insert("Todo", ["title": "ship it", "done": false])
+// 3. Optimistic mutations. The row is in the local store at once. The call
+//    returns when the server applies the write (or queues it while offline)
+//    and throws MutationRejectedError, after rolling the row back, when the
+//    server rejects it.
+do {
+    _ = try await engine.insert("Todo", ["title": "ship it", "done": false])
+} catch let err as MutationRejectedError {
+    print("not saved: \(err.code) \(err.message)")
+}
 
 // 4. React to local-store changes
 _ = engine.store.subscribe {

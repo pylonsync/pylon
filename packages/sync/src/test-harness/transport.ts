@@ -329,6 +329,7 @@ async function handle(
     } catch {
       /* body not JSON / no changes — count still recorded above */
     }
+    if (server.pushGate) await server.pushGate;
     const outcome = server.consumeNextPushOutcome();
     if (outcome?.kind === "network") {
       // Reject like a real offline fetch: no HTTP status → the engine

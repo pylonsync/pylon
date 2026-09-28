@@ -611,16 +611,28 @@ public actor SyncEngine {
     public func push() async {
         if let inFlight = inFlightPush {
             await inFlight.value
-            return
+        } else {
+            let task = Task { await self.pushInner() }
+            inFlightPush = task
+            await task.value
+            inFlightPush = nil
         }
-        let task = Task { await self.pushInner() }
-        inFlightPush = task
-        await task.value
-        inFlightPush = nil
+        // A call that joined a running push got that push's result, but
+        // that push had taken its batch before this caller's mutation was
+        // queued. Send any mutation no push has attempted yet. Mutations
+        // that failed transiently were attempted and wait for their
+        // backoff retry instead. Parity with the TS `push()`.
+        let unsent = await mutations.pending().contains { !attemptedOps.contains($0.id) }
+        if unsent { await push() }
     }
+
+    /// Op ids of pending mutations that some push already sent.
+    private var attemptedOps: Set<String> = []
 
     private func pushInner() async {
         let pending = await mutations.pending()
+        let pendingIds = Set(pending.map(\.id))
+        attemptedOps = attemptedOps.intersection(pendingIds).union(pendingIds)
         guard !pending.isEmpty else { return }
         let req = PushRequest(changes: pending.map(\.change), client_id: clientId)
         do {
@@ -628,6 +640,7 @@ public actor SyncEngine {
             // Any server response (success or per-op rejection) ends the
             // transient-failure episode.
             pushFailureCount = 0
+            var inFlightDedupe = false
             if let results = resp.results, !results.isEmpty {
                 // Per-op mapping by op_id — correct on a partial batch failure
                 // (e.g. op 1 applied, op 2 rejected, op 3 applied). Positional
@@ -640,9 +653,14 @@ public actor SyncEngine {
                     case "applied", "replayed", "deduped":
                         await mutations.markApplied(m.id)
                     case "error":
-                        await failPushedMutation(m, error: r.error?.message ?? "rejected")
+                        await failPushedMutation(m, error: r.error?.message ?? "rejected", code: r.error?.code)
+                    case "pending":
+                        // A concurrent push with this op_id is still in
+                        // flight on the server. Keep it queued and retry
+                        // shortly (TS parity: 250 ms).
+                        inFlightDedupe = true
                     default:
-                        break // "pending" → leave queued, retry next push
+                        break
                     }
                 }
             } else {
@@ -665,21 +683,33 @@ public actor SyncEngine {
             if maxApplied > cursor.last_seq {
                 Task { await self.pull() }
             }
+            if inFlightDedupe {
+                Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    await self?.push()
+                }
+            }
         } catch let err as PylonError {
             // Permanent rejection (4xx) → roll back the optimistic ghosts and
             // stop retrying. Transient (5xx/429/offline/no-status) → leave
             // pending; the poll loop / next push retries.
             if isPermanentPushError(err.httpStatus) {
                 pushFailureCount = 0
-                let msg: String
-                if case let .http(_, code, m) = err { msg = m ?? code ?? "rejected" } else { msg = "rejected" }
-                for m in pending { await failPushedMutation(m, error: msg) }
+                var msg = "rejected"
+                var errCode: String? = nil
+                if case let .http(_, code, m) = err {
+                    msg = m ?? code ?? "rejected"
+                    errCode = code
+                }
+                for m in pending { await failPushedMutation(m, error: msg, code: errCode) }
                 await mutations.clear()
             } else {
+                await settleQueued(pending)
                 scheduleTransientPushRetry(status: err.httpStatus)
             }
         } catch {
             // Network throw (no status) — transient. Leave pending.
+            await settleQueued(pending)
             scheduleTransientPushRetry(status: nil)
         }
     }
@@ -713,14 +743,21 @@ public actor SyncEngine {
     /// remove the ghost (insert) or restore the captured pre-mutation row
     /// (update/delete), then mark the mutation failed so the UI can surface
     /// it. Without this a rejected edit leaves a ghost row forever.
-    private func failPushedMutation(_ m: PendingMutation, error: String) async {
+    /// The writes stay queued and retry with backoff. Release the callers
+    /// awaiting them: the optimistic rows are in place, and a later
+    /// rejection shows up as a failed mutation.
+    private func settleQueued(_ pending: [PendingMutation]) async {
+        for m in pending { await mutations.settleQueued(m.id) }
+    }
+
+    private func failPushedMutation(_ m: PendingMutation, error: String, code: String? = nil) async {
         switch m.change.kind {
         case .insert:
             store.rollbackOptimisticInsert(m.change.entity, id: m.change.row_id)
         case .update, .delete:
             store.restoreRow(m.change.entity, id: m.change.row_id, prev: m.prevRow)
         }
-        await mutations.markFailed(m.id, error: error)
+        await mutations.markFailed(m.id, error: error, code: code)
     }
 
     /// Permanent push errors must NOT retry: 400/403/404/409/422. A missing
@@ -735,34 +772,59 @@ public actor SyncEngine {
 
     /// Insert a row with optimistic local update.
     ///
+    /// The row is in the local store before the first suspension. Returns
+    /// the row id once the server applies the write, or once the write is
+    /// queued because the server could not be reached (offline, 5xx); a
+    /// queued write that the server rejects later shows up as a failed
+    /// mutation. Throws `MutationRejectedError` when the server rejects the
+    /// write (policy denial, validation); the optimistic row is removed
+    /// first. Parity with the TS `insert()`.
+    ///
     /// Invariant: the optimistic ghost and the canonical server row share
     /// one id. The client mints a Pylon-shaped id, threads it through the
     /// data payload, and the server honors it on the canonical insert.
     @discardableResult
-    public func insert(_ entity: String, _ data: Row) async -> String {
+    public func insert(_ entity: String, _ data: Row) async throws -> String {
         let id = PylonIds.generate()
         var withId = data
         withId["id"] = .string(id)
         store.optimisticInsertWithId(entity, id: id, withId)
-        await mutations.add(ClientChange(entity: entity, row_id: id, kind: .insert, data: withId))
-        await push()
+        let opId = await mutations.add(
+            ClientChange(entity: entity, row_id: id, kind: .insert, data: withId), trackOutcome: true)
+        try await sendAndAwait(opId)
         return id
     }
 
-    public func update(_ entity: String, id: String, _ data: Row) async {
+    /// Update a row with optimistic local update. Throws
+    /// `MutationRejectedError` (after restoring the prior value) when the
+    /// server rejects the write.
+    public func update(_ entity: String, id: String, _ data: Row) async throws {
         // Snapshot the row BEFORE the optimistic apply so a permanent
         // rejection can restore it.
         let prev = store.get(entity, id: id)
         store.optimisticUpdate(entity, id: id, data)
-        await mutations.add(ClientChange(entity: entity, row_id: id, kind: .update, data: data), prevRow: prev)
-        await push()
+        let opId = await mutations.add(
+            ClientChange(entity: entity, row_id: id, kind: .update, data: data), prevRow: prev, trackOutcome: true)
+        try await sendAndAwait(opId)
     }
 
-    public func delete(_ entity: String, id: String) async {
+    /// Delete a row with optimistic local update. Throws
+    /// `MutationRejectedError` (after restoring the row) when the server
+    /// rejects the delete.
+    public func delete(_ entity: String, id: String) async throws {
         let prev = store.get(entity, id: id)
         store.optimisticDelete(entity, id: id)
-        await mutations.add(ClientChange(entity: entity, row_id: id, kind: .delete), prevRow: prev)
+        let opId = await mutations.add(
+            ClientChange(entity: entity, row_id: id, kind: .delete), prevRow: prev, trackOutcome: true)
+        try await sendAndAwait(opId)
+    }
+
+    /// Push, then wait for the mutation's outcome. The mutation was added
+    /// with `trackOutcome`, so an outcome that lands during the push is
+    /// kept for the wait.
+    private func sendAndAwait(_ opId: String) async throws {
         await push()
+        try await mutations.waitForOutcome(opId)
     }
 
     // MARK: - WebSocket
