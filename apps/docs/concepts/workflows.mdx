@@ -143,6 +143,10 @@ for (const run of runs) {
 finished. Cancel and `sendEvent` never wait for a step in progress,
 including on Postgres replicas.
 
+`ctx.workflows.*` calls take effect when they are made. In a mutation
+that later throws, a started run keeps running and a sent event stays
+delivered. Call them from an action, or as the last step of a mutation.
+
 `ctx.workflows.list({ name, key, status, limit })` returns runs newest
 first, without step history. `status` is one of `pending`, `running`,
 `sleeping`, `waiting`, `completed`, `failed`, `cancelled`, or `active`
