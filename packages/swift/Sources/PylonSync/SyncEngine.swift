@@ -145,6 +145,13 @@ public actor SyncEngine {
     /// pull that ends (or is cut short by a reset) does not close a newer
     /// pull's hold and drop its buffered frames.
     private var pullHoldOwner: UUID? = nil
+    /// Bearer token the current session was fetched with. A push whose
+    /// token differs holds owned writes (TS `sessionToken`).
+    private var sessionToken: String? = nil
+    private var sessionTokenKnown = false
+    /// Identity the replica was tagged with on disk (`SyncPersistence`).
+    private var savedIdentity: String? = nil
+    private var savedIdentityKnown = false
     private var lastSeenToken: String? = nil
     private var lastSeenTokenObserved = false
     private var lastSeenTenant: String? = nil
@@ -295,6 +302,10 @@ public actor SyncEngine {
                 if let saved = try await persistence.loadCursor() {
                     cursor = saved
                 }
+                if let tag = try? await persistence.loadIdentity(), tag.known {
+                    savedIdentity = tag.userId
+                    savedIdentityKnown = true
+                }
                 let local = persistence
                 store.persistFn = { change in
                     try? await local.persist(change)
@@ -392,7 +403,9 @@ public actor SyncEngine {
         // drains + replays it; this backstop discards whatever remains
         // on a failed pull (the next pull re-fetches those events).
         let holdOwner = UUID()
-        pullHold = []
+        // An overlapping older pull's buffered frames carry over: this pull
+        // now owns the hold and replays them when it lands.
+        pullHold = pullHold ?? []
         pullHoldOwner = holdOwner
         defer {
             if pullHoldOwner == holdOwner {
@@ -476,8 +489,9 @@ public actor SyncEngine {
             // now-advanced cursor, so frames the pull already delivered
             // dedupe and genuinely newer ones apply. Nil FIRST so the
             // replay isn't re-held.
-            if let held = pullHold {
+            if pullHoldOwner == holdOwner, let held = pullHold {
                 pullHold = nil
+                pullHoldOwner = nil
                 for change in held {
                     await applyLiveEvent(change)
                 }
@@ -705,10 +719,11 @@ public actor SyncEngine {
         // code DISCARDED (their rows went with the old identity's replica,
         // so nothing is rolled back). Held writes stay queued; their callers
         // are released.
+        let token = await client.currentToken()
         var pending: [PendingMutation] = []
         var anyHeld = false
         for m in queued {
-            switch pushable(m) {
+            switch pushable(m, token: token) {
             case .send: pending.append(m)
             case .discard: await mutations.discard(m.id)
             case .hold:
@@ -716,11 +731,14 @@ public actor SyncEngine {
                 await mutations.settleQueued(m.id)
             }
         }
-        if anyHeld && identityPending { scheduleIdentityRetry() }
+        if anyHeld && (identityPending || !(replicaUserKnown || lastSeenTenantObserved)) {
+            scheduleIdentityRetry()
+        }
         guard !pending.isEmpty else { return }
         let req = PushRequest(changes: pending.map(\.change), client_id: clientId)
         do {
-            let resp = try await client.syncPush(req)
+            // Sent with the token the owner check ran against.
+            let resp = try await client.syncPush(req, token: token)
             // Any server response (success or per-op rejection) ends the
             // transient-failure episode.
             pushFailureCount = 0
@@ -881,7 +899,8 @@ public actor SyncEngine {
         store.optimisticInsertWithId(entity, id: id, withId)
         let opId = await mutations.add(
             ClientChange(entity: entity, row_id: id, kind: .insert, data: withId), trackOutcome: true,
-            owner: currentOwner().user, ownerKnown: currentOwner().known)
+            owner: currentOwner().user, ownerKnown: currentOwner().known,
+            ownerPending: !currentOwner().known)
         try await sendAndAwait(opId)
         return id
     }
@@ -896,7 +915,8 @@ public actor SyncEngine {
         store.optimisticUpdate(entity, id: id, data)
         let opId = await mutations.add(
             ClientChange(entity: entity, row_id: id, kind: .update, data: data), prevRow: prev, trackOutcome: true,
-            owner: currentOwner().user, ownerKnown: currentOwner().known)
+            owner: currentOwner().user, ownerKnown: currentOwner().known,
+            ownerPending: !currentOwner().known)
         try await sendAndAwait(opId)
     }
 
@@ -908,7 +928,8 @@ public actor SyncEngine {
         store.optimisticDelete(entity, id: id)
         let opId = await mutations.add(
             ClientChange(entity: entity, row_id: id, kind: .delete), prevRow: prev, trackOutcome: true,
-            owner: currentOwner().user, ownerKnown: currentOwner().known)
+            owner: currentOwner().user, ownerKnown: currentOwner().known,
+            ownerPending: !currentOwner().known)
         try await sendAndAwait(opId)
     }
 
@@ -1294,7 +1315,16 @@ public actor SyncEngine {
 
     private func refreshResolvedSession(replicaAlreadyReset: Bool) async {
         do {
+            let tokenUsed = await client.currentToken()
             let next = try await client.me()
+            let firstResolution = !lastSeenTenantObserved
+            defer {
+                sessionToken = tokenUsed
+                sessionTokenKnown = true
+            }
+            // Writes made before any session resolved belong to this one.
+            if firstResolution { await mutations.stampPendingOwner(next.userId) }
+            await tagReplicaIdentity(next.userId)
             // USER flip (sign-in, sign-out, account switch). The rows, the
             // cursor, and the live socket belong to the previous identity,
             // and the tenant verdict below misses the common case where
@@ -1311,8 +1341,12 @@ public actor SyncEngine {
                 replicaUserKnown = true
                 lastSeenTenant = next.tenantId
                 lastSeenTenantObserved = true
-                identityPending = false
-                identityRetryAttempts = 0
+                // Owned writes wait while the flip runs.
+                identityPending = true
+                defer {
+                    identityPending = false
+                    identityRetryAttempts = 0
+                }
                 if !replicaAlreadyReset {
                     // Mark the current token as seen so the pull below does
                     // not detect the same flip and reset a second time.
@@ -1405,10 +1439,19 @@ public actor SyncEngine {
 
     /// The user a write made now belongs to. `known == false` before the
     /// session resolved this run.
+    /// The user a write made now belongs to: the resolved session, else
+    /// the replica's saved identity tag. `known == false` when neither.
     private func currentOwner() -> (user: String?, known: Bool) {
         if replicaUserKnown { return (replicaUserId, true) }
         if lastSeenTenantObserved { return (resolvedSession.userId, true) }
+        if savedIdentityKnown { return (savedIdentity, true) }
         return (nil, false)
+    }
+
+    private func tagReplicaIdentity(_ userId: String?) async {
+        savedIdentity = userId
+        savedIdentityKnown = true
+        try? await persistence?.saveIdentity(userId)
     }
 
     private enum PushVerdict { case send, hold, discard }
@@ -1417,13 +1460,20 @@ public actor SyncEngine {
     /// `pushable`: send it as its owner (or a guest's write after that
     /// guest signed in); hold it while nobody is signed in or a token
     /// change is unresolved; discard it once another user is signed in.
-    private func pushable(_ m: PendingMutation) -> PushVerdict {
+    private func pushable(_ m: PendingMutation, token: String?) -> PushVerdict {
+        if m.ownerPending == true { return .hold }
         guard m.ownerKnown == true else { return .send }
-        if identityPending { return .hold }
-        let now = currentOwner()
-        guard now.known else { return .hold }
-        if m.owner == now.user { return .send }
-        guard let user = now.user else { return .hold }
+        // Owned writes push only as the session resolved this run.
+        if identityPending || !(replicaUserKnown || lastSeenTenantObserved) { return .hold }
+        // The token changed since the session was fetched: it may be
+        // someone else's. Hold until a refresh says whose it is.
+        if sessionTokenKnown && token != sessionToken {
+            identityPending = true
+            return .hold
+        }
+        let nowUser = replicaUserKnown ? replicaUserId : resolvedSession.userId
+        if m.owner == nowUser { return .send }
+        guard let user = nowUser else { return .hold }
         if (m.owner?.hasPrefix("guest_") ?? false) && !user.hasPrefix("guest_") { return .send }
         return .discard
     }
@@ -1446,7 +1496,7 @@ public actor SyncEngine {
     private func runIdentityRetry() async {
         identityRetryScheduled = false
         await refreshResolvedSession()
-        if identityPending { scheduleIdentityRetry() }
+        if identityPending || !(replicaUserKnown || lastSeenTenantObserved) { scheduleIdentityRetry() }
     }
 
     public func notifySessionChanged() async {
@@ -1462,6 +1512,8 @@ public actor SyncEngine {
     /// survive. Mirrors the TS `resetReplicaInner({ wipeMutations })`.
     public func resetReplica(wipeMutations: Bool = false) async {
         replicaEpoch &+= 1
+        // Frames buffered by an in-flight pull belong to the wiped replica.
+        if pullHold != nil { pullHold = [] }
         resetDepth += 1
         defer { resetDepth -= 1 }
         cursor = SyncCursor()
@@ -1669,9 +1721,16 @@ public protocol SyncPersistence: MutationQueuePersistence {
     /// atomic transaction. The default writes row by row, then the
     /// cursor; `SQLitePersistence` overrides it with a transaction.
     func persistBatch(_ changes: [ChangeEvent], cursor: SyncCursor?) async throws
+    /// Save / load which user the replica belongs to. Writes made before
+    /// the session resolves are tagged with it. The defaults store nothing.
+    func saveIdentity(_ userId: String?) async throws
+    func loadIdentity() async throws -> (known: Bool, userId: String?)
 }
 
 extension SyncPersistence {
+    public func saveIdentity(_ userId: String?) async throws {}
+    public func loadIdentity() async throws -> (known: Bool, userId: String?) { (false, nil) }
+
     public func persistBatch(_ changes: [ChangeEvent], cursor: SyncCursor?) async throws {
         for change in changes { try await persist(change) }
         if let cursor { try await saveCursor(cursor) }

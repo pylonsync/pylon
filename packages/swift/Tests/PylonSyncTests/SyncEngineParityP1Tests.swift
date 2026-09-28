@@ -179,6 +179,8 @@ final class SyncEngineParityP1Tests: XCTestCase {
     func testInsertGhostAndServerRowShareId() async throws {
         let server = Server()
         let (engine, _) = await makeEngine(server)
+        // Writes push once the session is known (owner check).
+        await engine.refreshResolvedSession()
         await engine.pull()
         let id = try await engine.insert("Todo", ["title": "ship"])
         XCTAssertEqual(id.count, 40, "Pylon-shaped id: 32 hex nanos + 8 hex counter")
@@ -227,6 +229,8 @@ final class SyncEngineParityP1Tests: XCTestCase {
         let server = Server()
         await server.primePush([503])
         let (engine, _) = await makeEngine(server)
+        // Writes push once the session is known (owner check).
+        await engine.refreshResolvedSession()
         await engine.pull()
         let id = try await engine.insert("Todo", ["title": "offline"])
         // First push failed (503) and nothing else drives a retry in

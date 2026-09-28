@@ -58,6 +58,12 @@ public final class SQLitePersistence: SyncPersistence, @unchecked Sendable {
             );
         """)
         try exec("""
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+        """)
+        try exec("""
             CREATE TABLE IF NOT EXISTS mutations (
                 id TEXT PRIMARY KEY,
                 payload TEXT NOT NULL
@@ -173,6 +179,33 @@ public final class SQLitePersistence: SyncPersistence, @unchecked Sendable {
                 sqlite3_bind_text(stmt, 1, change.entity, -1, Self.SQLITE_TRANSIENT)
                 sqlite3_bind_text(stmt, 2, change.row_id, -1, Self.SQLITE_TRANSIENT)
             }
+        }
+    }
+
+    /// Save which user the replica belongs to (`nil` = anonymous).
+    public func saveIdentity(_ userId: String?) async throws {
+        try await withQueue {
+            try self.execStatement("INSERT OR REPLACE INTO meta (key, value) VALUES ('identity', ?)") { stmt in
+                if let userId {
+                    sqlite3_bind_text(stmt, 1, userId, -1, Self.SQLITE_TRANSIENT)
+                } else {
+                    sqlite3_bind_null(stmt, 1)
+                }
+            }
+        }
+    }
+
+    /// The saved identity tag. `known == false` when none was saved.
+    public func loadIdentity() async throws -> (known: Bool, userId: String?) {
+        try await withQueue {
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(self.db, "SELECT value FROM meta WHERE key = 'identity'", -1, &stmt, nil) == SQLITE_OK else {
+                throw self.lastError()
+            }
+            defer { sqlite3_finalize(stmt) }
+            guard sqlite3_step(stmt) == SQLITE_ROW else { return (false, nil) }
+            guard let c = sqlite3_column_text(stmt, 0) else { return (true, nil) }
+            return (true, String(cString: c))
         }
     }
 

@@ -104,6 +104,74 @@ final class MutationOwnerTests: XCTestCase {
         await engine.stop()
     }
 
+    func testAPushAfterATokenSwapHoldsTheOldUsersWrite() async throws {
+        let server = Server()
+        var clientRef: PylonClient?
+        let engine = await makeEngine(server, client: { clientRef = $0 })
+        await engine.refreshResolvedSession()
+        await server.primePush([503])
+        let id = try await engine.insert("Note", ["title": "u1 draft"])
+        // Another token is stored; nothing has refreshed the session yet.
+        await clientRef!.setSession(token: "tok-other")
+        let before = await server.pushCount()
+        await engine.push()
+        let after = await server.pushCount()
+        XCTAssertEqual(after, before, "u1's write is not sent with another token")
+        // The refresh says the token is u2's: u1's write is discarded.
+        await server.setMe(userId: "u2", tenantId: nil)
+        await engine.notifySessionChanged()
+        try await Task.sleep(nanoseconds: 1_300_000_000)
+        let rows = await server.rows["Note"] ?? [:]
+        XCTAssertNil(rows[id])
+        let left = await engine.mutations.all().count
+        XCTAssertEqual(left, 0)
+    }
+
+    func testAWriteBeforeAnyIdentityWaitsAndTakesTheFirstSessionsOwner() async throws {
+        let server = Server()
+        let engine = await makeEngine(server)
+        await server.primePush([])
+        let insert = Task { try await engine.insert("Note", ["title": "early"]) }
+        let id = try await insert.value
+        let early = await engine.mutations.pending().first
+        XCTAssertEqual(early?.ownerPending, true)
+        var rows = await server.rows["Note"] ?? [:]
+        XCTAssertNil(rows[id], "held until the session is known")
+        await engine.refreshResolvedSession()
+        await engine.push()
+        rows = await server.rows["Note"] ?? [:]
+        XCTAssertNotNil(rows[id])
+    }
+
+    func testOverlappingDeltaPullsKeepEachOthersHeldFrames() async throws {
+        let server = Server()
+        await server.seed(ChangeEvent(seq: 5, entity: "Note", row_id: "n1", kind: .insert, data: ["title": "a"]))
+        let gate = PullGate()
+        let engine = await makeEngine(server, pullGate: { await gate.wait() })
+        await engine.refreshResolvedSession()
+        await engine.pull()
+        await server.seed(ChangeEvent(seq: 6, entity: "Note", row_id: "n2", kind: .insert, data: ["title": "b"]))
+        gate.block()
+        let p1 = Task { await engine.pull() }
+        try await Task.sleep(nanoseconds: 30_000_000)
+        let p2 = Task { await engine.pull() }
+        try await Task.sleep(nanoseconds: 30_000_000)
+        // P1 lands first; P2 still owns the hold.
+        gate.releaseOne()
+        await p1.value
+        // A write lands on the server after P1's page and before P2's.
+        await server.seed(ChangeEvent(seq: 7, entity: "Note", row_id: "n3", kind: .insert, data: ["title": "c"]))
+        // This frame arrives while P2 is in flight: it must wait for P2,
+        // not apply now, move the cursor to 8, and make P2 drop seq 7.
+        await engine.handleTextFrame(#"{"seq":8,"entity":"Note","row_id":"n4","kind":"insert","data":{"id":"n4"}}"#)
+        gate.release()
+        await p2.value
+        let store = await engine.store
+        XCTAssertNotNil(store.get("Note", id: "n2"))
+        XCTAssertNotNil(store.get("Note", id: "n3"), "P2's page must not be dropped")
+        XCTAssertNotNil(store.get("Note", id: "n4"))
+    }
+
     func testAnOverlappingPullDoesNotCloseTheNewPullsHold() async throws {
         let server = Server()
         await server.seed(ChangeEvent(seq: 5, entity: "Note", row_id: "n1", kind: .insert, data: ["title": "a"]))

@@ -498,6 +498,14 @@ public actor PylonClient {
         try await self.request(.post, "/api/sync/push", body: request)
     }
 
+    /// `syncPush` sent with an explicit bearer token (`nil` = none) instead
+    /// of the stored one. The sync engine uses it to push with the token it
+    /// checked each write's owner against.
+    public func syncPush(_ request: PushRequest, token: String?) async throws -> PushResponse {
+        let req = try await makeRequest(.post, "/api/sync/push", body: request, token: .some(token))
+        return try await execute(req)
+    }
+
     /// `GET /api/sync/relay-token` response — a machine-minted signed
     /// auth blob + the Durable Object relay's socket URL. Parity with
     /// the TS engine's relay mode.
@@ -551,7 +559,13 @@ public actor PylonClient {
         }
     }
 
-    private func makeRequest<I: Encodable>(_ method: HTTPVerb, _ path: String, body: I?, accept: String = "application/json") async throws -> URLRequest {
+    private func makeRequest<I: Encodable>(
+        _ method: HTTPVerb,
+        _ path: String,
+        body: I?,
+        accept: String = "application/json",
+        token tokenOverride: String?? = nil
+    ) async throws -> URLRequest {
         let url = config.baseURL.appendingPathComponent(path)
             // appendingPathComponent re-encodes the slashes — rebuild with the
             // raw path to preserve the original.
@@ -562,7 +576,8 @@ public actor PylonClient {
         for (k, v) in config.defaultHeaders {
             req.setValue(v, forHTTPHeaderField: k)
         }
-        if let token = currentToken() {
+        let token: String? = tokenOverride ?? currentToken()
+        if let token {
             req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
         if let body {

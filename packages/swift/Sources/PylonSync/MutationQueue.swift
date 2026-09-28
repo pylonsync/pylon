@@ -40,6 +40,9 @@ public struct PendingMutation: Sendable, Codable, Hashable {
     /// queued by an older client. Parity with TS `PendingMutation.owner`.
     public var owner: String?
     public var ownerKnown: Bool?
+    /// Made before this run knew who is signed in: held until the first
+    /// resolved session stamps `owner`. Parity with TS `ownerPending`.
+    public var ownerPending: Bool?
     /// Pre-mutation snapshot of the row, captured at queue time for
     /// update/delete. Used to restore the row if the push is permanently
     /// rejected (see `SyncEngine.failPushedMutation`). `nil` for inserts and
@@ -132,7 +135,8 @@ public actor MutationQueue {
         prevRow: Row? = nil,
         trackOutcome: Bool = false,
         owner: String? = nil,
-        ownerKnown: Bool = false
+        ownerKnown: Bool = false,
+        ownerPending: Bool = false
     ) async -> String {
         let id = "mut_\(Int(Date().timeIntervalSince1970 * 1000))_\(UUID().uuidString.prefix(8))"
         var changeWithOp = change
@@ -141,6 +145,8 @@ public actor MutationQueue {
         if ownerKnown {
             entry.owner = owner
             entry.ownerKnown = true
+        } else if ownerPending {
+            entry.ownerPending = true
         }
         queue.append(entry)
         if trackOutcome { tracked[id] = .some(nil) }
@@ -261,6 +267,19 @@ public actor MutationQueue {
             )
             resumeWaiters(m.id, with: .failure(err))
         }
+    }
+
+    /// Stamp every write whose owner was pending with the user the first
+    /// resolved session names.
+    public func stampPendingOwner(_ owner: String?) async {
+        var changed = false
+        for i in queue.indices where queue[i].ownerPending == true {
+            queue[i].owner = owner
+            queue[i].ownerKnown = true
+            queue[i].ownerPending = nil
+            changed = true
+        }
+        if changed { await flush() }
     }
 
     /// Drop one mutation that must never be pushed (it belongs to another
