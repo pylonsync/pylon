@@ -694,6 +694,16 @@ impl OrgStore {
             .collect()
     }
 
+    /// Invites that can still be accepted: not accepted and not expired.
+    /// Revoked invites are deleted, so they never appear.
+    pub fn pending_invites(&self, org_id: &str) -> Vec<Invite> {
+        let now = now_secs();
+        self.list_invites(org_id)
+            .into_iter()
+            .filter(|i| i.accepted_at.is_none() && i.expires_at > now)
+            .collect()
+    }
+
     pub fn revoke_invite(&self, invite_id: &str) -> bool {
         if self.is_disabled() {
             return false;
@@ -1326,6 +1336,28 @@ mod tests {
             .accept_invite(&invited.token, "u-bob", "charlie@example.com")
             .unwrap_err();
         assert_eq!(err, AcceptError::EmailMismatch);
+    }
+
+    #[test]
+    fn pending_invites_leave_out_accepted_ones() {
+        let s = store();
+        let org = s.create("Acme", "u-alice").unwrap();
+        let bob = s
+            .create_invite(&org.id, "bob@example.com", OrgRole::Member, "u-alice")
+            .unwrap();
+        let _carol = s
+            .create_invite(&org.id, "carol@example.com", OrgRole::Member, "u-alice")
+            .unwrap();
+        assert_eq!(s.pending_invites(&org.id).len(), 2);
+        s.accept_invite(&bob.token, "u-bob", "bob@example.com").unwrap();
+        let pending: Vec<String> = s
+            .pending_invites(&org.id)
+            .into_iter()
+            .map(|i| i.email)
+            .collect();
+        assert_eq!(pending, vec!["carol@example.com".to_string()]);
+        // The full list still has the accepted row.
+        assert_eq!(s.list_invites(&org.id).len(), 2);
     }
 
     #[test]

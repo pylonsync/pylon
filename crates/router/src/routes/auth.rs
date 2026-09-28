@@ -4898,7 +4898,7 @@ pub(crate) fn handle(
                 if !caller_role.can_manage_members() {
                     return Some((403, json_error("FORBIDDEN", "Insufficient role")));
                 }
-                let list = ctx.orgs.list_invites(org_id);
+                let list = ctx.orgs.pending_invites(org_id);
                 let payload: Vec<serde_json::Value> = list
                     .iter()
                     .map(|i| {
