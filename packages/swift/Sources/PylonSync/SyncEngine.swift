@@ -141,6 +141,11 @@ public actor SyncEngine {
     private var hydrated = false
     private var lastReconcileAt: Date = .distantPast
     private var reconcileInFlight = false
+    /// Requests that arrived while a reconcile was running. Drained by the
+    /// running call before it returns, so no requested entity is dropped.
+    private var pendingScopedReconcile: Set<String> = []
+    private var pendingFullReconcile = false
+    private var reconcileWaiters: [CheckedContinuation<Void, Never>] = []
     private var lastPullStartedFromZero = false
 
     // Initial-sync loading signal (TS parity — `_initialSyncSettled` in
@@ -310,7 +315,9 @@ public actor SyncEngine {
             // Identity flip → wipe the previous identity's rows AND queued
             // writes (don't push user A's offline mutations under B's token).
             await resetReplica(wipeMutations: true)
-            Task { await self.refreshResolvedSession() }
+            // This pull already reset the replica and cycles the socket,
+            // so the session refresh must not do either a second time.
+            Task { await self.refreshResolvedSession(replicaAlreadyReset: true) }
             // The live socket authenticated as the OLD identity and keeps
             // streaming that identity's events until it reconnects. Cycle
             // it so the next connect binds the new token. Parity with the
@@ -487,13 +494,33 @@ public actor SyncEngine {
            Date().timeIntervalSince(lastReconcileAt) * 1000 < minIntervalMs {
             return
         }
-        if reconcileInFlight { return }
-        reconcileInFlight = true
-        defer {
-            reconcileInFlight = false
-            lastReconcileAt = Date()
+        if reconcileInFlight {
+            // Queue this request behind the running sweep instead of
+            // dropping it: a scoped call adds its entities, a full call
+            // asks for one more full sweep. The caller returns once its
+            // entities were fetched.
+            if let entities {
+                pendingScopedReconcile.formUnion(entities)
+            } else {
+                pendingFullReconcile = true
+            }
+            await withCheckedContinuation { reconcileWaiters.append($0) }
+            return
         }
+        reconcileInFlight = true
         await reconcileInner(entities)
+        while pendingFullReconcile || !pendingScopedReconcile.isEmpty {
+            let full = pendingFullReconcile
+            let scoped = pendingScopedReconcile
+            pendingFullReconcile = false
+            pendingScopedReconcile = []
+            await reconcileInner(full ? nil : Array(scoped))
+        }
+        reconcileInFlight = false
+        lastReconcileAt = Date()
+        let waiters = reconcileWaiters
+        reconcileWaiters = []
+        for w in waiters { w.resume() }
     }
 
     private func reconcileInner(_ entities: [String]?) async {
@@ -1053,8 +1080,41 @@ public actor SyncEngine {
     }
 
     public func refreshResolvedSession() async {
+        await refreshResolvedSession(replicaAlreadyReset: false)
+    }
+
+    private func refreshResolvedSession(replicaAlreadyReset: Bool) async {
         do {
             let next = try await client.me()
+            // USER flip (sign-in, sign-out, account switch). The rows, the
+            // cursor, and the live socket belong to the previous identity,
+            // and the tenant verdict below misses the common case where
+            // both sides have no tenant (anonymous → signed in). Wipe,
+            // reconnect as the new identity, and pull every entity from
+            // zero. Always wipes, whatever `resetOnTenantFlip` says.
+            // Parity with the TS engine's `applySessionTransition`.
+            let prevUserId = resolvedSession.userId
+            if lastSeenTenantObserved && prevUserId != next.userId {
+                lastSeenTenant = next.tenantId
+                lastSeenTenantObserved = true
+                if !replicaAlreadyReset {
+                    // Mark the current token as seen so the pull below does
+                    // not detect the same flip and reset a second time.
+                    lastSeenToken = await client.currentToken()
+                    lastSeenTokenObserved = true
+                    // Keep queued writes only for guest → user (the server
+                    // merges the guest's rows into the new account).
+                    let guestToUser = (prevUserId?.hasPrefix("guest_") ?? false)
+                        && next.userId != nil
+                        && !(next.userId?.hasPrefix("guest_") ?? false)
+                    await resetReplica(wipeMutations: !guestToUser)
+                    cycleTransport()
+                    await pull()
+                }
+                resolvedSession = next
+                store.notify()
+                return
+            }
             let tenantNow = next.tenantId
             // Same verdict as the TS SessionResolver.inspectSession:
             //   tenantChanged      — a tenant we had observed moved.
@@ -1070,6 +1130,17 @@ public actor SyncEngine {
             // row and reconcile to pick up rows of an org the user only
             // just joined (their change events predate membership).
             let skipReset = !config.resetOnTenantFlip
+            // A token-flip pull already reset and re-pulled under the new
+            // credentials, so the tenant it carries is already applied.
+            if tenantChanged && replicaAlreadyReset {
+                lastSeenTenant = tenantNow
+                lastSeenTenantObserved = true
+                if next != resolvedSession {
+                    resolvedSession = next
+                    store.notify()
+                }
+                return
+            }
             if tenantChanged {
                 if replicaInvalidated && !skipReset {
                     // Tenant flip is an identity change → wipe rows + queued writes.

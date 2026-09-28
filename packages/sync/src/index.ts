@@ -1771,7 +1771,9 @@ export class SyncEngine {
       await this.resetReplicaInner({ wipeMutations: true });
       // Token flipped → the cached tenant is for the previous user. Pull
       // the fresh session in parallel with the cursor catch-up below.
-      void this.refreshResolvedSession();
+      // This pull already reset the replica and cycles the transport,
+      // so the session refresh must not do either a second time.
+      void this.refreshResolvedSession({ replicaAlreadyReset: true });
       // The live socket was opened with the OLD token (the bearer rides
       // the WS subprotocol at connect time), so the server keeps
       // fanning out the previous identity's events to it. Cycle the
@@ -2095,18 +2097,54 @@ export class SyncEngine {
     if (entities === undefined && now - this.lastReconcileAt < minIntervalMs) {
       return;
     }
-    // Coalesce concurrent reconciles to a single op via the queue's
-    // keyed dedupe — multiple callers in the same tick share one fetch.
     // Reconcile waits behind any in-flight pull / refresh / push so it
     // can't apply rows captured under a stale session.
-    return this.opQueue.enqueue("reconcile", async () => {
-      try {
-        await this.reconcileInner(entities);
-      } finally {
-        this.lastReconcileAt = Date.now();
-      }
-    });
+    if (entities === undefined) {
+      // Full sweeps coalesce via the queue's keyed dedupe — callers in
+      // the same window share one fetch per entity.
+      return this.opQueue.enqueue("reconcile", async () => {
+        try {
+          await this.reconcileInner();
+        } finally {
+          this.lastReconcileAt = Date.now();
+        }
+      });
+    }
+    // Scoped reconciles batch by entity: every call made before the
+    // batch starts running adds its entities to the batch, and all of
+    // them are fetched in parallel. A call made after the batch started
+    // opens a new batch, so no requested entity is dropped.
+    const open = this.scopedReconcileBatch;
+    if (open) {
+      for (const e of entities) open.entities.add(e);
+      return open.promise;
+    }
+    const batch: { entities: Set<string>; promise: Promise<void> } = {
+      entities: new Set(entities),
+      promise: Promise.resolve(),
+    };
+    this.scopedReconcileBatch = batch;
+    this.scopedReconcileSeq += 1;
+    batch.promise = this.opQueue.enqueue(
+      `reconcile-scoped:${this.scopedReconcileSeq}`,
+      async () => {
+        if (this.scopedReconcileBatch === batch) this.scopedReconcileBatch = null;
+        try {
+          await this.reconcileInner([...batch.entities]);
+        } finally {
+          this.lastReconcileAt = Date.now();
+        }
+      },
+    );
+    return batch.promise;
   }
+
+  /** Scoped reconcile batch that has not started running yet. */
+  private scopedReconcileBatch: {
+    entities: Set<string>;
+    promise: Promise<void>;
+  } | null = null;
+  private scopedReconcileSeq = 0;
 
   private async reconcileInner(entities?: string[]): Promise<void> {
     // Same reasoning as pullInner: the leader reconciles, broadcasts
@@ -2365,14 +2403,16 @@ export class SyncEngine {
    * On tenant flip this also resets the replica — same logic as the
    * token-flip path, for the same reason (visible set changed).
    */
-  async refreshResolvedSession(): Promise<void> {
+  async refreshResolvedSession(
+    opts: { replicaAlreadyReset?: boolean } = {},
+  ): Promise<void> {
     // Followers don't fetch /api/auth/me — the leader does and
     // broadcasts the result, which `handleMultiTabMessage` routes
     // into the resolver.
     if (!this.isMultiTabLeader) return;
     const next = await this.fetchSessionBootstrap();
     if (next === null) return;
-    await this.applySessionTransition(next, /* broadcast */ true);
+    await this.applySessionTransition(next, /* broadcast */ true, opts);
   }
 
   /**
@@ -2463,6 +2503,7 @@ export class SyncEngine {
   private applySessionTransition(
     next: ResolvedSession,
     broadcast: boolean,
+    opts: { replicaAlreadyReset?: boolean } = {},
   ): Promise<void> {
     const prev = this.sessionChain;
     // Swallow errors when storing back to the chain so a single
@@ -2476,7 +2517,34 @@ export class SyncEngine {
       // closes the brief window where useSession would report the
       // new tenant while useQuery still has the old tenant's rows.
       const verdict = this.session.inspectSession(next);
-      if (verdict.tenantChanged) {
+      const prevUserId = this.session.resolved().userId;
+      // USER flip (sign-in, sign-out, account switch) observed on a
+      // session refresh. The rows, the cursor, and the live socket all
+      // belong to the previous identity, and a tenant verdict alone
+      // misses the common case where both sides have no tenant
+      // (anonymous → signed in). Wipe, reconnect as the new identity,
+      // and pull every entity from zero. Always wipes, whatever
+      // `resetOnTenantFlip` says.
+      const userFlipped =
+        this.session.hasObserved() && prevUserId !== next.userId;
+      if (userFlipped) {
+        if (!opts.replicaAlreadyReset) {
+          // Mark the current token as seen so the pull below does not
+          // detect the same flip and reset a second time.
+          this.session.observeToken(this.currentToken());
+          // Keep queued writes only for guest → user (the server merges
+          // the guest's rows into the new account). Any other flip drops
+          // them so one identity's writes never push as another.
+          const isGuestToUser =
+            typeof prevUserId === "string" &&
+            prevUserId.startsWith("guest_") &&
+            typeof next.userId === "string" &&
+            !next.userId.startsWith("guest_");
+          await this.resetReplica({ wipeMutations: !isGuestToUser });
+          this.cycleTransport();
+          if (this.isMultiTabLeader) await this.pull();
+        }
+      } else if (verdict.tenantChanged && !opts.replicaAlreadyReset) {
         // `resetOnTenantFlip: false` — the app has declared its read
         // policies MEMBERSHIP-scoped, so the replica is already valid
         // for every org the user belongs to and the wipe would be pure
@@ -2510,6 +2578,9 @@ export class SyncEngine {
       }
       const firstResolution = !this.session.hasObserved();
       this.session.commitObservation(next);
+      // The reset above tagged the replica with the outgoing user (the
+      // session was not committed yet). Re-tag it with the new owner.
+      if (userFlipped) this.persistReplicaIdentity();
       if (verdict.identityChanged || firstResolution) {
         // The first answer flips `sessionResolved()` even when the
         // session itself matches the placeholder (anonymous caller).
@@ -2647,9 +2718,9 @@ export class SyncEngine {
 
   /**
    * Revoke the current session server-side (DELETE /api/auth/session)
-   * and refresh — leaves the caller anonymous. Local sync stops on
-   * the next pull cycle; replica content stays in IndexedDB so a
-   * subsequent sign-in as the same user is instant.
+   * and refresh — leaves the caller anonymous. The refresh sees the
+   * user flip, wipes the replica (memory and IndexedDB), and re-pulls
+   * as the anonymous identity.
    */
   async signOut(): Promise<void> {
     await this.authMutate("/api/auth/session", undefined, "DELETE");
