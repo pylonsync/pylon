@@ -9,8 +9,8 @@
 //! ```
 
 use pylon_crdt::loro::{
-    Container, ContainerID, ContainerTrait, ExportMode, LoroDoc, LoroText, ValueOrContainer,
-    VersionVector,
+    Container, ContainerID, ContainerTrait, ExportMode, LoroDoc, LoroMovableList, LoroText,
+    ValueOrContainer, VersionVector,
 };
 use pylon_crdt::{CrdtField, CrdtFieldKind};
 use pylon_http::DataStore;
@@ -538,6 +538,94 @@ fn a_set_in_the_seed_movable_list_keeps_it() {
         assert_eq!(
             env.row(&id)["order"],
             json!(["M", "n", "p"]),
+            "{}",
+            env.name()
+        );
+    });
+}
+
+fn movable_in(doc: &LoroDoc, field: &str) -> LoroMovableList {
+    match pylon_crdt::root_map(doc).get(field) {
+        Some(ValueOrContainer::Container(Container::MovableList(l))) => l,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A later push from an offline client reaches the items of the movable
+/// list holding the key that another client moved: its set and its delete
+/// reach them, and its move moves the item there, which keeps the other
+/// client's set.
+#[test]
+fn a_later_push_reaches_moved_items_of_a_merged_movable_list() {
+    on_both(|env| {
+        let id = env.bare_row();
+        env.snapshot(&id);
+        let offline = client_doc(1, 0);
+        patch(&offline, json!({"order": ["p", "q", "r", "s"]}));
+        env.push(&id, &offline, &Default::default());
+        assert_eq!(
+            env.row(&id)["order"],
+            json!(["p", "q", "r", "s"]),
+            "{}",
+            env.name()
+        );
+        let online = online_client(env, &id);
+        let before = online.oplog_vv();
+        let list = movable_in(&online, "order");
+        list.mov(0, 3).unwrap();
+        list.set(1, "R").unwrap();
+        list.set(2, "S").unwrap();
+        online.commit();
+        env.push(&id, &online, &before);
+        assert_eq!(
+            env.row(&id)["order"],
+            json!(["q", "R", "S", "p"]),
+            "{}",
+            env.name()
+        );
+        let pushed = offline.oplog_vv();
+        let list = movable_in(&offline, "order");
+        list.set(0, "P").unwrap();
+        list.delete(1, 1).unwrap();
+        list.mov(1, 2).unwrap();
+        offline.commit();
+        env.push(&id, &offline, &pushed);
+        assert_eq!(
+            env.row(&id)["order"],
+            json!(["S", "R", "P"]),
+            "{}",
+            env.name()
+        );
+    });
+}
+
+/// Items an offline client moved together move together in the movable
+/// list holding the key, beside their neighbours there, and keep another
+/// client's set.
+#[test]
+fn a_move_in_a_merged_movable_list_moves_the_items() {
+    on_both(|env| {
+        let id = env.bare_row();
+        env.snapshot(&id);
+        let offline = client_doc(1, 0);
+        patch(&offline, json!({"order": ["a", "b", "c", "d", "e"]}));
+        env.push(&id, &offline, &Default::default());
+        let online = online_client(env, &id);
+        let before = online.oplog_vv();
+        let list = movable_in(&online, "order");
+        list.push("z").unwrap();
+        list.set(3, "D").unwrap();
+        online.commit();
+        env.push(&id, &online, &before);
+        let pushed = offline.oplog_vv();
+        let list = movable_in(&offline, "order");
+        list.mov(3, 0).unwrap();
+        list.mov(4, 1).unwrap();
+        offline.commit();
+        env.push(&id, &offline, &pushed);
+        assert_eq!(
+            env.row(&id)["order"],
+            json!(["D", "e", "a", "b", "c", "z"]),
             "{}",
             env.name()
         );

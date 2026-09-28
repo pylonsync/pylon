@@ -21,24 +21,21 @@
 //!   the source's other elements beside the images of their neighbours. A
 //!   later merge deletes the images of the source's elements deleted since,
 //!   inserts its new elements, and (a movable list) sets the images of the
-//!   ones whose value changed.
+//!   ones whose value changed and moves the images of the ones it moved.
+//! - A movable list names each element by the id of the op that inserted
+//!   it. A move gives the element a new position id; the insert id stays.
 //! - Trees: nodes are matched by their `id`. A later merge compares the
 //!   source with its nodes at the previous merge.
 //! - Counters: increments to any other counter of the field are added to
 //!   the holder, and a displaced holder adds its total.
-//!
-//! A movable list's element moved in the holder since a merge gets a new
-//! position id, which the links do not follow: a later delete or set of
-//! it from the source does not reach it. A move in the source reaches the
-//! holder as a delete and an insert.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use loro::cursor::Side;
 use loro::{
-    ContainerID, ContainerType, IdSpan, JsonMapOp, JsonOpContent, LoroDoc, LoroValue,
-    ValueOrContainer, VersionVector, ID,
+    ContainerID, ContainerType, IdLp, IdSpan, JsonMapOp, JsonMovableListOp, JsonOpContent, LoroDoc,
+    LoroValue, ValueOrContainer, VersionVector, ID,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -62,6 +59,10 @@ const MAX_SOURCES: usize = 16;
 /// Container chains followed at most (a field's key moved from container
 /// to container).
 const MAX_CHAIN: usize = 32;
+
+/// Counters between two position ids that one op-log read of a peer
+/// spans, when it finds the ops that made them.
+const MAX_SPAN_GAP: i32 = 64;
 
 /// The server's last whole write of a text, list, or tree field: the
 /// container it wrote, the op span of the write, and how many elements (or
@@ -133,12 +134,22 @@ pub struct Links {
     pub target: String,
     /// Text and lists: each source element (in the source's order) and its
     /// image in `target`, none for an element the target's side deleted.
+    /// Movable-list elements are named by the id of the op that inserted
+    /// them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runs: Vec<LinkRun>,
     /// Movable list: each linked element's value at the last merge, in the
     /// order of `runs`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub values: Vec<Value>,
+    /// Movable list: each linked element's position id at the last merge,
+    /// in the order of `runs`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub positions: Vec<IdRun>,
+    /// Movable list: `runs` name elements by insert op. Links without it
+    /// name them by position id; [`merge_after_import`] converts them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub by_insert: bool,
     /// Tree: the source's nodes at the last merge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nodes: Option<Value>,
@@ -151,6 +162,36 @@ pub struct LinkRun {
     pub s: (u64, i32),
     pub t: Option<(u64, i32)>,
     pub len: u32,
+}
+
+/// `len` ids of peer `id.0`, from counter `id.1` up.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IdRun {
+    pub id: (u64, i32),
+    pub len: u32,
+}
+
+fn expand_ids(runs: &[IdRun]) -> Vec<ID> {
+    runs.iter()
+        .flat_map(|r| (0..r.len as i32).map(move |k| ID::new(r.id.0, r.id.1 + k)))
+        .collect()
+}
+
+fn compress_ids(ids: impl IntoIterator<Item = ID>) -> Vec<IdRun> {
+    let mut runs: Vec<IdRun> = Vec::new();
+    for id in ids {
+        if let Some(last) = runs.last_mut() {
+            if last.id.0 == id.peer && last.id.1 + last.len as i32 == id.counter {
+                last.len += 1;
+                continue;
+            }
+        }
+        runs.push(IdRun {
+            id: (id.peer, id.counter),
+            len: 1,
+        });
+    }
+    runs
 }
 
 fn expand(runs: &[LinkRun]) -> Vec<(ID, Option<ID>)> {
@@ -418,7 +459,7 @@ pub fn merge_after_import(
 ) -> Result<Vec<String>, String> {
     use CrdtFieldKind as K;
     let now = holders(doc, fields);
-    let mut updated = Vec::new();
+    let mut updated = links_by_insert(doc, links);
     for f in fields {
         let (Some(kind), Some(holder)) = (container_type(f.kind), now.get(&f.name)) else {
             continue;
@@ -505,11 +546,58 @@ pub fn merge_after_import(
                     links.remove(&key);
                 }
             }
-            updated.push(key);
+            if !updated.contains(&key) {
+                updated.push(key);
+            }
         }
     }
     doc.commit();
     Ok(updated)
+}
+
+/// Name the elements of movable-list links written by position id by
+/// insert op instead (see [`Links::by_insert`]). The source's position ids
+/// are its elements' positions at that merge. An image whose op the op log
+/// does not hold is unlinked. Returns the sources converted.
+fn links_by_insert(doc: &LoroDoc, links: &mut HashMap<String, Links>) -> Vec<String> {
+    let old: Vec<String> = links
+        .iter()
+        .filter(|(_, l)| {
+            !l.by_insert
+                && ContainerID::try_from(l.target.as_str())
+                    .is_ok_and(|c| c.container_type() == ContainerType::MovableList)
+        })
+        .map(|(source, _)| source.clone())
+        .collect();
+    if old.is_empty() {
+        return old;
+    }
+    doc.commit();
+    let ids: Vec<ID> = old
+        .iter()
+        .flat_map(|source| expand(&links[source].runs))
+        .flat_map(|(s, t)| std::iter::once(s).chain(t))
+        .collect();
+    let inserted = insert_ids(doc, &ids);
+    for source in &old {
+        let Some(l) = links.get_mut(source) else {
+            continue;
+        };
+        let pairs = expand(&l.runs);
+        l.positions = compress_ids(pairs.iter().map(|(s, _)| *s));
+        let named: Vec<(ID, Option<ID>)> = pairs
+            .iter()
+            .map(|(s, t)| {
+                (
+                    inserted.get(s).copied().unwrap_or(*s),
+                    t.and_then(|t| inserted.get(&t).copied()),
+                )
+            })
+            .collect();
+        l.runs = compress(&named);
+        l.by_insert = true;
+    }
+    old
 }
 
 /// A counter's value, 0 for a container the doc does not hold or that is
@@ -600,9 +688,11 @@ fn base_in(
     )
 }
 
-/// One element of a text or list.
+/// One element of a text or list: its id (a movable list's: the id of the
+/// op that inserted it), its position id, and its value.
 struct Elem {
     id: ID,
+    pos: ID,
     value: Value,
 }
 
@@ -614,8 +704,10 @@ fn read_elements(doc: &LoroDoc, cid: &ContainerID) -> Vec<Elem> {
                 .chars()
                 .enumerate()
                 .filter_map(|(i, ch)| {
+                    let id = text.get_cursor(i, Side::Middle)?.id?;
                     Some(Elem {
-                        id: text.get_cursor(i, Side::Middle)?.id?,
+                        id,
+                        pos: id,
                         value: Value::String(ch.to_string()),
                     })
                 })
@@ -625,26 +717,118 @@ fn read_elements(doc: &LoroDoc, cid: &ContainerID) -> Vec<Elem> {
             let list = doc.get_list(cid.clone());
             (0..list.len())
                 .filter_map(|i| {
+                    let id = list.get_cursor(i, Side::Middle)?.id?;
                     Some(Elem {
-                        id: list.get_cursor(i, Side::Middle)?.id?,
+                        id,
+                        pos: id,
                         value: item_json(list.get(i)),
                     })
                 })
                 .collect()
         }
         ContainerType::MovableList => {
+            // The op log holds only committed ops.
+            doc.commit();
             let list = doc.get_movable_list(cid.clone());
-            (0..list.len())
+            let items: Vec<(ID, Value)> = (0..list.len())
                 .filter_map(|i| {
-                    Some(Elem {
-                        id: list.get_cursor(i, Side::Middle)?.id?,
-                        value: item_json(list.get(i)),
-                    })
+                    Some((
+                        list.get_cursor(i, Side::Middle)?.id?,
+                        item_json(list.get(i)),
+                    ))
+                })
+                .collect();
+            let positions: Vec<ID> = items.iter().map(|(pos, _)| *pos).collect();
+            let inserted = insert_ids(doc, &positions);
+            items
+                .into_iter()
+                .map(|(pos, value)| Elem {
+                    id: inserted.get(&pos).copied().unwrap_or(pos),
+                    pos,
+                    value,
                 })
                 .collect()
         }
         _ => Vec::new(),
     }
+}
+
+/// The id of the op that inserted each movable-list element, by the
+/// element's position id: an insert op's position ids are its own ids; a
+/// move op names the element it moved by peer and Lamport time. A position
+/// id whose op the op log does not hold (uncommitted ops included), or
+/// whose op is neither, is left out.
+fn insert_ids(doc: &LoroDoc, positions: &[ID]) -> HashMap<ID, ID> {
+    let mut by_peer: HashMap<u64, Vec<i32>> = HashMap::new();
+    for id in positions {
+        by_peer.entry(id.peer).or_default().push(id.counter);
+    }
+    let mut out = HashMap::new();
+    let mut moves: Vec<(ID, IdLp)> = Vec::new();
+    for (peer, mut counters) in by_peer {
+        counters.sort_unstable();
+        counters.dedup();
+        let wanted: HashSet<i32> = counters.iter().copied().collect();
+        let mut k = 0;
+        while k < counters.len() {
+            let start = counters[k];
+            let mut end = start + 1;
+            k += 1;
+            while k < counters.len() && counters[k] - end <= MAX_SPAN_GAP {
+                end = counters[k] + 1;
+                k += 1;
+            }
+            for change in doc.export_json_in_id_span(IdSpan::new(peer, start, end)) {
+                for op in &change.ops {
+                    let JsonOpContent::MovableList(content) = &op.content else {
+                        continue;
+                    };
+                    match content {
+                        JsonMovableListOp::Insert { value, .. } => {
+                            for c in op.counter..op.counter + value.len() as i32 {
+                                if wanted.contains(&c) {
+                                    out.insert(ID::new(peer, c), ID::new(peer, c));
+                                }
+                            }
+                        }
+                        JsonMovableListOp::Move { elem_id, .. } if wanted.contains(&op.counter) => {
+                            moves.push((ID::new(peer, op.counter), *elem_id));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    let vv = doc.oplog_vv();
+    for (pos, elem) in moves {
+        if let Some(id) = id_at_lamport(doc, &vv, elem) {
+            out.insert(pos, id);
+        }
+    }
+    out
+}
+
+/// The id of the op of `at.peer` at Lamport time `at.lamport`. A peer's
+/// changes have increasing Lamport times.
+fn id_at_lamport(doc: &LoroDoc, vv: &VersionVector, at: IdLp) -> Option<ID> {
+    let (mut lo, mut hi) = (0, vv.get(&at.peer).copied()?);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        let change = doc.get_change(ID::new(at.peer, mid))?;
+        let (start, len) = (change.id.counter, change.len as i32);
+        if at.lamport < change.lamport {
+            hi = start;
+        } else if at.lamport - change.lamport >= len as u32 {
+            lo = start + len;
+        } else {
+            return Some(ID::new(
+                at.peer,
+                start + (at.lamport - change.lamport) as i32,
+            ));
+        }
+    }
+    None
 }
 
 fn item_json(item: Option<ValueOrContainer>) -> Value {
@@ -963,18 +1147,20 @@ fn merge_seq(
     let at: HashMap<ID, usize> = dst.iter().enumerate().map(|(p, e)| (e.id, p)).collect();
     let mut link: HashMap<ID, Option<ID>> = HashMap::new();
     let mut edits: Vec<Edit> = Vec::new();
+    // Movable list: the source's linked elements moved since the last merge.
+    let mut moved: HashSet<ID> = HashSet::new();
     match earlier {
         Some(earlier) => {
             let alive: HashSet<ID> = src.iter().map(|e| e.id).collect();
             let expanded = expand(&earlier.runs);
-            let was: HashMap<ID, Value> = if movable {
-                expanded
-                    .iter()
-                    .map(|(s, _)| *s)
-                    .zip(earlier.values)
-                    .collect()
+            let (was, was_at): (HashMap<ID, Value>, HashMap<ID, ID>) = if movable {
+                let ids = || expanded.iter().map(|(s, _)| *s);
+                (
+                    ids().zip(earlier.values).collect(),
+                    ids().zip(expand_ids(&earlier.positions)).collect(),
+                )
             } else {
-                HashMap::new()
+                Default::default()
             };
             for (s, t) in expanded {
                 if alive.contains(&s) {
@@ -984,13 +1170,14 @@ fn merge_seq(
                 }
             }
             for e in src.iter().filter(|_| movable) {
-                let (Some(Some(t)), Some(was)) = (link.get(&e.id), was.get(&e.id)) else {
+                let Some(&p) = link.get(&e.id).copied().flatten().and_then(|t| at.get(&t)) else {
                     continue;
                 };
-                if was != &e.value {
-                    if let Some(&p) = at.get(t) {
-                        edits.push(Edit::Set(p, e.value.clone()));
-                    }
+                if was.get(&e.id).is_some_and(|was| was != &e.value) {
+                    edits.push(Edit::Set(p, e.value.clone()));
+                }
+                if was_at.get(&e.id).is_some_and(|was| *was != e.pos) {
+                    moved.insert(e.id);
                 }
             }
         }
@@ -1020,14 +1207,16 @@ fn merge_seq(
         }
     }
     // The source's unlinked elements, a run at a time, beside the images of
-    // their nearest neighbours still in the holder: after the nearest
-    // earlier one, else before the nearest later one, else at the end.
+    // their nearest neighbours still in the holder that did not move: after
+    // the nearest earlier one, else before the nearest later one, else at
+    // the end.
     let image: Vec<Option<usize>> = src
         .iter()
         .map(|e| {
             link.get(&e.id)
                 .copied()
                 .flatten()
+                .filter(|_| !moved.contains(&e.id))
                 .and_then(|t| at.get(&t))
                 .copied()
         })
@@ -1070,6 +1259,9 @@ fn merge_seq(
             }
         }
     }
+    if !moved.is_empty() {
+        move_images(doc, holder, &src, &link, &moved)?;
+    }
     let pairs: Vec<(ID, Option<ID>)> = src
         .iter()
         .map(|e| (e.id, link.get(&e.id).copied().flatten()))
@@ -1077,13 +1269,90 @@ fn merge_seq(
     Ok(Links {
         target: holder.to_string(),
         runs: compress(&pairs),
+        positions: if movable {
+            compress_ids(src.iter().map(|e| e.pos))
+        } else {
+            Vec::new()
+        },
         values: if movable {
             src.into_iter().map(|e| e.value).collect()
         } else {
             Vec::new()
         },
+        by_insert: movable,
         nodes: None,
     })
+}
+
+/// Move the holder's images of the source's elements `moved` beside the
+/// images of their nearest source neighbours: after the nearest earlier
+/// one, else before the nearest later one that did not move. The elements
+/// move in the source's order, so a run of moved elements keeps its order.
+fn move_images(
+    doc: &LoroDoc,
+    holder: &ContainerID,
+    src: &[Elem],
+    link: &HashMap<ID, Option<ID>>,
+    moved: &HashSet<ID>,
+) -> Result<(), String> {
+    let list = doc.get_movable_list(holder.clone());
+    let mut order: Vec<ID> = read_elements(doc, holder)
+        .into_iter()
+        .map(|e| e.id)
+        .collect();
+    let mut index: HashMap<ID, usize> = order.iter().enumerate().map(|(p, id)| (*id, p)).collect();
+    let image = |e: &Elem| link.get(&e.id).copied().flatten();
+    let mut placed: HashSet<ID> = HashSet::new();
+    for (k, e) in src.iter().enumerate() {
+        if !moved.contains(&e.id) {
+            continue;
+        }
+        let Some(t) = image(e) else {
+            continue;
+        };
+        let Some(&from) = index.get(&t) else {
+            continue;
+        };
+        let at = |n: &Elem| {
+            image(n)
+                .filter(|i| *i != t)
+                .and_then(|i| index.get(&i).copied())
+        };
+        let after = src[..k]
+            .iter()
+            .rev()
+            .filter(|n| !moved.contains(&n.id) || placed.contains(&n.id))
+            .find_map(at);
+        let before = src[k + 1..]
+            .iter()
+            .filter(|n| !moved.contains(&n.id))
+            .find_map(at);
+        placed.insert(e.id);
+        // The index `to` is taken after the element leaves `from`.
+        let to = match (after, before) {
+            (Some(a), _) if a < from => a + 1,
+            (Some(a), _) => a,
+            (None, Some(b)) if b < from => b,
+            (None, Some(b)) => b - 1,
+            (None, None) => continue,
+        };
+        if to == from {
+            continue;
+        }
+        list.mov(from, to)
+            .map_err(|e| format!("move {from} to {to}: {e}"))?;
+        order.remove(from);
+        order.insert(to, t);
+        for (p, id) in order
+            .iter()
+            .enumerate()
+            .skip(from.min(to))
+            .take(from.abs_diff(to) + 1)
+        {
+            index.insert(*id, p);
+        }
+    }
+    Ok(())
 }
 
 fn node_id(node: &Value) -> Option<&str> {
@@ -1225,9 +1494,8 @@ fn merge_tree(
     }
     Ok(Links {
         target: holder.to_string(),
-        runs: Vec::new(),
-        values: Vec::new(),
         nodes: Some(src_value),
+        ..Links::default()
     })
 }
 
@@ -1262,15 +1530,88 @@ fn break_cycles(nodes: &mut [Value]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use loro::ContainerTrait;
 
     fn elems(s: &str) -> Vec<Elem> {
         s.chars()
             .enumerate()
             .map(|(i, c)| Elem {
                 id: ID::new(1, i as i32),
+                pos: ID::new(1, i as i32),
                 value: Value::String(c.to_string()),
             })
             .collect()
+    }
+
+    /// Links that name a movable list's elements by position id name them
+    /// by insert op after the conversion, a moved element included, and
+    /// keep the position ids.
+    #[test]
+    fn links_by_position_id_are_named_by_insert_op() {
+        let doc = LoroDoc::new();
+        doc.set_peer_id(1).unwrap();
+        let list = doc.get_movable_list("l");
+        for v in ["a", "b", "c"] {
+            list.push(v).unwrap();
+        }
+        doc.commit();
+        list.mov(0, 2).unwrap();
+        doc.commit();
+        let positions: Vec<ID> = (0..3)
+            .map(|i| list.get_cursor(i, Side::Middle).unwrap().id.unwrap())
+            .collect();
+        assert_eq!(positions[2], ID::new(1, 3), "the move's own id");
+        let pairs: Vec<(ID, Option<ID>)> = positions.iter().map(|p| (*p, Some(*p))).collect();
+        let target = list.id().to_string();
+        let mut links = HashMap::from([(
+            target.clone(),
+            Links {
+                target: target.clone(),
+                runs: compress(&pairs),
+                values: vec![Value::from("b"), Value::from("c"), Value::from("a")],
+                ..Links::default()
+            },
+        )]);
+        assert_eq!(links_by_insert(&doc, &mut links), vec![target.clone()]);
+        let l = &links[&target];
+        assert!(l.by_insert);
+        let named: Vec<ID> = [1, 2, 0].into_iter().map(|c| ID::new(1, c)).collect();
+        assert_eq!(
+            expand(&l.runs),
+            named.iter().map(|id| (*id, Some(*id))).collect::<Vec<_>>()
+        );
+        assert_eq!(expand_ids(&l.positions), positions);
+        assert!(links_by_insert(&doc, &mut links).is_empty());
+    }
+
+    /// A moved element's id is the id of the op that inserted it, also
+    /// when other peers' ops came between.
+    #[test]
+    fn read_elements_names_a_moved_element_by_its_insert() {
+        let a = LoroDoc::new();
+        a.set_peer_id(1).unwrap();
+        let list = a.get_movable_list("l");
+        list.push("x").unwrap();
+        a.commit();
+        let text = a.get_text("t");
+        text.insert(0, "filler").unwrap();
+        a.commit();
+        list.push("y").unwrap();
+        a.commit();
+        let b = LoroDoc::new();
+        b.set_peer_id(2).unwrap();
+        b.import(&a.export(loro::ExportMode::all_updates()).unwrap())
+            .unwrap();
+        b.get_text("t").insert(0, "more").unwrap();
+        b.commit();
+        let moved = b.get_movable_list("l");
+        moved.mov(1, 0).unwrap();
+        moved.mov(1, 0).unwrap();
+        let cid = moved.id();
+        let elems = read_elements(&b, &cid);
+        let ids: Vec<ID> = elems.iter().map(|e| e.id).collect();
+        assert_eq!(ids, [ID::new(1, 0), ID::new(1, 7)]);
+        assert!(elems.iter().all(|e| e.pos.peer == 2));
     }
 
     /// Every line of a long text changed: the words still link.
