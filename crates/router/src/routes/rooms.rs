@@ -1,5 +1,5 @@
 //! `/api/rooms/*` — presence rooms with join, leave, presence updates,
-//! topic broadcast, listing, and per-room member queries.
+//! heartbeats, topic broadcast, listing, and per-room member queries.
 //!
 //! All endpoints require_auth. Caller identity is server-resolved from
 //! the session — only admins may spoof another user_id via the body
@@ -176,6 +176,56 @@ pub(crate) fn handle(
         ));
     }
 
+    // Keepalive. Members idle past the runtime's timeout are removed by
+    // the idle sweep; a heartbeat marks the member active with no event.
+    // `alive: false` tells the client it is no longer in the room and
+    // must rejoin.
+    if url == "/api/rooms/heartbeat" && method == HttpMethod::Post {
+        if let Some(err) = require_auth(ctx) {
+            return Some(err);
+        }
+        let data: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => {
+                return Some((
+                    400,
+                    json_error_safe(
+                        "INVALID_JSON",
+                        "Invalid request body",
+                        &format!("Invalid JSON: {e}"),
+                    ),
+                ));
+            }
+        };
+        let room = match data.get("room").and_then(|v| v.as_str()) {
+            Some(r) => r,
+            None => return Some((400, json_error("MISSING_ROOM", "room is required"))),
+        };
+        let body_user = data.get("user_id").and_then(|v| v.as_str());
+        let user_id = if ctx.auth_ctx.is_admin {
+            body_user.or(ctx.auth_ctx.user_id.as_deref())
+        } else {
+            ctx.auth_ctx.user_id.as_deref()
+        };
+        let user_id = match user_id {
+            Some(u) => u,
+            None => {
+                return Some((
+                    401,
+                    json_error("AUTH_REQUIRED", "authenticated session required"),
+                ));
+            }
+        };
+
+        if ctx.rooms.touch(room, user_id) {
+            return Some((200, serde_json::json!({"alive": true}).to_string()));
+        }
+        return Some((
+            200,
+            serde_json::json!({"alive": false, "reason": "not_in_room"}).to_string(),
+        ));
+    }
+
     if url == "/api/rooms/broadcast" && method == HttpMethod::Post {
         if let Some(err) = require_auth(ctx) {
             return Some(err);
@@ -274,6 +324,7 @@ pub(crate) fn handle(
             && room_name != "join"
             && room_name != "leave"
             && room_name != "presence"
+            && room_name != "heartbeat"
             && room_name != "broadcast"
         {
             if let Some(err) = require_auth(ctx) {

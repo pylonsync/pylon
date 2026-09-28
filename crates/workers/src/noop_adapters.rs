@@ -113,6 +113,11 @@ impl RoomOps for NoopAll {
         // lands).
         false
     }
+
+    fn touch(&self, _room: &str, _user_id: &str) -> bool {
+        // No room state, so no one is a member.
+        false
+    }
 }
 
 impl CacheOps for NoopAll {

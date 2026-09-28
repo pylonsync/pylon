@@ -2178,6 +2178,10 @@ impl pylon_router::RoomOps for RoomManager {
     fn is_in_room(&self, room: &str, user_id: &str) -> bool {
         RoomManager::is_in_room(self, room, user_id)
     }
+
+    fn touch(&self, room: &str, user_id: &str) -> bool {
+        RoomManager::touch(self, room, user_id)
+    }
 }
 
 /// Deliver a room event through the notifier: `room-update` to the

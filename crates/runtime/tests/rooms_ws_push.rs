@@ -750,3 +750,80 @@ fn closing_one_of_two_sockets_keeps_the_user_in_the_room() {
 
     let _ = watcher.close(None);
 }
+
+/// POST /api/rooms/heartbeat keeps a member alive without an event.
+/// A member gets `{"alive":true}`; a non-member gets
+/// `{"alive":false,"reason":"not_in_room"}` so the client knows to
+/// rejoin. Subscribers receive nothing for a heartbeat.
+#[test]
+fn heartbeat_reports_membership_without_an_event() {
+    let (port, _rt) = start_server();
+    let base = format!("http://127.0.0.1:{port}");
+    let room = "channel:heartbeat";
+    let url = format!("{base}/api/rooms/heartbeat");
+
+    let (token, user_id) = guest_session(&base);
+    let (status, body) = http_request_with_auth(
+        "POST",
+        &format!("{base}/api/rooms/join"),
+        Some(&format!(r#"{{"room":"{room}"}}"#)),
+        Some(&token),
+    );
+    assert_eq!(status, 200, "guest join: {body}");
+
+    let mut watcher = connect_ws_admin(port);
+    subscribe_room(&mut watcher, room);
+
+    let (status, body) = http_request_with_auth(
+        "POST",
+        &url,
+        Some(&format!(r#"{{"room":"{room}"}}"#)),
+        Some(&token),
+    );
+    assert_eq!(status, 200, "member heartbeat: {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v, serde_json::json!({"alive": true}));
+
+    let pushed = wait_for_frame(&mut watcher, Duration::from_millis(800), |v| {
+        v.get("type").and_then(|t| t.as_str()) == Some("room-update")
+    });
+    assert!(pushed.is_none(), "a heartbeat must not push: {pushed:?}");
+
+    let (status, body) = http_request_with_auth(
+        "POST",
+        &url,
+        Some(r#"{"room":"channel:never-joined"}"#),
+        Some(&token),
+    );
+    assert_eq!(status, 200, "non-member heartbeat: {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!({"alive": false, "reason": "not_in_room"})
+    );
+
+    // Admins name the member in the body.
+    let (status, body) = http_request_with_auth(
+        "POST",
+        &url,
+        Some(&format!(r#"{{"room":"{room}","user_id":"{user_id}"}}"#)),
+        Some(TEST_ADMIN_TOKEN),
+    );
+    assert_eq!(status, 200, "admin heartbeat: {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v, serde_json::json!({"alive": true}));
+
+    let (status, body) = http_request_with_auth("POST", &url, Some("{}"), Some(&token));
+    assert_eq!(status, 400, "missing room: {body}");
+    assert!(body.contains("MISSING_ROOM"), "{body}");
+
+    let (status, body) = http_request_with_auth("POST", &url, Some("not json"), Some(&token));
+    assert_eq!(status, 400, "invalid json: {body}");
+    assert!(body.contains("INVALID_JSON"), "{body}");
+
+    let (status, body) =
+        http_request_with_auth("POST", &url, Some(&format!(r#"{{"room":"{room}"}}"#)), None);
+    assert_eq!(status, 401, "anonymous heartbeat: {body}");
+
+    let _ = watcher.close(None);
+}

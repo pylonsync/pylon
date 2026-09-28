@@ -313,6 +313,10 @@ pub trait RoomOps: Send + Sync {
     /// senders. Returning `false` for unknown rooms is fine — the
     /// downstream `broadcast` call will short-circuit too.
     fn is_in_room(&self, room: &str, user_id: &str) -> bool;
+    /// Mark a member active so the idle sweep keeps them, with no event.
+    /// Backs `/api/rooms/heartbeat`. Returns false when the user is not
+    /// in the room.
+    fn touch(&self, room: &str, user_id: &str) -> bool;
 }
 
 /// Job queue operations used by the router.
@@ -1577,7 +1581,7 @@ fn route_inner(
 
     // -----------------------------------------------------------------------
     // Rooms — handled by crates/router/src/routes/rooms.rs.
-    // /api/rooms/{join,leave,presence,broadcast}, /api/rooms[/<room>].
+    // /api/rooms/{join,leave,presence,heartbeat,broadcast}, /api/rooms[/<room>].
     // -----------------------------------------------------------------------
     if let Some(r) = routes::rooms::handle(ctx, method, url, body, auth_token) {
         return r;
@@ -3362,6 +3366,9 @@ mod auth_gate_tests {
         fn is_in_room(&self, _room: &str, _user_id: &str) -> bool {
             false
         }
+        fn touch(&self, _room: &str, _user_id: &str) -> bool {
+            false
+        }
     }
     impl CacheOps for StubCache {
         fn handle_command(&self, _body: &str) -> (u16, String) {
@@ -3576,11 +3583,248 @@ mod auth_gate_tests {
             None,
             None,
             functions,
+            None,
             manifest,
             store,
             "127.0.0.1",
             f,
         );
+    }
+
+    /// Route with a custom RoomOps and ChangeNotifier.
+    fn with_ctx_rooms<F>(
+        auth: &AuthContext,
+        rooms: &dyn RoomOps,
+        notifier: &dyn ChangeNotifier,
+        f: F,
+    ) where
+        F: FnOnce(&RouterContext),
+    {
+        let manifest = empty_manifest();
+        let store = StubDataStore::empty(manifest.clone());
+        with_ctx_store(
+            false,
+            auth,
+            &NoopPluginHooks,
+            None,
+            Some(notifier),
+            None,
+            Some(rooms),
+            manifest,
+            store,
+            f,
+        );
+    }
+
+    /// Room membership for heartbeat tests. `touch` records each call
+    /// and answers from `members`.
+    struct HeartbeatRooms {
+        members: Vec<(&'static str, &'static str)>,
+        touched: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    impl RoomOps for HeartbeatRooms {
+        fn join(
+            &self,
+            _room: &str,
+            _user_id: &str,
+            _data: Option<serde_json::Value>,
+        ) -> Result<(serde_json::Value, serde_json::Value), pylon_http::DataError> {
+            Ok((serde_json::json!({}), serde_json::json!({})))
+        }
+        fn leave(&self, _room: &str, _user_id: &str) -> Option<serde_json::Value> {
+            None
+        }
+        fn set_presence(
+            &self,
+            _room: &str,
+            _user_id: &str,
+            _data: serde_json::Value,
+        ) -> Option<serde_json::Value> {
+            None
+        }
+        fn broadcast(
+            &self,
+            _room: &str,
+            _sender: Option<&str>,
+            _topic: &str,
+            _data: serde_json::Value,
+        ) -> Option<serde_json::Value> {
+            None
+        }
+        fn list_rooms(&self) -> Vec<String> {
+            vec![]
+        }
+        fn room_size(&self, _name: &str) -> usize {
+            0
+        }
+        fn members(&self, _name: &str) -> Vec<serde_json::Value> {
+            vec![]
+        }
+        fn is_in_room(&self, room: &str, user_id: &str) -> bool {
+            self.members.contains(&(room, user_id))
+        }
+        fn touch(&self, room: &str, user_id: &str) -> bool {
+            self.touched
+                .lock()
+                .unwrap()
+                .push((room.to_string(), user_id.to_string()));
+            self.is_in_room(room, user_id)
+        }
+    }
+
+    /// Counts presence notifications. A heartbeat must send none.
+    #[derive(Default)]
+    struct PresenceCounter {
+        presence: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ChangeNotifier for PresenceCounter {
+        fn notify(&self, _event: &pylon_sync::ChangeEvent) {}
+        fn notify_presence(&self, _json: &str) {
+            self.presence
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn heartbeat_rooms() -> HeartbeatRooms {
+        HeartbeatRooms {
+            members: vec![("doc:1", "alice")],
+            touched: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn rooms_heartbeat_member_is_alive_and_touched() {
+        let rooms = heartbeat_rooms();
+        let notifier = PresenceCounter::default();
+        let auth = AuthContext::authenticated("alice".into());
+        with_ctx_rooms(&auth, &rooms, &notifier, |ctx| {
+            let (status, body, _ct) = route(
+                ctx,
+                HttpMethod::Post,
+                "/api/rooms/heartbeat",
+                r#"{"room":"doc:1"}"#,
+                None,
+            );
+            assert_eq!(status, 200, "{body}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(v, serde_json::json!({"alive": true}));
+        });
+        assert_eq!(
+            *rooms.touched.lock().unwrap(),
+            vec![("doc:1".to_string(), "alice".to_string())]
+        );
+        assert_eq!(
+            notifier.presence.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a heartbeat must not emit an event"
+        );
+    }
+
+    #[test]
+    fn rooms_heartbeat_non_member_is_not_alive() {
+        let rooms = heartbeat_rooms();
+        let notifier = PresenceCounter::default();
+        let auth = AuthContext::authenticated("bob".into());
+        with_ctx_rooms(&auth, &rooms, &notifier, |ctx| {
+            let (status, body, _ct) = route(
+                ctx,
+                HttpMethod::Post,
+                "/api/rooms/heartbeat",
+                r#"{"room":"doc:1"}"#,
+                None,
+            );
+            assert_eq!(status, 200, "{body}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(
+                v,
+                serde_json::json!({"alive": false, "reason": "not_in_room"})
+            );
+        });
+    }
+
+    /// A non-admin cannot keep another user alive by naming them.
+    #[test]
+    fn rooms_heartbeat_ignores_body_user_for_non_admin() {
+        let rooms = heartbeat_rooms();
+        let notifier = PresenceCounter::default();
+        let auth = AuthContext::authenticated("bob".into());
+        with_ctx_rooms(&auth, &rooms, &notifier, |ctx| {
+            let (_status, body, _ct) = route(
+                ctx,
+                HttpMethod::Post,
+                "/api/rooms/heartbeat",
+                r#"{"room":"doc:1","user_id":"alice"}"#,
+                None,
+            );
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(v["alive"], serde_json::json!(false));
+        });
+        assert_eq!(
+            *rooms.touched.lock().unwrap(),
+            vec![("doc:1".to_string(), "bob".to_string())]
+        );
+    }
+
+    #[test]
+    fn rooms_heartbeat_admin_names_the_member() {
+        let rooms = heartbeat_rooms();
+        let notifier = PresenceCounter::default();
+        let auth = AuthContext::admin();
+        with_ctx_rooms(&auth, &rooms, &notifier, |ctx| {
+            let (_status, body, _ct) = route(
+                ctx,
+                HttpMethod::Post,
+                "/api/rooms/heartbeat",
+                r#"{"room":"doc:1","user_id":"alice"}"#,
+                None,
+            );
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(v, serde_json::json!({"alive": true}));
+        });
+    }
+
+    #[test]
+    fn rooms_heartbeat_validates_input() {
+        let rooms = heartbeat_rooms();
+        let notifier = PresenceCounter::default();
+        let alice = AuthContext::authenticated("alice".into());
+        with_ctx_rooms(&alice, &rooms, &notifier, |ctx| {
+            let (status, body, _ct) =
+                route(ctx, HttpMethod::Post, "/api/rooms/heartbeat", "{", None);
+            assert_eq!(status, 400);
+            assert!(body.contains("INVALID_JSON"), "{body}");
+            let (status, body, _ct) =
+                route(ctx, HttpMethod::Post, "/api/rooms/heartbeat", "{}", None);
+            assert_eq!(status, 400);
+            assert!(body.contains("MISSING_ROOM"), "{body}");
+        });
+        let anon = AuthContext::anonymous();
+        with_ctx_rooms(&anon, &rooms, &notifier, |ctx| {
+            let (status, body, _ct) = route(
+                ctx,
+                HttpMethod::Post,
+                "/api/rooms/heartbeat",
+                r#"{"room":"doc:1"}"#,
+                None,
+            );
+            assert_eq!(status, 401);
+            assert!(body.contains("AUTH_REQUIRED"), "{body}");
+        });
+        assert!(rooms.touched.lock().unwrap().is_empty());
+    }
+
+    /// `GET /api/rooms/heartbeat` is not a room named "heartbeat".
+    #[test]
+    fn rooms_heartbeat_is_not_a_room_name() {
+        let rooms = heartbeat_rooms();
+        let notifier = PresenceCounter::default();
+        let alice = AuthContext::authenticated("alice".into());
+        with_ctx_rooms(&alice, &rooms, &notifier, |ctx| {
+            let (status, body, _ct) = route(ctx, HttpMethod::Get, "/api/rooms/heartbeat", "", None);
+            assert_ne!(status, 200, "{body}");
+        });
     }
 
     fn with_ctx_full<F>(
@@ -3603,6 +3847,7 @@ mod auth_gate_tests {
             cookie_config_override,
             notifier_override,
             functions_override,
+            None,
             manifest,
             store,
             "127.0.0.1",
@@ -3618,6 +3863,7 @@ mod auth_gate_tests {
         cookie_config_override: Option<CookieConfig>,
         notifier_override: Option<&dyn ChangeNotifier>,
         functions_override: Option<&dyn FnOps>,
+        rooms_override: Option<&dyn RoomOps>,
         manifest: AppManifest,
         store: StubDataStore,
         peer_ip: &str,
@@ -3647,7 +3893,8 @@ mod auth_gate_tests {
         let change_log = ChangeLog::new();
         let default_notifier = NoopNotifier;
         let notifier: &dyn ChangeNotifier = notifier_override.unwrap_or(&default_notifier);
-        let rooms = StubRooms;
+        let default_rooms = StubRooms;
+        let rooms: &dyn RoomOps = rooms_override.unwrap_or(&default_rooms);
         let cache = StubCache;
         let pubsub = StubPubSub;
         let jobs = StubJobs;
@@ -3681,7 +3928,7 @@ mod auth_gate_tests {
             policy_engine: &policy_engine,
             change_log: &change_log,
             notifier,
-            rooms: &rooms,
+            rooms,
             cache: &cache,
             pubsub: &pubsub,
             jobs: &jobs,
@@ -3856,6 +4103,7 @@ mod auth_gate_tests {
             false,
             &auth,
             &NoopPluginHooks,
+            None,
             None,
             None,
             None,

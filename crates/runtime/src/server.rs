@@ -1308,7 +1308,8 @@ fn file_is_public(
 
 const DEFAULT_UPLOAD_MAX_BYTES: usize = 200 * 1024 * 1024;
 
-/// A room member with no join or presence update for this long is removed by the idle sweep.
+/// A room member with no join, presence update, or heartbeat for this
+/// long is removed by the idle sweep.
 const ROOMS_IDLE_TIMEOUT_SECS: u64 = 120;
 
 /// How often the idle room sweep runs.

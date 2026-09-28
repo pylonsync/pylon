@@ -122,9 +122,14 @@ const DEFAULT_MAX_ROOMS: usize = 10_000;
 
 impl RoomManager {
     pub fn new(idle_timeout_secs: u64) -> Self {
+        Self::with_idle_timeout(Duration::from_secs(idle_timeout_secs))
+    }
+
+    /// Create a RoomManager with an idle timeout finer than one second.
+    pub fn with_idle_timeout(idle_timeout: Duration) -> Self {
         Self {
             rooms: Mutex::new(HashMap::new()),
-            idle_timeout: Duration::from_secs(idle_timeout_secs),
+            idle_timeout,
             max_rooms: DEFAULT_MAX_ROOMS,
         }
     }
@@ -229,6 +234,18 @@ impl RoomManager {
             user_id: user_id.to_string(),
             data,
         })
+    }
+
+    /// Mark a member active so the idle sweep keeps them. Emits no
+    /// event and leaves the member's data unchanged. Returns false when
+    /// the user is not in the room.
+    pub fn touch(&self, room: &str, user_id: &str) -> bool {
+        let mut rooms = self.rooms.lock().unwrap();
+        let Some(member) = rooms.get_mut(room).and_then(|r| r.members.get_mut(user_id)) else {
+            return false;
+        };
+        member.last_active = Instant::now();
+        true
     }
 
     /// Get a member's current ephemeral data.
@@ -609,6 +626,45 @@ mod tests {
         let events = mgr.cleanup_idle();
         assert_eq!(events.len(), 2);
         assert!(mgr.list_rooms().is_empty());
+    }
+
+    /// A member that sends heartbeats outlives the idle timeout; one
+    /// that does not is removed.
+    #[test]
+    fn touch_keeps_member_past_idle_timeout() {
+        let mgr = RoomManager::with_idle_timeout(Duration::from_millis(1000));
+        mgr.join("lobby", "alice", Some(serde_json::json!({"v": 1})))
+            .unwrap();
+        mgr.join("lobby", "bob", None).unwrap();
+
+        std::thread::sleep(Duration::from_millis(700));
+        assert!(mgr.touch("lobby", "alice"));
+        std::thread::sleep(Duration::from_millis(500));
+
+        // bob: 1.2 s idle, past the timeout. alice: 0.5 s since touch.
+        let events = mgr.cleanup_idle();
+        assert_eq!(
+            events,
+            vec![RoomEvent::Leave {
+                room: "lobby".into(),
+                user_id: "bob".into(),
+            }]
+        );
+        assert!(mgr.is_in_room("lobby", "alice"));
+        assert_eq!(
+            mgr.get_presence("lobby", "alice"),
+            Some(serde_json::json!({"v": 1})),
+            "touch must not change presence data"
+        );
+    }
+
+    #[test]
+    fn touch_non_member_returns_false() {
+        let mgr = RoomManager::new(60);
+        assert!(!mgr.touch("lobby", "alice"));
+        mgr.join("lobby", "bob", None).unwrap();
+        assert!(!mgr.touch("lobby", "alice"));
+        assert!(!mgr.is_in_room("lobby", "alice"));
     }
 
     #[test]
