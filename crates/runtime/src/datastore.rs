@@ -2306,11 +2306,7 @@ impl WsRoomBridge {
 
 impl crate::ws::RoomBridge for WsRoomBridge {
     fn members(&self, room: &str) -> Vec<serde_json::Value> {
-        self.rooms
-            .members(room)
-            .into_iter()
-            .map(|p| to_json(p))
-            .collect()
+        self.rooms.members(room).into_iter().map(to_json).collect()
     }
 
     fn is_in_room(&self, room: &str, user_id: &str) -> bool {
