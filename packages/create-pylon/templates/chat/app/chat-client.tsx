@@ -254,7 +254,7 @@ function Chat({ selfId, initialChannel }: { selfId: string; initialChannel?: str
 
   function remove(id: string) {
     if (window.confirm("Delete this message? Everyone in the channel will stop seeing it.")) {
-      void db.delete("Message", id);
+      db.delete("Message", id).catch(console.warn);
     }
   }
 

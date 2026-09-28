@@ -86,7 +86,7 @@ export function PostMenu({ social, post }: { social: Social; post: Post }) {
               className={cn(row, "font-semibold text-red-600")}
               onClick={() => {
                 setOpen(false);
-                void db.delete("Post", post.id);
+                db.delete("Post", post.id).catch(console.warn);
                 if (window.location.pathname.startsWith("/p/")) router.push("/");
               }}
             >

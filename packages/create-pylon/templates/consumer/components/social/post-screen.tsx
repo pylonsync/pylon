@@ -158,7 +158,7 @@ function CommentRow({
           {mine ? (
             <button
               type="button"
-              onClick={() => void db.delete("Comment", comment.id)}
+              onClick={() => db.delete("Comment", comment.id).catch(console.warn)}
               className="hidden items-center gap-1 hover:text-zinc-900 group-hover:inline-flex"
               aria-label="Delete comment"
             >

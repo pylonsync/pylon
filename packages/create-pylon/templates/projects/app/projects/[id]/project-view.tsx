@@ -93,9 +93,9 @@ export function ProjectView({
                   value={project.status}
                   className="h-8 md:h-7.5"
                   onChange={(event) =>
-                    void db.update("Project", project.id, {
+                    db.update("Project", project.id, {
                       status: event.target.value,
-                    })
+                    }).catch(console.warn)
                   }
                 >
                   {PROJECT_STATUSES.map((s) => (

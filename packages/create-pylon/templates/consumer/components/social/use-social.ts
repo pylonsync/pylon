@@ -66,21 +66,21 @@ export type Social = ReturnType<typeof useSocial>;
 export const actions = {
   toggleLike(social: Social, postId: string) {
     const mine = social.myLikes.get(postId);
-    if (mine) void db.delete("Like", mine.id);
-    else if (social.me) void db.insert("Like", { postId, userId: social.me });
+    if (mine) db.delete("Like", mine.id).catch(console.warn);
+    else if (social.me) db.insert("Like", { postId, userId: social.me }).catch(console.warn);
   },
   like(social: Social, postId: string) {
-    if (social.me && !social.myLikes.has(postId)) void db.insert("Like", { postId, userId: social.me });
+    if (social.me && !social.myLikes.has(postId)) db.insert("Like", { postId, userId: social.me }).catch(console.warn);
   },
   toggleSave(social: Social, postId: string) {
     const mine = social.mySaves.get(postId);
-    if (mine) void db.delete("Save", mine.id);
-    else if (social.me) void db.insert("Save", { postId, userId: social.me });
+    if (mine) db.delete("Save", mine.id).catch(console.warn);
+    else if (social.me) db.insert("Save", { postId, userId: social.me }).catch(console.warn);
   },
   toggleFollow(social: Social, userId: string) {
     if (!social.me || userId === social.me) return;
     const mine = social.myFollows.get(userId);
-    if (mine) void db.delete("Follow", mine.id);
-    else void db.insert("Follow", { followingId: userId, followerId: social.me });
+    if (mine) db.delete("Follow", mine.id).catch(console.warn);
+    else db.insert("Follow", { followingId: userId, followerId: social.me }).catch(console.warn);
   },
 };

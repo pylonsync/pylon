@@ -59,9 +59,9 @@ function Inner({
     e.preventDefault();
     e.stopPropagation();
     if (mine) {
-      void db.delete("Watch", mine.id);
+      db.delete("Watch", mine.id).catch(console.warn);
     } else {
-      void db.insert("Watch", { userId: identity!.userId, listingId, listingTitle });
+      db.insert("Watch", { userId: identity!.userId, listingId, listingTitle }).catch(console.warn);
     }
   }
 

@@ -156,9 +156,9 @@ export function InvoiceView({
                       value={invoice.clientId ?? ""}
                       className="h-8 bg-background md:h-7.5"
                       onChange={(event) =>
-                        void db.update("Invoice", invoice.id, {
+                        db.update("Invoice", invoice.id, {
                           clientId: event.target.value || null,
-                        })
+                        }).catch(console.warn)
                       }
                     >
                       <option value="">—</option>
