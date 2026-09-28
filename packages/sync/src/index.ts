@@ -1089,7 +1089,7 @@ export class SyncEngine {
           // DELETE the leader's still-valid row. The follower's prevRow
           // (its pre-edit value) equals the leader's canonical row, so
           // restoring it is correct on both tabs.
-          this.mutations.add(op.change, op.prevRow);
+          this.mutations.add(op.change, op.prevRow, op.owner);
         }
         void this.push();
       },
@@ -1113,7 +1113,11 @@ export class SyncEngine {
         // update/delete and removes the insert ghost, then marks failed.
         for (const op of ops) {
           const m = this.mutations.get(op.opId);
-          if (m) {
+          if (op.code === "DISCARDED") {
+            // Another user is signed in: drop it without restoring rows
+            // of the old identity's replica.
+            this.mutations.discard(op.opId);
+          } else if (m) {
             this.failPushedMutation(m, op.error, op.code);
           } else {
             this.mutations.markFailed(op.opId, op.error, op.code);
@@ -1418,8 +1422,12 @@ export class SyncEngine {
       this.pullHold.push(...changes);
       return Promise.resolve();
     }
-    // Reset fence (see `resetDepth`).
-    if (this.resetDepth > 0 && !opts.isPull) return Promise.resolve();
+    // Reset fence (see `resetDepth`): live frames from the socket being
+    // replaced. The leader's broadcasts to a follower are NOT fenced:
+    // after its `reset` they already describe the new replica.
+    if (this.resetDepth > 0 && !opts.isPull && !opts.fromBroadcast) {
+      return Promise.resolve();
+    }
     const epoch = this.replicaEpoch;
     // Group commit for live frames (WS events, tab broadcasts without a
     // pull cursor). While an earlier batch is still applying and writing
@@ -1466,14 +1474,13 @@ export class SyncEngine {
   private resetDepth = 0;
 
   /**
-   * Offline writes held while nobody is signed in, and the user they
-   * belong to (`undefined` = no hold). A session that expires or signs
-   * out keeps its queue here instead of discarding it; the next
-   * identity decides: the same user (or a guest becoming a user) gets
-   * the writes pushed, anyone else gets them discarded. Pushes wait
-   * while the hold is set.
+   * True from a token change until a session refresh says who the new
+   * token belongs to. While true, owned writes are not pushed (the
+   * owner can't be checked) and a push retries the refresh with backoff.
    */
-  private heldQueueOwner: string | null | undefined = undefined;
+  private identityPending = false;
+  private identityRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private identityRetryAttempts = 0;
 
   /** Chain one apply step behind every queued one. Anything chained
    *  here closes the open live batch first, so later live frames can
@@ -1629,6 +1636,10 @@ export class SyncEngine {
   /** Stop the sync engine. */
   stop(): void {
     this.running = false;
+    if (this.identityRetryTimer !== null) {
+      clearTimeout(this.identityRetryTimer);
+      this.identityRetryTimer = null;
+    }
     if (this.transport) {
       this.transport.stop();
       this.transport = null;
@@ -1713,6 +1724,9 @@ export class SyncEngine {
    * the guard treats conservatively (no wipe, re-tag next run).
    */
   private persistReplicaIdentity(): void {
+    // Before /api/auth/me answered, the session is a placeholder: it
+    // says nothing about who owns the replica. Keep the old tag.
+    if (!this.session.hasObserved()) return;
     const id = this.session.resolved().userId;
     this._replicaIdentity = id;
     if (this.persistence && !this.persistDegraded) {
@@ -1792,9 +1806,13 @@ export class SyncEngine {
         // replica is about to be re-pulled for the CURRENT identity, so
         // re-tag it to match — otherwise the on-disk tag reads "unknown"
         // until the next cold-start pull re-records it.
-        const id = this.session.resolved().userId;
-        this._replicaIdentity = id;
-        await this.persistence.saveIdentity(id);
+        if (this.session.hasObserved()) {
+          const id = this.session.resolved().userId;
+          this._replicaIdentity = id;
+          await this.persistence.saveIdentity(id);
+        } else if (this._replicaIdentity !== undefined) {
+          await this.persistence.saveIdentity(this._replicaIdentity);
+        }
       } catch {
         /* best-effort */
       }
@@ -1941,13 +1959,13 @@ export class SyncEngine {
       // reads the token fresh. The new socket's onConnected pull sees
       // the token as already observed, so this does not recurse.
       this.cycleTransport();
-      // Hold the queued offline writes until the session refresh below
-      // says who signed in; it pushes or discards them.
-      if (this.heldQueueOwner === undefined) {
-        this.heldQueueOwner = this.session.resolved().userId;
-      }
+      // Until the session refresh below says who the new token belongs
+      // to, owned writes wait (see `pushable`).
+      this.identityPending = true;
       // We're holding the "pull" slot in the op queue — bypass the
-      // queue's reset path to avoid self-deadlock.
+      // queue's reset path to avoid self-deadlock. Queued writes stay:
+      // each carries its owner, and push drops the ones that belong to
+      // someone else.
       await this.resetReplicaInner({ wipeMutations: false });
       // Token flipped → the cached tenant is for the previous user. Pull
       // the fresh session in parallel with the cursor catch-up below.
@@ -2711,17 +2729,13 @@ export class SyncEngine {
           // Mark the current token as seen so the pull below does not
           // detect the same flip and reset a second time.
           this.session.observeToken(this.currentToken());
-          if (this.heldQueueOwner === undefined) this.heldQueueOwner = prevUserId;
           // Close the old identity's socket before the wipe so none of
           // its frames land in the new replica.
           this.cycleTransport();
-          await this.resetReplica({ wipeMutations: false });
-          this.settleHeldQueue(next.userId);
-          await this.pull();
-        } else {
-          this.settleHeldQueue(next.userId);
+          // Queued writes stay: each carries its owner, and push drops
+          // the ones that belong to someone else.
+          await this.resetAndPull({ wipeMutations: false });
         }
-        if (this.mutations.pending().length > 0) void this.push();
       } else if (userFlipped) {
         // Follower: the leader's reset already wiped this tab.
       } else if (verdict.tenantChanged && !opts.replicaAlreadyReset) {
@@ -2734,21 +2748,18 @@ export class SyncEngine {
         const skipReset = this.config.resetOnTenantFlip === false;
         // Leader only, like the user flip above: a follower's replica is
         // wiped by the leader's `reset` message.
-        if (verdict.replicaInvalidated && !skipReset && this.isMultiTabLeader) {
-          // Route reset through the public (queued) method so the
-          // wipe serializes against in-flight pulls / WS-event
-          // applies / pushes. sessionChain serializes session
-          // transitions but NOT the apply queue — without queuing
-          // the reset, a concurrent applyChangesAsync could write
-          // rows AFTER we clear the store, leaving stale data under
-          // the new identity. Identity flipped → wipe the outgoing
-          // identity's pending offline writes too.
-          await this.resetReplica({ wipeMutations: true });
+        const reset =
+          verdict.replicaInvalidated && !skipReset && this.isMultiTabLeader;
+        if (reset) {
+          // Reset and re-pull in one op-queue slot (see resetAndPull).
+          // The tenant's view changed → wipe the outgoing tenant's
+          // pending offline writes too.
+          await this.resetAndPull({ wipeMutations: true });
         }
         if (this.isMultiTabLeader) {
           // Only the leader pulls — followers receive subsequent
           // applied broadcasts that close the catch-up window.
-          await this.pull();
+          if (!reset) await this.pull();
           if (skipReset) {
             // No wipe happened, so rows of an org the user only just
             // JOINED aren't in the replica and no change event will
@@ -2763,11 +2774,13 @@ export class SyncEngine {
       // The reset above tagged the replica with the outgoing user (the
       // session was not committed yet). Re-tag it with the new owner.
       if (userFlipped && this.isMultiTabLeader) this.persistReplicaIdentity();
-      // A token change for the SAME user (rotation) held the queue too;
-      // release it now that the session says who is signed in.
-      if (this.isMultiTabLeader && this.heldQueueOwner !== undefined) {
-        this.settleHeldQueue(next.userId);
-        if (this.heldQueueOwner === undefined && this.mutations.pending().length > 0) {
+      // The session now says who the token belongs to: push writes
+      // that were waiting for it (their owner may be this user).
+      if (this.isMultiTabLeader) {
+        const wasPending = this.identityPending;
+        this.identityPending = false;
+        this.identityRetryAttempts = 0;
+        if ((wasPending || userFlipped) && this.mutations.pending().length > 0) {
           void this.push();
         }
       }
@@ -2783,28 +2796,63 @@ export class SyncEngine {
     return this.sessionChain;
   }
 
+  /** Reset the replica and pull from zero in ONE op-queue slot, so no
+   *  live frame can move the cursor between the reset and the pull's
+   *  hold (the pull would then run as a delta and miss rows). */
+  private resetAndPull(opts: { wipeMutations: boolean }): Promise<void> {
+    return this.opQueue.enqueue("reset-pull", async () => {
+      await this.resetReplicaInner(opts);
+      await this.pullInner();
+    }).then(() => {
+      if (this.isMultiTabLeader) this.markInitialSyncSettled();
+    });
+  }
+
+  /** The user a write made now belongs to: the resolved session, or,
+   *  before `/api/auth/me` answered this run, the identity the replica
+   *  was tagged with on disk. `undefined` = unknown. */
+  private currentOwner(): string | null | undefined {
+    if (this.session.hasObserved()) return this.session.resolved().userId;
+    return this._replicaIdentity;
+  }
+
   /**
-   * Decide what happens to the held offline writes now that `nextUserId`
-   * is signed in (see `heldQueueOwner`). Signed out: keep holding. The
-   * owner again, or a guest becoming a user: release them for push. Any
-   * other identity: discard them, so one user's writes never push as
-   * another's.
+   * Decide what push does with a queued write, by its owner:
+   * - `send`: it belongs to the signed-in user (or its owner is unknown,
+   *   an older client's write), or a guest's write after that guest
+   *   signed in (the server merges the guest's rows into the account).
+   * - `hold`: nobody is signed in, or a token change has not resolved
+   *   yet. The write waits for the next identity.
+   * - `discard`: another user is signed in. The write is dropped so one
+   *   user's writes never push as another's.
    */
-  private settleHeldQueue(nextUserId: string | null): void {
-    const owner = this.heldQueueOwner;
-    if (owner === undefined) return;
-    if (nextUserId === null) {
-      if (owner === null) this.heldQueueOwner = undefined;
-      return;
+  private pushable(m: PendingMutation): "send" | "hold" | "discard" {
+    if (m.owner === undefined) return "send";
+    if (this.identityPending) return "hold";
+    const now = this.currentOwner();
+    if (now === undefined) return "hold";
+    if (m.owner === now) return "send";
+    if (now === null) return "hold";
+    if (typeof m.owner === "string" && m.owner.startsWith("guest_") && !now.startsWith("guest_")) {
+      return "send";
     }
-    this.heldQueueOwner = undefined;
-    const guestToUser =
-      typeof owner === "string" &&
-      owner.startsWith("guest_") &&
-      !nextUserId.startsWith("guest_");
-    if (owner !== nextUserId && !guestToUser) {
-      this.mutations.clearAll();
-    }
+    return "discard";
+  }
+
+  /** A push found writes waiting on an unresolved token change. Retry the
+   *  session refresh with backoff (1 s, 2 s, ... 30 s) until it answers;
+   *  the refresh then pushes them. */
+  private scheduleIdentityRetry(): void {
+    if (this.identityRetryTimer !== null || !this.running) return;
+    const attempt = this.identityRetryAttempts;
+    this.identityRetryAttempts += 1;
+    const delay = Math.min(30_000, 1000 * 2 ** Math.min(attempt, 5));
+    this.identityRetryTimer = setTimeout(() => {
+      this.identityRetryTimer = null;
+      void this.refreshResolvedSession().then(() => {
+        if (this.identityPending) this.scheduleIdentityRetry();
+      });
+    }, delay);
   }
 
   private async rawFetch(path: string): Promise<Response> {
@@ -3044,32 +3092,52 @@ export class SyncEngine {
   private attemptedOps = new Set<string>();
 
   private async pushInner(): Promise<void> {
-    const pending = this.mutations.pending();
+    const queued = this.mutations.pending();
     // Keep the attempted set bounded to what is still pending.
-    const pendingIds = new Set(pending.map((m) => m.id));
+    const pendingIds = new Set(queued.map((m) => m.id));
     for (const id of this.attemptedOps) {
       if (!pendingIds.has(id)) this.attemptedOps.delete(id);
     }
     for (const id of pendingIds) this.attemptedOps.add(id);
-    if (pending.length === 0) return;
-
-    // Writes held across a sign-out wait for the next identity (see
-    // `heldQueueOwner`). Release their callers; the writes stay queued.
-    if (this.heldQueueOwner !== undefined) {
-      for (const m of pending) this.mutations.settleQueued(m.id);
-      return;
-    }
+    if (queued.length === 0) return;
 
     // Multi-tab follower: we don't own the network. Forward the
     // pending batch to the leader and let it push. The leader
     // broadcasts `mutations-acked` when the server confirms; that
     // path clears our queue. Note we don't clear locally here — if
     // the leader dies before pushing, on promotion we still have
-    // the queue and can ship it ourselves.
+    // the queue and can ship it ourselves. The leader checks each
+    // write's owner.
     if (!this.isMultiTabLeader) {
-      this.broadcastToTabs({ type: "mutations", ops: pending });
+      this.broadcastToTabs({ type: "mutations", ops: queued });
       return;
     }
+
+    // Owner check (see `pushable`). Discarded writes leave the queue with
+    // code DISCARDED, here and in the tab that made them; their rows were
+    // wiped with the old identity's replica, so nothing is rolled back.
+    // Held writes stay queued; their callers are released.
+    const pending: PendingMutation[] = [];
+    const discarded: { opId: string; error: string; code: string }[] = [];
+    const held: string[] = [];
+    for (const m of queued) {
+      const verdict = this.pushable(m);
+      if (verdict === "send") {
+        pending.push(m);
+      } else if (verdict === "discard") {
+        this.mutations.discard(m.id);
+        discarded.push({ opId: m.id, error: "discarded: another user is signed in", code: "DISCARDED" });
+      } else {
+        this.mutations.settleQueued(m.id);
+        held.push(m.id);
+      }
+    }
+    if (discarded.length > 0) this.broadcastToTabs({ type: "mutations-failed", ops: discarded });
+    if (held.length > 0) {
+      this.broadcastToTabs({ type: "mutations-queued", opIds: held });
+      if (this.identityPending) this.scheduleIdentityRetry();
+    }
+    if (pending.length === 0) return;
 
     try {
       const resp = await this.request<PushResponse>("POST", "/api/sync/push", {
@@ -3330,12 +3398,16 @@ export class SyncEngine {
     const id = generateId();
     const dataWithId = { ...data, id };
     this.store.optimisticInsertWithId(entity, id, dataWithId);
-    const opId = this.mutations.add({
-      entity,
-      row_id: id,
-      kind: "insert",
-      data: dataWithId,
-    });
+    const opId = this.mutations.add(
+      {
+        entity,
+        row_id: id,
+        kind: "insert",
+        data: dataWithId,
+      },
+      undefined,
+      this.currentOwner(),
+    );
     await this.sendAndAwait(opId);
     return id;
   }
@@ -3384,6 +3456,7 @@ export class SyncEngine {
         data: data as Row,
       },
       prev,
+      this.currentOwner(),
     );
     await this.sendAndAwait(opId);
   }
@@ -3404,6 +3477,7 @@ export class SyncEngine {
         kind: "delete",
       },
       prev,
+      this.currentOwner(),
     );
     await this.sendAndAwait(opId);
   }

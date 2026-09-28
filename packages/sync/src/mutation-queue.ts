@@ -55,6 +55,10 @@ export interface PendingMutation {
   error?: string;
   /** Server error code for a failed mutation, when the server sent one. */
   errorCode?: string;
+  /** User id the write was made as (`null` = anonymous). Persisted with
+   *  the queue so a write is only ever pushed as the user who made it.
+   *  `undefined` = unknown (queued by an older client). */
+  owner?: string | null;
   /** Pre-mutation snapshot of the affected row, captured at optimistic-
    *  apply time for `update`/`delete`. On a server rejection,
    *  `failPushedMutation` restores this so the local replica reverts to
@@ -132,14 +136,16 @@ export class MutationQueue {
    *  entry with the same op_id is already queued — a follower
    *  retrying its forward of the same op shouldn't double-queue on
    *  the leader. */
-  add(change: ClientChange, prevRow?: Row | null): string {
+  add(change: ClientChange, prevRow?: Row | null, owner?: string | null): string {
     const id =
       typeof change.op_id === "string" && change.op_id.length > 0
         ? change.op_id
         : `mut_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     if (this.queue.some((m) => m.id === id)) return id;
     const changeWithOp: ClientChange = { ...change, op_id: id };
-    this.queue.push({ id, change: changeWithOp, status: "pending", prevRow });
+    const entry: PendingMutation = { id, change: changeWithOp, status: "pending", prevRow };
+    if (owner !== undefined) entry.owner = owner;
+    this.queue.push(entry);
     this.flush();
     return id;
   }
@@ -248,6 +254,29 @@ export class MutationQueue {
       (m) => m.status === "pending" || m.status === "failed",
     );
     this.flush();
+  }
+
+  /** Drop one mutation that must never be pushed (it belongs to another
+   *  identity) and reject its waiters with code `DISCARDED`. Does not
+   *  touch the local store. */
+  discard(id: string): void {
+    const m = this.get(id);
+    this.queue = this.queue.filter((q) => q.id !== id);
+    this.flush();
+    const waiters = this.waiters.get(id);
+    if (!waiters) return;
+    this.waiters.delete(id);
+    const err = new MutationRejectedError(
+      "The write was discarded because the signed-in identity changed.",
+      {
+        code: "DISCARDED",
+        opId: id,
+        entity: m?.change.entity ?? "",
+        rowId: m?.change.row_id ?? "",
+        kind: m?.change.kind ?? "insert",
+      },
+    );
+    for (const w of waiters) w.reject(err);
   }
 
   /** Remove a specific mutation by id. Used by the UI after user

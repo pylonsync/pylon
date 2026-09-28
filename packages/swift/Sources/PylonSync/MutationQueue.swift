@@ -34,6 +34,12 @@ public struct PendingMutation: Sendable, Codable, Hashable {
     public var error: String?
     /// Server error code for a failed mutation, when the server sent one.
     public var errorCode: String?
+    /// User id the write was made as (`nil` with `ownerKnown == true` =
+    /// anonymous). Persisted with the queue so a write is only ever pushed
+    /// as the user who made it. `ownerKnown` is nil/false for writes
+    /// queued by an older client. Parity with TS `PendingMutation.owner`.
+    public var owner: String?
+    public var ownerKnown: Bool?
     /// Pre-mutation snapshot of the row, captured at queue time for
     /// update/delete. Used to restore the row if the push is permanently
     /// rejected (see `SyncEngine.failPushedMutation`). `nil` for inserts and
@@ -121,11 +127,22 @@ public actor MutationQueue {
     /// is called, so the caller can push before it waits. Every tracked id
     /// must be waited on once.
     @discardableResult
-    public func add(_ change: ClientChange, prevRow: Row? = nil, trackOutcome: Bool = false) async -> String {
+    public func add(
+        _ change: ClientChange,
+        prevRow: Row? = nil,
+        trackOutcome: Bool = false,
+        owner: String? = nil,
+        ownerKnown: Bool = false
+    ) async -> String {
         let id = "mut_\(Int(Date().timeIntervalSince1970 * 1000))_\(UUID().uuidString.prefix(8))"
         var changeWithOp = change
         changeWithOp.op_id = id
-        queue.append(PendingMutation(id: id, change: changeWithOp, prevRow: prevRow))
+        var entry = PendingMutation(id: id, change: changeWithOp, prevRow: prevRow)
+        if ownerKnown {
+            entry.owner = owner
+            entry.ownerKnown = true
+        }
+        queue.append(entry)
         if trackOutcome { tracked[id] = .some(nil) }
         await flush()
         return id
@@ -244,6 +261,24 @@ public actor MutationQueue {
             )
             resumeWaiters(m.id, with: .failure(err))
         }
+    }
+
+    /// Drop one mutation that must never be pushed (it belongs to another
+    /// identity) and fail its waiters with code `DISCARDED`. Does not touch
+    /// the local store. Parity with TS `MutationQueue.discard`.
+    public func discard(_ id: String) async {
+        let m = queue.first(where: { $0.id == id })
+        queue.removeAll { $0.id == id }
+        await flush()
+        let err = MutationRejectedError(
+            code: "DISCARDED",
+            message: "The write was discarded because the signed-in identity changed.",
+            opId: id,
+            entity: m?.change.entity ?? "",
+            rowId: m?.change.row_id ?? "",
+            kind: m?.change.kind ?? .insert
+        )
+        resumeWaiters(id, with: .failure(err))
     }
 
     public func remove(_ id: String) async {

@@ -135,14 +135,16 @@ public actor SyncEngine {
     /// during the flip (the reconnect's `connectWs`) sees no second flip.
     private var replicaUserId: String? = nil
     private var replicaUserKnown = false
-    /// Offline writes held while nobody is signed in, and the user they
-    /// belong to (nil = no hold). A session that expires or signs out
-    /// keeps its queue here instead of discarding it; the next identity
-    /// decides: the same user (or a guest becoming a user) gets them
-    /// pushed, anyone else gets them discarded. Pushes wait while held.
-    /// Parity with TS `heldQueueOwner`.
-    private var heldQueue: HeldQueue? = nil
-    private struct HeldQueue { let owner: String? }
+    /// True from a token change until a session refresh says who the new
+    /// token belongs to. Owned writes wait meanwhile, and a push retries
+    /// the refresh with backoff. Parity with TS `identityPending`.
+    private var identityPending = false
+    private var identityRetryScheduled = false
+    private var identityRetryAttempts = 0
+    /// Identifies the pull that owns `pullHold`, so an older overlapping
+    /// pull that ends (or is cut short by a reset) does not close a newer
+    /// pull's hold and drop its buffered frames.
+    private var pullHoldOwner: UUID? = nil
     private var lastSeenToken: String? = nil
     private var lastSeenTokenObserved = false
     private var lastSeenTenant: String? = nil
@@ -364,9 +366,10 @@ public actor SyncEngine {
             // it BEFORE the wipe so none of its frames land in the new
             // replica. Parity with the TS engine's `tokenChanged` path.
             cycleTransport()
-            // Hold the queued offline writes until the session refresh says
-            // who signed in; it pushes or discards them.
-            if heldQueue == nil { heldQueue = HeldQueue(owner: resolvedSession.userId) }
+            // Until the session refresh says who the new token belongs to,
+            // owned writes wait (see `pushable`). Queued writes stay: each
+            // carries its owner, and push drops the ones of another user.
+            identityPending = true
             await resetReplica(wipeMutations: false)
             // This pull already reset the replica and cycled the socket, so
             // the session refresh must not do either a second time.
@@ -388,8 +391,15 @@ public actor SyncEngine {
         // pull hasn't delivered yet (see `pullHold`). The success path
         // drains + replays it; this backstop discards whatever remains
         // on a failed pull (the next pull re-fetches those events).
+        let holdOwner = UUID()
         pullHold = []
-        defer { pullHold = nil }
+        pullHoldOwner = holdOwner
+        defer {
+            if pullHoldOwner == holdOwner {
+                pullHold = nil
+                pullHoldOwner = nil
+            }
+        }
         // Fetch/apply pipelining (parity with the TS engine): page N's
         // apply runs while page N+1 is in flight, so a multi-page
         // catch-up costs max(network, apply) per page instead of their
@@ -687,16 +697,27 @@ public actor SyncEngine {
     private var attemptedOps: Set<String> = []
 
     private func pushInner() async {
-        let pending = await mutations.pending()
-        let pendingIds = Set(pending.map(\.id))
+        let queued = await mutations.pending()
+        let pendingIds = Set(queued.map(\.id))
         attemptedOps = attemptedOps.intersection(pendingIds).union(pendingIds)
-        guard !pending.isEmpty else { return }
-        // Writes held across a sign-out wait for the next identity (see
-        // `heldQueue`). Release their callers; the writes stay queued.
-        if heldQueue != nil {
-            for m in pending { await mutations.settleQueued(m.id) }
-            return
+        guard !queued.isEmpty else { return }
+        // Owner check (see `pushable`). Discarded writes leave the queue with
+        // code DISCARDED (their rows went with the old identity's replica,
+        // so nothing is rolled back). Held writes stay queued; their callers
+        // are released.
+        var pending: [PendingMutation] = []
+        var anyHeld = false
+        for m in queued {
+            switch pushable(m) {
+            case .send: pending.append(m)
+            case .discard: await mutations.discard(m.id)
+            case .hold:
+                anyHeld = true
+                await mutations.settleQueued(m.id)
+            }
         }
+        if anyHeld && identityPending { scheduleIdentityRetry() }
+        guard !pending.isEmpty else { return }
         let req = PushRequest(changes: pending.map(\.change), client_id: clientId)
         do {
             let resp = try await client.syncPush(req)
@@ -859,7 +880,8 @@ public actor SyncEngine {
         withId["id"] = .string(id)
         store.optimisticInsertWithId(entity, id: id, withId)
         let opId = await mutations.add(
-            ClientChange(entity: entity, row_id: id, kind: .insert, data: withId), trackOutcome: true)
+            ClientChange(entity: entity, row_id: id, kind: .insert, data: withId), trackOutcome: true,
+            owner: currentOwner().user, ownerKnown: currentOwner().known)
         try await sendAndAwait(opId)
         return id
     }
@@ -873,7 +895,8 @@ public actor SyncEngine {
         let prev = store.get(entity, id: id)
         store.optimisticUpdate(entity, id: id, data)
         let opId = await mutations.add(
-            ClientChange(entity: entity, row_id: id, kind: .update, data: data), prevRow: prev, trackOutcome: true)
+            ClientChange(entity: entity, row_id: id, kind: .update, data: data), prevRow: prev, trackOutcome: true,
+            owner: currentOwner().user, ownerKnown: currentOwner().known)
         try await sendAndAwait(opId)
     }
 
@@ -884,7 +907,8 @@ public actor SyncEngine {
         let prev = store.get(entity, id: id)
         store.optimisticDelete(entity, id: id)
         let opId = await mutations.add(
-            ClientChange(entity: entity, row_id: id, kind: .delete), prevRow: prev, trackOutcome: true)
+            ClientChange(entity: entity, row_id: id, kind: .delete), prevRow: prev, trackOutcome: true,
+            owner: currentOwner().user, ownerKnown: currentOwner().known)
         try await sendAndAwait(opId)
     }
 
@@ -1287,21 +1311,20 @@ public actor SyncEngine {
                 replicaUserKnown = true
                 lastSeenTenant = next.tenantId
                 lastSeenTenantObserved = true
+                identityPending = false
+                identityRetryAttempts = 0
                 if !replicaAlreadyReset {
-                    if heldQueue == nil { heldQueue = HeldQueue(owner: prevUserId) }
-                    // Close the old identity's socket before the wipe.
-                    cycleTransport()
-                    await resetReplica(wipeMutations: false)
                     // Mark the current token as seen so the pull below does
                     // not detect the same flip and reset a second time.
                     lastSeenToken = await client.currentToken()
                     lastSeenTokenObserved = true
-                    await settleHeldQueue(nextUserId: next.userId)
+                    // Close the old identity's socket before the wipe. Queued
+                    // writes stay: push drops the ones of another user.
+                    cycleTransport()
                     resolvedSession = next
                     store.notify()
-                    await pull()
+                    await resetAndPull(wipeMutations: false)
                 } else {
-                    await settleHeldQueue(nextUserId: next.userId)
                     resolvedSession = next
                     store.notify()
                 }
@@ -1327,13 +1350,12 @@ public actor SyncEngine {
             let skipReset = !config.resetOnTenantFlip
             // A token-flip pull already reset and re-pulled under the new
             // credentials, so the tenant it carries is already applied.
-            if heldQueue != nil {
-                // A token change for the same user (rotation) held the
-                // queue; release it now that the session is known.
-                await settleHeldQueue(nextUserId: next.userId)
-                if heldQueue == nil, !(await mutations.pending().isEmpty) {
-                    Task { await self.push() }
-                }
+            if identityPending {
+                // A token change for the same user (rotation): the owner is
+                // known again, so push what waited for it.
+                identityPending = false
+                identityRetryAttempts = 0
+                if !(await mutations.pending().isEmpty) { Task { await self.push() } }
             }
             if tenantChanged && replicaAlreadyReset {
                 lastSeenTenant = tenantNow
@@ -1348,12 +1370,6 @@ public actor SyncEngine {
             // during the reset sees no second flip.
             lastSeenTenant = tenantNow
             lastSeenTenantObserved = true
-            if tenantChanged {
-                if replicaInvalidated && !skipReset {
-                    // Tenant flip is an identity change → wipe rows + queued writes.
-                    await resetReplica(wipeMutations: true)
-                }
-            }
             if next != resolvedSession {
                 resolvedSession = next
                 store.notify()
@@ -1361,7 +1377,12 @@ public actor SyncEngine {
             if tenantChanged {
                 // Re-pull under the new tenant. After a wipe this is the
                 // from-zero snapshot; without one it is the delta.
-                await pull()
+                if replicaInvalidated && !skipReset {
+                    // Tenant flip is an identity change → wipe rows + queued writes.
+                    await resetAndPull(wipeMutations: true)
+                } else {
+                    await pull()
+                }
                 if skipReset {
                     await reconcile()
                 }
@@ -1371,20 +1392,61 @@ public actor SyncEngine {
         }
     }
 
-    /// Decide what happens to the held offline writes now that
-    /// `nextUserId` is signed in (see `heldQueue`). Parity with TS
-    /// `settleHeldQueue`.
-    private func settleHeldQueue(nextUserId: String?) async {
-        guard let held = heldQueue else { return }
-        guard let nextUserId else {
-            if held.owner == nil { heldQueue = nil }
-            return
+    /// Reset, then pull from zero with live frames held in between: a frame
+    /// that applied after the reset and before the pull opened its hold
+    /// would move the cursor and turn the snapshot into a delta. Parity
+    /// with TS `resetAndPull`.
+    private func resetAndPull(wipeMutations: Bool) async {
+        await resetReplica(wipeMutations: wipeMutations)
+        pullHold = []
+        pullHoldOwner = nil
+        await pull()
+    }
+
+    /// The user a write made now belongs to. `known == false` before the
+    /// session resolved this run.
+    private func currentOwner() -> (user: String?, known: Bool) {
+        if replicaUserKnown { return (replicaUserId, true) }
+        if lastSeenTenantObserved { return (resolvedSession.userId, true) }
+        return (nil, false)
+    }
+
+    private enum PushVerdict { case send, hold, discard }
+
+    /// What push does with a queued write, by its owner. Parity with TS
+    /// `pushable`: send it as its owner (or a guest's write after that
+    /// guest signed in); hold it while nobody is signed in or a token
+    /// change is unresolved; discard it once another user is signed in.
+    private func pushable(_ m: PendingMutation) -> PushVerdict {
+        guard m.ownerKnown == true else { return .send }
+        if identityPending { return .hold }
+        let now = currentOwner()
+        guard now.known else { return .hold }
+        if m.owner == now.user { return .send }
+        guard let user = now.user else { return .hold }
+        if (m.owner?.hasPrefix("guest_") ?? false) && !user.hasPrefix("guest_") { return .send }
+        return .discard
+    }
+
+    /// Writes wait on an unresolved token change: retry the session refresh
+    /// with backoff (1 s, 2 s, ... 30 s) until it answers; the refresh then
+    /// pushes them.
+    private func scheduleIdentityRetry() {
+        guard !identityRetryScheduled, running else { return }
+        identityRetryScheduled = true
+        let attempt = identityRetryAttempts
+        identityRetryAttempts += 1
+        let delayMs = min(30_000, 1000 * (1 << min(attempt, 5)))
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delayMs) * 1_000_000)
+            await self?.runIdentityRetry()
         }
-        heldQueue = nil
-        let guestToUser = (held.owner?.hasPrefix("guest_") ?? false) && !nextUserId.hasPrefix("guest_")
-        if held.owner != nextUserId && !guestToUser {
-            await mutations.wipeAll()
-        }
+    }
+
+    private func runIdentityRetry() async {
+        identityRetryScheduled = false
+        await refreshResolvedSession()
+        if identityPending { scheduleIdentityRetry() }
     }
 
     public func notifySessionChanged() async {
