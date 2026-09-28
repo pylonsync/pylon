@@ -299,6 +299,8 @@ impl SseBody<Box<dyn std::io::Write + Send>> {
 }
 
 impl<W: std::io::Write> SseBody<W> {
+    /// A body over any writer, framed for `http_version` (tests).
+    #[cfg(test)]
     pub(crate) fn new(inner: W, http_version: &tiny_http::HTTPVersion) -> Self {
         Self {
             inner,

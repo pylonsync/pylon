@@ -1065,18 +1065,6 @@ fn guest_issue_rate_limited(ctx: &RouterContext) -> Option<(u16, String)> {
     }
 }
 
-/// If the request arrived under a guest session whose user_id differs
-/// from `to_user_id`, transfer ownership of every `id(<user_entity>)`
-/// row from the guest to the authenticated user and revoke the guest
-/// session. Returns `(from_user_id, summary)` when a merge ran, `None`
-/// otherwise (no guest session, or the same id).
-///
-/// Side effects beyond the row updates:
-/// - Revokes the guest session token so a leaked guest cookie can't
-///   later impersonate the (now empty) guest user_id.
-/// - Does NOT delete the guest user row. Apps may have FK constraints
-///   that prevent deletion, and an orphan guest row with zero
-///   referencing entities is harmless.
 /// Warn (at most every 10 minutes) when a production guest session is
 /// minted for a loopback or private address. That address is a reverse
 /// proxy or a shared NAT, so every client behind it shares one guest cap.
@@ -1107,6 +1095,18 @@ fn warn_on_shared_guest_address(ctx: &RouterContext) {
     );
 }
 
+/// If the request arrived under a guest session whose user_id differs
+/// from `to_user_id`, transfer ownership of every `id(<user_entity>)`
+/// row from the guest to the authenticated user and revoke the guest
+/// session. Returns `(from_user_id, summary)` when a merge ran, `None`
+/// otherwise (no guest session, or the same id).
+///
+/// Side effects beyond the row updates:
+/// - Revokes the guest session token so a leaked guest cookie can't
+///   later impersonate the (now empty) guest user_id.
+/// - Does NOT delete the guest user row. Apps may have FK constraints
+///   that prevent deletion, and an orphan guest row with zero
+///   referencing entities is harmless.
 fn maybe_merge_anonymous(
     ctx: &RouterContext,
     to_user_id: &str,
