@@ -165,6 +165,20 @@ public actor SyncEngine {
     /// `PylonQuery.loading` — mirrors `SyncEngine.isInitialSyncSettled()` in TS.
     public func isInitialSyncSettled() -> Bool { _initialSyncSettled }
 
+    /// True once a pull completed against the server in this run since the
+    /// last replica reset. Unlike `isInitialSyncSettled()` there is no
+    /// fallback deadline: it stays false while the replica holds only what
+    /// the local cache had (possibly stale or partial) and while the server
+    /// is unreachable. Drives `PylonQuery.synced`. Mirrors TS `isSynced()`.
+    public func isSynced() -> Bool { _synced }
+    private var _synced = false
+
+    private func markSynced() {
+        if _synced { return }
+        _synced = true
+        store.notify()
+    }
+
     /// Flip the signal true (idempotent) + notify observers so a `PylonQuery`
     /// re-reads and drops its `loading`. Cancels any armed fallback.
     private func markInitialSyncSettled() {
@@ -421,6 +435,7 @@ public actor SyncEngine {
             // a no-op on every pull after the first (until the next resetReplica
             // flips the signal back to false).
             markInitialSyncSettled()
+            markSynced()
         } catch let error as PylonError {
             // Settle any in-flight page apply before acting on the
             // error — the 410 path wipes the replica, and an apply
@@ -1255,6 +1270,7 @@ public actor SyncEngine {
         // pin. The next pull's success re-settles it. (TS resetReplicaInner
         // parity — the useQuery loading-flash fix, framework #315.)
         _initialSyncSettled = false
+        _synced = false
         store.notify()
         armInitialSyncFallback()
     }

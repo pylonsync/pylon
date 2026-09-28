@@ -86,6 +86,12 @@ export interface MultiTabOrchestratorHooks {
   onMutationsFailed(
     ops: { opId: string; error: string; code?: string }[],
   ): void;
+  /** Leader → followers: the leader completed a pull (see
+   *  `SyncEngine.isSynced`). */
+  onSyncedReceived(): void;
+  /** Follower → leader: a tab that just started asks whether the leader
+   *  has synced. */
+  onSyncStatusRequested(): void;
   /** Leader → followers: the leader's push failed transiently and
    *  these op ids stay queued for retry. */
   onMutationsQueued(opIds: string[]): void;
@@ -379,6 +385,15 @@ export class MultiTabOrchestrator {
           | { opId: string; error: string; code?: string }[]
           | undefined;
         if (Array.isArray(ops)) this.hooks.onMutationsFailed(ops);
+        break;
+      }
+      case "synced": {
+        this.hooks.onSyncedReceived();
+        break;
+      }
+      case "sync-status-request": {
+        if (!this._isLeader) return;
+        this.hooks.onSyncStatusRequested();
         break;
       }
       case "mutations-queued": {

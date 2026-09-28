@@ -273,6 +273,28 @@ export class SyncEngine {
 
   private _initialSyncFallback: ReturnType<typeof setTimeout> | null = null;
 
+  /**
+   * True once a pull completed against the server in this run since the
+   * last replica reset. Unlike `isInitialSyncSettled()`, a warm cache does
+   * not set it and there is no fallback deadline: it stays false while the
+   * replica holds only what IndexedDB had (possibly stale or partial) and
+   * while the server is unreachable. A replica reset (identity or org
+   * switch, 410 resync) clears it until the re-pull lands. Follower tabs
+   * take it from the leader.
+   */
+  private _synced = false;
+  isSynced(): boolean {
+    return this._synced;
+  }
+
+  /** Flip `_synced` true (idempotent), notify, and tell follower tabs. */
+  private markSynced(): void {
+    if (this._synced) return;
+    this._synced = true;
+    this.store.notify();
+    if (this.isMultiTabLeader) this.broadcastToTabs({ type: "synced" });
+  }
+
   /** Flip `_initialSyncSettled` true (idempotent) + notify so `useQuery`
    *  re-reads and drops its loading state. */
   private markInitialSyncSettled(): void {
@@ -877,6 +899,8 @@ export class SyncEngine {
       if (pendingOps.length > 0) {
         this.broadcastToTabs({ type: "mutations", ops: pendingOps });
       }
+      // Ask the leader whether it has synced; it answers with `synced`.
+      this.broadcastToTabs({ type: "sync-status-request" });
       return;
     }
 
@@ -1037,6 +1061,16 @@ export class SyncEngine {
       },
       onResetReceived: (wipeMutations: boolean) => {
         void this.resetReplicaInner({ wipeMutations });
+      },
+      onSyncedReceived: () => {
+        if (this.isMultiTabLeader) return;
+        // Flip after the leader's earlier `applied` batches land here.
+        void this.applyQueue.then(() => this.markSynced());
+      },
+      onSyncStatusRequested: () => {
+        if (this.isMultiTabLeader && this._synced) {
+          this.broadcastToTabs({ type: "synced" });
+        }
       },
       onSessionReceived: (resolved: ResolvedSession) => {
         // Funnel through the shared session chain so concurrent triggers
@@ -1602,6 +1636,7 @@ export class SyncEngine {
     // the next line reached nobody. The documented protection above silently
     // did nothing: an org switch dropped straight to the new org's empty list.
     this._initialSyncSettled = false;
+    this._synced = false;
     this.armInitialSyncFallback();
     this.store.clearAll();
     // Disk is about to be wiped + re-pulled from 0, so any prior
@@ -1904,6 +1939,7 @@ export class SyncEngine {
         this.pullHold = null;
         if (held.length > 0) await this.enqueueApply(held);
       }
+      this.markSynced();
     } catch (err) {
       // Settle any in-flight page apply before acting on the error —
       // the 410 path below wipes the replica, and an apply landing

@@ -28,6 +28,12 @@ public final class PylonQuery<T: Decodable>: ObservableObject {
     /// post-org-switch resnapshot) doesn't flash the empty state for the
     /// seconds the snapshot takes.
     @Published public private(set) var loading = true
+    /// True once the engine has completed a pull against the server in this
+    /// session (since the last replica reset). While false, `rows` may be a
+    /// stale or partial copy from the local cache, or the server is
+    /// unreachable. Use it where an incomplete list would mislead (counts,
+    /// "no results"). Mirrors React `useQuery().synced`.
+    @Published public private(set) var synced = false
     @Published public private(set) var error: Error?
 
     private let engine: SyncEngine
@@ -88,6 +94,8 @@ public final class PylonQuery<T: Decodable>: ObservableObject {
                     self.loading = false
                 }
             }
+            let synced = await engine.isSynced()
+            if synced != self.synced { self.synced = synced }
             do {
                 let decoded: [T] = try filtered.compactMap { row in
                     let data = try JSONEncoder().encode(row)

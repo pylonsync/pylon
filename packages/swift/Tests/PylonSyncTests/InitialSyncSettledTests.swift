@@ -74,4 +74,42 @@ final class InitialSyncSettledTests: XCTestCase {
         // Cancel any armed fallback task so it doesn't outlive the test.
         await engine.stop()
     }
+
+    /// `isSynced()` has no fallback and is not set by a warm cache: it flips
+    /// only when a pull completes, and a reset clears it. Mirrors TS
+    /// `packages/sync/src/synced-flag.test.ts`.
+    func testSyncedFollowsCompletedPullsOnly() async throws {
+        let engine = await makeEngine()
+        var synced = await engine.isSynced()
+        XCTAssertFalse(synced)
+        await engine.pull()
+        synced = await engine.isSynced()
+        XCTAssertTrue(synced, "a completed pull marks the replica synced")
+        await engine.resetReplica()
+        synced = await engine.isSynced()
+        XCTAssertFalse(synced, "a reset clears it until the re-pull")
+        await engine.pull()
+        synced = await engine.isSynced()
+        XCTAssertTrue(synced)
+        await engine.stop()
+    }
+
+    func testSyncedStaysFalseWhenThePullFails() async throws {
+        let transport = MockTransport { req in
+            if req.url?.path == "/api/sync/pull" { return (503, Data("{}".utf8)) }
+            return (404, Data("{}".utf8))
+        }
+        let client = PylonClient(
+            config: PylonClientConfig(baseURL: URL(string: "http://test.invalid")!),
+            storage: MemoryStorage(),
+            transport: transport
+        )
+        let cfg = SyncEngineConfig(
+            baseURL: URL(string: "http://test.invalid")!, transport: .poll, pollInterval: 60)
+        let engine = await SyncEngine(config: cfg, client: client)
+        await engine.pull()
+        let synced = await engine.isSynced()
+        XCTAssertFalse(synced, "an unreachable server never marks the replica synced")
+        await engine.stop()
+    }
 }

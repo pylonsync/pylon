@@ -68,8 +68,10 @@ let persistence = try SQLitePersistence(
 let engine = await SyncEngine(config: cfg, client: client, persistence: persistence)
 await engine.start()
 
-// 3. Optimistic mutations — local store updates immediately, syncs in background
-_ = await engine.insert("Todo", ["title": "ship it", "done": false])
+// 3. Optimistic mutations — local store updates immediately. The call returns
+//    when the server applies the write (or queues it while offline) and throws
+//    MutationRejectedError, after rolling back, when the server refuses it.
+_ = try await engine.insert("Todo", ["title": "ship it", "done": false])
 
 // 4. React to local-store changes
 let store = await engine.store
@@ -195,10 +197,13 @@ await engine.pull()
 // Push pending mutations
 await engine.push()
 
-// Optimistic mutations
-let id = await engine.insert("Todo", ["title": "x"])
-await engine.update("Todo", id: id, ["done": true])
-await engine.delete("Todo", id: id)
+// Optimistic mutations (throw MutationRejectedError when the server refuses)
+let id = try await engine.insert("Todo", ["title": "x"])
+try await engine.update("Todo", id: id, ["done": true])
+try await engine.delete("Todo", id: id)
+
+// true once a pull completed in this session (PylonQuery.synced)
+let synced = await engine.isSynced()
 
 // Subscribe to local-store changes
 let store = await engine.store

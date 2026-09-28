@@ -134,6 +134,9 @@ export type {
   UseRoomReturn,
 } from "./useRoom";
 export type { RoomMessage } from "@pylonsync/sync";
+// Thrown by db.insert / update / delete (and useEntity's) when the server
+// rejects a write.
+export { MutationRejectedError } from "@pylonsync/sync";
 
 // Shard hook for real-time sims (games, MMO, live docs, etc.)
 export { useShard, connectShard } from "./useShard";

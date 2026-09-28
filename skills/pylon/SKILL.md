@@ -678,6 +678,8 @@ function MessageList({ roomId }: { roomId: string }) {
 
 Filter keys must be indexed columns for performant fan-out.
 
+`loading` drops as soon as there are rows to show, including rows from a warm local cache that this session has not confirmed with the server. `synced` (on `useQuery` / `useQueryOne`) is true once the engine completed a pull in this session; it resets on an org or account switch and stays false offline. Gate empty states, counts, and billing UI on `synced` so a stale partial cache never reads as complete.
+
 ### Calling functions
 
 ```tsx

@@ -31,6 +31,15 @@ export interface QueryOptions {
 export interface UseQueryReturn<T> {
   data: T[];
   loading: boolean;
+  /**
+   * True once the engine has completed a pull against the server in this
+   * session (since the last replica reset). While false, `data` may be a
+   * stale or partial copy loaded from the local cache, or the server is
+   * unreachable. `loading` is false as soon as cached rows exist, so use
+   * `synced` when an incomplete list would mislead (counts, "no results",
+   * billing state).
+   */
+  synced: boolean;
   error: Error | null;
   /** Re-fetch from the server. Rarely needed — data is live. */
   refetch: () => void;
@@ -39,6 +48,9 @@ export interface UseQueryReturn<T> {
 export interface UseQueryOneReturn<T> {
   data: T | null;
   loading: boolean;
+  /** See `UseQueryReturn.synced`. A `null` row with `synced: false` may
+   *  still exist on the server. */
+  synced: boolean;
   error: Error | null;
   refetch: () => void;
 }
@@ -159,6 +171,12 @@ export function useQuery<T = Row>(
   // instead of flashing "nothing here" over data that is on its way back.
   const loading = refetching || (!settled && data.length === 0);
 
+  const synced = useSyncExternalStore(
+    subscribe,
+    useCallback(() => sync.isSynced(), [sync]),
+    FALSE_SNAPSHOT,
+  );
+
   // Register interest so the reconcile safety net sweeps this entity
   // even when the local replica has zero rows for it. Without this, a
   // server row in a never-cached entity (created on another surface, a
@@ -184,7 +202,7 @@ export function useQuery<T = Row>(
       .finally(() => setRefetching(false));
   }, [sync]);
 
-  return { data, loading, error, refetch };
+  return { data, loading, synced, error, refetch };
 }
 
 /**
@@ -248,6 +266,12 @@ export function useQueryOne<T = Row>(
   // server-side from flashing "not found" while it is still in flight.
   const loading = refetching || (!settled && data === null);
 
+  const synced = useSyncExternalStore(
+    subscribe,
+    useCallback(() => sync.isSynced(), [sync]),
+    FALSE_SNAPSHOT,
+  );
+
   // Register interest so reconcile sweeps this entity even with zero
   // local rows. See SyncEngine.observeEntity.
   useEffect(() => {
@@ -265,7 +289,7 @@ export function useQueryOne<T = Row>(
       .finally(() => setRefetching(false));
   }, [sync]);
 
-  return { data, loading, error, refetch };
+  return { data, loading, synced, error, refetch };
 }
 
 // ---------------------------------------------------------------------------

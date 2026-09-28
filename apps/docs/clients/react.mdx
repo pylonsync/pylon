@@ -43,6 +43,13 @@ export function TodoList() {
 }
 ```
 
+`loading` is true only while there is nothing to show and the first server pull has not landed. With a warm local cache it is false at once, even before this session has talked to the server. `synced` is true once the engine has completed a pull in this session (it goes back to false after an org or account switch until the re-pull lands, and stays false while offline). Check it where a partial list would mislead: counts, "no results", billing state.
+
+```tsx
+const { data: invoices, synced } = db.useQuery<Invoice>("Invoice");
+return synced && invoices.length === 0 ? <EmptyState /> : <InvoiceTable rows={invoices} />;
+```
+
 With filtering / ordering / limits:
 
 ```tsx
@@ -56,8 +63,10 @@ const { data } = db.useQuery<Todo>("Todo", {
 ### `db.useQueryOne` — single row by ID
 
 ```tsx
-const { data: post } = db.useQueryOne<Post>("Post", postId);
+const { data: post, loading, synced } = db.useQueryOne<Post>("Post", postId);
 ```
+
+A `null` row with `synced: false` may still exist on the server.
 
 ### `db.useInfiniteQuery` — paginated with `loadMore`
 
@@ -115,7 +124,18 @@ await update(todoId, { done: true });
 await remove(todoId);
 ```
 
-Same store + reconciliation as `db.useMutation`.
+Same store + reconciliation as `db.useMutation`. The change is in the local store before the promise settles. The promise resolves when the server applies the write, or when the server can't be reached and the write is queued for retry. It rejects with a `MutationRejectedError` when the server refuses the write (policy denial, validation); the optimistic change is rolled back first.
+
+```tsx
+import { MutationRejectedError } from "@pylonsync/react";
+
+try {
+  await insert({ channelId, body });
+} catch (err) {
+  if (err instanceof MutationRejectedError) showToast(`Not sent: ${err.message}`); // err.code, e.g. "POLICY_DENIED"
+  else throw err;
+}
+```
 
 ### `db.useSearch` — live faceted search
 
