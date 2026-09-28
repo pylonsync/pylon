@@ -922,7 +922,9 @@ export class SyncEngine {
     // we don't get stuck without a session.
     const bootstrapSession = await sessionPromise;
     if (bootstrapSession !== null) {
-      await this.applySessionTransition(bootstrapSession, /* broadcast */ true);
+      await this.applySessionTransition(bootstrapSession.session, /* broadcast */ true, {
+        token: bootstrapSession.token,
+      });
     } else {
       await this.refreshResolvedSession();
     }
@@ -1089,7 +1091,7 @@ export class SyncEngine {
           // DELETE the leader's still-valid row. The follower's prevRow
           // (its pre-edit value) equals the leader's canonical row, so
           // restoring it is correct on both tabs.
-          this.mutations.add(op.change, op.prevRow, op.owner);
+          this.mutations.add(op.change, op.prevRow, op.owner, op.ownerPending);
         }
         void this.push();
       },
@@ -1479,6 +1481,10 @@ export class SyncEngine {
    * owner can't be checked) and a push retries the refresh with backoff.
    */
   private identityPending = false;
+  /** Bearer token the committed session was fetched with (leader). A
+   *  push whose current token differs holds owned writes: the token may
+   *  belong to someone else. `undefined` until a session is committed. */
+  private sessionToken: string | null | undefined = undefined;
   private identityRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private identityRetryAttempts = 0;
 
@@ -1708,12 +1714,9 @@ export class SyncEngine {
     // queued writes should re-push under the user). For any other flip
     // (user A → user B, user → guest) discard them so one identity's
     // unsynced writes never push under another.
-    const isGuestToUser =
-      typeof prev === "string" &&
-      prev.startsWith("guest_") &&
-      typeof now === "string" &&
-      !now.startsWith("guest_");
-    await this.resetReplica({ wipeMutations: !isGuestToUser });
+    // Queued writes stay: each carries its owner, and push holds the ones
+    // of a signed-out user and discards the ones of another user.
+    await this.resetReplica({ wipeMutations: false });
     this.persistReplicaIdentity();
   }
 
@@ -2604,7 +2607,10 @@ export class SyncEngine {
     if (!this.isMultiTabLeader) return;
     const next = await this.fetchSessionBootstrap();
     if (next === null) return;
-    await this.applySessionTransition(next, /* broadcast */ true, opts);
+    await this.applySessionTransition(next.session, /* broadcast */ true, {
+      ...opts,
+      token: next.token,
+    });
   }
 
   /**
@@ -2621,8 +2627,11 @@ export class SyncEngine {
    * caller's next pull cycle (or the WS `session-changed` envelope)
    * will retry. Errors must not abort bootstrap.
    */
-  private async fetchSessionBootstrap(): Promise<ResolvedSession | null> {
+  private async fetchSessionBootstrap(): Promise<
+    { session: ResolvedSession; token: string | null } | null
+  > {
     try {
+      const token = this.currentToken();
       const res = await this.rawFetch("/api/auth/me");
       if (!res.ok) return null;
       const raw = (await res.json()) as {
@@ -2634,11 +2643,14 @@ export class SyncEngine {
       };
       if ((raw.user_id ?? null) === null) this.warnForeignToken();
       return {
-        userId: raw.user_id ?? null,
-        tenantId: raw.tenant_id ?? null,
-        isAdmin: raw.is_admin ?? false,
-        roles: raw.roles ?? [],
-        avatarUrl: raw.avatar_url ?? null,
+        token,
+        session: {
+          userId: raw.user_id ?? null,
+          tenantId: raw.tenant_id ?? null,
+          isAdmin: raw.is_admin ?? false,
+          roles: raw.roles ?? [],
+          avatarUrl: raw.avatar_url ?? null,
+        },
       };
     } catch {
       // Swallow — /api/auth/me errors are transient and the next pull
@@ -2695,7 +2707,7 @@ export class SyncEngine {
   private applySessionTransition(
     next: ResolvedSession,
     broadcast: boolean,
-    opts: { replicaAlreadyReset?: boolean } = {},
+    opts: { replicaAlreadyReset?: boolean; token?: string | null } = {},
   ): Promise<void> {
     const prev = this.sessionChain;
     // Swallow errors when storing back to the chain so a single
@@ -2725,6 +2737,8 @@ export class SyncEngine {
       const userFlipped =
         this.session.hasObserved() && prevUserId !== next.userId;
       if (userFlipped && this.isMultiTabLeader) {
+        // Owned writes wait until the new identity is committed below.
+        this.identityPending = true;
         if (!opts.replicaAlreadyReset) {
           // Mark the current token as seen so the pull below does not
           // detect the same flip and reset a second time.
@@ -2777,7 +2791,10 @@ export class SyncEngine {
       // The session now says who the token belongs to: push writes
       // that were waiting for it (their owner may be this user).
       if (this.isMultiTabLeader) {
-        const wasPending = this.identityPending;
+        const wasPending = this.identityPending || firstResolution;
+        if (opts.token !== undefined) this.sessionToken = opts.token;
+        // Writes made before any session resolved belong to this one.
+        if (firstResolution) this.mutations.stampPendingOwner(next.userId);
         this.identityPending = false;
         this.identityRetryAttempts = 0;
         if ((wasPending || userFlipped) && this.mutations.pending().length > 0) {
@@ -2826,11 +2843,20 @@ export class SyncEngine {
    * - `discard`: another user is signed in. The write is dropped so one
    *   user's writes never push as another's.
    */
-  private pushable(m: PendingMutation): "send" | "hold" | "discard" {
+  private pushable(
+    m: PendingMutation,
+    token: string | null,
+  ): "send" | "hold" | "discard" {
+    if (m.ownerPending) return "hold";
     if (m.owner === undefined) return "send";
-    if (this.identityPending) return "hold";
-    const now = this.currentOwner();
-    if (now === undefined) return "hold";
+    if (this.identityPending || !this.session.hasObserved()) return "hold";
+    // The token changed since the session was fetched: it may be someone
+    // else's. Hold until a refresh says whose it is.
+    if (this.sessionToken !== undefined && token !== this.sessionToken) {
+      this.identityPending = true;
+      return "hold";
+    }
+    const now = this.session.resolved().userId;
     if (m.owner === now) return "send";
     if (now === null) return "hold";
     if (typeof m.owner === "string" && m.owner.startsWith("guest_") && !now.startsWith("guest_")) {
@@ -2850,7 +2876,9 @@ export class SyncEngine {
     this.identityRetryTimer = setTimeout(() => {
       this.identityRetryTimer = null;
       void this.refreshResolvedSession().then(() => {
-        if (this.identityPending) this.scheduleIdentityRetry();
+        if (this.identityPending || !this.session.hasObserved()) {
+          this.scheduleIdentityRetry();
+        }
       });
     }, delay);
   }
@@ -3117,11 +3145,12 @@ export class SyncEngine {
     // code DISCARDED, here and in the tab that made them; their rows were
     // wiped with the old identity's replica, so nothing is rolled back.
     // Held writes stay queued; their callers are released.
+    const token = this.currentToken();
     const pending: PendingMutation[] = [];
     const discarded: { opId: string; error: string; code: string }[] = [];
     const held: string[] = [];
     for (const m of queued) {
-      const verdict = this.pushable(m);
+      const verdict = this.pushable(m, token);
       if (verdict === "send") {
         pending.push(m);
       } else if (verdict === "discard") {
@@ -3135,15 +3164,23 @@ export class SyncEngine {
     if (discarded.length > 0) this.broadcastToTabs({ type: "mutations-failed", ops: discarded });
     if (held.length > 0) {
       this.broadcastToTabs({ type: "mutations-queued", opIds: held });
-      if (this.identityPending) this.scheduleIdentityRetry();
+      if (this.identityPending || !this.session.hasObserved()) {
+        this.scheduleIdentityRetry();
+      }
     }
     if (pending.length === 0) return;
 
     try {
-      const resp = await this.request<PushResponse>("POST", "/api/sync/push", {
-        changes: pending.map((m) => m.change),
-        client_id: this.clientId,
-      });
+      // Sent with the token the owner check ran against.
+      const resp = await this.request<PushResponse>(
+        "POST",
+        "/api/sync/push",
+        {
+          changes: pending.map((m) => m.change),
+          client_id: this.clientId,
+        },
+        token,
+      );
       // The request reached the server and returned a response — clear
       // the transient-failure backoff counter (success or per-op
       // rejections both mean "we're online and the server answered").
@@ -3407,6 +3444,7 @@ export class SyncEngine {
       },
       undefined,
       this.currentOwner(),
+      this.currentOwner() === undefined,
     );
     await this.sendAndAwait(opId);
     return id;
@@ -3457,6 +3495,7 @@ export class SyncEngine {
       },
       prev,
       this.currentOwner(),
+      this.currentOwner() === undefined,
     );
     await this.sendAndAwait(opId);
   }
@@ -3478,6 +3517,7 @@ export class SyncEngine {
       },
       prev,
       this.currentOwner(),
+      this.currentOwner() === undefined,
     );
     await this.sendAndAwait(opId);
   }
@@ -4131,7 +4171,12 @@ export class SyncEngine {
     this.lastCrdtFrames.delete(`${entity}|${rowId}`);
   }
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    tokenOverride?: string | null,
+  ): Promise<T> {
     const headers: Record<string, string> = {};
     if (body) headers["Content-Type"] = "application/json";
     // Prefer the token explicitly configured on the engine; fall back to
@@ -4140,9 +4185,11 @@ export class SyncEngine {
     // anonymous caller and gets rate-limited into a 429 reconnect storm
     // once the anon bucket fills.
     const token =
-      this.config.token ??
-      this.storage.get(this.tokenStorageKey()) ??
-      undefined;
+      tokenOverride !== undefined
+        ? tokenOverride ?? undefined
+        : this.config.token ??
+          this.storage.get(this.tokenStorageKey()) ??
+          undefined;
     if (token) headers["Authorization"] = `Bearer ${token}`;
 
     // credentials: "include" so cookie-auth apps (Yapless and any other

@@ -499,10 +499,13 @@ describe("SyncEngine replica identity guard", () => {
     expect(engine.store.list("Note").length).toBe(1);
   });
 
-  test("guest→user preserves pending writes (merge); user→user discards them", async () => {
+  // The guard wipes rows but keeps queued writes: each write carries its
+  // owner, and push sends a guest's writes after the guest signs in and
+  // discards another user's (mutation-owner.test.ts).
+  test("an identity change across a reload keeps queued writes for the owner check", async () => {
     const cases: ReadonlyArray<readonly [string, string, boolean]> = [
-      ["guest_123", "user_B", false], // anonymous-merge login: keep writes
-      ["user_A", "user_B", true], // account switch: drop A's writes
+      ["guest_123", "user_B", false],
+      ["user_A", "user_B", false],
     ];
     for (const [prev, now, expectWipeMutations] of cases) {
       const engine = makeEngine();

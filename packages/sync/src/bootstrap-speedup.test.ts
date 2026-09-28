@@ -314,18 +314,21 @@ describe("Fix C: race election || auth/me", () => {
     const result = await (
       engine as unknown as {
         fetchSessionBootstrap(): Promise<{
-          userId: string | null;
-          tenantId: string | null;
-          isAdmin: boolean;
-          roles: string[];
+          session: {
+            userId: string | null;
+            tenantId: string | null;
+            isAdmin: boolean;
+            roles: string[];
+          };
+          token: string | null;
         } | null>;
       }
     ).fetchSessionBootstrap();
 
     expect(authMeHits).toBe(1);
     expect(result).not.toBeNull();
-    expect(result?.userId).toBe("u1");
-    expect(result?.tenantId).toBe("org-x");
+    expect(result?.session.userId).toBe("u1");
+    expect(result?.session.tenantId).toBe("org-x");
   });
 
   test("fetchSessionBootstrap returns null on non-ok response", async () => {

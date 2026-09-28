@@ -59,6 +59,10 @@ export interface PendingMutation {
    *  the queue so a write is only ever pushed as the user who made it.
    *  `undefined` = unknown (queued by an older client). */
   owner?: string | null;
+  /** The write was made before this run knew who is signed in (no
+   *  resolved session and no saved identity). It is held until the first
+   *  session resolves, which stamps `owner`. */
+  ownerPending?: boolean;
   /** Pre-mutation snapshot of the affected row, captured at optimistic-
    *  apply time for `update`/`delete`. On a server rejection,
    *  `failPushedMutation` restores this so the local replica reverts to
@@ -136,7 +140,12 @@ export class MutationQueue {
    *  entry with the same op_id is already queued — a follower
    *  retrying its forward of the same op shouldn't double-queue on
    *  the leader. */
-  add(change: ClientChange, prevRow?: Row | null, owner?: string | null): string {
+  add(
+    change: ClientChange,
+    prevRow?: Row | null,
+    owner?: string | null,
+    ownerPending?: boolean,
+  ): string {
     const id =
       typeof change.op_id === "string" && change.op_id.length > 0
         ? change.op_id
@@ -145,6 +154,7 @@ export class MutationQueue {
     const changeWithOp: ClientChange = { ...change, op_id: id };
     const entry: PendingMutation = { id, change: changeWithOp, status: "pending", prevRow };
     if (owner !== undefined) entry.owner = owner;
+    if (ownerPending) entry.ownerPending = true;
     this.queue.push(entry);
     this.flush();
     return id;
@@ -254,6 +264,20 @@ export class MutationQueue {
       (m) => m.status === "pending" || m.status === "failed",
     );
     this.flush();
+  }
+
+  /** Stamp every write whose owner was pending with the user the first
+   *  resolved session names. */
+  stampPendingOwner(owner: string | null): void {
+    let changed = false;
+    for (const m of this.queue) {
+      if (m.ownerPending) {
+        m.owner = owner;
+        delete m.ownerPending;
+        changed = true;
+      }
+    }
+    if (changed) this.flush();
   }
 
   /** Drop one mutation that must never be pushed (it belongs to another
