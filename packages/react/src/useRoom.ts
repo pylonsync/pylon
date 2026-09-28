@@ -108,6 +108,23 @@ export interface UseRoomReturn {
  *  setup recovers without the user noticing. */
 const PUSH_SNAPSHOT_TIMEOUT_MS = 2_000;
 
+/** How often a joined room sends `POST /api/rooms/heartbeat`. The server
+ *  drops a member after 120 s without activity; 45 s leaves room for two
+ *  lost heartbeats. */
+const ROOM_KEEPALIVE_MS = 45_000;
+
+/** Backoff base for rejoining after `NOT_IN_ROOM` or a failed join. The
+ *  first rejoin runs at once; later ones wait 1 s, 2 s, 4 s, ... up to
+ *  30 s. After `MAX_REJOIN_ATTEMPTS` the error is surfaced to the hook. */
+const REJOIN_BASE_MS = 1_000;
+const MAX_REJOIN_ATTEMPTS = 5;
+
+/** Test overrides for the timings above. */
+const timing = {
+  keepaliveMs: ROOM_KEEPALIVE_MS,
+  rejoinBaseMs: REJOIN_BASE_MS,
+};
+
 interface SharedRoom {
   /** Number of live React hooks holding this room. */
   refs: number;
@@ -148,6 +165,16 @@ interface SharedRoom {
   /** Connection-status unsubscribe — fires whenever the engine's
    *  transport state changes so we can flip between push and polling. */
   connectionStatusUnsubscribe: (() => void) | null;
+  /** A `POST /api/rooms/join` is in flight. */
+  joining: boolean;
+  /** Keepalive timer (`POST /api/rooms/heartbeat`), set once joined. */
+  keepalive: ReturnType<typeof setInterval> | null;
+  /** Pending rejoin after `NOT_IN_ROOM` / a failed join. */
+  rejoinTimer: ReturnType<typeof setTimeout> | null;
+  /** Rejoins since the last good snapshot or join. */
+  rejoinAttempts: number;
+  /** The caller left with `leave()`: no keepalive, no rejoin. */
+  left: boolean;
 }
 
 const rooms = new Map<string, SharedRoom>();
@@ -225,6 +252,22 @@ function startWsPush(room: SharedRoom): void {
         clearTimeout(room.pushSnapshotTimer);
         room.pushSnapshotTimer = null;
       }
+      // The server no longer counts us as a member: our socket closed
+      // (reconnect), the idle sweep dropped us, or the subscribe beat the
+      // join. Rejoin over HTTP, then resubscribe. Surface the error only
+      // when rejoining keeps failing.
+      if (
+        err.code === 'NOT_IN_ROOM' &&
+        !room.left &&
+        room.rejoinAttempts < MAX_REJOIN_ATTEMPTS
+      ) {
+        if (room.isConnected) {
+          room.isConnected = false;
+          notify(room);
+        }
+        scheduleRejoin(room);
+        return;
+      }
       room.error =
         err.code === 'NOT_IN_ROOM'
           ? 'You are not a member of this room.'
@@ -238,6 +281,7 @@ function startWsPush(room: SharedRoom): void {
         clearTimeout(room.pushSnapshotTimer);
         room.pushSnapshotTimer = null;
       }
+      room.rejoinAttempts = 0;
       room.peers = members
         .filter((m) => m.user_id !== room.userId)
         .map(memberToPeer);
@@ -302,6 +346,13 @@ function evaluateDelivery(room: SharedRoom): void {
     return;
   }
   if (engine.isWebSocketConnected()) {
+    // The server answers `room-subscribe` with NOT_IN_ROOM unless the
+    // HTTP join already landed. Subscribe only after it has; the join's
+    // success path calls back in here.
+    if (!room.joined) {
+      stopHeartbeat(room);
+      return;
+    }
     startWsPush(room);
   } else {
     stopWsPush(room);
@@ -314,6 +365,8 @@ function joinRoom(room: SharedRoom): void {
   // and notifies all subscribers. Late subscribers either pick up the
   // already-resolved snapshot from `room.peers` or the next push /
   // heartbeat.
+  if (room.joining || room.left) return;
+  room.joining = true;
   pylonFetch<{ snapshot?: { peers?: RoomPeer[] } }>(
     transportFor(room),
     '/api/rooms/join',
@@ -326,6 +379,7 @@ function joinRoom(room: SharedRoom): void {
       // The room may have been torn down before join landed (mount →
       // unmount → no remount). In that case the entry is gone from the
       // registry; bail and let the leave path (if it ran) do its thing.
+      room.joining = false;
       if (!rooms.has(roomKeyFor(room))) return;
       room.joined = true;
       room.isConnected = true;
@@ -334,12 +388,78 @@ function joinRoom(room: SharedRoom): void {
         room.peers = body.snapshot.peers.filter((p) => p.user_id !== room.userId);
       }
       notify(room);
+      startKeepalive(room);
+      if (room.wsUnsubscribe && room.engine) {
+        // Rejoin after NOT_IN_ROOM: the engine still holds the room's
+        // subscription, so ask it to resend `room-subscribe`.
+        room.engine.resubscribeRoom(room.roomId);
+      } else {
+        evaluateDelivery(room);
+      }
     })
     .catch((e: any) => {
+      room.joining = false;
       if (!rooms.has(roomKeyFor(room))) return;
+      if (room.rejoinAttempts < MAX_REJOIN_ATTEMPTS && !room.left) {
+        scheduleRejoin(room);
+        return;
+      }
       room.error = e?.message ?? 'Failed to join room';
       notify(room);
     });
+}
+
+/** Rejoin with backoff: at once for the first attempt, then 1 s, 2 s, 4 s,
+ *  ... capped at 30 s. One pending rejoin at a time. */
+function scheduleRejoin(room: SharedRoom): void {
+  if (room.rejoinTimer || room.joining || room.left) return;
+  const attempt = room.rejoinAttempts;
+  room.rejoinAttempts += 1;
+  const delay =
+    attempt === 0 ? 0 : Math.min(30_000, timing.rejoinBaseMs * 2 ** (attempt - 1));
+  room.rejoinTimer = setTimeout(() => {
+    room.rejoinTimer = null;
+    if (!rooms.has(roomKeyFor(room))) return;
+    joinRoom(room);
+  }, delay);
+}
+
+/** Keep the server-side membership alive. The server drops a member after
+ *  120 s without activity; a heartbeat refreshes it without emitting an
+ *  event. `alive: false` means the server already dropped us: rejoin. */
+function startKeepalive(room: SharedRoom): void {
+  if (room.keepalive || room.left) return;
+  room.keepalive = setInterval(() => {
+    if (!rooms.has(roomKeyFor(room)) || room.left) return;
+    pylonFetch<{ alive?: boolean }>(transportFor(room), '/api/rooms/heartbeat', {
+      method: 'POST',
+      json: { room: room.roomId, user_id: room.userId },
+    })
+      .then((body) => {
+        if (body?.alive === false && rooms.has(roomKeyFor(room))) {
+          if (room.isConnected) {
+            room.isConnected = false;
+            notify(room);
+          }
+          scheduleRejoin(room);
+        }
+      })
+      .catch(() => {
+        // Offline or an older server without the endpoint: the next
+        // heartbeat retries, and a reconnect's NOT_IN_ROOM rejoins.
+      });
+  }, timing.keepaliveMs);
+}
+
+function stopKeepalive(room: SharedRoom): void {
+  if (room.keepalive) {
+    clearInterval(room.keepalive);
+    room.keepalive = null;
+  }
+  if (room.rejoinTimer) {
+    clearTimeout(room.rejoinTimer);
+    room.rejoinTimer = null;
+  }
 }
 
 function leaveRoom(room: SharedRoom): void {
@@ -395,6 +515,11 @@ function acquireRoom(
     wsUnsubscribe: null,
     pushSnapshotTimer: null,
     connectionStatusUnsubscribe: null,
+    joining: false,
+    keepalive: null,
+    rejoinTimer: null,
+    rejoinAttempts: 0,
+    left: false,
   };
   rooms.set(key, room);
   joinRoom(room);
@@ -429,6 +554,7 @@ function releaseRoom(room: SharedRoom): void {
     }
     stopHeartbeat(room);
     stopWsPush(room);
+    stopKeepalive(room);
     if (room.connectionStatusUnsubscribe) {
       room.connectionStatusUnsubscribe();
       room.connectionStatusUnsubscribe = null;
@@ -479,12 +605,26 @@ export const __roomRegistryInternals = {
       if (room.pendingTeardown) clearTimeout(room.pendingTeardown);
       stopHeartbeat(room);
       stopWsPush(room);
+      stopKeepalive(room);
       if (room.connectionStatusUnsubscribe) {
         room.connectionStatusUnsubscribe();
         room.connectionStatusUnsubscribe = null;
       }
     }
     rooms.clear();
+    timing.keepaliveMs = ROOM_KEEPALIVE_MS;
+    timing.rejoinBaseMs = REJOIN_BASE_MS;
+  },
+  /** Shorten the keepalive / rejoin timings for a test. `reset()` restores
+   *  the defaults. */
+  setTimings(t: { keepaliveMs?: number; rejoinBaseMs?: number }): void {
+    if (t.keepaliveMs !== undefined) timing.keepaliveMs = t.keepaliveMs;
+    if (t.rejoinBaseMs !== undefined) timing.rejoinBaseMs = t.rejoinBaseMs;
+  },
+  /** Diagnostic: the caller's manual leave() for tests. */
+  markLeft(room: SharedRoom): void {
+    room.left = true;
+    stopKeepalive(room);
   },
   acquire(
     baseUrl: string,
@@ -669,7 +809,13 @@ export function useRoom(
     // Manual leave — bypasses the shared lifecycle and tells the server
     // we're gone immediately. The next effect cleanup will still try to
     // release the refcount; the join-guard means a duplicate leave is
-    // skipped if needed, and the server is idempotent anyway.
+    // skipped if needed, and the server is idempotent anyway. Stop the
+    // keepalive and any rejoin so the room stays left.
+    const room = roomRef.current;
+    if (room) {
+      room.left = true;
+      stopKeepalive(room);
+    }
     pylonFetch(
       { baseUrl, token },
       '/api/rooms/leave',

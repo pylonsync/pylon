@@ -111,6 +111,9 @@ export interface MultiTabOrchestratorHooks {
    *  `room-unsubscribe` when both the local refcount and the forwarder
    *  set are empty. */
   onRoomSubUnregister?(roomId: string, fromTabId: string): void;
+  /** Follower → leader: the follower rejoined a room after a
+   *  `NOT_IN_ROOM` error; resend the wire `room-subscribe`. */
+  onRoomSubResubscribe?(roomId: string): void;
   /** Leader → followers: a room-snapshot landed on the WS. Followers
    *  apply it to their local room registry so their subscribers fire. */
   onRoomFanoutSnapshot?(roomId: string, members: unknown): void;
@@ -462,6 +465,12 @@ export class MultiTabOrchestrator {
         if (typeof room === "string") {
           this.hooks.onRoomSubRegister?.(room, fromTabId);
         }
+        break;
+      }
+      case "room-sub-resubscribe": {
+        if (!this._isLeader) return;
+        const room = msg.room as string | undefined;
+        if (typeof room === "string") this.hooks.onRoomSubResubscribe?.(room);
         break;
       }
       case "room-sub-unregister": {

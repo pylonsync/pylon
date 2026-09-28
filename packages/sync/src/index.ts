@@ -1187,6 +1187,10 @@ export class SyncEngine {
           release();
         }
       },
+      onRoomSubResubscribe: (roomId: string) => {
+        if (!this.isMultiTabLeader) return;
+        this.rooms.resubscribe(roomId);
+      },
       onRoomFanoutSnapshot: (roomId: string, members: unknown) => {
         if (Array.isArray(members)) {
           this.rooms.applySnapshot(roomId, members as RoomMember[]);
@@ -3532,6 +3536,18 @@ export class SyncEngine {
         room: roomId,
       });
     }
+  }
+
+  /** Re-send `room-subscribe` for a room this tab is subscribed to and
+   *  clear its error. Call after rejoining the room over HTTP following a
+   *  `NOT_IN_ROOM` error; the server replies with a fresh snapshot. A
+   *  follower asks the leader, which owns the wire subscription. */
+  resubscribeRoom(roomId: string): void {
+    if (this.isMultiTabLeader) {
+      this.rooms.resubscribe(roomId);
+      return;
+    }
+    this.broadcastToTabs({ type: "room-sub-resubscribe", room: roomId });
   }
 
   /** Read the current cached members snapshot for `roomId`. Returns

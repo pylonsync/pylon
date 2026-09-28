@@ -216,6 +216,8 @@ function Editor({ docId, userId }: { docId: string; userId: string }) {
 }
 ```
 
+The hook joins over HTTP first and subscribes over the WebSocket after the join lands. While joined it sends `POST /api/rooms/heartbeat` every 45 s; the server drops a member after 120 s without activity and tells the room. When the server reports the member gone (a heartbeat returns `alive: false`, or a resubscribe after a reconnect gets `NOT_IN_ROOM`), the hook rejoins and resubscribes. A closed socket removes the user only from rooms no other socket of that user still holds.
+
 ## Multiplayer shards
 
 For tick-driven multiplayer (games, collaborative canvases):

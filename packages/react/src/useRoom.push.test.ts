@@ -31,19 +31,32 @@ interface RecordedRequest {
 
 let recorded: RecordedRequest[];
 let originalFetch: typeof globalThis.fetch;
+/** Per-test override: return a body (or a promise of one) for a request,
+ *  or undefined for the default room response. */
+let respond: ((url: string, method: string) => unknown) | null = null;
 
 function installFetchStub(): void {
   recorded = [];
+  respond = null;
   originalFetch = globalThis.fetch;
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     const method = (init?.method ?? "GET").toUpperCase();
     recorded.push({ url, method });
-    return new Response(JSON.stringify({ snapshot: { peers: [] }, members: [] }), {
+    const custom = respond ? await respond(url, method) : undefined;
+    const body = custom ?? { snapshot: { peers: [] }, members: [] };
+    return new Response(JSON.stringify(body), {
       status: 200,
       headers: { "content-type": "application/json" },
     });
   }) as typeof fetch;
+}
+
+function isJoin(r: RecordedRequest): boolean {
+  return r.method === "POST" && r.url.endsWith("/api/rooms/join");
+}
+function isKeepalive(r: RecordedRequest): boolean {
+  return r.method === "POST" && r.url.endsWith("/api/rooms/heartbeat");
 }
 
 function restoreFetch(): void {
@@ -69,6 +82,7 @@ interface FakeEngine {
     | Array<{ user_id: string; joined_at: string; data?: any }>
     | null;
   getRoomError: (roomId: string) => { code: string; message?: string } | null;
+  resubscribeRoom: (roomId: string) => void;
   isWebSocketConnected: () => boolean;
   connectionStatus: () => string;
   // The store.subscribe surface — useRoom subscribes to connection-status
@@ -83,6 +97,7 @@ interface FakeEngine {
   _rooms: Map<string, FakeRoomEntry>;
   _subscribeCalls: string[];
   _unsubscribeCalls: string[];
+  _resubscribeCalls: string[];
   setWsConnected(open: boolean): void;
   pushSnapshot(roomId: string, members: any[]): void;
   pushUpdate(
@@ -100,7 +115,13 @@ function makeFakeEngine(): FakeEngine {
     _rooms: new Map(),
     _subscribeCalls: [],
     _unsubscribeCalls: [],
+    _resubscribeCalls: [],
 
+    resubscribeRoom: (roomId) => {
+      engine._resubscribeCalls.push(roomId);
+      const entry = engine._rooms.get(roomId);
+      if (entry) entry.error = null;
+    },
     isWebSocketConnected: () => engine._wsOpen,
     connectionStatus: () => (engine._wsOpen ? "connected" : "reconnecting"),
     store: {
@@ -208,6 +229,8 @@ describe("useRoom WS push path", () => {
       25, // would tick every 25ms IF polling were active
       engine as any,
     );
+    // The room subscribes only after the HTTP join lands.
+    await flush();
     expect(engine._subscribeCalls).toEqual([ROOM]);
     expect(__roomRegistryInternals.isWsAttached(room)).toBe(true);
     expect(__roomRegistryInternals.isPolling(room)).toBe(false);
@@ -251,7 +274,7 @@ describe("useRoom WS push path", () => {
     expect(room.peers.map((p) => p.user_id)).toEqual(["bob"]);
   });
 
-  test("server pushes NOT_IN_ROOM error → surfaces via room.error, isConnected false, no retry", async () => {
+  test("NOT_IN_ROOM → rejoin over HTTP, then resubscribe; the snapshot restores presence", async () => {
     const engine = makeFakeEngine();
     const room = __roomRegistryInternals.acquire(
       BASE,
@@ -262,18 +285,130 @@ describe("useRoom WS push path", () => {
       1_000,
       engine as any,
     );
-    // Let the HTTP join settle first so its success doesn't clobber
-    // the WS-pushed error state.
     await flush();
+    expect(recorded.filter(isJoin)).toHaveLength(1);
+
+    // E.g. the socket reconnected and the server had dropped us when the
+    // old socket closed; the replayed subscribe is refused.
     engine.pushError(ROOM, "NOT_IN_ROOM", "not a member");
     await flush();
-    expect(typeof room.error).toBe("string");
-    expect(room.error ?? "").toContain("not a member");
-    expect(room.isConnected).toBe(false);
-    // Snapshot-timeout fallback should NOT have engaged (error path
-    // cancels the backwards-compat timer).
+    expect(recorded.filter(isJoin)).toHaveLength(2);
+    expect(engine._resubscribeCalls).toEqual([ROOM]);
+    expect(room.error).toBeNull();
+
+    engine.pushSnapshot(ROOM, [{ user_id: "alice", joined_at: "t1" }]);
+    await flush();
+    expect(room.isConnected).toBe(true);
+    expect(room.peers.map((p) => p.user_id)).toEqual(["alice"]);
+    // Snapshot-timeout fallback never engaged.
     await flush(80);
     expect(__roomRegistryInternals.isPolling(room)).toBe(false);
+  });
+
+  test("NOT_IN_ROOM that keeps coming back surfaces the error after bounded retries", async () => {
+    __roomRegistryInternals.setTimings({ rejoinBaseMs: 1 });
+    const engine = makeFakeEngine();
+    const room = __roomRegistryInternals.acquire(
+      BASE,
+      ROOM,
+      USER,
+      TOKEN,
+      {},
+      1_000,
+      engine as any,
+    );
+    await flush();
+    for (let i = 0; i < 8; i++) {
+      engine.pushError(ROOM, "NOT_IN_ROOM", "not a member");
+      await flush(40);
+    }
+    // 1 initial join + 5 rejoins, then the error reaches the hook.
+    expect(recorded.filter(isJoin)).toHaveLength(6);
+    expect(room.error ?? "").toContain("not a member");
+    expect(room.isConnected).toBe(false);
+  });
+
+  test("first mount: room-subscribe waits for the HTTP join (no NOT_IN_ROOM race)", async () => {
+    let releaseJoin!: () => void;
+    const joinGate = new Promise<void>((r) => (releaseJoin = r));
+    respond = async (url, method) => {
+      if (method === "POST" && url.endsWith("/api/rooms/join")) {
+        await joinGate;
+      }
+      return undefined;
+    };
+    const engine = makeFakeEngine();
+    const room = __roomRegistryInternals.acquire(
+      BASE,
+      ROOM,
+      USER,
+      TOKEN,
+      {},
+      1_000,
+      engine as any,
+    );
+    await flush(20);
+    expect(engine._subscribeCalls).toEqual([]);
+    releaseJoin();
+    await flush();
+    expect(engine._subscribeCalls).toEqual([ROOM]);
+    expect(__roomRegistryInternals.isWsAttached(room)).toBe(true);
+  });
+
+  test("keepalive heartbeats while joined; alive:false rejoins", async () => {
+    __roomRegistryInternals.setTimings({ keepaliveMs: 20 });
+    let alive = true;
+    respond = (url, method) =>
+      method === "POST" && url.endsWith("/api/rooms/heartbeat")
+        ? { alive, ...(alive ? {} : { reason: "not_in_room" }) }
+        : undefined;
+    const engine = makeFakeEngine();
+    const room = __roomRegistryInternals.acquire(
+      BASE,
+      ROOM,
+      USER,
+      TOKEN,
+      {},
+      1_000,
+      engine as any,
+    );
+    await flush(70);
+    expect(recorded.filter(isKeepalive).length).toBeGreaterThanOrEqual(2);
+    expect(recorded.filter(isJoin)).toHaveLength(1);
+
+    // The idle sweep dropped us: the next heartbeat reports it and the
+    // registry rejoins and resubscribes.
+    alive = false;
+    await flush(40);
+    alive = true;
+    expect(recorded.filter(isJoin).length).toBeGreaterThanOrEqual(2);
+    expect(engine._resubscribeCalls.length).toBeGreaterThanOrEqual(1);
+
+    // Manual leave stops the keepalive and any rejoin.
+    __roomRegistryInternals.markLeft(room);
+    const before = recorded.filter(isKeepalive).length;
+    await flush(60);
+    expect(recorded.filter(isKeepalive).length).toBe(before);
+  });
+
+  test("teardown stops the keepalive", async () => {
+    __roomRegistryInternals.setTimings({ keepaliveMs: 20 });
+    const engine = makeFakeEngine();
+    const room = __roomRegistryInternals.acquire(
+      BASE,
+      ROOM,
+      USER,
+      TOKEN,
+      {},
+      1_000,
+      engine as any,
+    );
+    await flush(30);
+    __roomRegistryInternals.release(room);
+    await flush(10);
+    const before = recorded.filter(isKeepalive).length;
+    await flush(60);
+    expect(recorded.filter(isKeepalive).length).toBe(before);
   });
 
   test("WS down → polling fallback fires; reconnect promotes back to push", async () => {
@@ -317,6 +452,7 @@ describe("useRoom WS push path", () => {
       25,
       engine as any,
     );
+    await flush();
     expect(__roomRegistryInternals.isWsAttached(room)).toBe(true);
     expect(__roomRegistryInternals.isPolling(room)).toBe(false);
 
@@ -349,6 +485,7 @@ describe("useRoom WS push path", () => {
       engine as any,
     );
     expect(r1).toBe(r2);
+    await flush();
     // Registry dedup → only one acquire path → only one subscribe.
     expect(engine._subscribeCalls).toEqual([ROOM]);
     __roomRegistryInternals.release(r1);

@@ -267,3 +267,35 @@ describe("RoomSubscriptions: replay on reconnect", () => {
     expect(h.sent).toEqual([{ type: "room-subscribe", room: "channel:b" }]);
   });
 });
+
+describe("RoomSubscriptions: resubscribe after a rejoin", () => {
+  test("resubscribe() clears the error and resends room-subscribe", () => {
+    const h = makeHarness();
+    h.rooms.register("channel:a", () => {});
+    h.rooms.applyError("channel:a", { code: "NOT_IN_ROOM" });
+    h.sent.length = 0;
+    h.rooms.resubscribe("channel:a");
+    expect(h.rooms.error("channel:a")).toBeNull();
+    expect(h.sent).toEqual([{ type: "room-subscribe", room: "channel:a" }]);
+  });
+
+  test("resubscribe() is a no-op for a room with no subscriber", () => {
+    const h = makeHarness();
+    h.rooms.resubscribe("channel:none");
+    expect(h.sent).toEqual([]);
+  });
+
+  test("a follower engine asks the leader to resubscribe", async () => {
+    const { SyncEngine } = await import("./index");
+    const engine = new SyncEngine({ baseUrl: "http://test.invalid", persist: false, multiTab: false });
+    const sent: unknown[] = [];
+    const internals = engine as unknown as {
+      isMultiTabLeader: boolean;
+      broadcastToTabs: (p: unknown) => void;
+    };
+    internals.isMultiTabLeader = false;
+    internals.broadcastToTabs = (p) => sent.push(p);
+    engine.resubscribeRoom("channel:a");
+    expect(sent).toEqual([{ type: "room-sub-resubscribe", room: "channel:a" }]);
+  });
+});

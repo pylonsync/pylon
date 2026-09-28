@@ -344,6 +344,17 @@ export class RoomSubscriptions {
     return Array.from(this.rooms.keys());
   }
 
+  /** Clear a room's error and resend its `room-subscribe`. Used after
+   *  the caller rejoined the room over HTTP following a `NOT_IN_ROOM`
+   *  reply: the server answers the new subscribe with a snapshot. No-op
+   *  for a room with no local subscriber. */
+  resubscribe(roomId: string): void {
+    const entry = this.rooms.get(roomId);
+    if (!entry) return;
+    entry.error = null;
+    this.sendWs({ type: "room-subscribe", room: roomId });
+  }
+
   /** Resend `room-subscribe` for every active room. Called by the
    *  engine's `onConnected` hook after the WS reopens — the server
    *  forgets per-client subs across disconnects, so without this
