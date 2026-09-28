@@ -219,32 +219,42 @@ fn sign_in_error_location(error_callback_url: &str, code: &str, message: &str) -
     )
 }
 
-/// If the request arrived under a guest session whose user_id differs
-/// from `to_user_id`, transfer ownership of every `id(<user_entity>)`
-/// row from the guest to the authenticated user and revoke the guest
-/// session. Returns `(from_user_id, summary)` when a merge ran, `None`
-/// otherwise (no guest cookie, same id, or no rows to move).
+/// Bookkeeping for a caller who just signed in as `user_id`: the guest
+/// merge ([`maybe_merge_anonymous`]) and the SignIn audit record, plus an
+/// AnonymousMerge record when a guest session was merged.
 ///
-/// Side effects beyond the row updates:
-/// - Revokes the guest session token so a leaked guest cookie can't
-///   later impersonate the (now empty) guest user_id.
-/// - Does NOT delete the guest user row. Apps may have FK constraints
-///   that prevent deletion, and an orphan guest row with zero
-///   referencing entities is harmless. A future GC sweep can clean up.
-/// Wave-7 D — wraps the SignIn audit + anonymous merge + AnonymousMerge
-/// audit into one call so every successful auth path (magic-code, OAuth,
-/// password, passkey, …) gets identical bookkeeping. The OAuth callbacks
-/// each invoke this exactly once, in the Ok arm.
-fn audit_oauth_login(ctx: &RouterContext, user_id: &str, provider: &str) {
-    let merge_summary = maybe_merge_anonymous(ctx, user_id);
-    ctx.audit.log(
-        audit(ctx, pylon_auth::audit::AuditAction::SignIn)
-            .user(user_id.to_string())
-            .actor(user_id.to_string())
-            .meta("method", format!("oauth:{provider}"))
-            .build(),
-    );
-    if let Some((from, summary)) = merge_summary {
+/// Every route that answers with a new session for a caller who proved an
+/// identity (password, magic code or link, OAuth, SSO, SAML, passkey, SIWE,
+/// phone code, trusted mint, password reset, sign-up) calls this or
+/// [`merge_guest_into`], so a guest who signs in keeps their rows and loses
+/// the guest token on every path.
+fn complete_sign_in(ctx: &RouterContext, user_id: &str, method: &str, meta: &[(&str, &str)]) {
+    let mut event = audit(ctx, pylon_auth::audit::AuditAction::SignIn)
+        .user(user_id.to_string())
+        .actor(user_id.to_string())
+        .meta("method", method.to_string());
+    for (key, value) in meta {
+        event = event.meta(key.to_string(), value.to_string());
+    }
+    let merged = maybe_merge_anonymous(ctx, user_id);
+    ctx.audit.log(event.build());
+    log_guest_merge(ctx, user_id, merged);
+}
+
+/// The guest half of [`complete_sign_in`], for routes that write their own
+/// audit record (sign-up, password reset) or already wrote the sign-in
+/// record (the tenant-host hand-off after an OAuth callback).
+fn merge_guest_into(ctx: &RouterContext, user_id: &str) {
+    let merged = maybe_merge_anonymous(ctx, user_id);
+    log_guest_merge(ctx, user_id, merged);
+}
+
+fn log_guest_merge(
+    ctx: &RouterContext,
+    user_id: &str,
+    merged: Option<(String, crate::merge::MergeResult)>,
+) {
+    if let Some((from, summary)) = merged {
         ctx.audit.log(
             audit(ctx, pylon_auth::audit::AuditAction::AnonymousMerge)
                 .user(user_id.to_string())
@@ -497,14 +507,7 @@ fn handle_org_sso_callback(ctx: &RouterContext, org_id: &str, raw: &str) -> (u16
     // Mint session + audit + 302 to the caller's success URL.
     accept_invites_for_verified_email(ctx, &user_id, &email);
     let session = create_session_with_device(ctx, user_id.clone());
-    ctx.audit.log(
-        audit(ctx, pylon_auth::audit::AuditAction::SignIn)
-            .user(user_id.clone())
-            .actor(user_id.clone())
-            .meta("method", "org_sso")
-            .meta("org_id", org_id.to_string())
-            .build(),
-    );
+    complete_sign_in(ctx, &user_id, "org_sso", &[("org_id", org_id)]);
     ctx.set_browser_session_cookie(&session.token);
     ctx.add_response_header("Location", state_record.callback_url);
     (302, String::new())
@@ -829,14 +832,7 @@ fn handle_saml_acs(ctx: &RouterContext, org_id: &str, body: &str) -> (u16, Strin
     }
     accept_invites_for_verified_email(ctx, &user_id, &canonical_email);
     let session = create_session_with_device(ctx, user_id.clone());
-    ctx.audit.log(
-        audit(ctx, pylon_auth::audit::AuditAction::SignIn)
-            .user(user_id.clone())
-            .actor(user_id.clone())
-            .meta("method", "saml")
-            .meta("org_id", org_id.to_string())
-            .build(),
-    );
+    complete_sign_in(ctx, &user_id, "saml", &[("org_id", org_id)]);
     ctx.set_browser_session_cookie(&session.token);
     ctx.add_response_header("Location", state_record.callback_url);
     (302, String::new())
@@ -1022,6 +1018,18 @@ fn guest_issue_rate_limited(ctx: &RouterContext) -> Option<(u16, String)> {
     }
 }
 
+/// If the request arrived under a guest session whose user_id differs
+/// from `to_user_id`, transfer ownership of every `id(<user_entity>)`
+/// row from the guest to the authenticated user and revoke the guest
+/// session. Returns `(from_user_id, summary)` when a merge ran, `None`
+/// otherwise (no guest session, or the same id).
+///
+/// Side effects beyond the row updates:
+/// - Revokes the guest session token so a leaked guest cookie can't
+///   later impersonate the (now empty) guest user_id.
+/// - Does NOT delete the guest user row. Apps may have FK constraints
+///   that prevent deletion, and an orphan guest row with zero
+///   referencing entities is harmless.
 fn maybe_merge_anonymous(
     ctx: &RouterContext,
     to_user_id: &str,
@@ -1611,32 +1619,7 @@ pub(crate) fn handle(
                 accept_invites_for_verified_email(ctx, &user_id, &email.to_string());
                 let session = create_session_with_device(ctx, user_id.clone());
                 ctx.maybe_set_session_cookie(&session.token);
-                // Wave-7 D: anonymous → authenticated merge. If the request
-                // arrived carrying a guest session cookie, transfer ownership
-                // of any rows referencing that guest user_id over to the
-                // newly-authenticated user. Cart-survives-login is the
-                // canonical case. Guarded so a self-merge (already signed
-                // in as the same user, refreshing the magic code) is a
-                // no-op.
-                let merge_summary = maybe_merge_anonymous(ctx, &user_id);
-                ctx.audit.log(
-                    audit(ctx, pylon_auth::audit::AuditAction::SignIn)
-                        .user(user_id.clone())
-                        .actor(user_id.clone())
-                        .meta("method", "magic_code")
-                        .build(),
-                );
-                if let Some((from, summary)) = merge_summary {
-                    ctx.audit.log(
-                        audit(ctx, pylon_auth::audit::AuditAction::AnonymousMerge)
-                            .user(user_id.clone())
-                            .actor(user_id.clone())
-                            .meta("from_user_id", from)
-                            .meta("rows_updated", summary.rows_updated.to_string())
-                            .meta("entities", summary.entities_csv())
-                            .build(),
-                    );
-                }
+                complete_sign_in(ctx, &user_id, "magic_code", &[]);
                 return Some((
                     200,
                     serde_json::json!({"token": session.token, "user_id": user_id, "expires_at": session.expires_at}).to_string(),
@@ -1992,6 +1975,7 @@ pub(crate) fn handle(
 
         let session = create_session_with_device(ctx, user_id.clone());
         ctx.maybe_set_session_cookie(&session.token);
+        merge_guest_into(ctx, &user_id);
         let mut response = serde_json::json!({
             "token": session.token,
             "user_id": user_id,
@@ -2097,13 +2081,7 @@ pub(crate) fn handle(
         };
         let session = create_session_with_device(ctx, user_id.clone());
         ctx.maybe_set_session_cookie(&session.token);
-        ctx.audit.log(
-            audit(ctx, pylon_auth::audit::AuditAction::SignIn)
-                .user(user_id.clone())
-                .actor(user_id.clone())
-                .meta("method", "password")
-                .build(),
-        );
+        complete_sign_in(ctx, &user_id, "password", &[]);
         return Some((
             200,
             serde_json::json!({
@@ -2355,6 +2333,9 @@ pub(crate) fn handle(
                     ),
                 ));
             }
+            // The sign-in record was written at the callback; the guest
+            // session to merge is the one on this (tenant) host.
+            merge_guest_into(ctx, &record.user_id);
             let session = create_session_with_device(ctx, record.user_id);
             ctx.set_browser_session_cookie(&session.token);
             ctx.add_response_header("Location", record.redirect_url);
@@ -2437,7 +2418,7 @@ pub(crate) fn handle(
             if is_browser {
                 return Some(match result {
                     Ok((user_id, session)) => {
-                        audit_oauth_login(ctx, &user_id, provider);
+                        complete_sign_in(ctx, &user_id, &format!("oauth:{provider}"), &[]);
                         if let Err(err) =
                             finish_browser_sign_in(ctx, &user_id, &session.token, &state_record)
                         {
@@ -2479,7 +2460,7 @@ pub(crate) fn handle(
 
             return Some(match result {
                 Ok((user_id, session)) => {
-                    audit_oauth_login(ctx, &user_id, provider);
+                    complete_sign_in(ctx, &user_id, &format!("oauth:{provider}"), &[]);
                     ctx.maybe_set_session_cookie(&session.token);
                     (
                         200,
@@ -2538,7 +2519,7 @@ pub(crate) fn handle(
                 None,
             ) {
                 Ok((user_id, session)) => {
-                    audit_oauth_login(ctx, &user_id, provider);
+                    complete_sign_in(ctx, &user_id, &format!("oauth:{provider}"), &[]);
                     if let Err(err) =
                         finish_browser_sign_in(ctx, &user_id, &session.token, &state_record)
                     {
@@ -2751,7 +2732,7 @@ pub(crate) fn handle(
         return Some(
             match crate::complete_login_from_userinfo(ctx, provider.name(), &userinfo, &tokens) {
                 Ok((user_id, session)) => {
-                    audit_oauth_login(ctx, &user_id, provider.name());
+                    complete_sign_in(ctx, &user_id, &format!("oauth:{}", provider.name()), &[]);
                     ctx.maybe_set_session_cookie(&session.token);
                     (
                         200,
@@ -3171,13 +3152,11 @@ pub(crate) fn handle(
         // breaking the documented flow. Mirrors the OAuth-callback
         // path which uses the same primitive for the same reason.
         ctx.set_browser_session_cookie(&session.token);
-        ctx.audit.log(
-            audit(ctx, pylon_auth::audit::AuditAction::SignIn)
-                .user(user_id.clone())
-                .actor(user_id.clone())
-                .meta("method", "trusted_mint")
-                .meta("intent", intent_for_audit(&intent))
-                .build(),
+        complete_sign_in(
+            ctx,
+            &user_id,
+            "trusted_mint",
+            &[("intent", intent_for_audit(&intent).as_str())],
         );
         return Some((
             200,
@@ -5337,6 +5316,7 @@ pub(crate) fn handle(
         };
         let session = create_session_with_device(ctx, user_id.clone());
         ctx.maybe_set_session_cookie(&session.token);
+        complete_sign_in(ctx, &user_id, "phone", &[]);
         return Some((
             200,
             serde_json::json!({
@@ -5443,6 +5423,7 @@ pub(crate) fn handle(
         };
         let session = create_session_with_device(ctx, user_id.clone());
         ctx.maybe_set_session_cookie(&session.token);
+        complete_sign_in(ctx, &user_id, "siwe", &[]);
         return Some((
             200,
             serde_json::json!({
@@ -5686,6 +5667,7 @@ pub(crate) fn handle(
         };
         let session = ctx.session_store.create(key.user_id.clone());
         ctx.maybe_set_session_cookie(&session.token);
+        complete_sign_in(ctx, &key.user_id, "passkey", &[]);
         return Some((
             200,
             serde_json::json!({
@@ -6929,6 +6911,7 @@ pub(crate) fn handle(
         accept_invites_for_verified_email(ctx, &user_id, &consumed.email);
         let session = create_session_with_device(ctx, user_id.clone());
         ctx.maybe_set_session_cookie(&session.token);
+        merge_guest_into(ctx, &user_id);
         ctx.audit.log(
             audit(ctx, pylon_auth::audit::AuditAction::PasswordReset)
                 .user(user_id.clone())
@@ -7080,6 +7063,7 @@ pub(crate) fn handle(
             accept_invites_for_verified_email(ctx, &user_id, &consumed.email);
             let session = create_session_with_device(ctx, user_id.clone());
             ctx.maybe_set_session_cookie(&session.token);
+            complete_sign_in(ctx, &user_id, "magic_link", &[]);
             // Browser flow → 302 to dashboard; SDK flow → JSON.
             if method == HttpMethod::Get {
                 let dashboard = std::env::var("PYLON_DASHBOARD_URL").unwrap_or_else(|_| "/".into());

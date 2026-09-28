@@ -3235,11 +3235,15 @@ mod auth_gate_tests {
         }
         fn lookup(
             &self,
-            _entity: &str,
-            _field: &str,
-            _value: &str,
+            entity: &str,
+            field: &str,
+            value: &str,
         ) -> Result<Option<serde_json::Value>, pylon_http::DataError> {
-            Ok(None)
+            let user_entity = &self.manifest.auth.user.entity;
+            Ok(self.user_row.as_ref().and_then(|row| {
+                (entity == user_entity && row.get(field).and_then(|v| v.as_str()) == Some(value))
+                    .then(|| row.clone())
+            }))
         }
         fn link(
             &self,
@@ -6814,6 +6818,68 @@ mod auth_gate_tests {
         // Another address is unaffected.
         assert_eq!(mint("198.51.100.8", "/api/auth/guest").0, 201);
         assert_eq!(mint("198.51.100.9", "/api/auth/anonymous").0, 200);
+    }
+
+    /// A guest who signs in with a password loses the guest session, as
+    /// with a magic code or OAuth. Before, password sign-in left the guest
+    /// token valid, so a leaked guest cookie still acted as the guest.
+    #[test]
+    fn password_sign_in_revokes_the_guest_session() {
+        let manifest = empty_manifest();
+        let password = "correct horse battery staple";
+        let store = StubDataStore::with_user(
+            manifest.clone(),
+            serde_json::json!({
+                "id": "user-real",
+                "email": "guest-upgrade@example.com",
+                "passwordHash": pylon_auth::password::hash_password(password),
+            }),
+        );
+        let guest = AuthContext {
+            user_id: Some("guest_abc".into()),
+            is_admin: false,
+            is_guest: true,
+            roles: vec![],
+            tenant_id: None,
+            api_key_id: None,
+            api_key_scopes: None,
+            is_trusted_device: false,
+        };
+        with_ctx_store(
+            false,
+            &guest,
+            &NoopPluginHooks,
+            None,
+            None,
+            None,
+            manifest,
+            store,
+            "198.51.100.20",
+            |ctx| {
+                let guest_token = ctx.session_store.create("guest_abc".into()).token;
+                let body = serde_json::json!({
+                    "email": "guest-upgrade@example.com",
+                    "password": password,
+                })
+                .to_string();
+                let (status, resp, _ct) = route(
+                    ctx,
+                    HttpMethod::Post,
+                    "/api/auth/password/login",
+                    &body,
+                    Some(&guest_token),
+                );
+                assert_eq!(status, 200, "{resp}");
+                let resp: serde_json::Value = serde_json::from_str(&resp).unwrap();
+                assert_eq!(resp["user_id"], "user-real");
+                assert!(
+                    ctx.session_store.get(&guest_token).is_none(),
+                    "the guest session survived password sign-in"
+                );
+                let new_token = resp["token"].as_str().unwrap();
+                assert!(ctx.session_store.get(new_token).is_some());
+            },
+        );
     }
 
     #[test]
