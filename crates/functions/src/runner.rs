@@ -765,12 +765,17 @@ impl FnRunner {
         // Read Ready BEFORE publishing the routes. The reader sends the
         // call_id-less Ready to its own channel, so there's no risk a
         // concurrent caller's route eats it.
-        let ready_msg = match ready_rx.recv_timeout(Duration::from_secs(10)) {
+        let ready_timeout = ready_timeout_from_env();
+        let ready_msg = match ready_rx.recv_timeout(ready_timeout) {
             Ok(m) => m,
             Err(_) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err("handshake timeout: TS runtime did not send Ready within 10s".into());
+                return Err(format!(
+                    "handshake timeout: TS runtime did not send Ready within {}s \
+                     (PYLON_FN_READY_TIMEOUT_SECS raises it)",
+                    ready_timeout.as_secs()
+                ));
             }
         };
         let defs = match ready_msg {
@@ -1661,9 +1666,11 @@ impl FnRunner {
                 // A provider still generating is activity: the handler is
                 // awaiting it, and the provider's own request timeout
                 // bounds a stalled one. hard_deadline still applies.
+                // So is one that just finished: the handler resumes with
+                // its reply and still needs time to return.
                 Err(e)
                     if e.code == "FN_TIMEOUT"
-                        && llm_streams.any_active()
+                        && (llm_streams.any_active() || llm_streams.finished_within(timeout))
                         && Instant::now() < hard_deadline =>
                 {
                     deadline = Instant::now() + timeout;
@@ -2233,7 +2240,10 @@ impl FnRunner {
                         .ops
                         .push((req.op_id.clone(), Arc::clone(&cancel)));
                     llm_streams.active.fetch_add(1, Ordering::SeqCst);
-                    let active = ActiveStreamGuard(Arc::clone(&llm_streams.active));
+                    let active = ActiveStreamGuard(
+                        Arc::clone(&llm_streams.active),
+                        Arc::clone(&llm_streams.last_finished_ms),
+                    );
                     let stdin = Arc::clone(&self.stdin);
                     let auth_snapshot = current_auth_snapshot(&gate_auth, caller_is_admin);
                     let stream_call_id = call_id.clone();
@@ -2604,6 +2614,8 @@ struct LlmStreamOps {
     ops: Vec<(Option<String>, Arc<AtomicBool>)>,
     /// Streams whose thread has not finished yet.
     active: Arc<AtomicUsize>,
+    /// When the last stream thread finished (ms epoch, 0 = none yet).
+    last_finished_ms: Arc<AtomicU64>,
 }
 
 impl LlmStreamOps {
@@ -2618,6 +2630,12 @@ impl LlmStreamOps {
     fn any_active(&self) -> bool {
         self.active.load(Ordering::SeqCst) > 0
     }
+
+    /// A stream finished less than `window` ago.
+    fn finished_within(&self, window: Duration) -> bool {
+        let at = self.last_finished_ms.load(Ordering::SeqCst);
+        at != 0 && now_millis().saturating_sub(at) < window.as_millis() as u64
+    }
 }
 
 impl Drop for LlmStreamOps {
@@ -2628,14 +2646,27 @@ impl Drop for LlmStreamOps {
     }
 }
 
-/// Decrements the active-stream count when a stream thread exits,
-/// including by panic.
-struct ActiveStreamGuard(Arc<AtomicUsize>);
+/// Decrements the active-stream count and records the finish time when a
+/// stream thread exits, including by panic.
+struct ActiveStreamGuard(Arc<AtomicUsize>, Arc<AtomicU64>);
 
 impl Drop for ActiveStreamGuard {
     fn drop(&mut self) {
+        self.1.store(now_millis(), Ordering::SeqCst);
         self.0.fetch_sub(1, Ordering::SeqCst);
     }
+}
+
+/// How long `start` waits for the runtime's Ready message.
+/// `PYLON_FN_READY_TIMEOUT_SECS`, default 30 s: a large app importing many
+/// functions on a cold machine can take longer than a few seconds.
+fn ready_timeout_from_env() -> Duration {
+    std::env::var("PYLON_FN_READY_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(30))
 }
 
 /// Block up to `deadline` for the next message on a call's demux channel.
@@ -3266,6 +3297,35 @@ impl From<pylon_http::DataError> for FnCallError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_stream_that_just_finished_counts_as_activity() {
+        let ops = super::LlmStreamOps::default();
+        assert!(!ops.finished_within(std::time::Duration::from_secs(1)));
+        {
+            ops.active.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _guard = super::ActiveStreamGuard(
+                std::sync::Arc::clone(&ops.active),
+                std::sync::Arc::clone(&ops.last_finished_ms),
+            );
+        }
+        assert!(!ops.any_active());
+        assert!(ops.finished_within(std::time::Duration::from_secs(1)));
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert!(!ops.finished_within(std::time::Duration::from_millis(10)));
+    }
+
+    #[test]
+    fn the_ready_wait_defaults_to_thirty_seconds() {
+        // Only asserts the default; the env override is read the same way
+        // as the other PYLON_FN_* settings.
+        if std::env::var("PYLON_FN_READY_TIMEOUT_SECS").is_err() {
+            assert_eq!(
+                super::ready_timeout_from_env(),
+                std::time::Duration::from_secs(30)
+            );
+        }
+    }
+
     use super::*;
     use crate::protocol::{AuthInfo, DbOp, DbOpMessage};
     use pylon_http::DataError;

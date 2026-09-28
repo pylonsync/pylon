@@ -342,6 +342,51 @@ fn a_silent_provider_does_not_trip_the_idle_timeout() {
     runner.kill();
 }
 
+/// The handler keeps working after the provider returns. The provider's
+/// finish is activity: the idle budget starts over from it, so the call
+/// does not time out while the handler finishes up.
+#[test]
+fn a_handler_that_resumes_after_the_provider_gets_a_fresh_idle_budget() {
+    if !bun_available() {
+        eprintln!("skipped: bun is not on PATH");
+        return;
+    }
+    const RESUMING_FN: &str = r#"
+export default {
+  type: "action",
+  handler: async (ctx) => {
+    const res = await ctx.llm.stream({ messages: [{ role: "user", content: "hi" }] }, () => {});
+    // Work after the provider answered, well within one idle timeout.
+    await new Promise((r) => setTimeout(r, 450));
+    return { stop: res.stop_reason };
+  },
+};
+"#;
+    let dir = app_dir("resume", &[("resumer", RESUMING_FN)]);
+    let runner = start_runner(&dir);
+    runner.set_call_timeout(Duration::from_millis(700));
+    // Finishes just before the extended deadline the running provider
+    // earned (700 ms after the first timeout at 700 ms).
+    runner.set_llm_stream_hook(Box::new(|_req, _auth, _on_event, _cancel| {
+        std::thread::sleep(Duration::from_millis(1250));
+        Ok(response("done"))
+    }));
+    let (value, _) = runner
+        .call(
+            &NullStore,
+            "resumer",
+            FnType::Action,
+            serde_json::json!({}),
+            auth(),
+            None,
+            None,
+            None,
+        )
+        .expect("the provider's finish restarts the idle budget");
+    assert_eq!(value["stop"], "end_turn");
+    runner.kill();
+}
+
 /// The functions under test never touch `ctx.db`.
 struct NullStore;
 
