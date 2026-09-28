@@ -8,6 +8,9 @@
 //! printing "restarting", and nothing listened on the port again.
 //!
 //! Skipped (with a message) when `bun` is not on PATH.
+//! Unix only: the restart there is an exec, and the test signals the
+//! process with SIGTERM.
+#![cfg(unix)]
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
