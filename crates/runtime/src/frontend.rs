@@ -3018,14 +3018,9 @@ fn host_of(value: &str) -> String {
     host.to_ascii_lowercase()
 }
 
-/// Loopback host? Mirrors `LOOPBACK_HOST` in ssr-runtime.ts:
-/// `/^(localhost|127\.|\[?::1|0\.0\.0\.0)/`.
+/// Loopback host? Exact match; see [`pylon_router::public_url::is_loopback_host`].
 fn is_loopback_host(host: &str) -> bool {
-    host.starts_with("localhost")
-        || host.starts_with("127.")
-        || host.starts_with("::1")
-        || host.starts_with("[::1")
-        || host.starts_with("0.0.0.0")
+    pylon_router::public_url::is_loopback_host(host)
 }
 
 /// The cache-key "host bucket" for an SSR render.

@@ -20,6 +20,7 @@ import {
   makeReadTrackingProxy,
   makeRevocableReadTrackingProxy,
   jsonClone,
+  isLoopbackHost,
 } from "./ssr-runtime";
 
 describe("resolveOrigin — Host-header allowlist (cache-poisoning fence)", () => {
@@ -902,5 +903,29 @@ describe("script-escaping + secure cookies", () => {
       if (prev === undefined) delete process.env.PYLON_DEV_MODE;
       else process.env.PYLON_DEV_MODE = prev;
     }
+  });
+});
+
+describe("isLoopbackHost — exact loopback match", () => {
+  test("accepts loopback names and addresses with an optional port", () => {
+    for (const h of ["localhost", "localhost:4321", "127.0.0.1", "127.1.2.3:80", "0.0.0.0:4321", "::1", "[::1]", "[::1]:4321"]) {
+      expect(isLoopbackHost(h)).toBe(true);
+    }
+  });
+
+  test("rejects hosts that only start like loopback", () => {
+    for (const h of ["localhost.attacker.io", "127.attacker.test", "0.0.0.0.attacker.net", "localhostx", "[::1].evil.com", "localhost:80x", "128.0.0.1", "127.0.0.256", ""]) {
+      expect(isLoopbackHost(h)).toBe(false);
+    }
+  });
+
+  test("a look-alike Host is not trusted for the origin or a redirect", () => {
+    expect(
+      resolveOrigin({ host: "localhost.attacker.io", publicUrl: "https://app.example.com" }),
+    ).toBe("https://app.example.com");
+    expect(
+      isSafeRedirect("https://localhost.attacker.io/phish", { publicUrl: "https://app.example.com" }),
+    ).toBe(false);
+    expect(isSafeRedirect("http://localhost:4321/ok", {})).toBe(true);
   });
 });

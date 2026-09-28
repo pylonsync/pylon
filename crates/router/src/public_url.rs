@@ -96,14 +96,46 @@ pub fn host_of(value: &str) -> String {
     host.to_ascii_lowercase()
 }
 
-/// Loopback host? Mirrors `LOOPBACK_HOST` in ssr-runtime.ts:
-/// `/^(localhost|127\.|\[?::1|0\.0\.0\.0)/`.
+/// Loopback host? `host` is a lowercase authority (`host[:port]`,
+/// `[ipv6]:port`). True for exactly `localhost`, an IPv4 address in
+/// 127.0.0.0/8, `::1`, or `0.0.0.0`, with an optional numeric port. The
+/// match is exact, so `localhost.example.com` and `127.evil.test` are not
+/// loopback. Mirrors `isLoopbackHost` in packages/functions/src/ssr-runtime.ts.
 pub fn is_loopback_host(host: &str) -> bool {
-    host.starts_with("localhost")
-        || host.starts_with("127.")
-        || host.starts_with("::1")
-        || host.starts_with("[::1")
-        || host.starts_with("0.0.0.0")
+    let name = if let Some(rest) = host.strip_prefix('[') {
+        // [ipv6] or [ipv6]:port
+        let Some((inner, after)) = rest.split_once(']') else {
+            return false;
+        };
+        if !(after.is_empty() || after.strip_prefix(':').is_some_and(is_port)) {
+            return false;
+        }
+        inner
+    } else {
+        match host.split_once(':') {
+            // A bare IPv6 address has several colons and no brackets.
+            Some((name, port)) if !port.contains(':') => {
+                if !is_port(port) {
+                    return false;
+                }
+                name
+            }
+            Some(_) => host,
+            None => host,
+        }
+    };
+    if name == "localhost" {
+        return true;
+    }
+    match name.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || ip.is_unspecified(),
+        Ok(std::net::IpAddr::V6(ip)) => ip.is_loopback(),
+        Err(_) => false,
+    }
+}
+
+fn is_port(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 5 && s.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// The full URL the client requested: `scheme://host` + `path_and_query`.
@@ -336,6 +368,49 @@ mod tests {
         assert_eq!(
             request_public_url(&h, "/p", &cfg("", &[]), no_tenants),
             "/p"
+        );
+    }
+
+    #[test]
+    fn loopback_match_is_exact() {
+        for h in [
+            "localhost",
+            "localhost:4321",
+            "127.0.0.1",
+            "127.1.2.3:80",
+            "0.0.0.0:4321",
+            "::1",
+            "[::1]",
+            "[::1]:4321",
+        ] {
+            assert!(is_loopback_host(h), "{h}");
+        }
+        for h in [
+            "localhost.attacker.io",
+            "localhost.attacker.io:443",
+            "127.attacker.test",
+            "0.0.0.0.attacker.net",
+            "localhostx",
+            "[::1].evil.com",
+            "[::1]:80x",
+            "localhost:80x",
+            "128.0.0.1",
+            "::2",
+            "",
+        ] {
+            assert!(!is_loopback_host(h), "{h}");
+        }
+    }
+
+    #[test]
+    fn a_host_that_only_starts_like_loopback_is_not_trusted() {
+        let h = hdrs(&[
+            ("host", "localhost.attacker.io"),
+            ("x-forwarded-proto", "https"),
+        ]);
+        assert_eq!(
+            request_public_url(&h, "/p", &cfg("https://app.example.com", &[]), no_tenants),
+            "https://app.example.com/p"
         );
     }
 

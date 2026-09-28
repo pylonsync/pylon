@@ -1092,7 +1092,36 @@ function readSocialImageMeta(relPath: string): {
   return { type, width, height, v };
 }
 
-const LOOPBACK_HOST = /^(localhost|127\.|\[?::1|0\.0\.0\.0)/;
+/** Loopback host? `host` is a lowercase authority (`host[:port]`,
+ *  `[ipv6]:port`). True for exactly `localhost`, 127.0.0.0/8, `::1`, or
+ *  `0.0.0.0`, with an optional numeric port. The match is exact, so
+ *  `localhost.example.com` is not loopback. Mirrors `is_loopback_host` in
+ *  crates/router/src/public_url.rs. Exported for tests. */
+export function isLoopbackHost(host: string): boolean {
+  let name: string;
+  const bracketed = /^\[([^\]]*)\](?::(\d{1,5}))?$/.exec(host);
+  if (bracketed) {
+    name = bracketed[1];
+  } else if (host.startsWith("[")) {
+    return false;
+  } else {
+    const colons = host.split(":").length - 1;
+    if (colons === 1) {
+      const [h, port] = host.split(":");
+      if (!/^\d{1,5}$/.test(port)) return false;
+      name = h;
+    } else {
+      name = host;
+    }
+  }
+  if (name === "localhost" || name === "::1" || name === "0.0.0.0") return true;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(name);
+  if (v4) {
+    const octets = v4.slice(1).map(Number);
+    return octets.every((o) => o <= 255) && octets[0] === 127;
+  }
+  return false;
+}
 
 /** Normalize a bare host or a full URL down to a lowercase `host` (host:port).
  *  Returns "" for unparseable input. */
@@ -1135,7 +1164,7 @@ export function resolveOrigin(opts: {
     add(opts.publicUrl || "");
     add(opts.canonicalHost || "");
     for (const x of (opts.trustedHostsCsv || "").split(",")) add(x);
-    const isLoopback = LOOPBACK_HOST.test(host);
+    const isLoopback = isLoopbackHost(host);
     if (isLoopback || allow.has(host)) {
       // Off-loopback (prod) we ALWAYS use https and never honor the request's
       // X-Forwarded-Proto. The SSR cache is keyed only by host (not proto), so
@@ -1201,7 +1230,7 @@ export function isSafeRedirect(
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
   const host = parsed.host.toLowerCase();
-  if (LOOPBACK_HOST.test(host)) return true;
+  if (isLoopbackHost(host)) return true;
   const allow = new Set<string>();
   const add = (v: string) => {
     const h = hostOf(v);

@@ -8543,7 +8543,7 @@ fn start_server(
                 .or(req_host)
                 .unwrap_or_else(|| format!("localhost:{port}"));
             let scheme = x_fwd_proto.unwrap_or_else(|| {
-                if host.starts_with("localhost") {
+                if pylon_router::public_url::is_loopback_host(&host.to_ascii_lowercase()) {
                     "http".to_string()
                 } else {
                     "https".to_string()
