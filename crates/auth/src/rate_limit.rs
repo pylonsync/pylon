@@ -136,13 +136,23 @@ struct Counter {
 pub struct AuthRateLimiter {
     per_ip: Mutex<HashMap<(AuthBucket, String), Counter>>,
     per_account: Mutex<HashMap<(AuthBucket, String), Counter>>,
+    /// When expired windows were last dropped (epoch seconds). Without
+    /// the sweep the maps grow by one entry per address or account ever
+    /// seen.
+    last_sweep: std::sync::atomic::AtomicU64,
 }
+
+/// Seconds between sweeps of expired windows.
+const SWEEP_INTERVAL_SECS: u64 = 60;
+const IP_WINDOW_SECS: u64 = 60;
+const ACCOUNT_WINDOW_SECS: u64 = 3600;
 
 impl Default for AuthRateLimiter {
     fn default() -> Self {
         Self {
             per_ip: Mutex::new(HashMap::new()),
             per_account: Mutex::new(HashMap::new()),
+            last_sweep: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -169,10 +179,26 @@ impl AuthRateLimiter {
         ip: &str,
         account_key: Option<&str>,
     ) -> RateLimitDecision {
+        self.check_at(bucket, ip, account_key, now_secs())
+    }
+
+    fn check_at(
+        &self,
+        bucket: AuthBucket,
+        ip: &str,
+        account_key: Option<&str>,
+        now: u64,
+    ) -> RateLimitDecision {
+        self.sweep_expired(now);
         let (ip_cap, acct_cap) = bucket.caps();
-        let now = now_secs();
         // 1-minute window for IP, 1-hour window for account.
-        if let Some(retry) = bump(&self.per_ip, (bucket, ip_key(ip)), 60, ip_cap, now) {
+        if let Some(retry) = bump(
+            &self.per_ip,
+            (bucket, ip_key(ip)),
+            IP_WINDOW_SECS,
+            ip_cap,
+            now,
+        ) {
             return RateLimitDecision::Deny {
                 retry_after_secs: retry,
             };
@@ -181,7 +207,7 @@ impl AuthRateLimiter {
             if let Some(retry) = bump(
                 &self.per_account,
                 (bucket, key.to_ascii_lowercase()),
-                3600,
+                ACCOUNT_WINDOW_SECS,
                 acct_cap,
                 now,
             ) {
@@ -191,6 +217,37 @@ impl AuthRateLimiter {
             }
         }
         RateLimitDecision::Allow
+    }
+
+    /// Drop the windows that have ended, at most once a minute (the check
+    /// that does it pays one pass over each map).
+    fn sweep_expired(&self, now: u64) {
+        use std::sync::atomic::Ordering;
+        let last = self.last_sweep.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < SWEEP_INTERVAL_SECS
+            || self
+                .last_sweep
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_err()
+        {
+            return;
+        }
+        for (map, window) in [
+            (&self.per_ip, IP_WINDOW_SECS),
+            (&self.per_account, ACCOUNT_WINDOW_SECS),
+        ] {
+            map.lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .retain(|_, c| now < c.window_start + window);
+        }
+    }
+
+    #[cfg(test)]
+    fn tracked(&self) -> (usize, usize) {
+        (
+            self.per_ip.lock().unwrap().len(),
+            self.per_account.lock().unwrap().len(),
+        )
     }
 }
 
@@ -389,6 +446,29 @@ mod tests {
         for ip in ["203.0.113.5", "2001:db8::1", "8.8.8.8", ""] {
             assert!(!is_non_public_ip(ip), "{ip}");
         }
+    }
+
+    /// Review P3: windows were never removed, so the maps kept one entry
+    /// per address and account ever seen. Ended windows are dropped.
+    #[test]
+    fn ended_windows_are_dropped() {
+        let rl = AuthRateLimiter::new();
+        let t0 = 1_000_000;
+        for i in 0..500 {
+            let _ = rl.check_at(
+                AuthBucket::Login,
+                &format!("10.9.{}.{}", i / 250, i % 250),
+                Some(&format!("u{i}@x.com")),
+                t0,
+            );
+        }
+        assert_eq!(rl.tracked(), (500, 500));
+        // Past the IP window: the IP entries go, the account ones stay.
+        let _ = rl.check_at(AuthBucket::Login, "10.8.0.1", None, t0 + 61);
+        assert_eq!(rl.tracked(), (1, 500));
+        // Past the account window.
+        let _ = rl.check_at(AuthBucket::Login, "10.8.0.2", None, t0 + 3700);
+        assert_eq!(rl.tracked(), (1, 0));
     }
 
     #[test]
