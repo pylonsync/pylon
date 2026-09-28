@@ -26,7 +26,13 @@ enum Backend {
 struct Env {
     rt: Runtime,
     backend: Backend,
+    /// Postgres: the test database's `Doc` and CRDT tables are shared, and
+    /// each Postgres env drops and recreates them, so one Postgres env
+    /// exists at a time. Held until the env drops.
+    _pg_schema: Option<std::sync::MutexGuard<'static, ()>>,
 }
+
+static PG_SCHEMA: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn field(name: &str, ty: &str, crdt: Option<CrdtAnnotation>, optional: bool) -> ManifestField {
     ManifestField {
@@ -111,10 +117,14 @@ fn sqlite() -> Env {
     Env {
         rt,
         backend: Backend::Sqlite(dir),
+        _pg_schema: None,
     }
 }
 
 fn postgres(url: &str) -> Env {
+    // A test that failed while holding the lock leaves the tables in any
+    // state; the next env recreates them, so the poison carries nothing.
+    let schema = PG_SCHEMA.lock().unwrap_or_else(|p| p.into_inner());
     let manifest = manifest();
     let mut adapter = pylon_storage::postgres::live::LivePostgresAdapter::connect(url)
         .expect("connect to test postgres");
@@ -135,6 +145,7 @@ fn postgres(url: &str) -> Env {
     Env {
         rt,
         backend: Backend::Postgres(url.to_string()),
+        _pg_schema: Some(schema),
     }
 }
 
