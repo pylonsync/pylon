@@ -1486,6 +1486,9 @@ export class SyncEngine {
    *  belong to someone else. `undefined` until a session is committed. */
   private sessionToken: string | null | undefined = undefined;
   private identityRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Delayed push / pull retries scheduled through `later()`. `stop()`
+   *  clears them, so a stopped engine makes no further requests. */
+  private retryTimers = new Set<ReturnType<typeof setTimeout>>();
   private identityRetryAttempts = 0;
 
   /** Chain one apply step behind every queued one. Anything chained
@@ -1646,6 +1649,8 @@ export class SyncEngine {
       clearTimeout(this.identityRetryTimer);
       this.identityRetryTimer = null;
     }
+    for (const timer of this.retryTimers) clearTimeout(timer);
+    this.retryTimers.clear();
     if (this.transport) {
       this.transport.stop();
       this.transport = null;
@@ -2148,11 +2153,11 @@ export class SyncEngine {
           console.warn(
             `[pylon] persistent 410 RESYNC_REQUIRED (attempt ${attempt + 1}); backing off ${delayMs}ms`,
           );
-          setTimeout(() => {
+          this.later(delayMs, () => {
             // Retry after the delay; a delta success resets the counter,
             // a repeat 410 extends the backoff (no snapshot).
             void this.pull();
-          }, delayMs);
+          });
         }
       }
     } finally {
@@ -3304,9 +3309,9 @@ export class SyncEngine {
       // takes the Proceed slot). 250ms is short enough that user
       // perception doesn't notice, long enough to not hot-loop.
       if (hasInFlightDedupe) {
-        setTimeout(() => {
+        this.later(250, () => {
           void this.push();
-        }, 250);
+        });
       }
     } catch (err) {
       // Whole-request failure. CRITICAL distinction:
@@ -3365,11 +3370,21 @@ export class SyncEngine {
         console.warn(
           `[sync] /api/sync/push transient failure (status ${status ?? "offline"}); keeping ${pending.length} mutation(s) pending, retrying in ${delayMs}ms`,
         );
-        setTimeout(() => {
+        this.later(delayMs, () => {
           void this.push();
-        }, delayMs);
+        });
       }
     }
+  }
+
+  /** Run `fn` after `ms` unless the engine stops first. A retry from a
+   *  stopped engine would otherwise still reach the network. */
+  private later(ms: number, fn: () => void): void {
+    const timer = setTimeout(() => {
+      this.retryTimers.delete(timer);
+      if (this.running) fn();
+    }, ms);
+    this.retryTimers.add(timer);
   }
 
   /**

@@ -88,6 +88,10 @@ public actor SyncEngine {
     private(set) var cursor: SyncCursor = SyncCursor()
 
     private var running = false
+    /// Set by `stop()`, cleared by `start()`. Delayed push / pull retries
+    /// check it, so a stopped engine makes no further requests. (Not
+    /// `running`: an engine used without `start()` still retries.)
+    private var stopped = false
     private var ws: PylonWebSocket?
     private var reconnectAttempts = 0
     private var consecutive410s = 0
@@ -278,6 +282,7 @@ public actor SyncEngine {
     public func start() async {
         guard !running else { return }
         running = true
+        stopped = false
 
         if let persistence {
             do {
@@ -340,6 +345,7 @@ public actor SyncEngine {
 
     public func stop() {
         running = false
+        stopped = true
         ws?.close()
         ws = nil
         wsConnected = false
@@ -525,7 +531,7 @@ public actor SyncEngine {
                     let delayMs = min(30_000, 1000 * (1 << min(attempt, 5)))
                     Task {
                         try? await Task.sleep(nanoseconds: UInt64(delayMs) * 1_000_000)
-                        await self.pull()
+                        await self.pullUnlessStopped()
                     }
                 }
             default:
@@ -794,7 +800,7 @@ public actor SyncEngine {
             if inFlightDedupe {
                 Task { [weak self] in
                     try? await Task.sleep(nanoseconds: 250_000_000)
-                    await self?.push()
+                    await self?.pushUnlessStopped()
                 }
             }
         } catch let err as PylonError {
@@ -844,7 +850,17 @@ public actor SyncEngine {
 
     private func retryPush() async {
         pushRetryScheduled = false
+        await pushUnlessStopped()
+    }
+
+    private func pushUnlessStopped() async {
+        guard !stopped else { return }
         await push()
+    }
+
+    private func pullUnlessStopped() async {
+        guard !stopped else { return }
+        await pull()
     }
 
     /// Roll back an optimistic mutation the server permanently rejected:

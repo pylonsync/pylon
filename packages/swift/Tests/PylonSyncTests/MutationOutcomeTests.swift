@@ -99,6 +99,20 @@ final class MutationOutcomeTests: XCTestCase {
         try await Task.sleep(nanoseconds: 1_300_000_000)
     }
 
+    /// Parity with the TS "a stopped engine does not retry a failed push".
+    func testAStoppedEngineDoesNotRetryAFailedPush() async throws {
+        let server = Server()
+        let engine = await makeEngine(server)
+        await server.primePush([503])
+        _ = try await engine.insert("Note", ["title": "offline"])
+        await engine.stop()
+        let before = await server.pushCount()
+        // The transient failure scheduled a retry 1s out.
+        try await Task.sleep(nanoseconds: 1_300_000_000)
+        let after = await server.pushCount()
+        XCTAssertEqual(after, before)
+    }
+
     func testAWriteQueuedDuringAPushStillReachesTheServer() async throws {
         let server = Server()
         let engine = await makeEngine(server, pushDelayNanos: 150_000_000)

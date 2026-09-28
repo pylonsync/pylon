@@ -89,6 +89,19 @@ describe("mutation outcome", () => {
     expect(env.engine.pendingCount()).toBe(1);
   });
 
+  test("a stopped engine does not retry a failed push", async () => {
+    env = createTestEnv({ transport: "poll" });
+    env.signIn({ userId: "u1" });
+    await env.start();
+    env.server.primeNextPushOutcome({ kind: "network" });
+    await env.engine.insert("Note", { title: "offline" });
+    env.engine.stop();
+    const before = env.transport.fetchCount();
+    // The transient failure scheduled a retry 1s out.
+    await new Promise((r) => setTimeout(r, 1300));
+    expect(env.transport.fetchCount()).toBe(before);
+  });
+
   test("a write queued while a push is running still reaches the server", async () => {
     env = createTestEnv({ transport: "poll" });
     env.signIn({ userId: "u1" });
