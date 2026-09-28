@@ -794,7 +794,9 @@ fn timestamptz_binds_iso_string_correctly() {
     )
     .unwrap();
     let row = rt.get_by_id("TsTest", &id).unwrap().unwrap();
-    assert_eq!(row["createdAt"], "2026-04-29T14:28:34Z");
+    // Datetimes read back in the stored form: UTC, three fractional
+    // digits, the same string SQLite returns for the same write.
+    assert_eq!(row["createdAt"], "2026-04-29T14:28:34.000Z");
     assert_eq!(row["verifiedAt"], "2026-04-29T14:28:34.789Z");
     let found = rt
         .query_filtered(

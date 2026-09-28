@@ -285,6 +285,37 @@ pub fn iso_to_epoch(s: &str) -> Result<u64, String> {
     Ok(total as u64)
 }
 
+/// The stored form of a `datetime` field value: RFC 3339 in UTC with
+/// exactly three fractional digits (`2026-04-29T14:28:34.500Z`, the shape
+/// of JavaScript's `toISOString`). Every backend stores and returns this
+/// one shape, so string order is time order and a value reads back as it
+/// was stored, on SQLite and Postgres alike. Extra fractional digits are
+/// truncated to milliseconds; an offset is converted to UTC.
+///
+/// `None` for a string that is not an RFC 3339 timestamp from 1970 on
+/// (callers keep such a value as given).
+pub fn canonical_datetime(s: &str) -> Option<String> {
+    let secs = iso_to_epoch(s).ok()?;
+    let bytes = s.as_bytes();
+    let mut millis = [b'0'; 3];
+    if bytes.get(19) == Some(&b'.') {
+        for (i, b) in bytes[20..]
+            .iter()
+            .take_while(|b| b.is_ascii_digit())
+            .take(3)
+            .enumerate()
+        {
+            millis[i] = *b;
+        }
+    }
+    let whole = epoch_to_iso(secs);
+    let base = whole.strip_suffix('Z')?;
+    Some(format!(
+        "{base}.{}Z",
+        std::str::from_utf8(&millis).unwrap_or("000")
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // File ID validation (defense-in-depth against path traversal)
 // ---------------------------------------------------------------------------
@@ -496,6 +527,39 @@ mod tests {
             s.len() >= 20,
             "now_iso must be a full RFC3339 timestamp, got {s:?}"
         );
+    }
+
+    #[test]
+    fn canonical_datetime_has_three_fractional_digits_in_utc() {
+        let c = |s: &str| canonical_datetime(s);
+        assert_eq!(
+            c("2026-04-29T14:28:34Z").as_deref(),
+            Some("2026-04-29T14:28:34.000Z")
+        );
+        assert_eq!(
+            c("2026-04-29T14:28:34.5Z").as_deref(),
+            Some("2026-04-29T14:28:34.500Z")
+        );
+        assert_eq!(
+            c("2026-04-29T14:28:34.1Z").as_deref(),
+            Some("2026-04-29T14:28:34.100Z")
+        );
+        assert_eq!(
+            c("2026-04-29T14:28:34.123456Z").as_deref(),
+            Some("2026-04-29T14:28:34.123Z")
+        );
+        assert_eq!(
+            c("2026-04-29T16:28:34.789+02:00").as_deref(),
+            Some("2026-04-29T14:28:34.789Z")
+        );
+        assert_eq!(c("not a date"), None);
+        assert_eq!(c("1969-12-31T23:59:59Z"), None);
+        // String order is time order.
+        let (a, b) = (
+            c("2026-04-29T14:28:34Z").unwrap(),
+            c("2026-04-29T14:28:34.5Z").unwrap(),
+        );
+        assert!(a < b);
     }
 
     #[test]

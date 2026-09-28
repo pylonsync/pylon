@@ -3362,6 +3362,14 @@ impl Runtime {
         } else {
             data
         };
+        let canonical_owned;
+        let data = match canonicalize_datetime_fields(self.require_entity(entity)?, data) {
+            Some(v) => {
+                canonical_owned = v;
+                &canonical_owned
+            }
+            None => data,
+        };
         // Encrypt encrypted-field values before the storage backend
         // sees the row. The `enc:v2:<key-id>:<nonce>:<ct>` strings persist
         // through CRDT projection, FTS indexing, JSON change events —
@@ -3749,6 +3757,14 @@ impl Runtime {
         id: &str,
         data: &serde_json::Value,
     ) -> Result<bool, RuntimeError> {
+        let canonical_owned;
+        let data = match canonicalize_datetime_fields(self.require_entity(entity)?, data) {
+            Some(v) => {
+                canonical_owned = v;
+                &canonical_owned
+            }
+            None => data,
+        };
         // Encrypt any encrypted-field patches before the backend
         // sees them. Partial updates (PATCH-style) only touch fields
         // the caller included — fields the caller omits stay as the
@@ -4594,6 +4610,14 @@ impl Runtime {
     ) -> Result<String, RuntimeError> {
         let ent = self.require_entity(entity)?;
         let id = resolve_or_generate_id(data)?;
+        let canonical_owned;
+        let data = match canonicalize_datetime_fields(ent, data) {
+            Some(v) => {
+                canonical_owned = v;
+                &canonical_owned
+            }
+            None => data,
+        };
         // Encrypt encrypted-field values before this connection sees
         // the row. Codex P1: the *_with_conn family is the per-
         // transaction store path used by ALL action handlers (TxStore,
@@ -4695,6 +4719,14 @@ impl Runtime {
         data: &serde_json::Value,
     ) -> Result<bool, RuntimeError> {
         let ent = self.require_entity(entity)?;
+        let canonical_owned;
+        let data = match canonicalize_datetime_fields(ent, data) {
+            Some(v) => {
+                canonical_owned = v;
+                &canonical_owned
+            }
+            None => data,
+        };
         // Encrypt before this connection sees the patch — same
         // rationale as insert_with_conn.
         let encrypted_owned;
@@ -5761,6 +5793,32 @@ fn is_valid_pylon_id(s: &str) -> bool {
 /// shape-driven binding. Applied at the SQL boundary only: the
 /// in-memory row (change events, hooks, policies) always carries the
 /// parsed value.
+/// `data` with each `datetime` field's string value in its stored form
+/// ([`pylon_kernel::util::canonical_datetime`]), or `None` when nothing
+/// changes. Applied at every runtime write entry, so the SQL column, the
+/// CRDT doc, and the change event all carry the same string on SQLite and
+/// Postgres. Values that are not RFC 3339 timestamps pass through.
+fn canonicalize_datetime_fields(
+    ent: &pylon_kernel::ManifestEntity,
+    data: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let obj = data.as_object()?;
+    let mut out: Option<serde_json::Map<String, serde_json::Value>> = None;
+    for f in ent.fields.iter().filter(|f| f.field_type == "datetime") {
+        let Some(serde_json::Value::String(s)) = obj.get(&f.name) else {
+            continue;
+        };
+        let Some(c) = pylon_kernel::util::canonical_datetime(s) else {
+            continue;
+        };
+        if c != *s {
+            out.get_or_insert_with(|| obj.clone())
+                .insert(f.name.clone(), serde_json::Value::String(c));
+        }
+    }
+    out.map(serde_json::Value::Object)
+}
+
 fn json_to_sql_typed(
     ent: &pylon_kernel::ManifestEntity,
     key: &str,
@@ -5768,6 +5826,19 @@ fn json_to_sql_typed(
 ) -> Box<dyn rusqlite::types::ToSql> {
     if entity_field_is_json(ent, key) {
         return Box::new(serde_json::to_string(val).unwrap_or_else(|_| "null".to_string()));
+    }
+    // A datetime value (a write, or a filter operand) in its stored form,
+    // so comparisons are between like strings.
+    if let serde_json::Value::String(s) = val {
+        if ent
+            .fields
+            .iter()
+            .any(|f| f.name == key && f.field_type == "datetime")
+        {
+            if let Some(c) = pylon_kernel::util::canonical_datetime(s) {
+                return Box::new(c);
+            }
+        }
     }
     if let Some(dims) = entity_field_vector_dims(ent, key) {
         // `validate_vector_fields` already rejected malformed writes at
@@ -6716,7 +6787,7 @@ mod tests {
         assert_eq!(row["email"], "a@b.com");
         assert_eq!(row["displayName"], "Alice");
         assert_eq!(row["avatarColor"], "#abc");
-        assert_eq!(row["createdAt"], "2026-01-01T00:00:00Z");
+        assert_eq!(row["createdAt"], "2026-01-01T00:00:00.000Z");
         assert_eq!(row["passwordHash"], "hashed-password");
     }
 
@@ -7133,6 +7204,61 @@ mod tests {
             rt.get_by_id("User", &id).unwrap().unwrap()["displayName"],
             "Committed"
         );
+    }
+
+    /// Review P3: SQLite stored a datetime string as written and Postgres
+    /// formatted its own, so precision was mixed (`...34.500Z` sorts
+    /// before `...34Z` as a string) and the backends disagreed. Every
+    /// write now stores UTC with three fractional digits, the form
+    /// Postgres returns, and filter operands are compared in that form.
+    #[test]
+    fn datetimes_are_stored_in_one_form() {
+        let mut manifest = test_manifest();
+        manifest.entities[0]
+            .fields
+            .push(pylon_kernel::ManifestField {
+                name: "seenAt".into(),
+                field_type: "datetime".into(),
+                optional: true,
+                unique: false,
+                crdt: None,
+                server_only: false,
+                readonly: false,
+                default: None,
+                enum_values: None,
+                encrypted: false,
+                sync_omit: false,
+            });
+        let rt = Runtime::in_memory(manifest).unwrap();
+        let insert = |email: &str, seen: &str| {
+            rt.insert(
+                "User",
+                &serde_json::json!({"email": email, "displayName": "d", "seenAt": seen}),
+            )
+            .unwrap()
+        };
+        let whole = insert("a@x.com", "2026-04-29T14:28:34Z");
+        let half = insert("b@x.com", "2026-04-29T16:28:34.5+02:00");
+        let seen = |id: &str| rt.get_by_id("User", id).unwrap().unwrap()["seenAt"].clone();
+        assert_eq!(seen(&whole), "2026-04-29T14:28:34.000Z");
+        assert_eq!(seen(&half), "2026-04-29T14:28:34.500Z");
+        assert!(seen(&whole).as_str() < seen(&half).as_str());
+        rt.update(
+            "User",
+            &whole,
+            &serde_json::json!({"seenAt": "2026-04-29T14:28:35.1Z"}),
+        )
+        .unwrap();
+        assert_eq!(seen(&whole), "2026-04-29T14:28:35.100Z");
+        // A filter written in another form matches the stored value.
+        let found = pylon_http::DataStore::query_filtered(
+            &rt,
+            "User",
+            &serde_json::json!({"seenAt": "2026-04-29T14:28:34.5Z"}),
+        )
+        .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0]["id"], half);
     }
 
     /// A COMMIT that fails ends the transaction and drops the CRDT docs it

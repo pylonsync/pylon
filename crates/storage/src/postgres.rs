@@ -66,15 +66,14 @@ pub fn quote_ident_pub(name: &str) -> String {
     quote_ident(name)
 }
 
-/// Render a timestamp read from Postgres as an ISO 8601 UTC string with
-/// only the fractional digits the value has: none for whole seconds
-/// (`2026-04-29T14:28:34Z`, the `pylon_kernel::util::now_iso` shape), 3
-/// for milliseconds (`2026-04-29T14:28:34.789Z`, a JS `toISOString()`
-/// value), 6 for microseconds. A datetime written with milliseconds
-/// reads back with them, as on SQLite, which stores the string as given.
+/// Render a timestamp read from Postgres in the stored `datetime` form
+/// (`pylon_kernel::util::canonical_datetime`): UTC, always three
+/// fractional digits (`2026-04-29T14:28:34.500Z`). The runtime writes that
+/// form on SQLite too, so both backends return the same string for the
+/// same value and string order is time order.
 #[cfg(feature = "postgres-live")]
 pub(crate) fn format_timestamp(dt: chrono::DateTime<chrono::Utc>) -> String {
-    dt.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+    dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 /// Public re-export of [`live::row_to_json`] for sibling modules. Used
@@ -2442,22 +2441,25 @@ mod tests {
                 .unwrap()
                 .with_timezone(&chrono::Utc)
         };
-        assert_eq!(
-            format_timestamp(at("2026-04-29T14:28:34Z")),
-            "2026-04-29T14:28:34Z"
-        );
-        assert_eq!(
-            format_timestamp(at("2026-04-29T14:28:34.789Z")),
-            "2026-04-29T14:28:34.789Z"
-        );
-        assert_eq!(
-            format_timestamp(at("2026-04-29T14:28:34.000123Z")),
-            "2026-04-29T14:28:34.000123Z"
-        );
-        // An offset is normalized to UTC.
-        assert_eq!(
-            format_timestamp(at("2026-04-29T16:28:34.5+02:00")),
-            "2026-04-29T14:28:34.500Z"
+        // Always milliseconds, the form the runtime stores on SQLite, so
+        // the two backends return the same string.
+        for (input, stored) in [
+            ("2026-04-29T14:28:34Z", "2026-04-29T14:28:34.000Z"),
+            ("2026-04-29T14:28:34.789Z", "2026-04-29T14:28:34.789Z"),
+            ("2026-04-29T14:28:34.1Z", "2026-04-29T14:28:34.100Z"),
+            ("2026-04-29T16:28:34.5+02:00", "2026-04-29T14:28:34.500Z"),
+        ] {
+            assert_eq!(format_timestamp(at(input)), stored, "{input}");
+            assert_eq!(
+                pylon_kernel::util::canonical_datetime(input).as_deref(),
+                Some(stored),
+                "{input}"
+            );
+        }
+        // String order is time order across precisions.
+        assert!(
+            format_timestamp(at("2026-04-29T14:28:34Z"))
+                < format_timestamp(at("2026-04-29T14:28:34.5Z"))
         );
     }
 
