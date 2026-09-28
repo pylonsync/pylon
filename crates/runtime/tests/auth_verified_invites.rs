@@ -429,3 +429,47 @@ fn a_failed_membership_insert_leaves_the_invite_pending() {
     let (_, mine) = call(port, "GET", "/api/auth/invites/mine", Some(&erin_tok), "");
     assert_eq!(mine.as_array().unwrap().len(), 1, "{mine}");
 }
+
+#[test]
+fn accept_works_when_the_invite_entity_has_no_accepted_by_field() {
+    let mut m = manifest();
+    m.entities
+        .iter_mut()
+        .find(|e| e.name == "OrgInvite")
+        .unwrap()
+        .fields
+        .retain(|f| f.name != "acceptedByUserId");
+    let (port, rt) = start_with(m);
+    let (_, owner_tok) = session_for(port, &rt, "owner@dealer.test", true);
+    let (status, org) = call(
+        port,
+        "POST",
+        "/api/auth/orgs",
+        Some(&owner_tok),
+        r#"{"name":"Lot 12"}"#,
+    );
+    assert!(status == 200 || status == 201, "{org}");
+    let org_id = org["id"].as_str().unwrap().to_string();
+    let (status, inv) = call(
+        port,
+        "POST",
+        &format!("/api/auth/orgs/{org_id}/invites"),
+        Some(&owner_tok),
+        r#"{"email":"finn@dealer.test","role":"member"}"#,
+    );
+    assert!(status == 200 || status == 201, "{inv}");
+    let (finn, finn_tok) = session_for(port, &rt, "finn@dealer.test", true);
+    let (_, mine) = call(port, "GET", "/api/auth/invites/mine", Some(&finn_tok), "");
+    let invite_id = mine[0]["id"].as_str().unwrap().to_string();
+    let (status, accepted) = call(
+        port,
+        "POST",
+        &format!("/api/auth/invites/by-id/{invite_id}/accept"),
+        Some(&finn_tok),
+        "",
+    );
+    assert_eq!(status, 200, "{accepted}");
+    assert!(members(&rt, &org_id).contains(&finn));
+    let invite = rt.get_by_id("OrgInvite", &invite_id).unwrap().unwrap();
+    assert!(invite.get("acceptedByUserId").is_none(), "{invite}");
+}

@@ -236,7 +236,20 @@ impl OrgStore {
         roles
     }
 
+    /// The invite's `acceptedAt`, in Unix milliseconds.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn accepted_at_ms(&self, invite_id: &str) -> Option<u64> {
+        self.store
+            .get_by_id(&self.cfg.invite_entity, invite_id)
+            .ok()
+            .flatten()?
+            .get("acceptedAt")
+            .and_then(|v| v.as_str())
+            .and_then(parse_rfc3339_millis)
+    }
+
     /// Whether the invite entity declares `field`.
+    #[cfg(not(target_arch = "wasm32"))]
     fn invite_declares(&self, field: &str) -> bool {
         self.store
             .manifest()
@@ -825,7 +838,14 @@ impl OrgStore {
     }
 
     /// Shared accept step: checks expiry, accepted-at, email, and existing
-    /// membership, CAS-stamps `acceptedAt`, then inserts the membership.
+    /// membership, stamps `acceptedAt`, then inserts the membership.
+    ///
+    /// Accepts run one at a time in this process ([`ACCEPT_LOCK`]), and the
+    /// invite is re-read under the lock, so two concurrent accepts of one
+    /// invite cannot both pass the checks. Machines that share a Postgres
+    /// database do not share the lock; across machines the stamp read-back
+    /// below is the only guard, and it cannot tell apart two accepts that
+    /// write in the same millisecond.
     #[cfg(not(target_arch = "wasm32"))]
     fn accept_row(
         &self,
@@ -833,7 +853,20 @@ impl OrgStore {
         accepting_user_id: &str,
         accepting_email: &str,
     ) -> Result<Membership, AcceptError> {
-        let invite = row_to_invite(row, &self.declared_roles).ok_or(AcceptError::InvalidRole)?;
+        let _guard = ACCEPT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let invite_id = row
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or(AcceptError::NotFound)?;
+        let row = self
+            .store
+            .get_by_id(&self.cfg.invite_entity, invite_id)
+            .ok()
+            .flatten()
+            .ok_or(AcceptError::NotFound)?;
+        let invite = row_to_invite(&row, &self.declared_roles).ok_or(AcceptError::InvalidRole)?;
         if invite.accepted_at.is_some() {
             return Err(AcceptError::AlreadyAccepted);
         }
@@ -847,11 +880,9 @@ impl OrgStore {
             return Err(AcceptError::AlreadyMember);
         }
         // Stamp acceptedAt before creating the membership, then re-read it.
-        // Two accepts that both passed the check above race here; each
-        // writes its own millisecond timestamp, and only the one whose value
-        // reads back continues. The read-back is compared as a point in
-        // time: the store may rewrite the string (a datetime field is stored
-        // as UTC with milliseconds).
+        // The read-back is compared as a point in time: the store may
+        // rewrite the string (a datetime field is stored as UTC with
+        // milliseconds).
         let now_ms = now_millis();
         let now = now_ms / 1000;
         let stamp = iso_millis(now_ms);
@@ -867,18 +898,8 @@ impl OrgStore {
         if !updated {
             return Err(AcceptError::NotFound);
         }
-        let after = self
-            .store
-            .get_by_id(&self.cfg.invite_entity, &invite.id)
-            .ok()
-            .flatten()
-            .ok_or(AcceptError::NotFound)?;
-        let after_ms = after
-            .get("acceptedAt")
-            .and_then(|v| v.as_str())
-            .and_then(parse_rfc3339_millis);
-        if after_ms != Some(now_ms) {
-            // A parallel accept won.
+        if self.accepted_at_ms(&invite.id) != Some(now_ms) {
+            // An accept on another machine won.
             return Err(AcceptError::AlreadyAccepted);
         }
         let membership_payload = serde_json::json!({
@@ -892,7 +913,11 @@ impl OrgStore {
             .insert(&self.cfg.member_entity, &membership_payload)
             .is_err()
         {
-            // Give the invite back so the user can accept it again.
+            // Give the invite back so the user can accept it again, unless
+            // another machine's accept has replaced this stamp.
+            if self.accepted_at_ms(&invite.id) != Some(now_ms) {
+                return Err(AcceptError::NotFound);
+            }
             let mut release = serde_json::json!({ "acceptedAt": serde_json::Value::Null });
             if records_acceptor {
                 release["acceptedByUserId"] = serde_json::Value::Null;
@@ -1026,6 +1051,10 @@ fn now_secs() -> u64 {
 fn now_iso() -> String {
     iso(now_secs())
 }
+
+/// Serializes invite accepts in this process. See `OrgStore::accept_row`.
+#[cfg(not(target_arch = "wasm32"))]
+static ACCEPT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(not(target_arch = "wasm32"))]
 fn now_millis() -> u64 {
@@ -1419,6 +1448,39 @@ mod tests {
             .unwrap();
         assert_eq!(membership.role, OrgRole::Admin);
         assert_eq!(s.role_of(&org.id, "u-bob"), Some(OrgRole::Admin));
+    }
+
+    #[test]
+    fn concurrent_accepts_of_one_invite_create_one_membership() {
+        let s = Arc::new(store());
+        let org = s.create("Acme", "u-alice").unwrap();
+        let invited = s
+            .create_invite(&org.id, "bob@example.com", OrgRole::Member, "u-alice")
+            .unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let s = Arc::clone(&s);
+                let barrier = Arc::clone(&barrier);
+                let id = invited.invite.id.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    s.accept_invite_by_id(&id, "u-bob", "bob@example.com")
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(
+            results.iter().filter(|r| r.is_ok()).count(),
+            1,
+            "{results:?}"
+        );
+        let bob_rows = s
+            .list_members(&org.id)
+            .into_iter()
+            .filter(|m| m.user_id == "u-bob")
+            .count();
+        assert_eq!(bob_rows, 1);
     }
 
     #[test]
