@@ -1288,6 +1288,11 @@ fn merge_seq(
 /// images of their nearest source neighbours: after the nearest earlier
 /// one, else before the nearest later one that did not move. The elements
 /// move in the source's order, so a run of moved elements keeps its order.
+///
+/// The final order is found first, in a linked list over the holder's
+/// elements. Then each moved element's old and new place get a slot in
+/// one sequence, and a count of the filled slots before one gives its
+/// index: each move costs O(log n).
 fn move_images(
     doc: &LoroDoc,
     holder: &ContainerID,
@@ -1295,64 +1300,136 @@ fn move_images(
     link: &HashMap<ID, Option<ID>>,
     moved: &HashSet<ID>,
 ) -> Result<(), String> {
-    let list = doc.get_movable_list(holder.clone());
-    let mut order: Vec<ID> = read_elements(doc, holder)
+    let order: Vec<ID> = read_elements(doc, holder)
         .into_iter()
         .map(|e| e.id)
         .collect();
-    let mut index: HashMap<ID, usize> = order.iter().enumerate().map(|(p, id)| (*id, p)).collect();
-    let image = |e: &Elem| link.get(&e.id).copied().flatten();
-    let mut placed: HashSet<ID> = HashSet::new();
+    let n = order.len();
+    let index: HashMap<ID, usize> = order.iter().enumerate().map(|(p, id)| (*id, p)).collect();
+    let image = |e: &Elem| {
+        link.get(&e.id)
+            .copied()
+            .flatten()
+            .and_then(|t| index.get(&t).copied())
+    };
+    // A circular list over the holder's elements; `n` is its head.
+    let mut next: Vec<usize> = (1..=n).chain([0]).collect();
+    let mut prev: Vec<usize> = std::iter::once(n).chain(0..n).collect();
+    // Per source index k: the image of the nearest element from k on that
+    // did not move.
+    let mut later = vec![None; src.len() + 1];
+    for k in (0..src.len()).rev() {
+        later[k] = if moved.contains(&src[k].id) {
+            later[k + 1]
+        } else {
+            image(&src[k]).or(later[k + 1])
+        };
+    }
+    let mut movers: Vec<usize> = Vec::new();
+    let mut last: Option<usize> = None;
     for (k, e) in src.iter().enumerate() {
+        let Some(i) = image(e) else {
+            continue;
+        };
         if !moved.contains(&e.id) {
+            last = Some(i);
             continue;
         }
-        let Some(t) = image(e) else {
-            continue;
-        };
-        let Some(&from) = index.get(&t) else {
-            continue;
-        };
-        let at = |n: &Elem| {
-            image(n)
-                .filter(|i| *i != t)
-                .and_then(|i| index.get(&i).copied())
-        };
-        let after = src[..k]
-            .iter()
-            .rev()
-            .filter(|n| !moved.contains(&n.id) || placed.contains(&n.id))
-            .find_map(at);
-        let before = src[k + 1..]
-            .iter()
-            .filter(|n| !moved.contains(&n.id))
-            .find_map(at);
-        placed.insert(e.id);
-        // The index `to` is taken after the element leaves `from`.
-        let to = match (after, before) {
-            (Some(a), _) if a < from => a + 1,
-            (Some(a), _) => a,
-            (None, Some(b)) if b < from => b,
-            (None, Some(b)) => b - 1,
-            (None, None) => continue,
-        };
-        if to == from {
+        if last.is_none() && later[k + 1].is_none() {
+            last = Some(i);
             continue;
         }
-        list.mov(from, to)
-            .map_err(|e| format!("move {from} to {to}: {e}"))?;
-        order.remove(from);
-        order.insert(to, t);
-        for (p, id) in order
-            .iter()
-            .enumerate()
-            .skip(from.min(to))
-            .take(from.abs_diff(to) + 1)
-        {
-            index.insert(*id, p);
+        let (p, q) = (prev[i], next[i]);
+        next[p] = q;
+        prev[q] = p;
+        let a = last.unwrap_or_else(|| later[k + 1].map_or(n, |b| prev[b]));
+        let b = next[a];
+        next[a] = i;
+        prev[i] = a;
+        next[i] = b;
+        prev[b] = i;
+        movers.push(i);
+        last = Some(i);
+    }
+    if movers.is_empty() {
+        return Ok(());
+    }
+    let mut is_mover = vec![false; n];
+    for &i in &movers {
+        is_mover[i] = true;
+    }
+    let mut end_order = Vec::with_capacity(n);
+    let mut at = next[n];
+    while at != n {
+        end_order.push(at);
+        at = next[at];
+    }
+    // The elements that did not move have the same order before and after:
+    // between two of them come the old places of the movers there, then
+    // their new places.
+    let (mut old_slot, mut new_slot) = (vec![0; n], vec![0; n]);
+    let (mut slots, mut i, mut j) = (0, 0, 0);
+    loop {
+        while i < n && is_mover[i] {
+            old_slot[i] = slots;
+            slots += 1;
+            i += 1;
+        }
+        while j < n && is_mover[end_order[j]] {
+            new_slot[end_order[j]] = slots;
+            slots += 1;
+            j += 1;
+        }
+        if i == n || j == n {
+            break;
+        }
+        old_slot[i] = slots;
+        slots += 1;
+        i += 1;
+        j += 1;
+    }
+    let mut filled = Fenwick::new(slots);
+    for &slot in &old_slot {
+        filled.add(slot, 1);
+    }
+    let list = doc.get_movable_list(holder.clone());
+    for &m in &movers {
+        let from = filled.before(old_slot[m]);
+        filled.add(old_slot[m], -1);
+        let to = filled.before(new_slot[m]);
+        filled.add(new_slot[m], 1);
+        if from != to {
+            list.mov(from, to)
+                .map_err(|e| format!("move {from} to {to}: {e}"))?;
         }
     }
     Ok(())
+}
+
+/// Counts over slots `0..len`, with the sum of the slots before one.
+struct Fenwick(Vec<i64>);
+
+impl Fenwick {
+    fn new(len: usize) -> Self {
+        Fenwick(vec![0; len + 1])
+    }
+
+    fn add(&mut self, slot: usize, by: i64) {
+        let mut k = slot + 1;
+        while k < self.0.len() {
+            self.0[k] += by;
+            k += k.isolate_lowest_one();
+        }
+    }
+
+    fn before(&self, slot: usize) -> usize {
+        let (mut k, mut sum) = (slot, 0);
+        while k > 0 {
+            sum += self.0[k];
+            k -= k.isolate_lowest_one();
+        }
+        sum as usize
+    }
 }
 
 fn node_id(node: &Value) -> Option<&str> {
@@ -1612,6 +1689,69 @@ mod tests {
         let ids: Vec<ID> = elems.iter().map(|e| e.id).collect();
         assert_eq!(ids, [ID::new(1, 0), ID::new(1, 7)]);
         assert!(elems.iter().all(|e| e.pos.peer == 2));
+    }
+
+    /// Merge `source` into `holder` of `doc`, a movable list each, as the
+    /// merge after an import does.
+    fn merge_lists(doc: &LoroDoc, earlier: Option<Links>) -> Links {
+        let source = doc.get_movable_list("source").id();
+        let holder = doc.get_movable_list("holder").id();
+        let links = merge_seq(
+            doc,
+            &source,
+            &holder,
+            earlier,
+            None,
+            &BaseIn::Nothing,
+            &BaseIn::Nothing,
+        )
+        .unwrap();
+        doc.commit();
+        links
+    }
+
+    fn values(list: &loro::LoroMovableList) -> Vec<LoroValue> {
+        (0..list.len())
+            .map(|i| list.get(i).unwrap().into_value().unwrap())
+            .collect()
+    }
+
+    /// A source list that another peer reversed, then shuffled: the holder
+    /// takes each order, and the moves take time near-linear in the list.
+    #[test]
+    fn moves_of_many_items_reach_the_holder() {
+        let doc = LoroDoc::new();
+        doc.set_peer_id(1).unwrap();
+        let source = doc.get_movable_list("source");
+        let n = 12000;
+        for i in 0..n {
+            source.push(i as i64).unwrap();
+        }
+        doc.commit();
+        let links = merge_lists(&doc, None);
+        let holder = doc.get_movable_list("holder");
+        assert_eq!(values(&holder), values(&source));
+        for k in 0..n {
+            source.mov(n - 1, k).unwrap();
+        }
+        doc.commit();
+        let started = Instant::now();
+        let mut links = merge_lists(&doc, Some(links));
+        let took = started.elapsed();
+        assert_eq!(values(&holder), values(&source));
+        assert!(took < Duration::from_secs(5), "{took:?}");
+        let mut seed: u64 = 7;
+        for _ in 0..n / 2 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let from = (seed >> 33) as usize % n;
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let to = (seed >> 33) as usize % n;
+            source.mov(from, to).unwrap();
+        }
+        doc.commit();
+        links = merge_lists(&doc, Some(links));
+        assert_eq!(values(&holder), values(&source));
+        assert!(links.by_insert);
     }
 
     /// Every line of a long text changed: the words still link.
