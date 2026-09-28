@@ -132,13 +132,23 @@ struct AppleSigner {
     key: RsaPrivateKey,
 }
 
-impl AppleSigner {
-    fn new() -> Self {
-        Self {
+/// The one signer every test in this file uses. The JWKS cache is a
+/// process-wide map keyed by the provider's JWKS URL, and the tests run
+/// in parallel threads of one process: a signer per test would let one
+/// test replace the published key while another test's token is in
+/// flight, and that token then fails signature verification.
+fn signer() -> &'static AppleSigner {
+    static SIGNER: std::sync::OnceLock<AppleSigner> = std::sync::OnceLock::new();
+    SIGNER.get_or_init(|| {
+        let signer = AppleSigner {
             key: RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap(),
-        }
-    }
+        };
+        signer.seed_jwks();
+        signer
+    })
+}
 
+impl AppleSigner {
     fn seed_jwks(&self) {
         let public = self.key.to_public_key();
         let jwks = serde_json::json!({
@@ -181,8 +191,7 @@ impl AppleSigner {
 
 #[test]
 fn native_apple_sign_in_mints_a_session_and_links_the_account() {
-    let signer = AppleSigner::new();
-    signer.seed_jwks();
+    let signer = signer();
     let port = start_server();
 
     let token = signer.token("001234.abcdef", "Jane@Example.com", BUNDLE_ID);
@@ -238,8 +247,7 @@ fn native_apple_sign_in_mints_a_session_and_links_the_account() {
 
 #[test]
 fn native_sign_in_rejects_other_apps_tokens_and_bad_requests() {
-    let signer = AppleSigner::new();
-    signer.seed_jwks();
+    let signer = signer();
     let port = start_server();
 
     // A token minted for a different bundle id.
