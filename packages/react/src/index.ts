@@ -1051,8 +1051,22 @@ export async function uploadFile(
           body,
           headers: { "Content-Type": contentType },
         });
+  // Read the response body to the end, even an empty 204. Chrome cancels a
+  // fetch whose body is never read once the Response is dropped, and
+  // DevTools then lists the upload as failed (net::ERR_ABORTED) although
+  // the server stored the bytes.
+  const putBody = await put.text().catch(() => "");
   if (!put.ok) {
-    throw new PylonHttpError(`Upload of ${filename} failed: ${put.status}`, put.status);
+    let message = `Upload of ${filename} failed: ${put.status}`;
+    let code: string | undefined;
+    try {
+      const err = JSON.parse(putBody) as { error?: { code?: string; message?: string } };
+      if (err.error?.message) message = err.error.message;
+      code = err.error?.code;
+    } catch {
+      // Not JSON (storage provider XML, proxy page): keep the status text.
+    }
+    throw new PylonHttpError(message, put.status, code);
   }
 
   return pylonFetch<UploadedFile>(transport, "/api/files/confirm", {

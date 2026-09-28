@@ -65,6 +65,43 @@ describe("uploadFile", () => {
     expect(seen[1].headers.Authorization).toBeUndefined();
   });
 
+  // Chrome cancels a fetch whose response body is never read once the
+  // Response is dropped: DevTools listed every upload's PUT as
+  // net::ERR_ABORTED even though the server answered 204 and stored the
+  // bytes. Reproduced in headless Chrome over CDP (loadingFailed,
+  // canceled: true); reading the body gives loadingFinished.
+  test("reads the PUT response body to the end (local and presigned)", async () => {
+    const puts: Response[] = [];
+    const inner = globalThis.fetch;
+    globalThis.fetch = (async (input: any, init: any = {}) => {
+      const res = await inner(input, init);
+      if ((init.method ?? "GET") === "PUT") {
+        const r = new Response(null, { status: 204 });
+        puts.push(r);
+        return r;
+      }
+      return res;
+    }) as typeof fetch;
+    await uploadFile(new Blob(["hi"]), { token: "tok" });
+    uploadUrl = "https://bucket.s3.example/f_1?X-Amz-Signature=abc";
+    await uploadFile(new Blob(["hi"]), { token: "tok" });
+    expect(puts).toHaveLength(2);
+    expect(puts.every((r) => r.bodyUsed)).toBe(true);
+  });
+
+  test("a refused PUT surfaces the server's error message", async () => {
+    globalThis.fetch = (async (input: any) => {
+      const url = String(input?.url ?? input);
+      if (url.endsWith("/api/files/init")) return new Response(JSON.stringify({ uploadUrl, assetId: "f_1" }), { status: 200 });
+      return new Response(JSON.stringify({ error: { code: "PAYLOAD_TOO_LARGE", message: "Body exceeds upload max" } }), { status: 413 });
+    }) as typeof fetch;
+    await expect(uploadFile(new Uint8Array([1]), { token: "tok" })).rejects.toMatchObject({
+      status: 413,
+      code: "PAYLOAD_TOO_LARGE",
+      message: "Body exceeds upload max",
+    });
+  });
+
   test("a refused PUT throws before confirm", async () => {
     globalThis.fetch = (async (input: any, init: any = {}) => {
       const url = String(input?.url ?? input);
