@@ -22,10 +22,22 @@ fn bun_available() -> bool {
 }
 
 fn runtime_ts() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../packages/functions/src/runtime.ts")
-        .canonicalize()
-        .expect("packages/functions/src/runtime.ts")
+    without_verbatim_prefix(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/functions/src/runtime.ts")
+            .canonicalize()
+            .expect("packages/functions/src/runtime.ts"),
+    )
+}
+
+/// `canonicalize` returns a `\\?\` verbatim path on Windows, which bun
+/// cannot resolve as a module path. Drop the prefix; other platforms are
+/// unchanged.
+fn without_verbatim_prefix(p: PathBuf) -> PathBuf {
+    match p.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        Some(rest) => PathBuf::from(rest),
+        None => p,
+    }
 }
 
 #[test]
