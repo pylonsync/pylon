@@ -157,7 +157,7 @@ fn free_port() -> u16 {
     // The server binds port..port+3 (HTTP, WS, SSE, shard WS).
     for _ in 0..200 {
         let base = 20_000 + rand::random::<u16>() % 8_000;
-        let ok = (0..4).all(|o| std::net::TcpListener::bind(("127.0.0.1", base + o)).is_ok());
+        let ok = (0..4).all(|o| pylon_runtime::listen::port_is_free(base + o));
         if ok {
             return base;
         }

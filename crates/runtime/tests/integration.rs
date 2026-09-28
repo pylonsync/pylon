@@ -239,19 +239,12 @@ fn available_port() -> u16 {
     panic!("could not find 4 free contiguous ports after 200 attempts");
 }
 
-/// Try to bind 4 contiguous ports starting at `base`. Returns the base port
-/// if all bind, or None otherwise. All listeners are dropped before returning
-/// so the actual server can bind immediately afterwards.
+/// `base` when the 4 contiguous ports starting there are free the way the
+/// server binds them (see `pylon_runtime::listen::port_is_free`).
 fn try_bind_block(base: u16) -> Option<u16> {
-    let mut listeners = Vec::with_capacity(4);
-    for offset in 0..4 {
-        match std::net::TcpListener::bind(format!("127.0.0.1:{}", base + offset)) {
-            Ok(l) => listeners.push(l),
-            Err(_) => return None,
-        }
-    }
-    drop(listeners);
-    Some(base)
+    (0..4)
+        .all(|offset| pylon_runtime::listen::port_is_free(base + offset))
+        .then_some(base)
 }
 
 /// Start a test server in a background thread. Returns the base URL

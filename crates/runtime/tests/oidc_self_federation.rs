@@ -151,7 +151,7 @@ fn available_port() -> u16 {
     // Own lane (25_000+) so parallel test binaries can't collide — see
     // oidc_provider.rs for the rationale.
     for base in (25_000..26_000).step_by(4) {
-        if std::net::TcpListener::bind(format!("127.0.0.1:{base}")).is_ok() {
+        if pylon_runtime::listen::port_is_free(base) {
             return base;
         }
     }

@@ -71,7 +71,7 @@ fn free_port() -> u16 {
             .local_addr()
             .unwrap()
             .port();
-        if port < 65000 && (1..3).all(|off| TcpListener::bind(("127.0.0.1", port + off)).is_ok()) {
+        if port < 65000 && (0..3).all(|off| pylon_runtime::listen::port_is_free(port + off)) {
             return port;
         }
     }

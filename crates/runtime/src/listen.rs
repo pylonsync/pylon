@@ -99,6 +99,15 @@ pub fn bind_listeners(port: u16, scope: &ListenScope) -> std::io::Result<Vec<Tcp
     }
 }
 
+/// Whether a server could bind `port` in either scope: every interface
+/// (dual-stack `[::]`) and loopback. Checking `127.0.0.1` alone is not
+/// enough: on macOS and BSD that bind succeeds while another socket holds
+/// `[::]:port`, and connections to `127.0.0.1:port` then reach that socket.
+pub fn port_is_free(port: u16) -> bool {
+    bind_listeners(port, &ListenScope::All).is_ok()
+        && bind_listeners(port, &ListenScope::Loopback).is_ok()
+}
+
 #[cfg(unix)]
 fn libc_eafnosupport() -> i32 {
     libc::EAFNOSUPPORT
@@ -198,6 +207,22 @@ impl From<TcpListener> for Listeners {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_port_held_dual_stack_is_not_free() {
+        let held = crate::bind_dual_stack_tcp(0).unwrap();
+        let port = held.local_addr().unwrap().port();
+        assert!(!super::port_is_free(port));
+        drop(held);
+        assert!(super::port_is_free(port));
+    }
+
+    #[test]
+    fn a_port_held_on_loopback_is_not_free() {
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = held.local_addr().unwrap().port();
+        assert!(!super::port_is_free(port));
+    }
+
     use super::*;
     use std::io::{Read, Write};
 

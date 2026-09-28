@@ -74,8 +74,7 @@ fn available_port() -> u16 {
     static NEXT: AtomicU16 = AtomicU16::new(28_000);
     for _ in 0..200 {
         let base = NEXT.fetch_add(4, Ordering::Relaxed);
-        let ok = (0..4)
-            .all(|off| std::net::TcpListener::bind(format!("127.0.0.1:{}", base + off)).is_ok());
+        let ok = (0..4).all(|off| pylon_runtime::listen::port_is_free(base + off));
         if ok {
             return base;
         }

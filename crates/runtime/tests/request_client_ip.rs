@@ -83,7 +83,7 @@ fn manifest() -> AppManifest {
 fn free_port() -> u16 {
     for _ in 0..200 {
         let base = 20_000 + rand::random::<u16>() % 8_000;
-        if (0..4).all(|o| TcpListener::bind(("127.0.0.1", base + o)).is_ok()) {
+        if (0..4).all(|o| pylon_runtime::listen::port_is_free(base + o)) {
             return base;
         }
     }

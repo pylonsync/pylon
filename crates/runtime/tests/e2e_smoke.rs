@@ -98,8 +98,7 @@ fn available_port() -> u16 {
     for _ in 0..200 {
         let base = NEXT.fetch_add(4, Ordering::Relaxed);
         // Confirm the whole 4-port block is free (HTTP + WS + SSE + shardWS).
-        let ok = (0..4)
-            .all(|off| std::net::TcpListener::bind(format!("127.0.0.1:{}", base + off)).is_ok());
+        let ok = (0..4).all(|off| pylon_runtime::listen::port_is_free(base + off));
         if ok {
             return base;
         }

@@ -81,7 +81,7 @@ fn test_manifest() -> AppManifest {
 
 fn free_port(lane: std::ops::Range<u16>) -> u16 {
     for p in lane.step_by(4) {
-        if TcpListener::bind(format!("127.0.0.1:{p}")).is_ok() {
+        if pylon_runtime::listen::port_is_free(p) {
             return p;
         }
     }
