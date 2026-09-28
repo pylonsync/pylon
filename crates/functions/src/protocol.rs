@@ -467,6 +467,11 @@ pub enum TsMessage {
     #[serde(rename = "llm_stream")]
     LlmStream(LlmStreamMessage),
 
+    /// The handler aborted one `ctx.llm.stream` (its AbortSignal fired).
+    /// The host cancels that provider request. No reply.
+    #[serde(rename = "llm_cancel")]
+    LlmCancel(LlmCancelMessage),
+
     /// `ctx.llm.embed(texts)` — batch-embed via the configured
     /// embeddings provider (a separate axis from chat: openai|voyage).
     /// Replied to with `{ embeddings: number[][], model, totalTokens }`.
@@ -563,6 +568,7 @@ impl TsMessage {
             TsMessage::SendEmail(m) => Some(&m.call_id),
             TsMessage::LlmComplete(m) => Some(&m.call_id),
             TsMessage::LlmStream(m) => Some(&m.call_id),
+            TsMessage::LlmCancel(m) => Some(&m.call_id),
             TsMessage::LlmEmbed(m) => Some(&m.call_id),
             TsMessage::RoomBroadcast(m) => Some(&m.call_id),
             TsMessage::Connection(m) => Some(&m.call_id),
@@ -944,6 +950,15 @@ pub struct LlmStreamMessage {
     pub request: serde_json::Value,
 }
 
+/// Cancel one in-flight `llm_stream`, addressed by the `op_id` it was
+/// sent with.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LlmCancelMessage {
+    pub call_id: String,
+    #[serde(default)]
+    pub op_id: Option<String>,
+}
+
 /// Batch-embed request. `request` is `{ input: string[], model? }` —
 /// forwarded to `pylon_runtime::llm::EmbeddingsClient::embed` verbatim.
 /// Carries `op_id` so a handler can run several embeds concurrently.
@@ -1186,6 +1201,15 @@ mod tests {
     /// the TS runtime. A rename on either side silently breaks
     /// `ctx.llm.stream` / `ctx.rooms.broadcast` at runtime — nothing
     /// else type-checks across the pipe.
+    #[test]
+    fn llm_cancel_parses_and_routes_by_call_id() {
+        let msg: TsMessage =
+            serde_json::from_str(r#"{"type":"llm_cancel","call_id":"c1","op_id":"c1#4"}"#)
+                .expect("llm_cancel must deserialize");
+        assert_eq!(msg.call_id(), Some("c1"));
+        assert!(matches!(msg, TsMessage::LlmCancel(m) if m.op_id.as_deref() == Some("c1#4")));
+    }
+
     #[test]
     fn llm_stream_and_room_broadcast_parse_from_ts() {
         let stream: TsMessage = serde_json::from_str(

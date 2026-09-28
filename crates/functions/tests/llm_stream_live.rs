@@ -9,6 +9,8 @@
 //!     not all at once after it returns
 //!   - a call that ends while its stream is still running cancels the
 //!     provider request
+//!   - aborting the stream's signal cancels the provider request while
+//!     the call keeps running
 //!   - a provider that is silent for longer than the idle timeout does
 //!     not time the call out while it is still running
 //!
@@ -222,6 +224,78 @@ export default {
         "the provider call was not cancelled when the call ended"
     );
     assert!(emitted.load(Ordering::SeqCst) < 100);
+    runner.kill();
+}
+
+#[test]
+fn aborting_the_signal_cancels_the_provider_call_mid_stream() {
+    if !bun_available() {
+        eprintln!("skipped: bun is not on PATH");
+        return;
+    }
+    // Aborts after the second token, then keeps running for a second so
+    // the cancel cannot come from the call ending.
+    let dir = app_dir(
+        "abort",
+        &[(
+            "stopper",
+            r#"
+export default {
+  type: "action",
+  handler: async (ctx) => {
+    const controller = new AbortController();
+    let seen = 0;
+    const code = await ctx.llm
+      .stream({ messages: [] }, () => {
+        seen += 1;
+        if (seen === 2) controller.abort();
+      }, { signal: controller.signal })
+      .then(() => "resolved", (e) => e.code);
+    await new Promise((r) => setTimeout(r, 1000));
+    return { code, seen };
+  },
+};
+"#,
+        )],
+    );
+    let runner = start_runner(&dir);
+
+    let cancelled_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+    let cancelled_h = Arc::clone(&cancelled_at);
+    runner.set_llm_stream_hook(Box::new(move |_req, _auth, on_event, cancel| {
+        for _ in 0..100 {
+            if cancel.load(Ordering::SeqCst) {
+                *cancelled_h.lock().unwrap() = Some(Instant::now());
+                return Err(("LLM_CANCELLED".into(), "cancelled".into()));
+            }
+            on_event(serde_json::json!({ "type": "text_delta", "text": "x" }));
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Ok(response("x"))
+    }));
+
+    let (value, _) = runner
+        .call(
+            &NullStore,
+            "stopper",
+            FnType::Action,
+            serde_json::json!({}),
+            auth(),
+            None,
+            None,
+            None,
+        )
+        .expect("call succeeds");
+    let returned = Instant::now();
+    assert_eq!(value["code"], "LLM_CANCELLED");
+    let cancelled = cancelled_at
+        .lock()
+        .unwrap()
+        .expect("the provider call saw the cancel");
+    assert!(
+        cancelled + Duration::from_millis(500) < returned,
+        "the cancel arrived only when the call ended"
+    );
     runner.kill();
 }
 

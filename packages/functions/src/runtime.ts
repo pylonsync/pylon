@@ -392,19 +392,37 @@ function rpcDb(
  * is alive, however long it runs in total, while one whose provider
  * goes silent still trips the safety net. The host's own call deadline
  * remains the real upper bound.
+ *
+ * When `signal` aborts, the promise rejects with `LLM_CANCELLED` at
+ * once and an `llm_cancel` frame tells the host to drop the provider
+ * request. Events and the result that arrive after that are ignored.
  */
 function rpcStreaming(
   callId: string,
   msg: Record<string, unknown>,
   onEvent: (event: unknown) => void,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   throwIfCancelled(callId);
+  if (signal?.aborted) return Promise.reject(streamCancelledError(signal));
   const opId = nextOpId(callId);
   return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      const pending = pendingRpcs.get(opId);
+      if (!pending) return;
+      pendingRpcs.delete(opId);
+      streamSinks.delete(opId);
+      clearTimeout(pending.timeout);
+      send({ type: "llm_cancel", call_id: callId, op_id: opId });
+      reject(streamCancelledError(signal));
+    };
     const fail = () => {
       if (pendingRpcs.has(opId)) {
         pendingRpcs.delete(opId);
         streamSinks.delete(opId);
+        signal?.removeEventListener("abort", onAbort);
+        // Nothing waits for this stream any more; stop the provider.
+        send({ type: "llm_cancel", call_id: callId, op_id: opId });
         reject(
           new Error(
             `RPC timed out after ${RPC_TIMEOUT_MS}ms with no stream activity (call_id=${callId} op_id=${opId})`,
@@ -415,14 +433,17 @@ function rpcStreaming(
     const entry = {
       resolve: (data: unknown) => {
         streamSinks.delete(opId);
+        signal?.removeEventListener("abort", onAbort);
         resolve(data);
       },
       reject: (err: Error) => {
         streamSinks.delete(opId);
+        signal?.removeEventListener("abort", onAbort);
         reject(err);
       },
       timeout: setTimeout(fail, RPC_TIMEOUT_MS),
     };
+    signal?.addEventListener("abort", onAbort, { once: true });
     pendingRpcs.set(opId, entry);
     streamSinks.set(opId, (event) => {
       clearTimeout(entry.timeout);
@@ -438,6 +459,17 @@ function rpcStreaming(
     });
     send({ ...msg, call_id: callId, op_id: opId });
   });
+}
+
+function streamCancelledError(signal?: AbortSignal): Error {
+  const reason = signal?.reason;
+  const detail =
+    reason instanceof Error ? reason.message : reason ? String(reason) : "";
+  const err = new Error(
+    detail ? `ctx.llm.stream was cancelled: ${detail}` : "ctx.llm.stream was cancelled",
+  );
+  (err as { code?: string }).code = "LLM_CANCELLED";
+  return err;
 }
 
 /**
@@ -941,11 +973,13 @@ export function buildLlm(callId: string): Llm {
     async stream(
       request: LlmCompleteRequest,
       onEvent: (event: LlmStreamEvent) => void,
+      options?: { signal?: AbortSignal },
     ): Promise<LlmCompleteResponse> {
       return (await rpcStreaming(
         callId,
         { type: "llm_stream", request },
         (event) => onEvent(event as LlmStreamEvent),
+        options?.signal,
       )) as LlmCompleteResponse;
     },
 

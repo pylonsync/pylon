@@ -508,10 +508,16 @@ export interface Llm {
    * if (res.stop_reason === "tool_use") { ...run tools, loop... }
    * ```
    *
-   * Streaming does NOT extend the function's call deadline — it is an
-   * absolute wall clock from invocation (PYLON_FN_CALL_TIMEOUT, 30s
-   * default). A long agent run must declare its own `timeout` on the
-   * function def.
+   * The function's call timeout (PYLON_FN_CALL_TIMEOUT, 30s default, or
+   * the function's own `timeout`) is an idle timeout. A running stream
+   * counts as activity, but no call outlives 10× its timeout, so a long
+   * agent run should still declare its own `timeout`.
+   *
+   * Pass `{ signal }` to stop a stream early. When the signal aborts,
+   * the promise rejects with `err.code === "LLM_CANCELLED"` and the
+   * server closes the provider connection, so the model stops
+   * generating (and billing) tokens. A stream still running when the
+   * function returns or times out is cancelled the same way.
    *
    * Same errors and same gating as {@link Llm.complete} — including
    * the model allowlist, so streaming can't be used to reach a model
@@ -520,6 +526,7 @@ export interface Llm {
   stream(
     request: LlmCompleteRequest,
     onEvent: (event: LlmStreamEvent) => void,
+    options?: { signal?: AbortSignal },
   ): Promise<LlmCompleteResponse>;
 
   /**

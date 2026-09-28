@@ -625,8 +625,8 @@ export async function callFn<T = unknown>(
  * to survive the window closing).
  *
  * The call returns as soon as the request is recorded. A live
- * generation stops at its next turn boundary — between tool calls
- * within seconds, or after the current model response finishes.
+ * generation stops within a few seconds: a model response in progress
+ * is aborted, and a running tool sees `ctx.signal` abort.
  * `run.cancelRequested` is true in that window; drive the stop
  * button's pending state from it and treat `run.status === "cancelled"`
  * as the confirmation.

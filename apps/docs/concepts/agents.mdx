@@ -102,7 +102,12 @@ const { run } = useAgentRun(runId);
 
 Cancel is durable state on the run row, not a stream teardown. That matters twice: dropping the SSE connection is **not** a cancel (a detached run is supposed to survive the window closing), and the request reaches a loop running on a different machine than the one serving the click.
 
-The loop honours it at its next boundary and settles the run as `cancelled`. Between tool calls that is within `CANCEL_POLL_MS` (2s) — the loop polls while handlers run, and a running handler sees `ctx.signal` abort, so a handler that threads `ctx.signal` into `fetch` stops with the run. A tool that ignores the signal finishes first. **A model response already in flight is not interrupted**: the host blocks its per-call read loop for the whole of `ctx.llm.stream`, so cancel takes effect once that response completes. Every `tool_use` still receives a `tool_result` when a batch stops early, so the transcript stays replayable.
+The loop polls the run row every 2 seconds while the model streams and while tools run, and settles the run as `cancelled` once it sees the request:
+
+- A model response in flight is aborted. The server closes the provider connection, so no more tokens are generated or billed. The text streamed so far is kept as the assistant turn, and anything queued is appended after it.
+- A running tool handler sees `ctx.signal` abort, so a handler that threads `ctx.signal` into `fetch` stops with the run. A tool that ignores the signal finishes first, and the tools after it do not start.
+
+Every `tool_use` still receives a `tool_result` when a batch stops early, so the transcript stays replayable.
 
 Cancelling a run that is not generating settles it as `cancelled` immediately and drops anything queued. Starting a new turn on a cancelled run works like any continuation.
 

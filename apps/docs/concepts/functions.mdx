@@ -437,6 +437,20 @@ Every fn stream is resumable: the server buffers frames under a stream id, so a
 dropped connection reconnects from its cursor and misses nothing, including the final
 result after the handler finished. See [Resumable Streams](/concepts/streaming).
 
+### Stopping a stream
+
+Pass an `AbortSignal` to stop a generation early:
+
+```ts
+const res = await ctx.llm.stream({ messages }, onEvent, { signal });
+```
+
+When the signal aborts, the promise rejects with `err.code === "LLM_CANCELLED"` and
+the server closes the provider connection, so the model stops generating and billing
+tokens. A stream that is still running when the function returns or times out is
+cancelled the same way. `ctx.signal` aborts when the host cancels the call, so
+`{ signal: ctx.signal }` ties a stream to its call.
+
 ### Stream events
 
 `onEvent` receives one of four shapes:

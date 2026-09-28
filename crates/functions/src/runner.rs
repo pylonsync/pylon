@@ -238,8 +238,9 @@ pub type LlmHook = Box<
 ///
 /// The runner calls the hook on its own thread, so the call's read loop
 /// keeps serving the handler's frames (`ctx.stream.write`, db ops) while
-/// the provider generates. `cancel` becomes true when the call ends or
-/// times out while the stream is still running; the hook must then
+/// the provider generates. `cancel` becomes true when the handler aborts
+/// the stream (`llm_cancel`), or when the call ends or times out while
+/// the stream is still running; the hook must then
 /// stop reading the provider response and drop it, which closes the
 /// HTTP connection so the provider stops generating.
 ///
@@ -2111,8 +2112,9 @@ impl FnRunner {
                         .spawn(move || {
                             let _active = active;
                             // Nothing is written once the stream is
-                            // cancelled: the call is over and its route
-                            // is gone.
+                            // cancelled: the handler has stopped waiting
+                            // (llm_cancel), or the call is over and its
+                            // route is gone.
                             let mut on_event = |event: serde_json::Value| {
                                 if cancel.load(Ordering::SeqCst) {
                                     return;
@@ -2147,6 +2149,15 @@ impl FnRunner {
                         );
                         self.send(&reply)?;
                     }
+                }
+
+                TsMessage::LlmCancel(req) if req.call_id == call_id => {
+                    // The handler stopped waiting on one stream (its
+                    // AbortSignal fired). Cancelling drops the provider
+                    // response, which closes the connection so no more
+                    // tokens are generated. No reply: the handler has
+                    // already settled its promise.
+                    llm_streams.cancel(req.op_id.as_deref());
                 }
 
                 TsMessage::RoomBroadcast(req) if req.call_id == call_id => {
@@ -2401,9 +2412,10 @@ fn write_frame<T: serde::Serialize>(
 }
 
 /// The `ctx.llm.stream` provider calls one function call has started.
-/// Each runs on its own thread. This tracks them so the call can hold
-/// off its idle timeout while a provider is still generating, and cancel
-/// all of them when the call ends for any reason (the drop).
+/// Each runs on its own thread. This tracks them so the call can cancel
+/// one by op id (`llm_cancel` from the handler), hold off its idle
+/// timeout while a provider is still generating, and cancel all of them
+/// when the call ends for any reason (the drop).
 #[derive(Default)]
 struct LlmStreamOps {
     ops: Vec<(Option<String>, Arc<AtomicBool>)>,
@@ -2412,6 +2424,14 @@ struct LlmStreamOps {
 }
 
 impl LlmStreamOps {
+    fn cancel(&self, op_id: Option<&str>) {
+        for (id, flag) in &self.ops {
+            if id.as_deref() == op_id {
+                flag.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
     fn any_active(&self) -> bool {
         self.active.load(Ordering::SeqCst) > 0
     }

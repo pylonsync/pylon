@@ -793,6 +793,61 @@ describe("agent loop", () => {
     expect(state.status).toBe("cancelled");
   }, 10_000);
 
+  test("a cancel raised while the model streams aborts the stream and keeps the partial text", async () => {
+    const def = agent({});
+    const { ctx, state, writes, streamed } = mockCtx([]);
+    let aborted = false;
+    let deltasAfterAbort = 0;
+    // A provider that keeps generating until the signal aborts, the way
+    // the host's ctx.llm.stream behaves.
+    (ctx.llm as { stream: unknown }).stream = (
+      _req: LlmCompleteRequest,
+      onEvent: (e: LlmStreamEvent) => void,
+      options?: { signal?: AbortSignal },
+    ) =>
+      new Promise<LlmCompleteResponse>((_resolve, reject) => {
+        const timer = setInterval(() => {
+          if (aborted) deltasAfterAbort += 1;
+          onEvent({ type: "text_delta", text: "tok " });
+        }, 20);
+        options?.signal?.addEventListener("abort", () => {
+          aborted = true;
+          clearInterval(timer);
+          const err = new Error("ctx.llm.stream was cancelled");
+          (err as { code?: string }).code = "LLM_CANCELLED";
+          reject(err);
+        });
+      });
+    setTimeout(() => {
+      state.cancelRequested = true;
+      state.pendingInput.push("queued while generating");
+    }, 50);
+
+    const result = await (def.handler as unknown as (
+      c: ActionCtx,
+      a: Record<string, unknown>,
+    ) => Promise<Record<string, unknown>>)(ctx, {
+      input: "write a long essay",
+      __agentName: "helper",
+    });
+
+    expect(result.cancelled).toBe(true);
+    expect(aborted).toBe(true);
+    expect(deltasAfterAbort).toBe(0);
+    expect(state.status).toBe("cancelled");
+    const tokens = streamed.filter((s) => s.event === undefined).length;
+    expect(tokens).toBeGreaterThan(0);
+    // The text the user saw is persisted as the assistant turn, and the
+    // queued message is not lost.
+    const appended = writes.filter((w) => w.op === "appendMessage");
+    expect(appended.map((w) => w.role)).toEqual(["user", "assistant", "user"]);
+    expect(appended[1].content).toEqual([
+      { type: "text", text: "tok ".repeat(tokens) },
+    ]);
+    expect(appended[2].content).toBe("queued while generating");
+    expect(result.text).toBe("tok ".repeat(tokens));
+  }, 10_000);
+
   test("the default step budget is high enough for a real tool loop", async () => {
     // 16 was the old default and is nowhere near enough for an agent
     // that reads files before answering.

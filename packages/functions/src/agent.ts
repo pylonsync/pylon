@@ -101,8 +101,10 @@ export interface AgentCallArgs {
   /** Optional display title, stored on new runs. */
   title?: string;
   /** Ask the run to stop. Requires `runId`, ignores `input`, and
-   *  returns as soon as the request is recorded — a live generation
-   *  stops at its next turn boundary. */
+   *  returns as soon as the request is recorded. The running loop
+   *  notices within a few seconds: a model response in progress is
+   *  aborted (the provider stops generating), and a running tool sees
+   *  `ctx.signal` abort. */
   cancel?: boolean;
 }
 
@@ -223,10 +225,8 @@ export function isAgentDefinition(value: unknown): boolean {
 
 const DEFAULT_MAX_STEPS = 64;
 
-/** How often the loop asks whether cancel was requested while a tool
- *  handler is running. Only runs during a tool batch: the host blocks
- *  its per-call read loop for the whole of `ctx.llm.stream`, so no RPC
- *  the child issues during a generation would be serviced anyway. */
+/** How often the loop asks whether cancel was requested while a model
+ *  response streams or a tool handler runs. */
 const CANCEL_POLL_MS = 2000;
 
 /** Tool results persist into AgentMessage rows and replay into every
@@ -258,16 +258,63 @@ interface DrainResult {
  *  run. Prototype-based rather than a spread: ctx's methods keep
  *  working when invoked on the derived object. */
 function ctxWithSignal(ctx: ActionCtx, signal: AbortSignal): ActionCtx {
-  const combined =
-    ctx.signal && typeof AbortSignal.any === "function"
-      ? AbortSignal.any([ctx.signal, signal])
-      : signal;
+  const combined = anySignal(ctx.signal, signal);
   const derived = Object.create(ctx) as ActionCtx;
   Object.defineProperty(derived, "signal", {
     value: combined,
     enumerable: true,
   });
   return derived;
+}
+
+/** Watches the run row for a cancel request while the loop is busy.
+ *
+ *  A poll rather than a push because a cancel can be requested on a
+ *  different machine than the loop runs on, and the run row is the only
+ *  thing both sides share. `signal` aborts once a cancel is seen; the
+ *  loop passes it to `ctx.llm.stream` (which then drops the provider
+ *  request) and to tool handlers through `ctx.signal`. */
+interface CancelWatch {
+  readonly signal: AbortSignal;
+  readonly cancelled: boolean;
+  stop(): void;
+}
+
+function watchCancel(ctx: ActionCtx, runId: string): CancelWatch {
+  const controller = new AbortController();
+  let polling = false;
+  const timer = setInterval(() => {
+    // Skip rather than stack: a slow poll must not queue more.
+    if (polling || controller.signal.aborted) return;
+    polling = true;
+    void ctx
+      .runQuery<{ cancelRequested: boolean }>("__pylon_agent_poll", { runId })
+      .then((s) => {
+        if (s.cancelRequested && !controller.signal.aborted) {
+          controller.abort(new Error("agent run cancelled"));
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        polling = false;
+      });
+  }, CANCEL_POLL_MS);
+  return {
+    signal: controller.signal,
+    get cancelled() {
+      return controller.signal.aborted;
+    },
+    stop() {
+      clearInterval(timer);
+    },
+  };
+}
+
+/** `a` and `b` combined, for runtimes without `AbortSignal.any`. */
+function anySignal(a: AbortSignal | undefined, b: AbortSignal): AbortSignal {
+  if (!a) return b;
+  if (typeof AbortSignal.any === "function") return AbortSignal.any([a, b]);
+  return b;
 }
 
 async function runAgentLoop(
@@ -445,6 +492,10 @@ async function runAgentLoop(
       unknown
     > as Promise<DrainResult>;
 
+  const watch = watchCancel(ctx, runId);
+  const streamSignal = anySignal(ctx.signal, watch.signal);
+  const toolCtx = ctxWithSignal(ctx, watch.signal);
+
   try {
     for (;;) {
       steps += 1;
@@ -456,18 +507,44 @@ async function runAgentLoop(
       }
       const system =
         typeof def.system === "function" ? def.system(ctx, args) : def.system;
-      const res = await ctx.llm.stream(
-        {
-          messages: history,
-          ...(system ? { system } : {}),
-          ...(tools.length > 0 ? { tools } : {}),
-          ...(def.model ? { model: def.model } : {}),
-          ...(def.maxTokens ? { max_tokens: def.maxTokens } : {}),
-        },
-        (e) => {
-          if (e.type === "text_delta") ctx.stream.write(e.text);
-        },
-      );
+      let partial = "";
+      let res: Awaited<ReturnType<ActionCtx["llm"]["stream"]>>;
+      try {
+        res = await ctx.llm.stream(
+          {
+            messages: history,
+            ...(system ? { system } : {}),
+            ...(tools.length > 0 ? { tools } : {}),
+            ...(def.model ? { model: def.model } : {}),
+            ...(def.maxTokens ? { max_tokens: def.maxTokens } : {}),
+          },
+          (e) => {
+            if (e.type === "text_delta") {
+              partial += e.text;
+              ctx.stream.write(e.text);
+            }
+          },
+          { signal: streamSignal },
+        );
+      } catch (err) {
+        if (!watch.cancelled) throw err;
+        // Stopped mid-response. Keep the text the user already saw, then
+        // take whatever was queued so it is not lost with the run.
+        if (partial !== "") {
+          const content: LlmContentBlock[] = [{ type: "text", text: partial }];
+          await write({ op: "appendMessage", role: "assistant", content });
+          history.push({ role: "assistant", content });
+          finalText = partial;
+        }
+        const pending = await drain({});
+        const text = pending.input.join("\n\n");
+        if (text !== "") {
+          await write({ op: "appendMessage", role: "user", content: text });
+          history.push({ role: "user", content: text });
+        }
+        cancelled = true;
+        break;
+      }
       usage.input_tokens += res.usage.input_tokens;
       usage.output_tokens += res.usage.output_tokens;
 
@@ -508,7 +585,7 @@ async function runAgentLoop(
 
       // 3. Execute every requested tool; failures become is_error
       // results the model can react to rather than run-fatal throws.
-      const batch = await runToolBatch(def, ctx, runId, res.content);
+      const batch = await runToolBatch(def, ctx, toolCtx, watch, res.content);
 
       // Tool boundary. Every tool_use needs its tool_result even when
       // the batch stopped early, or the transcript can't be replayed.
@@ -536,6 +613,8 @@ async function runAgentLoop(
       steps: priorSteps + steps,
     }).catch(() => {});
     throw err;
+  } finally {
+    watch.stop();
   }
 
   if (cancelled) {
@@ -558,17 +637,13 @@ async function runAgentLoop(
   return { runId, text: finalText, steps, usage };
 }
 
-/** Run one turn's tool calls, watching for a cancel while they run.
- *
- *  The watch is a poll rather than a push because a cancel can be
- *  requested on a different machine than the loop runs on — the run
- *  row is the only thing both sides share. It runs only for the
- *  duration of the batch: during `ctx.llm.stream` the host blocks its
- *  per-call read loop, so an RPC issued then would not be answered. */
+/** Run one turn's tool calls. Stops starting new ones once `watch`
+ *  sees a cancel; a handler already running sees `ctx.signal` abort. */
 async function runToolBatch(
   def: AgentDefinition,
   ctx: ActionCtx,
-  runId: string,
+  toolCtx: ActionCtx,
+  watch: CancelWatch,
   turn: LlmContentBlock[],
 ): Promise<{ results: LlmContentBlock[]; cancelled: boolean }> {
   const calls = turn.filter(
@@ -578,77 +653,51 @@ async function runToolBatch(
   const results: LlmContentBlock[] = [];
   if (calls.length === 0) return { results, cancelled: false };
 
-  const controller = new AbortController();
-  const toolCtx = ctxWithSignal(ctx, controller.signal);
-  let cancelled = false;
-  let polling = false;
-  const timer = setInterval(() => {
-    // Skip rather than stack: a slow poll must not queue more.
-    if (polling || cancelled) return;
-    polling = true;
-    void ctx
-      .runQuery<{ cancelRequested: boolean }>("__pylon_agent_poll", { runId })
-      .then((s) => {
-        if (s.cancelRequested && !cancelled) {
-          cancelled = true;
-          controller.abort(new Error("agent run cancelled"));
-        }
-      })
-      .catch(() => {})
-      .finally(() => {
-        polling = false;
-      });
-  }, CANCEL_POLL_MS);
-
-  try {
-    for (const block of calls) {
-      let content: string;
-      let isError = false;
-      if (cancelled) {
-        // Stop starting new work, but still answer the call so the
-        // model sees why it has no result.
-        content = "cancelled by user";
+  for (const block of calls) {
+    let content: string;
+    let isError = false;
+    if (watch.cancelled) {
+      // Stop starting new work, but still answer the call so the
+      // model sees why it has no result.
+      content = "cancelled by user";
+      isError = true;
+    } else {
+      const tool = def.tools?.[block.name];
+      if (!tool) {
+        content = `Unknown tool "${block.name}"`;
         isError = true;
       } else {
-        const tool = def.tools?.[block.name];
-        if (!tool) {
-          content = `Unknown tool "${block.name}"`;
-          isError = true;
-        } else {
-          try {
-            if (tool.args) {
-              const check = validateArgs(block.input, tool.args);
-              if (!check.valid) {
-                throw new Error(`Invalid tool input: ${check.errors.join("; ")}`);
-              }
+        try {
+          if (tool.args) {
+            const check = validateArgs(block.input, tool.args);
+            if (!check.valid) {
+              throw new Error(`Invalid tool input: ${check.errors.join("; ")}`);
             }
-            const value = await tool.handler(toolCtx, block.input);
-            content =
-              typeof value === "string" ? value : JSON.stringify(value ?? null);
-          } catch (err) {
-            content = err instanceof Error ? err.message : String(err);
-            isError = true;
           }
+          const value = await tool.handler(toolCtx, block.input);
+          content =
+            typeof value === "string" ? value : JSON.stringify(value ?? null);
+        } catch (err) {
+          content = err instanceof Error ? err.message : String(err);
+          isError = true;
         }
       }
-      content = truncateToolResult(content);
-      // Announce the tool call on the stream so live UIs can render
-      // "using searchDocs…" without polling the message rows.
-      ctx.stream.writeEvent(
-        "tool",
-        JSON.stringify({ name: block.name, input: block.input, isError }),
-      );
-      results.push({
-        type: "tool_result",
-        tool_use_id: block.id,
-        content,
-        ...(isError ? { is_error: true } : {}),
-      });
     }
-  } finally {
-    clearInterval(timer);
+    content = truncateToolResult(content);
+    // Announce the tool call on the stream so live UIs can render
+    // "using searchDocs…" without polling the message rows.
+    ctx.stream.writeEvent(
+      "tool",
+      JSON.stringify({ name: block.name, input: block.input, isError }),
+    );
+    results.push({
+      type: "tool_result",
+      tool_use_id: block.id,
+      content,
+      ...(isError ? { is_error: true } : {}),
+    });
   }
-  return { results, cancelled };
+  return { results, cancelled: watch.cancelled };
 }
 
 function storedToLlmMessage(m: StoredMessage): LlmMessage {

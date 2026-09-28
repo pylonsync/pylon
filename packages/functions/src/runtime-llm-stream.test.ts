@@ -184,3 +184,88 @@ test("llm.stream routes events by op_id, resolves on result; rooms.broadcast rou
   // 6. rooms.broadcast surfaced the host's verdict.
   expect(out.delivered).toBe(true);
 });
+
+const ABORT_SCRIPT = `
+import { buildLlm } from ${JSON.stringify(RUNTIME)};
+
+const llm = buildLlm("c_9");
+const seen = [];
+const controller = new AbortController();
+
+// Aborted before it starts: rejects without sending a frame.
+const early = await llm
+  .stream({ messages: [] }, () => {}, { signal: AbortSignal.abort("stopped") })
+  .then(() => "resolved", (e) => e.code);
+
+const running = llm
+  .stream({ messages: [] }, (e) => {
+    seen.push(e.text);
+    if (seen.length === 2) controller.abort(new Error("user pressed stop"));
+  }, { signal: controller.signal })
+  .then(() => ({ code: "resolved" }), (e) => ({ code: e.code, message: e.message }));
+
+const out = await running;
+// Give late host frames time to arrive; they must be ignored.
+await new Promise((r) => setTimeout(r, 200));
+console.error("RESULT " + JSON.stringify({ early, out, seen }));
+process.exit(0);
+`;
+
+test("an aborted llm.stream rejects with LLM_CANCELLED and sends llm_cancel", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pylon-fn-llm-abort-"));
+  const scriptPath = join(dir, "probe.ts");
+  writeFileSync(scriptPath, ABORT_SCRIPT);
+  const proc = Bun.spawn([process.execPath, scriptPath], {
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const reader = proc.stdout.getReader();
+  const decoder = new TextDecoder();
+  let buffered = "";
+  const frames = () => parseFrames(buffered);
+  const readUntil = async (
+    pred: (fs: Record<string, unknown>[]) => boolean,
+  ) => {
+    while (!pred(frames())) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffered += decoder.decode(value, { stream: true });
+    }
+  };
+  const send = (msg: Record<string, unknown>) =>
+    proc.stdin.write(JSON.stringify(msg) + "\n");
+
+  await readUntil((fs) => fs.some((f) => f.type === "llm_stream"));
+  const streams = frames().filter((f) => f.type === "llm_stream");
+  // The pre-aborted stream never reached the host.
+  expect(streams).toHaveLength(1);
+  const opId = streams[0].op_id as string;
+
+  send({ type: "llm_event", call_id: "c_9", op_id: opId, event: { type: "text_delta", text: "a" } });
+  send({ type: "llm_event", call_id: "c_9", op_id: opId, event: { type: "text_delta", text: "b" } });
+  await proc.stdin.flush();
+  await readUntil((fs) => fs.some((f) => f.type === "llm_cancel"));
+  const cancel = frames().find((f) => f.type === "llm_cancel");
+  expect(cancel).toEqual({ type: "llm_cancel", call_id: "c_9", op_id: opId });
+
+  // Frames the host sent before it saw the cancel are dropped.
+  send({ type: "llm_event", call_id: "c_9", op_id: opId, event: { type: "text_delta", text: "c" } });
+  send({
+    type: "result",
+    call_id: "c_9",
+    op_id: opId,
+    data: { model: "m", content: [], stop_reason: "end_turn", usage: { input_tokens: 0, output_tokens: 0 } },
+  });
+  await proc.stdin.flush();
+
+  const stderr = await new Response(proc.stderr).text();
+  await proc.exited;
+  const line = stderr.split("\n").find((l) => l.includes("RESULT "));
+  expect(line).toBeDefined();
+  const out = JSON.parse(line!.slice(line!.indexOf("RESULT ") + 7));
+  expect(out.early).toBe("LLM_CANCELLED");
+  expect(out.out.code).toBe("LLM_CANCELLED");
+  expect(out.out.message).toContain("user pressed stop");
+  expect(out.seen).toEqual(["a", "b"]);
+});
