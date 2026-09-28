@@ -595,6 +595,7 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
             // SIGTERM, once the drain finishes). The main thread is in the
             // file watcher loop and never returns, so without this exit the
             // process kept running with no listener until a second signal.
+            stop_frontend_dev_server();
             std::process::exit(0);
         });
         dev_timing(
@@ -1143,6 +1144,25 @@ fn exec_restart(_json_mode: bool) {
 /// Users with a custom port can set `PYLON_FRONTEND_DEV_PROXY`
 /// themselves and we honor it (env-var overrides take precedence
 /// over our default — see frontend::FrontendConfig::from_env).
+/// The `bun run dev` frontend child, when `spawn_frontend_dev_server`
+/// started one.
+static FRONTEND_DEV_SERVER: std::sync::Mutex<Option<std::process::Child>> =
+    std::sync::Mutex::new(None);
+
+/// Stop the frontend child before `pylon dev` exits. Ctrl-C reaches it
+/// through the terminal's process group, but a SIGTERM sent to pylon
+/// alone does not, and it would keep holding its port.
+fn stop_frontend_dev_server() {
+    let child = FRONTEND_DEV_SERVER
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take();
+    if let Some(mut child) = child {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
 fn spawn_frontend_dev_server(watch_dir: &Path, json_mode: bool) {
     let candidates = [watch_dir.join("web"), watch_dir.join("apps").join("web")];
     let Some(web_dir) = candidates.into_iter().find(|p| {
@@ -1186,7 +1206,11 @@ fn spawn_frontend_dev_server(watch_dir: &Path, json_mode: bool) {
                     proxy,
                 );
             }
-            std::mem::forget(child);
+            // Kept (not dropped: that does not stop it either) so a
+            // graceful shutdown can stop it; see `stop_frontend_dev_server`.
+            *FRONTEND_DEV_SERVER
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = Some(child);
         }
         Err(e) => {
             if !json_mode {
@@ -1672,6 +1696,25 @@ mod tests {
         drop(accepted);
         drop(client);
         drop(listener);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_graceful_exit_stops_the_frontend_dev_server() {
+        use super::{stop_frontend_dev_server, FRONTEND_DEV_SERVER};
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id() as libc::pid_t;
+        *FRONTEND_DEV_SERVER.lock().unwrap() = Some(child);
+
+        stop_frontend_dev_server();
+
+        // Reaped: the pid no longer names a process of ours.
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        assert!(!alive, "the frontend child is still running");
+        assert!(FRONTEND_DEV_SERVER.lock().unwrap().is_none());
     }
 
     #[test]
