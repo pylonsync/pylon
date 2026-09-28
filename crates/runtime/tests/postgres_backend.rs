@@ -128,6 +128,40 @@ fn fresh_runtime(url: &str) -> Runtime {
     Runtime::open_postgres(url, manifest).expect("open postgres runtime")
 }
 
+/// Runtimes opened at the same time in one process (tests, tools) each
+/// create the CRDT sidecar and `_pylon_fn_calls` tables. The cross-machine
+/// boot-DDL lock is held once per process, so without the in-process guard
+/// two `CREATE TABLE IF NOT EXISTS` collided in the Postgres catalog
+/// (`duplicate key value violates unique constraint "pg_type_typname_nsp_index"`).
+#[test]
+fn concurrent_opens_in_one_process_bootstrap_without_a_catalog_race() {
+    let Some(url) = pg_url() else {
+        return;
+    };
+    for round in 0..5 {
+        let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+        client
+            .batch_execute(
+                "DROP TABLE IF EXISTS _pylon_crdt_snapshots, _pylon_crdt_synthetic, \
+                 _pylon_crdt_base, _pylon_crdt_links, _pylon_fn_calls CASCADE",
+            )
+            .unwrap();
+        let opens: Vec<_> = (0..8)
+            .map(|_| {
+                let url = url.clone();
+                std::thread::spawn(move || {
+                    Runtime::open_postgres(&url, empty_manifest()).map(|_| ())
+                })
+            })
+            .collect();
+        for open in opens {
+            if let Err(e) = open.join().unwrap() {
+                panic!("round {round}: {}: {}", e.code, e.message);
+            }
+        }
+    }
+}
+
 #[test]
 fn open_postgres_dispatches_via_url_prefix() {
     let Some(url) = pg_url() else {

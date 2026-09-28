@@ -1032,8 +1032,15 @@ impl Runtime {
         })?;
         let store = pylon_storage::pg_datastore::PostgresDataStore::connect(url, manifest.clone())
             .map_err(data_err_to_runtime)?;
+        // The boot-DDL guard serializes this process against peers, but it
+        // is held once per process, so two runtimes opened concurrently in
+        // one process (tests, tools) would still run the CREATE TABLE IF NOT
+        // EXISTS below at the same time and collide in the Postgres catalog
+        // (duplicate `pg_type` key). Serialize them here too.
+        static BOOTSTRAP_DDL: Mutex<()> = Mutex::new(());
+        let _ddl = BOOTSTRAP_DDL.lock().unwrap_or_else(|p| p.into_inner());
         // Bootstrap the CRDT sidecar table on every open. Idempotent,
-        // and race-free under the boot-DDL guard acquired above.
+        // and race-free under the two guards above.
         store
             .with_client(|c| crate::pg_loro_store::ensure_sidecar(c))
             .map_err(|e| RuntimeError {
