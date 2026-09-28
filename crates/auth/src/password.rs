@@ -103,9 +103,14 @@ pub fn validate_length(password: &str) -> Result<(), PasswordPolicyError> {
 /// an API key, and Cloudflare caches the hash-prefix endpoint for ~1
 /// hour so the actual request typically never hits HIBP itself.
 pub fn check_pwned(password: &str) -> Result<u64, String> {
+    check_pwned_at("https://api.pwnedpasswords.com", password)
+}
+
+/// [`check_pwned`] against the range API at `base`.
+fn check_pwned_at(base: &str, password: &str) -> Result<u64, String> {
     let hash = sha1_hex_upper(password.as_bytes());
     let (prefix, suffix) = hash.split_at(5);
-    let url = format!("https://api.pwnedpasswords.com/range/{prefix}");
+    let url = format!("{base}/range/{prefix}");
     let body = hibp_agent()
         .get(&url)
         // "Add-Padding: true" makes responses constant-size so a
@@ -121,16 +126,23 @@ pub fn check_pwned(password: &str) -> Result<u64, String> {
 
 /// One agent for every HIBP request, so the TLS config and root store are
 /// built once and connections are reused.
+///
+/// The check runs inside sign-up and password changes, and callers skip it
+/// on an error, so a request gets one short deadline for the whole exchange
+/// (DNS, connect, TLS, and body). Per-read timeouts alone let a slow
+/// endpoint hold a sign-up for many seconds.
 fn hibp_agent() -> &'static ureq::Agent {
     static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
     AGENT.get_or_init(|| {
         ureq::AgentBuilder::new()
-            .timeout_connect(std::time::Duration::from_secs(5))
-            .timeout_read(std::time::Duration::from_secs(5))
+            .timeout(HIBP_DEADLINE)
             .user_agent("pylon-auth")
             .build()
     })
 }
+
+/// Longest an HIBP lookup may take before the caller skips the check.
+const HIBP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Parse the HIBP range response (line-separated `SUFFIX:COUNT`) and
 /// return the count for our suffix, or 0 if not found.
@@ -176,6 +188,21 @@ pub fn validate(password: &str) -> Result<(), PasswordPolicyError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_silent_hibp_endpoint_errors_within_the_deadline() {
+        // Accepts the connection, then never answers.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let _held = std::thread::spawn(move || {
+            let conns: Vec<_> = listener.incoming().take(1).collect();
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            drop(conns);
+        });
+        let started = std::time::Instant::now();
+        assert!(check_pwned_at(&base, "correct-horse-battery").is_err());
+        assert!(started.elapsed() < HIBP_DEADLINE + std::time::Duration::from_secs(2));
+    }
 
     #[test]
     fn validate_length_rejects_short() {

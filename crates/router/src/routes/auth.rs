@@ -582,6 +582,31 @@ fn build_sso_redirect_uri(ctx: &RouterContext, org_id: &str) -> Option<String> {
 /// explicit allowlist (+ loopback for dev); anything else falls back to the
 /// env var. SSO/SAML callbacks intentionally do NOT use this — those must match
 /// the fixed redirect_uri registered with the IdP.
+/// `400 PWNED_PASSWORD` when HIBP lists `password` in a breach. The check
+/// is skipped when `PYLON_DISABLE_HIBP=1`, and on an HIBP error or timeout:
+/// sign-up and password changes keep working while the service is down,
+/// and the skip is logged.
+fn pwned_password_error(password: &str) -> Option<(u16, String)> {
+    if std::env::var("PYLON_DISABLE_HIBP").ok().as_deref() == Some("1") {
+        return None;
+    }
+    match pylon_auth::password::check_pwned(password) {
+        Ok(0) => None,
+        Ok(n) => Some((
+            400,
+            json_error_safe(
+                "PWNED_PASSWORD",
+                "This password has appeared in known data breaches. Choose a different one.",
+                &format!("HIBP returned {n} occurrences"),
+            ),
+        )),
+        Err(e) => {
+            tracing::warn!("[auth] breached-password check skipped: {e}");
+            None
+        }
+    }
+}
+
 /// The link an invite email carries. `PYLON_INVITE_URL` points it at the
 /// app's own accept page: `{token}` in it is replaced with the invite
 /// token (otherwise `token=` is appended as a query parameter), and a path
@@ -1981,26 +2006,8 @@ pub(crate) fn handle(
                 ));
             }
         }
-        // HIBP check unless explicitly disabled (off in test/dev to keep
-        // unit tests offline). Honors PYLON_DISABLE_HIBP=1.
-        if std::env::var("PYLON_DISABLE_HIBP").ok().as_deref() != Some("1") {
-            match pylon_auth::password::check_pwned(password) {
-                Ok(0) => {}
-                Ok(n) => {
-                    return Some((
-                        400,
-                        json_error_safe(
-                            "PWNED_PASSWORD",
-                            "This password has appeared in known data breaches. Choose a different one.",
-                            &format!("HIBP returned {n} occurrences"),
-                        ),
-                    ));
-                }
-                // Fail-open on HIBP outage — security-vs-availability
-                // tradeoff favors not locking out registration when an
-                // external service is down.
-                Err(_) => {}
-            }
+        if let Some(err) = pwned_password_error(password) {
+            return Some(err);
         }
         let display_name = data
             .get("displayName")
@@ -3705,19 +3712,8 @@ pub(crate) fn handle(
         if let Err(e) = pylon_auth::password::validate_length(new_password) {
             return Some((400, json_error("WEAK_PASSWORD", &e.to_string())));
         }
-        if std::env::var("PYLON_DISABLE_HIBP").ok().as_deref() != Some("1") {
-            if let Ok(n) = pylon_auth::password::check_pwned(new_password) {
-                if n > 0 {
-                    return Some((
-                        400,
-                        json_error_safe(
-                            "PWNED_PASSWORD",
-                            "This password has appeared in known data breaches.",
-                            &format!("HIBP returned {n} occurrences"),
-                        ),
-                    ));
-                }
-            }
+        if let Some(err) = pwned_password_error(new_password) {
+            return Some(err);
         }
         let new_hash = pylon_auth::password::hash_password(new_password);
         match ctx.store.update(
@@ -6999,19 +6995,8 @@ pub(crate) fn handle(
         if let Err(e) = pylon_auth::password::validate_length(new_password) {
             return Some((400, json_error("WEAK_PASSWORD", &e.to_string())));
         }
-        if std::env::var("PYLON_DISABLE_HIBP").ok().as_deref() != Some("1") {
-            if let Ok(n) = pylon_auth::password::check_pwned(new_password) {
-                if n > 0 {
-                    return Some((
-                        400,
-                        json_error_safe(
-                            "PWNED_PASSWORD",
-                            "This password has appeared in known data breaches.",
-                            &format!("HIBP returned {n} occurrences"),
-                        ),
-                    ));
-                }
-            }
+        if let Some(err) = pwned_password_error(new_password) {
+            return Some(err);
         }
         let consumed = match ctx
             .verification
