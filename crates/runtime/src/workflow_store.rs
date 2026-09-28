@@ -121,7 +121,13 @@ impl WorkflowStore {
 
     /// Save a workflow instance (insert or update), including all steps.
     pub fn save(&self, wf: &WorkflowInstance) -> Result<(), String> {
-        let conn = self.conn.lock().unwrap();
+        let mut guard = self.conn.lock().unwrap();
+        // One transaction: the row, its steps, and its inbox are rewritten
+        // together, so a crash mid-save cannot drop buffered events or
+        // step history.
+        let conn = guard
+            .transaction()
+            .map_err(|e| format!("Begin workflow save failed: {e}"))?;
 
         conn.execute(
             "INSERT OR REPLACE INTO workflows \
@@ -204,8 +210,10 @@ impl WorkflowStore {
             ])
             .map_err(|e| format!("Insert step failed: {e}"))?;
         }
+        drop(stmt);
 
-        Ok(())
+        conn.commit()
+            .map_err(|e| format!("Commit workflow save failed: {e}"))
     }
 
     /// Load a workflow instance by ID, including its steps.
@@ -772,5 +780,38 @@ mod tests {
         for (i, status) in step_statuses.iter().enumerate() {
             assert_eq!(loaded.steps[i].status, *status);
         }
+    }
+
+    #[test]
+    fn a_failed_save_keeps_the_previous_inbox_and_steps() {
+        let store = WorkflowStore::in_memory().unwrap();
+        let mut wf = make_workflow("wf_tx", WorkflowStatus::WaitingForEvent);
+        wf.steps.push(make_step("first", StepStatus::Completed));
+        wf.pending_events.push(BufferedEvent {
+            seq: 1,
+            event: "reply".into(),
+            data: serde_json::json!({"a": 1}),
+            received_at: "1000Z".into(),
+        });
+        store.save(&wf).unwrap();
+
+        // Make the next step insert fail after the inbox was rewritten.
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_step BEFORE INSERT ON workflow_steps \
+                 WHEN NEW.name = 'boom' BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+            )
+            .unwrap();
+        let mut next = wf.clone();
+        next.pending_events.clear();
+        next.steps.push(make_step("boom", StepStatus::Completed));
+        assert!(store.save(&next).is_err());
+
+        let loaded = store.load("wf_tx").unwrap().unwrap();
+        assert_eq!(loaded.pending_events, wf.pending_events);
+        assert_eq!(loaded.steps.len(), 1);
     }
 }

@@ -319,11 +319,13 @@ impl PgWorkflowStore {
         let max_buffered = max_buffered.min(i64::MAX as usize) as i64;
         let outcome = self.pool.with_client(|client| {
             let mut tx = client.transaction()?;
-            // FOR SHARE orders this insert against a concurrent cancel
-            // (which takes the row lock): an event never lands after the
-            // cancel commits.
+            // FOR UPDATE serializes senders to one run (so two cannot
+            // pass the capacity check for the same last slot) and orders
+            // this insert against a concurrent cancel: an event never
+            // lands after the cancel commits.
             let Some(row) = tx.query_opt(
-                "SELECT status, waiting_for FROM _pylon_workflows WHERE id=$1 FOR SHARE",
+                "SELECT status, waiting_for, wait_deadline FROM _pylon_workflows
+                 WHERE id=$1 FOR UPDATE",
                 &[&id],
             )?
             else {
@@ -331,6 +333,7 @@ impl PgWorkflowStore {
             };
             let status = workflow_status_from_str(row.get::<_, String>(0).as_str());
             let waiting_for: Option<String> = row.get(1);
+            let wait_deadline: Option<i64> = row.get(2);
             if status.is_terminal() {
                 return Ok(Err(format!(
                     "Workflow is {}; it no longer accepts events",
@@ -354,8 +357,9 @@ impl PgWorkflowStore {
                 &[&id, &event, data, &now],
             )?;
             tx.commit()?;
-            let delivered =
-                status == WorkflowStatus::WaitingForEvent && waiting_for.as_deref() == Some(event);
+            let delivered = status == WorkflowStatus::WaitingForEvent
+                && waiting_for.as_deref() == Some(event)
+                && wait_deadline.is_none_or(|d| now <= d);
             Ok(Ok(EventDelivery {
                 delivered,
                 buffered: !delivered,
@@ -450,7 +454,8 @@ impl PgWorkflowStore {
                          OR (w.status='WaitingForEvent' AND (
                              (w.wait_deadline IS NOT NULL AND w.wait_deadline <= $2)
                              OR EXISTS (SELECT 1 FROM _pylon_workflow_events e
-                                        WHERE e.workflow_id=w.id AND e.event=w.waiting_for))))",
+                                        WHERE e.workflow_id=w.id AND e.event=w.waiting_for
+                                   AND (w.wait_deadline IS NULL OR e.received_at <= w.wait_deadline)))))",
                     &[&id, &now],
                 )
                 .map(|row| row.is_some())
@@ -468,7 +473,8 @@ impl PgWorkflowStore {
                      WHERE w.status='WaitingForEvent' AND (
                          (w.wait_deadline IS NOT NULL AND w.wait_deadline <= $1)
                          OR EXISTS (SELECT 1 FROM _pylon_workflow_events e
-                                    WHERE e.workflow_id=w.id AND e.event=w.waiting_for))",
+                                    WHERE e.workflow_id=w.id AND e.event=w.waiting_for
+                                   AND (w.wait_deadline IS NULL OR e.received_at <= w.wait_deadline)))",
                     &[&now],
                 )
                 .map(|rows| rows.into_iter().map(|row| row.get(0)).collect())
@@ -854,7 +860,7 @@ mod tests {
         let mut workflow = test_workflow(id.clone());
         workflow.status = WorkflowStatus::WaitingForEvent;
         workflow.waiting_for = Some("reply".into());
-        workflow.wait_deadline = Some(1);
+        workflow.wait_deadline = Some(now_secs_i64() as u64 + 3600);
         store.save(&workflow).unwrap();
 
         // A driver holds the lease (a step is running elsewhere).

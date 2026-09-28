@@ -223,8 +223,15 @@ impl WorkflowInstance {
     }
 
     /// Remove and return the oldest buffered event named `event`.
+    ///
+    /// Only events that arrived no later than the current wait's deadline
+    /// count. A later event stays buffered for a later wait: the timeout
+    /// happened first, even if the driver ran late.
     fn take_buffered(&mut self, event: &str) -> Option<serde_json::Value> {
-        let pos = self.pending_events.iter().position(|e| e.event == event)?;
+        let pos = self
+            .pending_events
+            .iter()
+            .position(|e| e.event == event && self.arrived_in_time(e))?;
         let taken = self.pending_events.remove(pos);
         self.consumed_events.push(taken.seq);
         Some(taken.data)
@@ -237,12 +244,22 @@ impl WorkflowInstance {
             WorkflowStatus::Sleeping => self.wake_at.is_none_or(|t| t <= now),
             WorkflowStatus::WaitingForEvent => {
                 self.wait_deadline.is_some_and(|t| t <= now)
-                    || self
-                        .waiting_for
-                        .as_deref()
-                        .is_some_and(|event| self.pending_events.iter().any(|e| e.event == event))
+                    || self.waiting_for.as_deref().is_some_and(|event| {
+                        self.pending_events
+                            .iter()
+                            .any(|e| e.event == event && self.arrived_in_time(e))
+                    })
             }
             _ => false,
+        }
+    }
+
+    /// Whether `e` arrived by the current wait's deadline (always true
+    /// for a wait without a timeout).
+    fn arrived_in_time(&self, e: &BufferedEvent) -> bool {
+        match (self.wait_deadline, stamp_secs(&e.received_at)) {
+            (Some(deadline), Some(at)) => at <= deadline,
+            _ => true,
         }
     }
 }
@@ -938,8 +955,11 @@ impl WorkflowEngine {
                 inst.status.api_name()
             ));
         }
+        // A wait whose deadline already passed resolves as a timeout (the
+        // driver does that); the event is buffered for a later wait.
         let waiting = inst.status == WorkflowStatus::WaitingForEvent
-            && inst.waiting_for.as_deref() == Some(event);
+            && inst.waiting_for.as_deref() == Some(event)
+            && inst.wait_deadline.is_none_or(|d| now_secs() <= d);
         if waiting {
             inst.resolve_wait(event, Some(data));
         } else {
@@ -2955,5 +2975,99 @@ mod tests {
         assert_eq!(seen[1]["completed_steps"][0]["status"], "completed");
         assert_eq!(seen[1]["completed_steps"][0]["name"], "one");
         assert_eq!(seen[1]["completed_steps"][0]["output"], 1);
+    }
+
+    #[test]
+    fn an_event_after_the_deadline_does_not_satisfy_the_wait() {
+        let e = engine();
+        e.set_runner_hook(std::sync::Arc::new(|request| {
+            let steps = request["completed_steps"].as_array().unwrap();
+            Ok(match steps.len() {
+                0 => {
+                    serde_json::json!({"action": "wait_event", "event": "reply", "timeout": "60s"})
+                }
+                _ => serde_json::json!({"action": "complete", "output": steps[0]["name"]}),
+            })
+        }));
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
+        e.run_to_pause(&id, 10).unwrap();
+        // The deadline passed 10 s ago and the driver has not run yet.
+        let deadline = now_secs() - 10;
+        e.instances
+            .lock()
+            .unwrap()
+            .get_mut(&id)
+            .unwrap()
+            .wait_deadline = Some(deadline);
+
+        // A reply arrives now, after the deadline: buffered, not delivered.
+        let d = e
+            .send_event(&id, "reply", serde_json::json!({"late": true}))
+            .unwrap();
+        assert!(d.buffered && !d.delivered);
+
+        assert_eq!(e.run_to_pause(&id, 10).unwrap(), WorkflowStatus::Completed);
+        let inst = e.get(&id).unwrap();
+        assert_eq!(inst.output, Some(serde_json::json!("timeout:reply")));
+        // The late reply is kept for a later wait.
+        assert_eq!(inst.pending_events.len(), 1);
+    }
+
+    #[test]
+    fn an_event_before_the_deadline_wins_even_if_the_driver_runs_late() {
+        let e = engine();
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
+        wait(&e, &id, "reply", Some("60s"));
+        let deadline = now_secs() - 10;
+        {
+            let mut map = e.instances.lock().unwrap();
+            let inst = map.get_mut(&id).unwrap();
+            inst.wait_deadline = Some(deadline);
+            inst.pending_events.push(BufferedEvent {
+                seq: 1,
+                event: "reply".into(),
+                data: serde_json::json!({"on_time": true}),
+                received_at: format!("{}Z", deadline - 1),
+            });
+        }
+        e.set_runner_hook(std::sync::Arc::new(|_| {
+            Ok(serde_json::json!({"action": "complete", "output": null}))
+        }));
+        e.run_to_pause(&id, 10).unwrap();
+        let inst = e.get(&id).unwrap();
+        assert_eq!(inst.steps[0].name, "event:reply");
+        assert_eq!(
+            inst.steps[0].output,
+            Some(serde_json::json!({"on_time": true}))
+        );
+    }
+
+    #[test]
+    fn postgres_concurrent_sends_respect_the_buffer_limit() {
+        let Some(e) = pg_engine() else {
+            eprintln!("skipping: PYLON_TEST_PG_URL not set");
+            return;
+        };
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
+        for i in 0..MAX_BUFFERED_EVENTS - 5 {
+            e.send_event(&id, "x", serde_json::json!({"i": i})).unwrap();
+        }
+        let handles: Vec<_> = (0..20)
+            .map(|i| {
+                let e = std::sync::Arc::clone(&e);
+                let id = id.clone();
+                std::thread::spawn(move || {
+                    e.send_event(&id, "x", serde_json::json!({"t": i})).is_ok()
+                })
+            })
+            .collect();
+        let accepted = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|ok| *ok)
+            .count();
+        assert_eq!(accepted, 5);
+        let buffered = e.pg_store().unwrap().load_events(&id).unwrap().len();
+        assert_eq!(buffered, MAX_BUFFERED_EVENTS);
     }
 }
