@@ -80,6 +80,10 @@ impl SqliteOrgSsoBackend {
         let _ = conn.execute_batch(&format!(
             "ALTER TABLE {SQLITE_STATE} ADD COLUMN nonce TEXT NOT NULL DEFAULT ''"
         ));
+        // The guest that started the flow (OrgSsoStateRecord::guest_binding).
+        let _ = conn.execute_batch(&format!(
+            "ALTER TABLE {SQLITE_STATE} ADD COLUMN guest_binding TEXT"
+        ));
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -230,8 +234,8 @@ impl OrgSsoStore for SqliteOrgSsoBackend {
             let _ = c.execute(
                 &format!(
                     "INSERT INTO {SQLITE_STATE}
-                       (state, org_id, pkce_verifier, nonce, callback_url, error_callback_url, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                       (state, org_id, pkce_verifier, nonce, callback_url, error_callback_url, created_at, guest_binding)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                      ON CONFLICT(state) DO NOTHING"
                 ),
                 rusqlite::params![
@@ -242,6 +246,7 @@ impl OrgSsoStore for SqliteOrgSsoBackend {
                     record.callback_url,
                     record.error_callback_url,
                     record.created_at as i64,
+                    record.guest_binding,
                 ],
             );
         }
@@ -251,7 +256,7 @@ impl OrgSsoStore for SqliteOrgSsoBackend {
         let c = self.conn.lock().ok()?;
         let mut stmt = c
             .prepare(&format!(
-                "SELECT state, org_id, pkce_verifier, nonce, callback_url, error_callback_url, created_at
+                "SELECT state, org_id, pkce_verifier, nonce, callback_url, error_callback_url, created_at, guest_binding
                  FROM {SQLITE_STATE} WHERE state = ?1"
             ))
             .ok()?;
@@ -310,6 +315,7 @@ fn state_row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<OrgSsoStateR
         callback_url: row.get(4)?,
         error_callback_url: row.get(5)?,
         created_at: row.get::<_, i64>(6)? as u64,
+        guest_binding: row.get(7)?,
     })
 }
 
@@ -358,7 +364,9 @@ mod pg {
                         ON {PG_STATE}(created_at);
                     -- Idempotent additive migration for nonce column.
                     ALTER TABLE {PG_STATE}
-                        ADD COLUMN IF NOT EXISTS nonce TEXT NOT NULL DEFAULT '';"
+                        ADD COLUMN IF NOT EXISTS nonce TEXT NOT NULL DEFAULT '';
+                    ALTER TABLE {PG_STATE}
+                        ADD COLUMN IF NOT EXISTS guest_binding TEXT;"
                 ))
             })
             .map_err(|e| format!("PG init schema: {e}"))?;
@@ -522,8 +530,8 @@ mod pg {
                 c.execute(
                     &format!(
                         "INSERT INTO {PG_STATE}
-                           (state, org_id, pkce_verifier, nonce, callback_url, error_callback_url, created_at)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7)
+                           (state, org_id, pkce_verifier, nonce, callback_url, error_callback_url, created_at, guest_binding)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
                          ON CONFLICT(state) DO NOTHING"
                     ),
                     &[
@@ -534,6 +542,7 @@ mod pg {
                         &record.callback_url,
                         &record.error_callback_url,
                         &(record.created_at as i64),
+                        &record.guest_binding,
                     ],
                 )
             }) {
@@ -549,7 +558,7 @@ mod pg {
             match self.conn.with_client(|c| {
                 let Some(row) = c.query_opt(
                     &format!(
-                        "SELECT state, org_id, pkce_verifier, nonce, callback_url, error_callback_url, created_at
+                        "SELECT state, org_id, pkce_verifier, nonce, callback_url, error_callback_url, created_at, guest_binding
                          FROM {PG_STATE} WHERE state = $1"
                     ),
                     &[&state],
@@ -613,6 +622,7 @@ mod pg {
             callback_url: row.get(4),
             error_callback_url: row.get(5),
             created_at: row.get::<_, i64>(6) as u64,
+            guest_binding: row.get(7),
         }
     }
 }
@@ -702,6 +712,7 @@ mod tests {
             callback_url: "https://app/cb".into(),
             error_callback_url: "https://app/err".into(),
             created_at: now,
+            guest_binding: None,
         };
         s.save_state(rec);
         let got = s.take_state("tok_1", "acme").unwrap();
@@ -725,6 +736,7 @@ mod tests {
             callback_url: "u".into(),
             error_callback_url: "u".into(),
             created_at: now,
+            guest_binding: None,
         });
         assert!(s.take_state("tok_2", "evil").is_none());
         // Legit org can still consume.

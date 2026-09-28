@@ -83,6 +83,13 @@ pub struct OrgSsoStateRecord {
     pub callback_url: String,
     pub error_callback_url: String,
     pub created_at: u64,
+    /// The guest user id of the session that started the flow, when a
+    /// guest started it. The callback merges a guest session into the
+    /// signed-in account only when it is this one (see the router's
+    /// `complete_sign_in`), so a link or callback that an attacker hands a
+    /// victim cannot move the victim's guest rows into the attacker's
+    /// account.
+    pub guest_binding: Option<String>,
 }
 
 /// Persistence trait. Implemented in-memory below; SQLite/PG impls live
@@ -1141,6 +1148,7 @@ mod tests {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
+            guest_binding: None,
         };
         let token = record.state.clone();
         store.save_state(record);
@@ -1164,6 +1172,7 @@ mod tests {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
+            guest_binding: None,
         };
         store.save_state(record);
         // Cross-org replay attempt — record stays in place.

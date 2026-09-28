@@ -77,6 +77,13 @@ pub struct SamlStateRecord {
     pub callback_url: String,
     pub error_callback_url: String,
     pub created_at: u64,
+    /// The guest user id of the session that started the flow, when a
+    /// guest started it. The callback merges a guest session into the
+    /// signed-in account only when it is this one (see the router's
+    /// `complete_sign_in`), so a link or callback that an attacker hands a
+    /// victim cannot move the victim's guest rows into the attacker's
+    /// account.
+    pub guest_binding: Option<String>,
 }
 
 /// 10-minute SAML state TTL — same as [`crate::org_sso::STATE_TTL_SECS`].
@@ -742,6 +749,7 @@ mod tests {
             callback_url: "u".into(),
             error_callback_url: "u".into(),
             created_at: now,
+            guest_binding: None,
         };
         store.save_state(rec);
         assert!(store.take_state("rs_1", "acme").is_some());
@@ -762,6 +770,7 @@ mod tests {
             callback_url: "u".into(),
             error_callback_url: "u".into(),
             created_at: now,
+            guest_binding: None,
         });
         assert!(store.take_state("rs_2", "evil").is_none());
         assert!(store.take_state("rs_2", "acme").is_some());

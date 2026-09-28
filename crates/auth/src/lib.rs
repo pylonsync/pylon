@@ -1887,6 +1887,13 @@ pub struct OAuthState {
     /// redeems in the browser holding that cookie. `None` for ordinary
     /// sign-ins. See pylon_auth::session_handoff.
     pub handoff_binding: Option<String>,
+    /// The guest user id of the session that started the flow, when a
+    /// guest started it. The callback merges a guest session into the
+    /// signed-in account only when it is this one (see the router's
+    /// `complete_sign_in`), so a link or callback that an attacker hands a
+    /// victim cannot move the victim's guest rows into the attacker's
+    /// account.
+    pub guest_binding: Option<String>,
     pub expires_at: u64,
 }
 
@@ -1994,11 +2001,13 @@ impl OAuthStateStore {
             error_callback_url,
             pkce_verifier,
             None,
+            None,
         )
     }
 
     /// [`Self::create_with_pkce`] plus the browser binding for a sign-in
-    /// that returns to a platform (tenant) host.
+    /// that returns to a platform (tenant) host, and the guest user id of
+    /// the session that started it ([`OAuthState::guest_binding`]).
     pub fn create_with_binding(
         &self,
         provider: &str,
@@ -2006,6 +2015,7 @@ impl OAuthStateStore {
         error_callback_url: &str,
         pkce_verifier: Option<String>,
         handoff_binding: Option<String>,
+        guest_binding: Option<String>,
     ) -> String {
         use std::time::{SystemTime, UNIX_EPOCH};
         let token = generate_token();
@@ -2019,6 +2029,7 @@ impl OAuthStateStore {
             error_callback_url: error_callback_url.to_string(),
             pkce_verifier,
             handoff_binding,
+            guest_binding,
             expires_at: now + 600,
         };
         self.backend.put(&token, &state);

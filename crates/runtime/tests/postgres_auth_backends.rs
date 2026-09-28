@@ -61,6 +61,7 @@ fn oauth_state_backend_take_is_atomic_single_use() {
         error_callback_url: "https://app/login".into(),
         pkce_verifier: None,
         handoff_binding: Some("abc".into()),
+        guest_binding: Some("guest_pg".into()),
         expires_at: 9_999_999_999,
     };
     b.put("tok_pg_oauth", &s);
@@ -69,6 +70,7 @@ fn oauth_state_backend_take_is_atomic_single_use() {
     assert_eq!(got.callback_url, "https://app/dash");
     assert_eq!(got.error_callback_url, "https://app/login");
     assert_eq!(got.handoff_binding.as_deref(), Some("abc"));
+    assert_eq!(got.guest_binding.as_deref(), Some("guest_pg"));
     // Second take returns None — DELETE … RETURNING is atomic so
     // concurrent callbacks for the same token can't both succeed.
     assert!(b.take("tok_pg_oauth", 0).is_none());
@@ -318,4 +320,45 @@ fn session_handoff_backend_is_single_use_and_keeps_the_binding() {
         },
     );
     assert_eq!(b.take("hash_pg_handoff_old", 100), None);
+}
+
+/// The guest that started an org SSO or SAML flow survives the Postgres
+/// state round trip (the callback merges only that guest).
+#[test]
+fn sso_and_saml_state_keep_the_guest_binding() {
+    use pylon_auth::org_sso::{OrgSsoStateRecord, OrgSsoStore};
+    use pylon_auth::saml::{SamlStateRecord, SamlStore};
+    let Some(url) = pg_url() else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let sso = PostgresOrgSsoBackend::with_pool(pool(&url)).expect("with_pool");
+    sso.save_state(OrgSsoStateRecord {
+        state: "st_pg_guest".into(),
+        org_id: "org_pg".into(),
+        pkce_verifier: "v".into(),
+        nonce: "n".into(),
+        callback_url: "https://app/cb".into(),
+        error_callback_url: "https://app/err".into(),
+        created_at: now,
+        guest_binding: Some("guest_sso".into()),
+    });
+    let got = sso.take_state("st_pg_guest", "org_pg").expect("state");
+    assert_eq!(got.guest_binding.as_deref(), Some("guest_sso"));
+
+    let saml = PostgresSamlBackend::with_pool(pool(&url)).expect("with_pool");
+    saml.save_state(SamlStateRecord {
+        relay_state: "rs_pg_guest".into(),
+        org_id: "org_pg".into(),
+        request_id: "req".into(),
+        callback_url: "https://app/cb".into(),
+        error_callback_url: "https://app/err".into(),
+        created_at: now,
+        guest_binding: Some("guest_saml".into()),
+    });
+    let got = saml.take_state("rs_pg_guest", "org_pg").expect("state");
+    assert_eq!(got.guest_binding.as_deref(), Some("guest_saml"));
 }

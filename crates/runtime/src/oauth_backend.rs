@@ -57,6 +57,7 @@ impl SqliteOAuthBackend {
                 error_callback_url TEXT NOT NULL DEFAULT '',
                 pkce_verifier TEXT,
                 handoff_binding TEXT,
+                guest_binding TEXT,
                 expires_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS {TABLE}_exp_idx ON {TABLE}(expires_at);"
@@ -79,6 +80,11 @@ impl SqliteOAuthBackend {
         // Tenant-host session handoff binding (see pylon_auth::session_handoff).
         let _ = conn.execute(
             &format!("ALTER TABLE {TABLE} ADD COLUMN handoff_binding TEXT"),
+            [],
+        );
+        // The guest that started the flow (OAuthState::guest_binding).
+        let _ = conn.execute(
+            &format!("ALTER TABLE {TABLE} ADD COLUMN guest_binding TEXT"),
             [],
         );
         Ok(Self {
@@ -107,14 +113,15 @@ impl OAuthStateBackend for SqliteOAuthBackend {
         };
         if let Err(e) = guard.execute(
             &format!(
-                "INSERT INTO {TABLE} (token, provider, callback_url, error_callback_url, pkce_verifier, handoff_binding, expires_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "INSERT INTO {TABLE} (token, provider, callback_url, error_callback_url, pkce_verifier, handoff_binding, expires_at, guest_binding)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT(token) DO UPDATE SET
                    provider = excluded.provider,
                    callback_url = excluded.callback_url,
                    error_callback_url = excluded.error_callback_url,
                    pkce_verifier = excluded.pkce_verifier,
                    handoff_binding = excluded.handoff_binding,
+                   guest_binding = excluded.guest_binding,
                    expires_at = excluded.expires_at"
             ),
             rusqlite::params![
@@ -125,6 +132,7 @@ impl OAuthStateBackend for SqliteOAuthBackend {
                 state.pkce_verifier,
                 state.handoff_binding,
                 state.expires_at as i64,
+                state.guest_binding,
             ],
         ) {
             tracing::error!(
@@ -141,14 +149,32 @@ impl OAuthStateBackend for SqliteOAuthBackend {
         // callbacks can't both succeed with the same token.
         let tx = guard.unchecked_transaction().ok()?;
         #[allow(clippy::type_complexity)]
-        let row: Option<(String, String, String, Option<String>, Option<String>, i64)> = tx
+        let row: Option<(
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            i64,
+            Option<String>,
+        )> = tx
             .query_row(
                 &format!(
-                    "SELECT provider, callback_url, error_callback_url, pkce_verifier, handoff_binding, expires_at
+                    "SELECT provider, callback_url, error_callback_url, pkce_verifier, handoff_binding, expires_at, guest_binding
                      FROM {TABLE} WHERE token = ?1"
                 ),
                 rusqlite::params![token],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
+                },
             )
             .ok();
         // Always delete what we read — single-use even if expired.
@@ -167,6 +193,7 @@ impl OAuthStateBackend for SqliteOAuthBackend {
             pkce_verifier,
             handoff_binding,
             expires_at,
+            guest_binding,
         ) = row?;
         if (expires_at as u64) <= now_unix_secs {
             return None;
@@ -177,6 +204,7 @@ impl OAuthStateBackend for SqliteOAuthBackend {
             error_callback_url,
             pkce_verifier,
             handoff_binding,
+            guest_binding,
             expires_at: expires_at as u64,
         })
     }
@@ -213,12 +241,14 @@ mod pg {
                         error_callback_url TEXT NOT NULL DEFAULT '',
                         pkce_verifier TEXT,
                         handoff_binding TEXT,
+                        guest_binding TEXT,
                         expires_at BIGINT NOT NULL
                     );
                     ALTER TABLE {PG_TABLE} ADD COLUMN IF NOT EXISTS callback_url TEXT NOT NULL DEFAULT '';
                     ALTER TABLE {PG_TABLE} ADD COLUMN IF NOT EXISTS error_callback_url TEXT NOT NULL DEFAULT '';
                     ALTER TABLE {PG_TABLE} ADD COLUMN IF NOT EXISTS pkce_verifier TEXT;
                     ALTER TABLE {PG_TABLE} ADD COLUMN IF NOT EXISTS handoff_binding TEXT;
+                    ALTER TABLE {PG_TABLE} ADD COLUMN IF NOT EXISTS guest_binding TEXT;
                     CREATE INDEX IF NOT EXISTS {PG_TABLE}_exp_idx ON {PG_TABLE}(expires_at);"
                 ))
             })
@@ -265,14 +295,15 @@ mod pg {
             if let Err(e) = self.conn.with_client(|c| {
                 c.execute(
                     &format!(
-                        "INSERT INTO {PG_TABLE} (token, provider, callback_url, error_callback_url, pkce_verifier, handoff_binding, expires_at)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        "INSERT INTO {PG_TABLE} (token, provider, callback_url, error_callback_url, pkce_verifier, handoff_binding, expires_at, guest_binding)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                          ON CONFLICT (token) DO UPDATE SET
                            provider = EXCLUDED.provider,
                            callback_url = EXCLUDED.callback_url,
                            error_callback_url = EXCLUDED.error_callback_url,
                            pkce_verifier = EXCLUDED.pkce_verifier,
                            handoff_binding = EXCLUDED.handoff_binding,
+                           guest_binding = EXCLUDED.guest_binding,
                            expires_at = EXCLUDED.expires_at"
                     ),
                     &[
@@ -283,6 +314,7 @@ mod pg {
                         &state.pkce_verifier,
                         &state.handoff_binding,
                         &(state.expires_at as i64),
+                        &state.guest_binding,
                     ],
                 )
             }) {
@@ -304,7 +336,7 @@ mod pg {
                 c.query_opt(
                     &format!(
                         "DELETE FROM {PG_TABLE} WHERE token = $1
-                         RETURNING provider, callback_url, error_callback_url, pkce_verifier, handoff_binding, expires_at"
+                         RETURNING provider, callback_url, error_callback_url, pkce_verifier, handoff_binding, expires_at, guest_binding"
                     ),
                     &[&token],
                 )
@@ -338,6 +370,7 @@ mod pg {
             let pkce_verifier: Option<String> = row.get(3);
             let handoff_binding: Option<String> = row.get(4);
             let expires_at: i64 = row.get(5);
+            let guest_binding: Option<String> = row.get(6);
             if (expires_at as u64) <= now_unix_secs {
                 return None;
             }
@@ -347,6 +380,7 @@ mod pg {
                 error_callback_url,
                 pkce_verifier,
                 handoff_binding,
+                guest_binding,
                 expires_at: expires_at as u64,
             })
         }
@@ -364,6 +398,7 @@ mod tests {
             error_callback_url: callback.to_string(),
             pkce_verifier: None,
             handoff_binding: Some("b1".into()),
+            guest_binding: Some("guest_g1".into()),
             expires_at: 9_999_999_999,
         }
     }
@@ -378,6 +413,7 @@ mod tests {
         assert_eq!(got.callback_url, "http://localhost:3000/dashboard");
         assert_eq!(got.error_callback_url, "http://localhost:3000/dashboard");
         assert_eq!(got.handoff_binding.as_deref(), Some("b1"));
+        assert_eq!(got.guest_binding.as_deref(), Some("guest_g1"));
     }
 
     #[test]
@@ -396,10 +432,9 @@ mod tests {
         .unwrap();
         let b = SqliteOAuthBackend::from_connection(conn).unwrap();
         b.put("tok", &fixture("github", "https://feedback.acme.com/p"));
-        assert_eq!(
-            b.take("tok", 100).unwrap().handoff_binding.as_deref(),
-            Some("b1")
-        );
+        let got = b.take("tok", 100).unwrap();
+        assert_eq!(got.handoff_binding.as_deref(), Some("b1"));
+        assert_eq!(got.guest_binding.as_deref(), Some("guest_g1"));
     }
 
     #[test]

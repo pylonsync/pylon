@@ -64,6 +64,10 @@ impl SqliteSamlBackend {
                 ON {SQLITE_STATE}(created_at);"
         ))
         .map_err(|e| format!("init schema: {e}"))?;
+        // The guest that started the flow (SamlStateRecord::guest_binding).
+        let _ = conn.execute_batch(&format!(
+            "ALTER TABLE {SQLITE_STATE} ADD COLUMN guest_binding TEXT"
+        ));
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -204,8 +208,8 @@ impl SamlStore for SqliteSamlBackend {
             let _ = c.execute(
                 &format!(
                     "INSERT INTO {SQLITE_STATE}
-                       (relay_state, org_id, request_id, callback_url, error_callback_url, created_at)
-                     VALUES (?1,?2,?3,?4,?5,?6)
+                       (relay_state, org_id, request_id, callback_url, error_callback_url, created_at, guest_binding)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7)
                      ON CONFLICT(relay_state) DO NOTHING"
                 ),
                 rusqlite::params![
@@ -215,6 +219,7 @@ impl SamlStore for SqliteSamlBackend {
                     record.callback_url,
                     record.error_callback_url,
                     record.created_at as i64,
+                    record.guest_binding,
                 ],
             );
         }
@@ -224,7 +229,7 @@ impl SamlStore for SqliteSamlBackend {
         let c = self.conn.lock().ok()?;
         let mut stmt = c
             .prepare(&format!(
-                "SELECT relay_state, org_id, request_id, callback_url, error_callback_url, created_at
+                "SELECT relay_state, org_id, request_id, callback_url, error_callback_url, created_at, guest_binding
                  FROM {SQLITE_STATE} WHERE relay_state = ?1"
             ))
             .ok()?;
@@ -278,6 +283,7 @@ fn state_row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<SamlStateRec
         callback_url: row.get(3)?,
         error_callback_url: row.get(4)?,
         created_at: row.get::<_, i64>(5)? as u64,
+        guest_binding: row.get(6)?,
     })
 }
 
@@ -320,7 +326,8 @@ mod pg {
                         created_at BIGINT NOT NULL
                     );
                     CREATE INDEX IF NOT EXISTS {PG_STATE}_created_idx
-                        ON {PG_STATE}(created_at);"
+                        ON {PG_STATE}(created_at);
+                    ALTER TABLE {PG_STATE} ADD COLUMN IF NOT EXISTS guest_binding TEXT;"
                 ))
             })
             .map_err(|e| format!("PG init schema: {e}"))?;
@@ -477,8 +484,8 @@ mod pg {
                 c.execute(
                     &format!(
                         "INSERT INTO {PG_STATE}
-                           (relay_state, org_id, request_id, callback_url, error_callback_url, created_at)
-                         VALUES ($1,$2,$3,$4,$5,$6)
+                           (relay_state, org_id, request_id, callback_url, error_callback_url, created_at, guest_binding)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7)
                          ON CONFLICT(relay_state) DO NOTHING"
                     ),
                     &[
@@ -488,6 +495,7 @@ mod pg {
                         &record.callback_url,
                         &record.error_callback_url,
                         &(record.created_at as i64),
+                        &record.guest_binding,
                     ],
                 )
             }) {
@@ -503,7 +511,7 @@ mod pg {
             match self.conn.with_client(|c| {
                 let Some(row) = c.query_opt(
                     &format!(
-                        "SELECT relay_state, org_id, request_id, callback_url, error_callback_url, created_at
+                        "SELECT relay_state, org_id, request_id, callback_url, error_callback_url, created_at, guest_binding
                          FROM {PG_STATE} WHERE relay_state = $1"
                     ),
                     &[&relay_state],
@@ -564,6 +572,7 @@ mod pg {
             callback_url: row.get(3),
             error_callback_url: row.get(4),
             created_at: row.get::<_, i64>(5) as u64,
+            guest_binding: row.get(6),
         }
     }
 }
@@ -651,6 +660,7 @@ mod tests {
             callback_url: "https://app/cb".into(),
             error_callback_url: "https://app/err".into(),
             created_at: now,
+            guest_binding: None,
         };
         s.save_state(rec);
         assert!(s.take_state("rs_1", "acme").is_some());
@@ -671,6 +681,7 @@ mod tests {
             callback_url: "u".into(),
             error_callback_url: "u".into(),
             created_at: now,
+            guest_binding: None,
         });
         assert!(s.take_state("rs_2", "evil").is_none());
         assert!(s.take_state("rs_2", "acme").is_some());

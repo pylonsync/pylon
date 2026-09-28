@@ -219,16 +219,48 @@ fn sign_in_error_location(error_callback_url: &str, code: &str, message: &str) -
     )
 }
 
+/// Which guest session a completed sign-in may merge into the account.
+#[derive(Debug, Clone, Copy)]
+enum GuestMerge<'a> {
+    /// The identity was proved in this request (password, magic code,
+    /// passkey, SIWE, phone code, an id_token from a native app, a
+    /// trusted mint): the caller's guest session merges.
+    Caller,
+    /// A link or redirect flow finished in this request. Its start
+    /// recorded the guest session that began it (`None` when no guest
+    /// did). The caller's guest session merges only when it is that one:
+    /// an attacker who hands a victim their own magic link, or a callback
+    /// URL from a flow the attacker started, signs the victim in to the
+    /// attacker's account but does not move the victim's guest rows into
+    /// it.
+    StartedBy(Option<&'a str>),
+}
+
+/// The guest user id of the caller, recorded when a link or redirect
+/// flow starts (see [`GuestMerge::StartedBy`]).
+fn guest_binding(ctx: &RouterContext) -> Option<String> {
+    if ctx.auth_ctx.is_guest {
+        ctx.auth_ctx.user_id.clone()
+    } else {
+        None
+    }
+}
+
 /// Bookkeeping for a caller who just signed in as `user_id`: the guest
 /// merge ([`maybe_merge_anonymous`]) and the SignIn audit record, plus an
 /// AnonymousMerge record when a guest session was merged.
 ///
 /// Every route that answers with a new session for a caller who proved an
-/// identity (password, magic code or link, OAuth, SSO, SAML, passkey, SIWE,
-/// phone code, trusted mint, password reset, sign-up) calls this or
-/// [`merge_guest_into`], so a guest who signs in keeps their rows and loses
-/// the guest token on every path.
-fn complete_sign_in(ctx: &RouterContext, user_id: &str, method: &str, meta: &[(&str, &str)]) {
+/// identity calls this or [`merge_guest_into`], so a guest who signs in
+/// keeps their rows and loses the guest token on every path. `merge` says
+/// which guest session may merge.
+fn complete_sign_in(
+    ctx: &RouterContext,
+    user_id: &str,
+    method: &str,
+    meta: &[(&str, &str)],
+    merge: GuestMerge,
+) {
     let mut event = audit(ctx, pylon_auth::audit::AuditAction::SignIn)
         .user(user_id.to_string())
         .actor(user_id.to_string())
@@ -236,7 +268,7 @@ fn complete_sign_in(ctx: &RouterContext, user_id: &str, method: &str, meta: &[(&
     for (key, value) in meta {
         event = event.meta(key.to_string(), value.to_string());
     }
-    let merged = maybe_merge_anonymous(ctx, user_id);
+    let merged = maybe_merge_anonymous(ctx, user_id, merge);
     ctx.audit.log(event.build());
     log_guest_merge(ctx, user_id, merged);
 }
@@ -244,8 +276,8 @@ fn complete_sign_in(ctx: &RouterContext, user_id: &str, method: &str, meta: &[(&
 /// The guest half of [`complete_sign_in`], for routes that write their own
 /// audit record (sign-up, password reset) or already wrote the sign-in
 /// record (the tenant-host hand-off after an OAuth callback).
-fn merge_guest_into(ctx: &RouterContext, user_id: &str) {
-    let merged = maybe_merge_anonymous(ctx, user_id);
+fn merge_guest_into(ctx: &RouterContext, user_id: &str, merge: GuestMerge) {
+    let merged = maybe_merge_anonymous(ctx, user_id, merge);
     log_guest_merge(ctx, user_id, merged);
 }
 
@@ -333,6 +365,7 @@ fn handle_org_sso_start(ctx: &RouterContext, org_id: &str, raw: &str) -> (u16, S
             callback_url: callback,
             error_callback_url: error_callback,
             created_at: now,
+            guest_binding: guest_binding(ctx),
         });
     // Build redirect URI matching the callback endpoint we'll hit.
     // Apps configure the IdP with this exact URL on their end.
@@ -507,7 +540,13 @@ fn handle_org_sso_callback(ctx: &RouterContext, org_id: &str, raw: &str) -> (u16
     // Mint session + audit + 302 to the caller's success URL.
     accept_invites_for_verified_email(ctx, &user_id, &email);
     let session = create_session_with_device(ctx, user_id.clone());
-    complete_sign_in(ctx, &user_id, "org_sso", &[("org_id", org_id)]);
+    complete_sign_in(
+        ctx,
+        &user_id,
+        "org_sso",
+        &[("org_id", org_id)],
+        GuestMerge::StartedBy(state_record.guest_binding.as_deref()),
+    );
     ctx.set_browser_session_cookie(&session.token);
     ctx.add_response_header("Location", state_record.callback_url);
     (302, String::new())
@@ -677,6 +716,7 @@ fn handle_saml_start(ctx: &RouterContext, org_id: &str, raw: &str) -> (u16, Stri
         callback_url: callback,
         error_callback_url: error_callback,
         created_at: now,
+        guest_binding: guest_binding(ctx),
     });
     let qs = pylon_auth::saml::encode_redirect_binding(&xml, &relay_state);
     let target = format!("{}?{qs}", config.idp_sso_url);
@@ -832,7 +872,13 @@ fn handle_saml_acs(ctx: &RouterContext, org_id: &str, body: &str) -> (u16, Strin
     }
     accept_invites_for_verified_email(ctx, &user_id, &canonical_email);
     let session = create_session_with_device(ctx, user_id.clone());
-    complete_sign_in(ctx, &user_id, "saml", &[("org_id", org_id)]);
+    complete_sign_in(
+        ctx,
+        &user_id,
+        "saml",
+        &[("org_id", org_id)],
+        GuestMerge::StartedBy(state_record.guest_binding.as_deref()),
+    );
     ctx.set_browser_session_cookie(&session.token);
     ctx.add_response_header("Location", state_record.callback_url);
     (302, String::new())
@@ -1033,6 +1079,7 @@ fn guest_issue_rate_limited(ctx: &RouterContext) -> Option<(u16, String)> {
 fn maybe_merge_anonymous(
     ctx: &RouterContext,
     to_user_id: &str,
+    merge: GuestMerge,
 ) -> Option<(String, crate::merge::MergeResult)> {
     if !ctx.auth_ctx.is_guest {
         return None;
@@ -1040,6 +1087,11 @@ fn maybe_merge_anonymous(
     let from_user_id = ctx.auth_ctx.user_id.as_deref()?.to_string();
     if from_user_id == to_user_id {
         return None;
+    }
+    if let GuestMerge::StartedBy(started_by) = merge {
+        if started_by != Some(from_user_id.as_str()) {
+            return None;
+        }
     }
     let user_entity = ctx.store.manifest().auth.user.entity.clone();
     let summary = crate::merge::transfer_user_ownership(
@@ -1619,7 +1671,7 @@ pub(crate) fn handle(
                 accept_invites_for_verified_email(ctx, &user_id, &email.to_string());
                 let session = create_session_with_device(ctx, user_id.clone());
                 ctx.maybe_set_session_cookie(&session.token);
-                complete_sign_in(ctx, &user_id, "magic_code", &[]);
+                complete_sign_in(ctx, &user_id, "magic_code", &[], GuestMerge::Caller);
                 return Some((
                     200,
                     serde_json::json!({"token": session.token, "user_id": user_id, "expires_at": session.expires_at}).to_string(),
@@ -1975,7 +2027,7 @@ pub(crate) fn handle(
 
         let session = create_session_with_device(ctx, user_id.clone());
         ctx.maybe_set_session_cookie(&session.token);
-        merge_guest_into(ctx, &user_id);
+        merge_guest_into(ctx, &user_id, GuestMerge::Caller);
         let mut response = serde_json::json!({
             "token": session.token,
             "user_id": user_id,
@@ -2081,7 +2133,7 @@ pub(crate) fn handle(
         };
         let session = create_session_with_device(ctx, user_id.clone());
         ctx.maybe_set_session_cookie(&session.token);
-        complete_sign_in(ctx, &user_id, "password", &[]);
+        complete_sign_in(ctx, &user_id, "password", &[], GuestMerge::Caller);
         return Some((
             200,
             serde_json::json!({
@@ -2248,6 +2300,7 @@ pub(crate) fn handle(
                 &error_callback,
                 pkce_verifier,
                 handoff_binding,
+                guest_binding(ctx),
             );
             // auth_url_with_pkce was given an empty state placeholder
             // because we mint the random state token AFTER the URL.
@@ -2335,7 +2388,7 @@ pub(crate) fn handle(
             }
             // The sign-in record was written at the callback; the guest
             // session to merge is the one on this (tenant) host.
-            merge_guest_into(ctx, &record.user_id);
+            merge_guest_into(ctx, &record.user_id, GuestMerge::Caller);
             let session = create_session_with_device(ctx, record.user_id);
             ctx.set_browser_session_cookie(&session.token);
             ctx.add_response_header("Location", record.redirect_url);
@@ -2418,7 +2471,13 @@ pub(crate) fn handle(
             if is_browser {
                 return Some(match result {
                     Ok((user_id, session)) => {
-                        complete_sign_in(ctx, &user_id, &format!("oauth:{provider}"), &[]);
+                        complete_sign_in(
+                            ctx,
+                            &user_id,
+                            &format!("oauth:{provider}"),
+                            &[],
+                            GuestMerge::StartedBy(state_record.guest_binding.as_deref()),
+                        );
                         if let Err(err) =
                             finish_browser_sign_in(ctx, &user_id, &session.token, &state_record)
                         {
@@ -2460,7 +2519,13 @@ pub(crate) fn handle(
 
             return Some(match result {
                 Ok((user_id, session)) => {
-                    complete_sign_in(ctx, &user_id, &format!("oauth:{provider}"), &[]);
+                    complete_sign_in(
+                        ctx,
+                        &user_id,
+                        &format!("oauth:{provider}"),
+                        &[],
+                        GuestMerge::StartedBy(state_record.guest_binding.as_deref()),
+                    );
                     ctx.maybe_set_session_cookie(&session.token);
                     (
                         200,
@@ -2519,7 +2584,13 @@ pub(crate) fn handle(
                 None,
             ) {
                 Ok((user_id, session)) => {
-                    complete_sign_in(ctx, &user_id, &format!("oauth:{provider}"), &[]);
+                    complete_sign_in(
+                        ctx,
+                        &user_id,
+                        &format!("oauth:{provider}"),
+                        &[],
+                        GuestMerge::StartedBy(state_record.guest_binding.as_deref()),
+                    );
                     if let Err(err) =
                         finish_browser_sign_in(ctx, &user_id, &session.token, &state_record)
                     {
@@ -2732,7 +2803,13 @@ pub(crate) fn handle(
         return Some(
             match crate::complete_login_from_userinfo(ctx, provider.name(), &userinfo, &tokens) {
                 Ok((user_id, session)) => {
-                    complete_sign_in(ctx, &user_id, &format!("oauth:{}", provider.name()), &[]);
+                    complete_sign_in(
+                        ctx,
+                        &user_id,
+                        &format!("oauth:{}", provider.name()),
+                        &[],
+                        GuestMerge::Caller,
+                    );
                     ctx.maybe_set_session_cookie(&session.token);
                     (
                         200,
@@ -3157,6 +3234,7 @@ pub(crate) fn handle(
             &user_id,
             "trusted_mint",
             &[("intent", intent_for_audit(&intent).as_str())],
+            GuestMerge::Caller,
         );
         return Some((
             200,
@@ -5316,7 +5394,7 @@ pub(crate) fn handle(
         };
         let session = create_session_with_device(ctx, user_id.clone());
         ctx.maybe_set_session_cookie(&session.token);
-        complete_sign_in(ctx, &user_id, "phone", &[]);
+        complete_sign_in(ctx, &user_id, "phone", &[], GuestMerge::Caller);
         return Some((
             200,
             serde_json::json!({
@@ -5423,7 +5501,7 @@ pub(crate) fn handle(
         };
         let session = create_session_with_device(ctx, user_id.clone());
         ctx.maybe_set_session_cookie(&session.token);
-        complete_sign_in(ctx, &user_id, "siwe", &[]);
+        complete_sign_in(ctx, &user_id, "siwe", &[], GuestMerge::Caller);
         return Some((
             200,
             serde_json::json!({
@@ -5667,7 +5745,7 @@ pub(crate) fn handle(
         };
         let session = ctx.session_store.create(key.user_id.clone());
         ctx.maybe_set_session_cookie(&session.token);
-        complete_sign_in(ctx, &key.user_id, "passkey", &[]);
+        complete_sign_in(ctx, &key.user_id, "passkey", &[], GuestMerge::Caller);
         return Some((
             200,
             serde_json::json!({
@@ -6809,11 +6887,13 @@ pub(crate) fn handle(
         let entity = &ctx.store.manifest().auth.user.entity;
         let registered = matches!(ctx.store.lookup(entity, "email", &email), Ok(Some(_)));
         // Mint regardless — discarded for non-registered.
+        // The payload carries the guest that asked for the reset
+        // (GuestMerge::StartedBy).
         let minted = ctx.verification.mint(
             pylon_auth::verification::TokenKind::PasswordReset,
             &email,
             None,
-            None,
+            guest_binding(ctx),
         );
         if registered {
             let public_url = auth_link_base(ctx);
@@ -6911,7 +6991,11 @@ pub(crate) fn handle(
         accept_invites_for_verified_email(ctx, &user_id, &consumed.email);
         let session = create_session_with_device(ctx, user_id.clone());
         ctx.maybe_set_session_cookie(&session.token);
-        merge_guest_into(ctx, &user_id);
+        merge_guest_into(
+            ctx,
+            &user_id,
+            GuestMerge::StartedBy(consumed.payload.as_deref()),
+        );
         ctx.audit.log(
             audit(ctx, pylon_auth::audit::AuditAction::PasswordReset)
                 .user(user_id.clone())
@@ -6979,11 +7063,13 @@ pub(crate) fn handle(
                 return Some((400, json_error("CAPTCHA_FAILED", "CAPTCHA failed")));
             }
         }
+        // The payload carries the guest that asked for the link
+        // (GuestMerge::StartedBy).
         let minted = ctx.verification.mint(
             pylon_auth::verification::TokenKind::MagicLink,
             &email,
             None,
-            None,
+            guest_binding(ctx),
         );
         let public_url = auth_link_base(ctx);
         let verify_url = format!(
@@ -7063,7 +7149,13 @@ pub(crate) fn handle(
             accept_invites_for_verified_email(ctx, &user_id, &consumed.email);
             let session = create_session_with_device(ctx, user_id.clone());
             ctx.maybe_set_session_cookie(&session.token);
-            complete_sign_in(ctx, &user_id, "magic_link", &[]);
+            complete_sign_in(
+                ctx,
+                &user_id,
+                "magic_link",
+                &[],
+                GuestMerge::StartedBy(consumed.payload.as_deref()),
+            );
             // Browser flow → 302 to dashboard; SDK flow → JSON.
             if method == HttpMethod::Get {
                 let dashboard = std::env::var("PYLON_DASHBOARD_URL").unwrap_or_else(|_| "/".into());

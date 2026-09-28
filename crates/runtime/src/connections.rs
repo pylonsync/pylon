@@ -324,6 +324,7 @@ impl ConnectionManager {
                 error_callback_url: callback.clone(),
                 pkce_verifier: None,
                 handoff_binding: None,
+                guest_binding: None,
                 expires_at,
             },
         );

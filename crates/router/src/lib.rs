@@ -6904,6 +6904,70 @@ mod auth_gate_tests {
         );
     }
 
+    /// Login CSRF through the guest merge: an attacker asks for a magic
+    /// link to their own account and sends it to a victim who is browsing
+    /// as a guest. Opening it signs the victim in as the attacker; before,
+    /// it also moved the victim's guest rows into the attacker's account
+    /// and revoked the victim's guest session. A link merges only the
+    /// guest session that asked for it.
+    #[test]
+    fn a_magic_link_merges_only_the_guest_that_asked_for_it() {
+        let run = |asked_by: Option<&str>| -> bool {
+            let manifest = empty_manifest();
+            let store = StubDataStore::with_user(
+                manifest.clone(),
+                serde_json::json!({"id": "user-attacker", "email": "attacker@example.com"}),
+            );
+            let victim = AuthContext {
+                user_id: Some("guest_victim".into()),
+                is_admin: false,
+                is_guest: true,
+                roles: vec![],
+                tenant_id: None,
+                api_key_id: None,
+                api_key_scopes: None,
+                is_trusted_device: false,
+            };
+            let mut merged = false;
+            with_ctx_store(
+                false,
+                &victim,
+                &NoopPluginHooks,
+                None,
+                None,
+                None,
+                manifest,
+                store,
+                "198.51.100.30",
+                |ctx| {
+                    let guest_token = ctx.session_store.create("guest_victim".into()).token;
+                    let link = ctx.verification.mint(
+                        pylon_auth::verification::TokenKind::MagicLink,
+                        "attacker@example.com",
+                        None,
+                        asked_by.map(String::from),
+                    );
+                    let (status, body, _ct) = route(
+                        ctx,
+                        HttpMethod::Get,
+                        &format!("/api/auth/magic-link/verify?token={}", link.plaintext),
+                        "",
+                        Some(&guest_token),
+                    );
+                    assert_eq!(status, 302, "{body}");
+                    merged = ctx.session_store.get(&guest_token).is_none();
+                },
+            );
+            merged
+        };
+        assert!(!run(Some("guest_attacker")), "another guest's link merged");
+        assert!(!run(None), "a link no guest asked for merged");
+        assert!(
+            run(Some("guest_victim")),
+            "the asking guest's link did not merge"
+        );
+    }
+
     #[test]
     fn session_revoke_pushes_session_changed() {
         let notifier = RecordingNotifier::new();
