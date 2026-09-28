@@ -97,8 +97,9 @@ pub fn host_of(value: &str) -> String {
 }
 
 /// Loopback host? `host` is a lowercase authority (`host[:port]`,
-/// `[ipv6]:port`). True for exactly `localhost`, an IPv4 address in
-/// 127.0.0.0/8, `::1`, or `0.0.0.0`, with an optional numeric port. The
+/// `[ipv6]:port`). True for exactly `localhost`, a dotted IPv4 address in
+/// 127.0.0.0/8 without leading zeros, `::1`, or `0.0.0.0`, with an
+/// optional numeric port. The
 /// match is exact, so `localhost.example.com` and `127.evil.test` are not
 /// loopback. Mirrors `isLoopbackHost` in packages/functions/src/ssr-runtime.ts.
 pub fn is_loopback_host(host: &str) -> bool {
@@ -127,9 +128,13 @@ pub fn is_loopback_host(host: &str) -> bool {
     if name == "localhost" {
         return true;
     }
-    match name.parse::<std::net::IpAddr>() {
-        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || ip.is_unspecified(),
-        Ok(std::net::IpAddr::V6(ip)) => ip.is_loopback(),
+    // IPv6 loopback only in its short textual form, so this matches the
+    // TS check exactly (it does not canonicalize IPv6).
+    if name == "::1" {
+        return true;
+    }
+    match name.parse::<std::net::Ipv4Addr>() {
+        Ok(ip) => ip.is_loopback() || ip.is_unspecified(),
         Err(_) => false,
     }
 }
@@ -395,6 +400,9 @@ mod tests {
             "[::1]:80x",
             "localhost:80x",
             "128.0.0.1",
+            "127.000.000.001",
+            "0:0:0:0:0:0:0:1",
+            "localhost.",
             "::2",
             "",
         ] {

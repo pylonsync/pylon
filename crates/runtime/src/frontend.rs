@@ -2882,7 +2882,7 @@ fn absolute_url(headers: &std::collections::HashMap<String, String>, path: &str)
         .get("x-forwarded-proto")
         .map(|p| p.split(',').next().unwrap_or("https").trim().to_string())
         .unwrap_or_else(|| {
-            if is_loopback_host(host) {
+            if is_loopback_host(&host.to_ascii_lowercase()) {
                 "http".to_string()
             } else {
                 "https".to_string()

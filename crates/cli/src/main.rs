@@ -318,7 +318,7 @@ fn print_command_help(cmd: &str) -> bool {
             println!();
             println!("Options:");
             println!(
-                "  --status <s>      pending | running | completed | failed | retrying | dead"
+                "  --status <s>      pending | running | completed | failed | retrying | dead | cancelled"
             );
             println!("  --queue <q>       Only jobs on this queue");
             println!("  --limit <n>       Rows to return (default: 50, max: 500)");

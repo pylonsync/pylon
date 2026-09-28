@@ -1093,8 +1093,9 @@ function readSocialImageMeta(relPath: string): {
 }
 
 /** Loopback host? `host` is a lowercase authority (`host[:port]`,
- *  `[ipv6]:port`). True for exactly `localhost`, 127.0.0.0/8, `::1`, or
- *  `0.0.0.0`, with an optional numeric port. The match is exact, so
+ *  `[ipv6]:port`). True for exactly `localhost`, dotted 127.0.0.0/8
+ *  without leading zeros, `::1`, or `0.0.0.0`, with an optional numeric
+ *  port. The match is exact, so
  *  `localhost.example.com` is not loopback. Mirrors `is_loopback_host` in
  *  crates/router/src/public_url.rs. Exported for tests. */
 export function isLoopbackHost(host: string): boolean {
@@ -1115,7 +1116,9 @@ export function isLoopbackHost(host: string): boolean {
     }
   }
   if (name === "localhost" || name === "::1" || name === "0.0.0.0") return true;
-  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(name);
+  // Dotted IPv4 without leading zeros (matches Rust's Ipv4Addr parser).
+  const octet = "(0|[1-9]\\d{0,2})";
+  const v4 = new RegExp(`^${octet}\\.${octet}\\.${octet}\\.${octet}$`).exec(name);
   if (v4) {
     const octets = v4.slice(1).map(Number);
     return octets.every((o) => o <= 255) && octets[0] === 127;

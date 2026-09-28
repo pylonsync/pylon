@@ -914,7 +914,7 @@ describe("isLoopbackHost — exact loopback match", () => {
   });
 
   test("rejects hosts that only start like loopback", () => {
-    for (const h of ["localhost.attacker.io", "127.attacker.test", "0.0.0.0.attacker.net", "localhostx", "[::1].evil.com", "localhost:80x", "128.0.0.1", "127.0.0.256", ""]) {
+    for (const h of ["localhost.attacker.io", "127.attacker.test", "0.0.0.0.attacker.net", "localhostx", "[::1].evil.com", "localhost:80x", "128.0.0.1", "127.0.0.256", "127.000.000.001", "0:0:0:0:0:0:0:1", "localhost.", ""]) {
       expect(isLoopbackHost(h)).toBe(false);
     }
   });
