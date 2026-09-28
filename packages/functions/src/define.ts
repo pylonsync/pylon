@@ -59,7 +59,8 @@ interface CommonDef<
    * IDLE-timeout SECONDS for this function: how long it may go without
    * producing any activity (a stream chunk, a `ctx.db` op, an LLM
    * event) before the host cancels the call. Defaults to
-   * `PYLON_FN_CALL_TIMEOUT` (30s). Activity restarts the budget, so a
+   * `PYLON_FN_CALL_TIMEOUT` (30s; Stack0 Cloud sets 300s). Activity
+   * restarts the budget, so a
    * streaming agent run stays alive as long as it keeps producing; a
    * silent hang is cancelled at the budget. Total lifetime is capped at
    * 10× this value however chatty the call is.

@@ -593,9 +593,8 @@ const tools = [{
 
 export default action({
   args: { question: v.string() },
-  timeout: 300,   // REQUIRED for long runs: streaming does NOT extend the call
-                  // deadline (PYLON_FN_CALL_TIMEOUT, 30s default — absolute wall
-                  // clock from invocation).
+  timeout: 300,   // idle seconds: each stream event resets it; total run capped
+                  // at 10x. Default PYLON_FN_CALL_TIMEOUT is 30s (Cloud: 300s).
   async handler(ctx, args) {
     const messages: { role: "user" | "assistant"; content: string | any[] }[] = [
       { role: "user", content: args.question },
@@ -1081,7 +1080,7 @@ Keeping a project current: `pylon update` bumps every @pylonsync/* dependency (w
 | A server-side join / computed value, live | `db.useReactiveQuery("fnName", args)` (leader-view; see footgun) |
 | Live full-text search | `db.useSearch("Entity", { query, facets })` + `.search({...})` on the entity |
 | Presence / cursors / typing | `useRoom(roomId, userId)` — ephemeral, not persisted |
-| An AI chat / agent that streams its answer | `action()` with `ctx.llm.stream(req, (e) => ctx.stream.write(e.text))` + `db.streamFn` on the client (auto-resumes on disconnect; `onStreamId` + `resumeStream` survive reloads); set `timeout:` — streaming does NOT extend the 30s call deadline |
+| An AI chat / agent that streams its answer | `action()` with `ctx.llm.stream(req, (e) => ctx.stream.write(e.text))` + `db.streamFn` on the client (auto-resumes on disconnect; `onStreamId` + `resumeStream` survive reloads); set `timeout:` when a tool call can be silent past the idle timeout (30s default; each stream event resets it) |
 | Agent output fanned to every CONNECTED watcher (second device, no HTTP caller) | `ctx.rooms.broadcast(room, topic, data)` from the mutation/action; live-only, no replay — persist the stream id for gap-proof delivery |
 | Multiplayer game / tick sim | `useShard(shardId, { subscriberId })` |
 | A form submission / write | A `mutation()` in `functions/X.ts` + `await callFn("X", args)` in the component (or `db.useMutation` for optimistic UI) |

@@ -287,6 +287,33 @@ export default action({
 
 Actions have no `ctx.db`. They reach the database through `ctx.runQuery(name, args)` / `ctx.runMutation(name, args)`. Each of those runs as its own transaction, but the action as a whole is not atomic. If a sequence of writes must commit or roll back together, do them inside a single mutation and have the action call it once.
 
+## Timeouts
+
+`timeout` on a function is an idle timeout in seconds: how long the call
+may go without activity before Pylon cancels it. Activity is any
+`ctx.db` operation, stream chunk, LLM event, or other `ctx.*` call, and
+each one restarts the budget. The total run is capped at 10 times the
+timeout, however active the call is.
+
+| Setting | Default |
+| --- | --- |
+| `timeout` on the function definition | not set |
+| `PYLON_FN_CALL_TIMEOUT` (seconds), used when `timeout` is not set | 30 locally and self-hosted; 300 on Stack0 Cloud |
+| Total run cap | 10 × the timeout |
+
+Stack0 Cloud sets `PYLON_FN_CALL_TIMEOUT=300` on each machine. A project
+env var overrides it. There is no separate Cloud maximum: a function
+with `timeout: 600` can go 10 minutes without activity and run for up to
+100 minutes.
+
+When a call is cancelled, its next `ctx.*` call throws `CALL_CANCELLED`
+and `ctx.signal` aborts. A mutation's transaction rolls back. External
+work already in flight, such as a `fetch`, finishes unless you pass
+`{ signal: ctx.signal }`.
+
+For work that can outlast an HTTP request, return early and continue in
+`ctx.scheduler.runAfter` or a [workflow](/concepts/workflows) step.
+
 ## Receiving webhooks
 
 `POST /api/webhooks/<action>` calls an action with the raw request on
@@ -423,13 +450,17 @@ result after the handler finished. See [Resumable Streams](/concepts/streaming).
 
 Everything else matches `complete`: same auth gating, same model allowlist (`PYLON_AI_MODELS_ALLOWED` / the manifest `llm()` helper), same thrown errors carrying `err.code` (`LLM_NOT_CONFIGURED`, `MODEL_NOT_ALLOWED`, `PROVIDER_HTTP_429`, …). Streaming can't reach a model `complete` would refuse.
 
-### Streaming does not extend the deadline
+### Streaming keeps a call alive
 
-The call deadline is absolute wall clock from invocation: `PYLON_FN_CALL_TIMEOUT`, 30 seconds by default. Emitting events does not reset it. A multi-turn agent that runs tools will exceed 30s, so declare a timeout on the function:
+The timeout is an idle timeout (see [Timeouts](#timeouts)). Every stream
+event resets it, so a streaming call runs as long as it keeps producing,
+up to 10 times the timeout in total. A multi-turn agent that runs tools
+can be silent for longer than 30 seconds between events (a slow tool
+call), so raise the timeout:
 
 ```ts
 export default action({
-  timeout: 300,   // seconds of wall clock for the whole handler
+  timeout: 300,   // idle seconds; total run capped at 3000 s
   args: { ... },
   async handler(ctx, args) { ... },
 });
@@ -461,7 +492,7 @@ const tools = [
 
 export default action({
   args: { question: v.string() },
-  timeout: 300,   // streaming does NOT extend the 30s default
+  timeout: 300,   // a slow tool call can be silent for minutes
   async handler(ctx, args) {
     const messages: Turn[] = [{ role: "user", content: args.question }];
 
