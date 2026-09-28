@@ -205,13 +205,80 @@ export function useRouteData<T>(
     // loader is intentionally excluded; `deps` are the reload trigger.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
-  if (!optimistic) {
+  // Hooks run in both modes so their order never changes.
+  const committed = useRef<LoaderEntry | null>(null);
+  const source = optimistic ? "" : loader.toString();
+  const entry = optimistic
+    ? null
+    : committed.current && sameLoader(committed.current, source, deps)
+      ? committed.current
+      : loaderEntry(source, deps, loader);
+  useEffect(() => {
+    if (!entry) return;
+    // Once mounted, the ref keeps the promise; the shared cache only has to
+    // bridge renders that suspended before the first commit.
+    committed.current = entry;
+    releaseLoaderEntry(entry);
+  });
+  if (entry) {
     // SSR + hard load + non-seeded nav: suspend so the server streams the real
     // content and the client hydrates it synchronously from the pre-fulfilled
-    // serverData cache (matches the server HTML — no mismatch).
-    return use(Promise.resolve(loader())) as T;
+    // serverData cache (matches the server HTML — no mismatch). `use()` must
+    // get the SAME promise on every attempt: a render that suspends before its
+    // first commit keeps no state, so the promise lives in a shared cache
+    // keyed by the loader's source and `deps`.
+    return use(entry.promise) as T;
   }
   return data ?? seed;
+}
+
+interface LoaderEntry {
+  source: string;
+  deps: readonly unknown[];
+  promise: Promise<unknown>;
+}
+
+/** Promises for loaders whose component has not committed yet. Bounded so
+ *  renders that suspend and are then abandoned cannot grow it forever. */
+const pendingLoaders: LoaderEntry[] = [];
+const PENDING_LOADERS_MAX = 64;
+
+function sameLoader(e: LoaderEntry, source: string, deps: readonly unknown[]): boolean {
+  if (e.source !== source || e.deps.length !== deps.length) return false;
+  for (let i = 0; i < deps.length; i++) {
+    if (!Object.is(e.deps[i], deps[i])) return false;
+  }
+  return true;
+}
+
+/** Find or create the cached promise for this loader call. A synchronous
+ *  loader result becomes an already-fulfilled thenable, which `use()` reads
+ *  without suspending. */
+function loaderEntry(
+  source: string,
+  deps: readonly unknown[],
+  loader: () => unknown,
+): LoaderEntry {
+  const hit = pendingLoaders.find((e) => sameLoader(e, source, deps));
+  if (hit) return hit;
+  const value = loader();
+  let promise: Promise<unknown>;
+  if (value != null && typeof (value as { then?: unknown }).then === "function") {
+    promise = value as Promise<unknown>;
+  } else {
+    promise = Promise.resolve(value);
+    // React reads `status` / `value` on a thenable to skip suspending.
+    Object.assign(promise, { status: "fulfilled", value });
+  }
+  const entry: LoaderEntry = { source, deps: [...deps], promise };
+  pendingLoaders.push(entry);
+  if (pendingLoaders.length > PENDING_LOADERS_MAX) pendingLoaders.shift();
+  return entry;
+}
+
+function releaseLoaderEntry(entry: LoaderEntry): void {
+  const i = pendingLoaders.indexOf(entry);
+  if (i !== -1) pendingLoaders.splice(i, 1);
 }
 
 /**
