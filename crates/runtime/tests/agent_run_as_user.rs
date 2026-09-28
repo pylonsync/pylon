@@ -335,14 +335,24 @@ fn server_code_runs_an_agent_as_a_named_user() {
 
     // Wait until the functions runtime serves calls.
     let deadline = Instant::now() + Duration::from_secs(60);
+    let mut last = (0u16, serde_json::Value::Null);
     loop {
         if TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
             let (status, body) = post(port, "/api/fn/plainAction", &serde_json::json!({}));
             if status == 200 && body == "plain" {
                 break;
             }
+            last = (status, body);
         }
-        assert!(Instant::now() < deadline, "functions never came up");
+        assert!(
+            Instant::now() < deadline,
+            "functions never came up; last /api/fn/plainAction answer: {} {} \
+             (PYLON_FUNCTIONS_DIR={:?}, cwd={:?})",
+            last.0,
+            last.1,
+            std::env::var("PYLON_FUNCTIONS_DIR").ok(),
+            std::env::current_dir().ok(),
+        );
         std::thread::sleep(Duration::from_millis(200));
     }
 
