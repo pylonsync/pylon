@@ -2989,6 +2989,19 @@ fn start_server(
         // revoked mid-session stops receiving frames immediately.
         .with_policy(Arc::clone(&policy_engine)),
     );
+    // Room events that start outside an HTTP request (a WS close, the
+    // idle sweep) go through this notifier, so they reach the same room
+    // subscribers, on every machine, as the /api/rooms routes.
+    let rooms_notifier: Arc<dyn pylon_router::ChangeNotifier> =
+        Arc::new(crate::datastore::WsSseNotifier::with_cluster_bus(
+            Arc::clone(&ws_hub),
+            Arc::clone(&sse_hub),
+            runtime.manifest().auth.user.clone(),
+            Arc::clone(&cluster_bus),
+        ));
+    let rooms_bridge: Arc<dyn crate::ws::RoomBridge> = Arc::new(
+        crate::datastore::WsRoomBridge::new(Arc::clone(&room_mgr), Arc::clone(&rooms_notifier)),
+    );
     // Subscriber: inbound peer events → local hubs. Idempotent —
     // calling subscribe registers a handler; Noop never delivers, so
     // single-machine builds pay nothing for the call.
@@ -3627,7 +3640,7 @@ fn start_server(
         let auth = Arc::clone(&ws_auth);
         let fetcher = snapshot_fetcher.clone();
         let reactive = Arc::clone(&reactive_registry);
-        let rooms_bridge: Arc<dyn crate::ws::RoomBridge> = Arc::clone(&room_mgr) as _;
+        let rooms_bridge = Arc::clone(&rooms_bridge);
         let scope = listen_scope.clone();
         std::thread::spawn(move || {
             crate::ws::start_ws_server(
@@ -3976,6 +3989,7 @@ fn start_server(
         let magic_codes = Arc::clone(&magic_codes);
         let plugin_reg = Arc::clone(&plugin_reg);
         let room_mgr = Arc::clone(&room_mgr);
+        let rooms_bridge = Arc::clone(&rooms_bridge);
         let metrics = Arc::clone(&metrics);
         let oauth_state = Arc::clone(&oauth_state);
         let session_handoff = Arc::clone(&session_handoff);
@@ -4047,6 +4061,7 @@ fn start_server(
         let mc = Arc::clone(&magic_codes);
         let pr = Arc::clone(&plugin_reg);
         let rm = Arc::clone(&room_mgr);
+        let rbr = Arc::clone(&rooms_bridge);
         let mt = Arc::clone(&metrics);
         let os = Arc::clone(&oauth_state);
         let sho = Arc::clone(&session_handoff);
@@ -4532,7 +4547,7 @@ fn start_server(
                 let auth = Arc::clone(&ws_auth);
                 let fetcher = snapshot_fetcher.clone();
                 let reactive = Arc::clone(&reactive_registry);
-                let rooms_bridge: Arc<dyn crate::ws::RoomBridge> = Arc::clone(&rm) as _;
+                let rooms_bridge = Arc::clone(&rbr);
                 std::thread::Builder::new()
                     .name("ws-upgrade".into())
                     .stack_size(64 * 1024)

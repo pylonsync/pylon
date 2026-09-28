@@ -520,11 +520,12 @@ fn subscribe_rejects_non_member() {
 }
 
 /// Scenario 3: WS disconnect triggers `room-update` action:leave to
-/// remaining subscribers of every room the user was in.
+/// remaining subscribers of every room the closing connection
+/// subscribed to.
 ///
 /// Without this, a client that drops without calling /api/rooms/leave
-/// would leave stale presence entries until the 2-minute idle sweep,
-/// and other subscribers would only see the leave on that same timer.
+/// would leave stale presence entries until the idle sweep, and other
+/// subscribers would only see the leave on that same timer.
 #[test]
 fn disconnect_fires_room_update_leave() {
     let (port, _rt) = start_server();
@@ -561,9 +562,9 @@ fn disconnect_fires_room_update_leave() {
         v.get("type").and_then(|t| t.as_str()) == Some("room-snapshot")
     });
 
-    // Open the guest's WS. The connection's auth context carries the
-    // guest's user_id; on close, fanout_room_leaves_on_disconnect
-    // calls RoomManager::disconnect with that user_id.
+    // Open the guest's WS and subscribe to the room. The server records
+    // the guest's user_id with the subscription; on close it leaves
+    // the room as that user.
     let url = format!("ws://127.0.0.1:{}/", port + 1);
     let mut req = url.into_client_request().expect("ws request");
     req.headers_mut().insert(
@@ -574,13 +575,9 @@ fn disconnect_fires_room_update_leave() {
     if let tungstenite::stream::MaybeTlsStream::Plain(ref s) = guest_ws.get_ref() {
         s.set_read_timeout(Some(Duration::from_millis(500))).ok();
     }
+    subscribe_room(&mut guest_ws, room);
 
-    // Give the server a moment to register the guest's connection.
-    std::thread::sleep(Duration::from_millis(200));
-
-    // Drop the guest's WS abruptly — this is the path the cleanup
-    // must handle (close frame, then read loop's Close arm fires
-    // fanout_room_leaves_on_disconnect).
+    // Close the guest's WS. The read loop's Close arm leaves the room.
     let _ = guest_ws.close(None);
     // Read a couple frames so the close handshake completes.
     for _ in 0..3 {
@@ -601,6 +598,154 @@ fn disconnect_fires_room_update_leave() {
         leave["member"]["user_id"].as_str(),
         Some(guest_user_id.as_str()),
         "leave push carries the disconnected guest's user_id: {leave}"
+    );
+
+    let _ = watcher.close(None);
+}
+
+/// Mint a guest session. Returns (token, user_id).
+fn guest_session(base: &str) -> (String, String) {
+    let (status, body) =
+        http_request_with_auth("POST", &format!("{base}/api/auth/guest"), Some("{}"), None);
+    assert_eq!(status, 201, "guest auth: {body}");
+    let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
+    (
+        resp["token"].as_str().expect("guest token").to_string(),
+        resp["user_id"].as_str().expect("guest user_id").to_string(),
+    )
+}
+
+/// Open a WS connection authenticated with a session token.
+fn connect_ws_token(
+    port: u16,
+    token: &str,
+) -> tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>> {
+    let url = format!("ws://127.0.0.1:{}/", port + 1);
+    let mut req = url.into_client_request().expect("ws request");
+    req.headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (ws, _) = client::connect(req).expect("ws connect");
+    if let tungstenite::stream::MaybeTlsStream::Plain(ref s) = ws.get_ref() {
+        s.set_read_timeout(Some(Duration::from_millis(500))).ok();
+        s.set_nodelay(true).ok();
+    }
+    ws
+}
+
+/// Send `room-subscribe` and wait for the `room-snapshot` that confirms
+/// the server recorded the subscription.
+fn subscribe_room(
+    ws: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>,
+    room: &str,
+) {
+    ws.send(Message::Text(
+        serde_json::json!({"type":"room-subscribe","room":room}).to_string(),
+    ))
+    .unwrap();
+    let snap = wait_for_frame(ws, Duration::from_secs(2), |v| {
+        v.get("type").and_then(|t| t.as_str()) == Some("room-snapshot")
+            && v.get("room").and_then(|r| r.as_str()) == Some(room)
+    });
+    assert!(snap.is_some(), "subscribe to {room} must return a snapshot");
+}
+
+/// Close a WS connection and wait for the close handshake.
+fn close_ws(mut ws: tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>) {
+    let _ = ws.close(None);
+    for _ in 0..3 {
+        if ws.read().is_err() {
+            break;
+        }
+    }
+    drop(ws);
+}
+
+fn room_member_ids(base: &str, room: &str) -> Vec<String> {
+    let (status, body) = http_request_with_auth(
+        "GET",
+        &format!("{base}/api/rooms/{room}"),
+        None,
+        Some(TEST_ADMIN_TOKEN),
+    );
+    assert_eq!(status, 200, "members of {room}: {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    v["members"]
+        .as_array()
+        .expect("members array")
+        .iter()
+        .filter_map(|m| m["user_id"].as_str().map(str::to_string))
+        .collect()
+}
+
+fn is_leave_for(v: &serde_json::Value, room: &str) -> bool {
+    v.get("type").and_then(|t| t.as_str()) == Some("room-update")
+        && v.get("action").and_then(|a| a.as_str()) == Some("leave")
+        && v.get("room").and_then(|r| r.as_str()) == Some(room)
+}
+
+/// Membership follows WS connections, not users. A user with two sockets
+/// subscribed to a room stays in the room when one socket closes, and
+/// leaves when the last one closes. A socket close does not touch a room
+/// that none of the user's sockets subscribed to.
+#[test]
+fn closing_one_of_two_sockets_keeps_the_user_in_the_room() {
+    let (port, _rt) = start_server();
+    let base = format!("http://127.0.0.1:{port}");
+    let room = "channel:two-tabs";
+    let http_only_room = "channel:http-only";
+
+    let (token, user_id) = guest_session(&base);
+    for r in [room, http_only_room] {
+        let (status, body) = http_request_with_auth(
+            "POST",
+            &format!("{base}/api/rooms/join"),
+            Some(&format!(r#"{{"room":"{r}"}}"#)),
+            Some(&token),
+        );
+        assert_eq!(status, 200, "guest join {r}: {body}");
+    }
+
+    let mut watcher = connect_ws_admin(port);
+    subscribe_room(&mut watcher, room);
+    subscribe_room(&mut watcher, http_only_room);
+
+    let mut tab_a = connect_ws_token(port, &token);
+    let mut tab_b = connect_ws_token(port, &token);
+    subscribe_room(&mut tab_a, room);
+    subscribe_room(&mut tab_b, room);
+
+    // Close the first tab. The second tab still holds the room.
+    close_ws(tab_a);
+    let early_leave = wait_for_frame(&mut watcher, Duration::from_millis(1500), |v| {
+        is_leave_for(v, room) || is_leave_for(v, http_only_room)
+    });
+    assert!(
+        early_leave.is_none(),
+        "closing one of two sockets must not push a leave: {early_leave:?}"
+    );
+    assert!(
+        room_member_ids(&base, room).contains(&user_id),
+        "the user must stay in {room} while another socket is subscribed"
+    );
+
+    // Close the second tab. Now the user leaves the room.
+    close_ws(tab_b);
+    let leave = wait_for_frame(&mut watcher, Duration::from_secs(3), |v| {
+        is_leave_for(v, room)
+    })
+    .expect("closing the last socket must push room-update action:leave");
+    assert_eq!(leave["member"]["user_id"].as_str(), Some(user_id.as_str()));
+    assert!(!room_member_ids(&base, room).contains(&user_id));
+
+    // No socket subscribed to the HTTP-only room, so the user stays there
+    // until they leave over HTTP or the idle sweep removes them.
+    let stray = wait_for_frame(&mut watcher, Duration::from_millis(500), |v| {
+        is_leave_for(v, http_only_room)
+    });
+    assert!(stray.is_none(), "no leave for {http_only_room}: {stray:?}");
+    assert!(
+        room_member_ids(&base, http_only_room).contains(&user_id),
+        "a socket close must not remove the user from rooms it never subscribed to"
     );
 
     let _ = watcher.close(None);

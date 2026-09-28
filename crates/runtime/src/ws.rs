@@ -200,8 +200,10 @@ impl CrdtSubscriptions {
 // Same two-map design as `CrdtSubscriptions`:
 //   - by_room: room → set of client_ids
 //   - by_client: client_id → set of rooms
-// Both maps live under a single mutex so disconnect cleanup and
-// concurrent subscribe never tear.
+// plus user_by_client (client_id → the user it subscribed as), so a
+// closing connection can tell whether another connection of the same
+// user still holds a room. All maps live under a single mutex so
+// disconnect cleanup and concurrent subscribe never tear.
 // ---------------------------------------------------------------------------
 
 #[derive(Default)]
@@ -210,6 +212,19 @@ struct RoomSubsState {
     by_room: HashMap<String, HashSet<u64>>,
     /// client_id → set of rooms it subscribes to.
     by_client: HashMap<u64, HashSet<String>>,
+    /// client_id → user id the client subscribed as. No entry for a
+    /// client that subscribed without a user id (an admin context with no user).
+    user_by_client: HashMap<u64, String>,
+}
+
+/// The result of [`RoomSubscriptions::release_client`].
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ReleasedRooms {
+    /// The user the client subscribed as, if any.
+    pub user_id: Option<String>,
+    /// Rooms the client subscribed to where no other client of the same
+    /// user is still subscribed. Empty when `user_id` is `None`.
+    pub last_rooms: Vec<String>,
 }
 
 pub struct RoomSubscriptions {
@@ -229,7 +244,10 @@ impl RoomSubscriptions {
         Arc::new(Self::default())
     }
 
-    pub fn subscribe(&self, client_id: u64, room: &str) {
+    /// Record that `client_id` receives pushes for `room`. `user_id` is
+    /// the user the connection is authenticated as; `release_client`
+    /// uses it to decide whether the user still holds the room.
+    pub fn subscribe(&self, client_id: u64, room: &str, user_id: Option<&str>) {
         let mut state = self.state.lock().unwrap();
         state
             .by_room
@@ -241,6 +259,9 @@ impl RoomSubscriptions {
             .entry(client_id)
             .or_default()
             .insert(room.to_string());
+        if let Some(uid) = user_id {
+            state.user_by_client.insert(client_id, uid.to_string());
+        }
     }
 
     pub fn unsubscribe(&self, client_id: u64, room: &str) {
@@ -255,30 +276,47 @@ impl RoomSubscriptions {
             set.remove(room);
             if set.is_empty() {
                 state.by_client.remove(&client_id);
+                state.user_by_client.remove(&client_id);
             }
         }
     }
 
     /// Drop every room subscription for this client. Called on WS
-    /// disconnect — mirrors `CrdtSubscriptions::unsubscribe_all`. Returns
-    /// the list of rooms this client was subscribed to so the caller can
-    /// surface "you were in these rooms" diagnostics if needed.
-    pub fn unsubscribe_all(&self, client_id: u64) -> Vec<String> {
-        let mut state = self.state.lock().unwrap();
+    /// disconnect. Returns the client's user and the rooms that user no
+    /// longer holds through any other client, in one step under the
+    /// lock, so two connections of one user closing at the same time
+    /// cannot both conclude that the other still holds the room.
+    pub fn release_client(&self, client_id: u64) -> ReleasedRooms {
+        let mut guard = self.state.lock().unwrap();
+        let state = &mut *guard;
+        let user_id = state.user_by_client.remove(&client_id);
         let rooms: Vec<String> = state
             .by_client
             .remove(&client_id)
             .map(|set| set.into_iter().collect())
             .unwrap_or_default();
-        for room in &rooms {
-            if let Some(set) = state.by_room.get_mut(room) {
+        let mut last_rooms = Vec::new();
+        for room in rooms {
+            let mut held_elsewhere = false;
+            if let Some(set) = state.by_room.get_mut(&room) {
                 set.remove(&client_id);
+                if let Some(uid) = user_id.as_deref() {
+                    held_elsewhere = set.iter().any(|other| {
+                        state.user_by_client.get(other).map(String::as_str) == Some(uid)
+                    });
+                }
                 if set.is_empty() {
-                    state.by_room.remove(room);
+                    state.by_room.remove(&room);
                 }
             }
+            if user_id.is_some() && !held_elsewhere {
+                last_rooms.push(room);
+            }
         }
-        rooms
+        ReleasedRooms {
+            user_id,
+            last_rooms,
+        }
     }
 
     /// Snapshot the subscriber set for a room. Returns an owned `Vec`
@@ -1661,12 +1699,12 @@ pub trait RoomBridge: Send + Sync {
     /// calling this).
     fn is_in_room(&self, room: &str, user_id: &str) -> bool;
 
-    /// Disconnect a user from every room they're in. Returns the names
-    /// of the rooms they were in so the reader can fan a `room-update`
-    /// action:leave to each room's remaining subscribers. Used at WS
-    /// close time so presence updates fire even when the client never
-    /// hits `/api/rooms/leave` explicitly.
-    fn disconnect(&self, user_id: &str) -> Vec<String>;
+    /// Remove the user from the room and deliver `room-update`
+    /// action:leave to the room's subscribers. Returns false, and
+    /// delivers nothing, when the user was not in the room. Called at
+    /// WS close for each room the closing connection was the user's
+    /// last subscriber to.
+    fn leave(&self, room: &str, user_id: &str) -> bool;
 }
 
 /// Start the WebSocket server on the given port.
@@ -2158,7 +2196,7 @@ fn run_authenticated_session(
                     // messages will be discarded when the channel
                     // half is dropped.
                     drop(guard);
-                    hub.remove_client(client_id);
+                    end_session(&hub, client_id, reactive.as_ref(), rooms.as_ref());
                     return;
                 }
             }
@@ -2333,30 +2371,7 @@ fn run_authenticated_session(
                 let _ = socket_handle.outbound_tx.try_send(Message::Pong(data));
             }
             Ok(Message::Close(_)) => {
-                // Drop every CRDT subscription this client held BEFORE
-                // remove_client so the broadcast path can never look up
-                // a stale client_id between the two ops.
-                hub.subscriptions.unsubscribe_all(client_id);
-                hub.room_subscriptions.unsubscribe_all(client_id);
-                if let Some(reg) = reactive.as_ref() {
-                    reg.disconnect_client(client_id);
-                }
-                // Auto-leave every room the user was in and push
-                // `room-update` action:leave to remaining subscribers
-                // of each. This closes the stale-presence gap when a
-                // client drops without calling /api/rooms/leave.
-                let snapshot_auth = match socket_handle.auth.read() {
-                    Ok(g) => g.clone(),
-                    Err(poisoned) => poisoned.into_inner().clone(),
-                };
-                fanout_room_leaves_on_disconnect(&hub, &snapshot_auth, rooms.as_ref());
-                hub.remove_client(client_id);
-                let disconnect = serde_json::json!({
-                    "type": "presence",
-                    "event": "disconnect",
-                    "clientId": client_id,
-                });
-                hub.broadcast_presence(&disconnect.to_string());
+                end_session(&hub, client_id, reactive.as_ref(), rooms.as_ref());
                 break;
             }
             Err(tungstenite::Error::Io(io_err))
@@ -2375,28 +2390,40 @@ fn run_authenticated_session(
                 continue;
             }
             Err(_) => {
-                hub.subscriptions.unsubscribe_all(client_id);
-                hub.room_subscriptions.unsubscribe_all(client_id);
-                if let Some(reg) = reactive.as_ref() {
-                    reg.disconnect_client(client_id);
-                }
-                let snapshot_auth = match socket_handle.auth.read() {
-                    Ok(g) => g.clone(),
-                    Err(poisoned) => poisoned.into_inner().clone(),
-                };
-                fanout_room_leaves_on_disconnect(&hub, &snapshot_auth, rooms.as_ref());
-                hub.remove_client(client_id);
-                let disconnect = serde_json::json!({
-                    "type": "presence",
-                    "event": "disconnect",
-                    "clientId": client_id,
-                });
-                hub.broadcast_presence(&disconnect.to_string());
+                end_session(&hub, client_id, reactive.as_ref(), rooms.as_ref());
                 break;
             }
             _ => {}
         }
     }
+}
+
+/// Clean up after a WS connection ends, for every way the reader loop
+/// exits.
+///
+/// CRDT and room subscriptions are dropped BEFORE `remove_client`, so
+/// the broadcast path never looks up a stale client_id between the two
+/// steps. The user leaves each room this connection was their last
+/// subscriber to (see [`leave_released_rooms`]).
+fn end_session(
+    hub: &Arc<WsHub>,
+    client_id: u64,
+    reactive: Option<&Arc<crate::reactive::ReactiveRegistry>>,
+    rooms: Option<&Arc<dyn RoomBridge>>,
+) {
+    hub.subscriptions.unsubscribe_all(client_id);
+    let released = hub.room_subscriptions.release_client(client_id);
+    if let Some(reg) = reactive {
+        reg.disconnect_client(client_id);
+    }
+    leave_released_rooms(&released, rooms);
+    hub.remove_client(client_id);
+    let disconnect = serde_json::json!({
+        "type": "presence",
+        "event": "disconnect",
+        "clientId": client_id,
+    });
+    hub.broadcast_presence(&disconnect.to_string());
 }
 
 /// Apply a parsed `crdt-subscribe` / `crdt-unsubscribe` control
@@ -2580,7 +2607,8 @@ fn handle_room_control(
             // fanned out) or via the snapshot (because it landed
             // before the snapshot read). No room update is silently
             // lost across the subscribe boundary.
-            hub.room_subscriptions.subscribe(client_id, room);
+            hub.room_subscriptions
+                .subscribe(client_id, room, auth_ctx.user_id.as_deref());
             let members = bridge.members(room);
             let members_json = serde_json::Value::Array(members);
             hub.push_room_snapshot(client_id, room, &members_json);
@@ -2592,36 +2620,26 @@ fn handle_room_control(
     }
 }
 
-/// Auto-leave fanout: invoked from the Close + Err arms of the WS
-/// reader loop. For each room this user was in, evict them from the
-/// RoomManager and push `room-update` action:leave to remaining
-/// subscribers of that room.
+/// Auto-leave on WS close. For each room in `released.last_rooms` (rooms
+/// the closing connection subscribed to, with no other connection of
+/// the same user still subscribed), the bridge removes the user and
+/// pushes `room-update` action:leave to the room's subscribers.
 ///
-/// Without this, a client that drops without calling `/api/rooms/leave`
-/// would leave their presence entry hanging in the RoomManager until
-/// the next `pylon.rooms.cleanup` idle sweep (2 min default) — and
-/// other subscribers would only learn the user left on that same
-/// timer, not in real time.
+/// Rooms the connection never subscribed to are not touched: a user
+/// can be in a room over HTTP only, or hold it from another device.
+/// The idle sweep removes members that stop sending heartbeats.
 ///
-/// Anonymous WS connections (no `user_id` on auth_ctx) skip — they
-/// were never in a room, so there's nothing to leave. Admins fall
-/// through the same path; an admin connection doesn't typically
-/// hold room membership, but if one does it gets cleaned up too.
-fn fanout_room_leaves_on_disconnect(
-    hub: &Arc<WsHub>,
-    auth_ctx: &pylon_auth::AuthContext,
-    rooms: Option<&Arc<dyn RoomBridge>>,
-) {
+/// A connection that subscribed without a user id (an admin context) has
+/// `user_id: None` and leaves nothing.
+fn leave_released_rooms(released: &ReleasedRooms, rooms: Option<&Arc<dyn RoomBridge>>) {
     let Some(bridge) = rooms else {
         return;
     };
-    let Some(user_id) = auth_ctx.user_id.as_deref() else {
+    let Some(user_id) = released.user_id.as_deref() else {
         return;
     };
-    let left_rooms = bridge.disconnect(user_id);
-    for room in left_rooms {
-        let member = serde_json::json!({ "user_id": user_id });
-        hub.push_room_update(&room, "leave", Some(member), None);
+    for room in &released.last_rooms {
+        bridge.leave(room, user_id);
     }
 }
 
@@ -3433,8 +3451,8 @@ mod tests {
     #[test]
     fn room_subs_subscribe_dedups() {
         let subs = RoomSubscriptions::default();
-        subs.subscribe(1, "channel:foo");
-        subs.subscribe(1, "channel:foo");
+        subs.subscribe(1, "channel:foo", None);
+        subs.subscribe(1, "channel:foo", None);
         assert_eq!(subs.subscribers("channel:foo"), vec![1]);
         assert_eq!(subs.total_subscriptions(), 1);
     }
@@ -3444,10 +3462,10 @@ mod tests {
         // O(subscribers per room) — verify many clients on one room
         // all show up via the room key.
         let subs = RoomSubscriptions::default();
-        subs.subscribe(1, "channel:foo");
-        subs.subscribe(2, "channel:foo");
-        subs.subscribe(3, "channel:foo");
-        subs.subscribe(4, "channel:bar"); // unrelated
+        subs.subscribe(1, "channel:foo", None);
+        subs.subscribe(2, "channel:foo", None);
+        subs.subscribe(3, "channel:foo", None);
+        subs.subscribe(4, "channel:bar", None); // unrelated
         let mut ids = subs.subscribers("channel:foo");
         ids.sort();
         assert_eq!(ids, vec![1, 2, 3]);
@@ -3458,7 +3476,7 @@ mod tests {
     #[test]
     fn room_subs_unsubscribe_removes_empty_rooms() {
         let subs = RoomSubscriptions::default();
-        subs.subscribe(1, "channel:foo");
+        subs.subscribe(1, "channel:foo", None);
         subs.unsubscribe(1, "channel:foo");
         assert!(subs.subscribers("channel:foo").is_empty());
         // total drops, empty room entry cleaned up — long-running
@@ -3467,23 +3485,68 @@ mod tests {
     }
 
     #[test]
-    fn room_subs_unsubscribe_all_drops_every_room_and_returns_names() {
+    fn room_subs_release_client_drops_every_room() {
         let subs = RoomSubscriptions::default();
-        subs.subscribe(1, "channel:a");
-        subs.subscribe(1, "channel:b");
-        subs.subscribe(2, "channel:a");
-        let mut left = subs.unsubscribe_all(1);
-        left.sort();
-        assert_eq!(left, vec!["channel:a", "channel:b"]);
+        subs.subscribe(1, "channel:a", Some("alice"));
+        subs.subscribe(1, "channel:b", Some("alice"));
+        subs.subscribe(2, "channel:a", Some("bob"));
+        let mut released = subs.release_client(1);
+        released.last_rooms.sort();
+        assert_eq!(released.user_id.as_deref(), Some("alice"));
+        assert_eq!(released.last_rooms, vec!["channel:a", "channel:b"]);
         // Client 2 must still be present on channel:a.
         assert_eq!(subs.subscribers("channel:a"), vec![2]);
         assert!(subs.subscribers("channel:b").is_empty());
     }
 
+    /// Two connections of one user subscribed to a room: releasing one
+    /// does not report the room, releasing the second does. A room only
+    /// the released connection held is reported at once.
+    #[test]
+    fn room_subs_release_client_keeps_rooms_held_by_another_connection() {
+        let subs = RoomSubscriptions::default();
+        subs.subscribe(1, "channel:shared", Some("alice"));
+        subs.subscribe(1, "channel:only-1", Some("alice"));
+        subs.subscribe(2, "channel:shared", Some("alice"));
+        subs.subscribe(3, "channel:shared", Some("bob"));
+
+        let first = subs.release_client(1);
+        assert_eq!(first.user_id.as_deref(), Some("alice"));
+        assert_eq!(first.last_rooms, vec!["channel:only-1"]);
+
+        let second = subs.release_client(2);
+        assert_eq!(second.last_rooms, vec!["channel:shared"]);
+
+        // Bob's connection is unaffected by alice's.
+        assert_eq!(subs.subscribers("channel:shared"), vec![3]);
+    }
+
+    #[test]
+    fn room_subs_release_client_without_user_reports_no_rooms() {
+        let subs = RoomSubscriptions::default();
+        subs.subscribe(1, "channel:a", None);
+        let released = subs.release_client(1);
+        assert_eq!(released, ReleasedRooms::default());
+        assert!(subs.subscribers("channel:a").is_empty());
+    }
+
+    /// An explicit room-unsubscribe of the connection's last room
+    /// forgets its user, so a later release reports nothing stale.
+    #[test]
+    fn room_subs_unsubscribe_last_room_forgets_the_user() {
+        let subs = RoomSubscriptions::default();
+        subs.subscribe(1, "channel:a", Some("alice"));
+        subs.subscribe(2, "channel:a", Some("alice"));
+        subs.unsubscribe(1, "channel:a");
+        let released = subs.release_client(2);
+        assert_eq!(released.last_rooms, vec!["channel:a"]);
+        assert_eq!(subs.release_client(1), ReleasedRooms::default());
+    }
+
     #[test]
     fn room_subs_unsubscribe_unknown_is_noop() {
         let subs = RoomSubscriptions::default();
-        assert!(subs.unsubscribe_all(99).is_empty());
+        assert_eq!(subs.release_client(99), ReleasedRooms::default());
         subs.unsubscribe(99, "channel:foo");
         assert_eq!(subs.total_subscriptions(), 0);
     }
@@ -3620,13 +3683,12 @@ mod tests {
 
     /// Stub RoomBridge for handle_room_control tests.
     ///
-    /// Records the user_id passed to disconnect so the test can assert
-    /// the auto-leave path fires with the correct identity.
+    /// Records each (room, user_id) passed to `leave` so the test can
+    /// assert which rooms the auto-leave path leaves, and as whom.
     struct StubBridge {
         is_member: bool,
         peers: Vec<serde_json::Value>,
-        disconnect_log: Mutex<Vec<String>>,
-        leave_rooms: Vec<String>,
+        leave_log: Mutex<Vec<(String, String)>>,
     }
 
     impl RoomBridge for StubBridge {
@@ -3636,12 +3698,12 @@ mod tests {
         fn is_in_room(&self, _room: &str, _user_id: &str) -> bool {
             self.is_member
         }
-        fn disconnect(&self, user_id: &str) -> Vec<String> {
-            self.disconnect_log
+        fn leave(&self, room: &str, user_id: &str) -> bool {
+            self.leave_log
                 .lock()
                 .unwrap()
-                .push(user_id.to_string());
-            self.leave_rooms.clone()
+                .push((room.to_string(), user_id.to_string()));
+            self.is_member
         }
     }
 
@@ -3652,8 +3714,7 @@ mod tests {
         let bridge: Arc<dyn RoomBridge> = Arc::new(StubBridge {
             is_member: true,
             peers: vec![],
-            disconnect_log: Mutex::new(Vec::new()),
-            leave_rooms: vec![],
+            leave_log: Mutex::new(Vec::new()),
         });
         let auth_ctx = pylon_auth::AuthContext::user("alice".into());
         let parsed = serde_json::json!({
@@ -3681,8 +3742,7 @@ mod tests {
         let bridge: Arc<dyn RoomBridge> = Arc::new(StubBridge {
             is_member: false,
             peers: vec![],
-            disconnect_log: Mutex::new(Vec::new()),
-            leave_rooms: vec![],
+            leave_log: Mutex::new(Vec::new()),
         });
         let auth_ctx = pylon_auth::AuthContext::user("bob".into());
         let parsed = serde_json::json!({
@@ -3707,8 +3767,7 @@ mod tests {
             // Even with is_member=false, admins go through.
             is_member: false,
             peers: vec![],
-            disconnect_log: Mutex::new(Vec::new()),
-            leave_rooms: vec![],
+            leave_log: Mutex::new(Vec::new()),
         });
         let auth_ctx = pylon_auth::AuthContext::admin();
         let parsed = serde_json::json!({
@@ -3738,8 +3797,7 @@ mod tests {
         let bridge: Arc<dyn RoomBridge> = Arc::new(StubBridge {
             is_member: true, // even if bridge would allow, we don't ask
             peers: vec![],
-            disconnect_log: Mutex::new(Vec::new()),
-            leave_rooms: vec![],
+            leave_log: Mutex::new(Vec::new()),
         });
         let auth_ctx = pylon_auth::AuthContext::anonymous();
         let parsed = serde_json::json!({
@@ -3764,12 +3822,11 @@ mod tests {
     fn room_unsubscribe_drops_registry_entry() {
         let hub = make_test_hub();
         // Pre-populate.
-        hub.room_subscriptions.subscribe(42, "channel:foo");
+        hub.room_subscriptions.subscribe(42, "channel:foo", None);
         let bridge: Arc<dyn RoomBridge> = Arc::new(StubBridge {
             is_member: true,
             peers: vec![],
-            disconnect_log: Mutex::new(Vec::new()),
-            leave_rooms: vec![],
+            leave_log: Mutex::new(Vec::new()),
         });
         let auth_ctx = pylon_auth::AuthContext::user("alice".into());
         let parsed = serde_json::json!({
@@ -3790,41 +3847,89 @@ mod tests {
             .is_empty());
     }
 
+    fn subscribe_as(
+        hub: &Arc<WsHub>,
+        bridge: &Arc<dyn RoomBridge>,
+        client_id: u64,
+        auth_ctx: &pylon_auth::AuthContext,
+        room: &str,
+    ) {
+        handle_room_control(
+            hub,
+            client_id,
+            auth_ctx,
+            "room-subscribe",
+            &serde_json::json!({ "type": "room-subscribe", "room": room }),
+            Some(bridge),
+        );
+    }
+
+    /// Closing one of a user's two connections leaves only the rooms no
+    /// other connection of that user subscribed to. Closing the second
+    /// connection leaves the shared room.
     #[test]
-    fn fanout_leaves_calls_bridge_disconnect() {
-        // Disconnect path: user identifies, bridge gets the user_id,
-        // returns the rooms the user was in. The push happens via
-        // push_room_update — no client sockets, so the verification
-        // is via the bridge's disconnect_log.
+    fn end_session_leaves_only_rooms_no_other_connection_holds() {
         let hub = make_test_hub();
         let bridge_struct = Arc::new(StubBridge {
             is_member: true,
             peers: vec![],
-            disconnect_log: Mutex::new(Vec::new()),
-            leave_rooms: vec!["channel:a".into(), "channel:b".into()],
+            leave_log: Mutex::new(Vec::new()),
         });
         let bridge: Arc<dyn RoomBridge> = bridge_struct.clone();
-        let auth_ctx = pylon_auth::AuthContext::user("alice".into());
-        fanout_room_leaves_on_disconnect(&hub, &auth_ctx, Some(&bridge));
-        let log = bridge_struct.disconnect_log.lock().unwrap();
-        assert_eq!(*log, vec!["alice".to_string()]);
+        let alice = pylon_auth::AuthContext::user("alice".into());
+        subscribe_as(&hub, &bridge, 1, &alice, "channel:shared");
+        subscribe_as(&hub, &bridge, 1, &alice, "channel:tab-1");
+        subscribe_as(&hub, &bridge, 2, &alice, "channel:shared");
+
+        end_session(&hub, 1, None, Some(&bridge));
+        assert_eq!(
+            *bridge_struct.leave_log.lock().unwrap(),
+            vec![("channel:tab-1".to_string(), "alice".to_string())]
+        );
+
+        end_session(&hub, 2, None, Some(&bridge));
+        assert_eq!(
+            bridge_struct.leave_log.lock().unwrap().last(),
+            Some(&("channel:shared".to_string(), "alice".to_string()))
+        );
+        assert_eq!(bridge_struct.leave_log.lock().unwrap().len(), 2);
     }
 
     #[test]
-    fn fanout_leaves_skips_anonymous() {
-        // Anonymous never joined any room — disconnect cleanup is a no-op.
+    fn end_session_without_a_user_leaves_nothing() {
+        // An admin context with no user id subscribes; its
+        // close must not remove anyone from the room.
         let hub = make_test_hub();
         let bridge_struct = Arc::new(StubBridge {
-            is_member: false,
+            is_member: true,
             peers: vec![],
-            disconnect_log: Mutex::new(Vec::new()),
-            leave_rooms: vec![],
+            leave_log: Mutex::new(Vec::new()),
         });
         let bridge: Arc<dyn RoomBridge> = bridge_struct.clone();
-        let auth_ctx = pylon_auth::AuthContext::anonymous();
-        fanout_room_leaves_on_disconnect(&hub, &auth_ctx, Some(&bridge));
-        let log = bridge_struct.disconnect_log.lock().unwrap();
-        assert!(log.is_empty(), "anonymous disconnect must not call bridge");
+        let admin = pylon_auth::AuthContext {
+            user_id: None,
+            ..pylon_auth::AuthContext::admin()
+        };
+        subscribe_as(&hub, &bridge, 1, &admin, "channel:a");
+        assert_eq!(hub.room_subscriptions().subscribers("channel:a"), vec![1]);
+        end_session(&hub, 1, None, Some(&bridge));
+        assert!(bridge_struct.leave_log.lock().unwrap().is_empty());
+        assert!(hub.room_subscriptions().subscribers("channel:a").is_empty());
+    }
+
+    #[test]
+    fn end_session_without_subscriptions_leaves_nothing() {
+        // A connection that never subscribed to a room leaves nothing,
+        // even though its user may be in rooms over HTTP.
+        let hub = make_test_hub();
+        let bridge_struct = Arc::new(StubBridge {
+            is_member: true,
+            peers: vec![],
+            leave_log: Mutex::new(Vec::new()),
+        });
+        let bridge: Arc<dyn RoomBridge> = bridge_struct.clone();
+        end_session(&hub, 7, None, Some(&bridge));
+        assert!(bridge_struct.leave_log.lock().unwrap().is_empty());
     }
 
     #[test]

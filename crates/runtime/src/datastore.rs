@@ -2180,35 +2180,55 @@ impl pylon_router::RoomOps for RoomManager {
     }
 }
 
-// Bridge from the WS reader → RoomManager. Lets `room-subscribe`
-// validate membership and snapshot peers without the WS layer
-// depending on the runtime's concrete RoomManager type. Also drives
-// the auto-leave-on-WS-close path: `disconnect(user_id)` returns the
-// rooms the user was just evicted from so the caller can push
-// `room-update` action:leave to remaining subscribers.
-impl crate::ws::RoomBridge for RoomManager {
+/// Deliver a room event through the notifier: `room-update` to the
+/// room's WS subscribers on this machine, plus the cluster relay. The
+/// HTTP `/api/rooms/*` routes deliver their events the same way.
+pub(crate) fn announce_room_event(
+    notifier: &dyn pylon_router::ChangeNotifier,
+    event: &crate::rooms::RoomEvent,
+) {
+    if let Ok(json) = serde_json::to_string(event) {
+        notifier.notify_presence(&json);
+    }
+}
+
+/// Bridge from the WS reader to the RoomManager. Lets `room-subscribe`
+/// validate membership and snapshot peers without the WS layer
+/// depending on the concrete RoomManager type. A leave on WS close goes
+/// through the notifier, so it reaches the same subscribers, on every
+/// machine, as a leave over HTTP.
+pub struct WsRoomBridge {
+    rooms: Arc<RoomManager>,
+    notifier: Arc<dyn pylon_router::ChangeNotifier>,
+}
+
+impl WsRoomBridge {
+    pub fn new(rooms: Arc<RoomManager>, notifier: Arc<dyn pylon_router::ChangeNotifier>) -> Self {
+        Self { rooms, notifier }
+    }
+}
+
+impl crate::ws::RoomBridge for WsRoomBridge {
     fn members(&self, room: &str) -> Vec<serde_json::Value> {
-        RoomManager::members(self, room)
+        self.rooms
+            .members(room)
             .into_iter()
             .map(|p| to_json(p))
             .collect()
     }
 
     fn is_in_room(&self, room: &str, user_id: &str) -> bool {
-        RoomManager::is_in_room(self, room, user_id)
+        self.rooms.is_in_room(room, user_id)
     }
 
-    fn disconnect(&self, user_id: &str) -> Vec<String> {
-        // RoomManager::disconnect returns the list of Leave events;
-        // we only need the room names for the WS push. Extract them
-        // and drop the event objects.
-        RoomManager::disconnect(self, user_id)
-            .into_iter()
-            .filter_map(|event| match event {
-                crate::rooms::RoomEvent::Leave { room, .. } => Some(room),
-                _ => None,
-            })
-            .collect()
+    fn leave(&self, room: &str, user_id: &str) -> bool {
+        match self.rooms.leave(room, user_id) {
+            Some(event) => {
+                announce_room_event(&*self.notifier, &event);
+                true
+            }
+            None => false,
+        }
     }
 }
 
