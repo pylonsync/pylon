@@ -860,9 +860,12 @@ pub struct ManifestEntity {
     /// delta-streamed into every client's local replica. Set `false` for large,
     /// server-queried catalogs (a 10k-row product table) that the client reaches
     /// via search + by-id fetch instead of holding the whole table locally:
-    /// `sync: false` excludes the entity from the snapshot AND the change-log
-    /// delta, so it never floods the replica. Direct reads (`/api/entities/X`,
-    /// `/api/search/X`) and policies are unchanged.
+    /// `sync: false` excludes the entity from the snapshot, the change-log
+    /// delta, and the live WS/SSE fan-out, so it never floods the replica.
+    /// Direct reads (`/api/entities/X`, `/api/search/X`) and policies are
+    /// unchanged. Writes go through mutations or `/api/entities/X`; a
+    /// client replica write (`/api/sync/push`) is refused with
+    /// `ENTITY_NOT_SYNCED`, since it would never be echoed back.
     #[serde(default = "default_sync_enabled")]
     pub sync: bool,
     /// Replication SCOPE — a policy-DSL predicate that bounds WHICH rows of a

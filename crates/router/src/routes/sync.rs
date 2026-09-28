@@ -1070,6 +1070,37 @@ fn handle_push(ctx: &RouterContext, body: &str) -> (u16, String) {
             }));
             continue;
         }
+        // A `sync: false` entity is not in any client replica, so a
+        // replica write to it is never echoed back and the client's next
+        // reconcile drops its optimistic row. Refuse it with an error that
+        // says what to do instead, rather than apply a write the client
+        // will then lose from view.
+        if !crate::is_replicated_entity(manifest, &change.entity) {
+            let message = format!(
+                "{} is sync: false, so it is not in the client replica and a replica \
+                 write to it cannot be confirmed. Write it with a mutation or \
+                 /api/entities/{}.",
+                change.entity, change.entity
+            );
+            if ctx.is_dev {
+                tracing::warn!("[sync] refused a client write: {message}");
+            }
+            errors.push(format!(
+                "{} {}/{}: {message}",
+                change_kind_label(&change.kind),
+                change.entity,
+                change.row_id
+            ));
+            op_results.push(serde_json::json!({
+                "op_id": change.op_id,
+                "entity": change.entity,
+                "row_id": change.row_id,
+                "kind": change_kind_label(&change.kind),
+                "status": "error",
+                "error": { "code": "ENTITY_NOT_SYNCED", "message": message },
+            }));
+            continue;
+        }
         // SECURITY: readonly fields — including the owner stamped by
         // `field.owner()` and identity columns like orgId/tenantId/createdBy —
         // are immutable from the client. The PATCH entity route enforces this

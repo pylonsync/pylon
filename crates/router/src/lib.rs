@@ -6968,6 +6968,48 @@ mod auth_gate_tests {
         );
     }
 
+    /// Review design note: a client write to a `sync: false` entity was
+    /// applied but never echoed (the entity is not replicated), and the
+    /// next reconcile dropped the optimistic row. The push refuses it
+    /// with an error that names the alternatives.
+    #[test]
+    fn a_replica_write_to_a_sync_false_entity_is_refused() {
+        let mut manifest = empty_manifest();
+        manifest.entities.push(pylon_kernel::ManifestEntity {
+            name: "Catalog".into(),
+            sync: false,
+            ..Default::default()
+        });
+        let admin = AuthContext::admin();
+        with_ctx_functions(&admin, manifest, None, |ctx| {
+            let body = serde_json::json!({
+                "changes": [{
+                    "op_id": "op-1",
+                    "entity": "Catalog",
+                    "row_id": "c1",
+                    "kind": "insert",
+                    "data": {"title": "x"},
+                }],
+            });
+            let (status, response, _ct) = route(
+                ctx,
+                HttpMethod::Post,
+                "/api/sync/push",
+                &body.to_string(),
+                None,
+            );
+            assert_eq!(status, 200, "{response}");
+            let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+            let result = &parsed["results"][0];
+            assert_eq!(result["status"], "error", "{response}");
+            assert_eq!(result["error"]["code"], "ENTITY_NOT_SYNCED");
+            assert!(result["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("/api/entities/Catalog"));
+        });
+    }
+
     #[test]
     fn session_revoke_pushes_session_changed() {
         let notifier = RecordingNotifier::new();

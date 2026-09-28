@@ -199,6 +199,12 @@ reads (`/api/entities/X`), `db.useSearch`, and `ctx.db.*` inside functions are
 all unchanged — so serve it with a query/action that returns the window the UI
 actually renders (`limit: 168`, not the whole table).
 
+Write a `sync: false` entity with a mutation (`ctx.db.insert/update/delete`) or
+`/api/entities/X`, never through the client replica (`db.insert` in the sync
+engine): no change is echoed back for it, so an optimistic row would vanish on
+the next reconcile. `/api/sync/push` refuses such a write with
+`ENTITY_NOT_SYNCED`.
+
 Why it matters: the replica bootstrap walks a synced table **one cursor page at
 a time, sequentially** — page N+1 needs page N's last id, so cold-start latency
 is `rows / pageSize × round-trip`. A real app shipped a per-project-per-hour
