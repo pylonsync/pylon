@@ -132,7 +132,7 @@ fn request(port: u16, method: &str, path: &str, body: &str, token: Option<&str>)
         body.len()
     );
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
-    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
     stream.write_all(req.as_bytes()).expect("write");
     let mut resp = String::new();
     stream.read_to_string(&mut resp).ok();
@@ -184,12 +184,18 @@ fn start() -> App {
     std::thread::spawn(move || {
         let _ = pylon_runtime::server::start(rt, port);
     });
-    for _ in 0..100 {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            break;
+    // A bound listener accepts connections before the server answers
+    // requests, so wait for a real response.
+    let ready = (0..600).any(|_| {
+        if TcpStream::connect(("127.0.0.1", port)).is_ok()
+            && request(port, "GET", "/health", "", None).0 == 200
+        {
+            return true;
         }
         std::thread::sleep(Duration::from_millis(50));
-    }
+        false
+    });
+    assert!(ready, "server on port {port} never answered /health");
     for org in [ORG_A, ORG_B] {
         runtime
             .insert("Org", &json!({"id": org, "name": org}))
