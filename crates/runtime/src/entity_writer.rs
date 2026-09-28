@@ -243,6 +243,23 @@ impl EntityWriter {
         id: &str,
         fields: &serde_json::Value,
     ) -> Result<(), WriteError> {
+        self.apply(
+            entity,
+            MutationOp::Update {
+                entity,
+                row_id: id,
+                data: fields,
+            },
+        )
+    }
+
+    /// Delete row `id` of `entity` through the entity pipeline, with admin
+    /// rights. Retention uses it.
+    pub fn delete(&self, entity: &str, id: &str) -> Result<(), WriteError> {
+        self.apply(entity, MutationOp::Delete { entity, row_id: id })
+    }
+
+    fn apply(&self, entity: &str, op: MutationOp<'_>) -> Result<(), WriteError> {
         if self
             .runtime
             .manifest()
@@ -262,14 +279,7 @@ impl EntityWriter {
             auth: &auth,
             bypass_policy: true,
         };
-        match mutate::apply_mutation(
-            &ctx,
-            MutationOp::Update {
-                entity,
-                row_id: id,
-                data: fields,
-            },
-        ) {
+        match mutate::apply_mutation(&ctx, op) {
             Ok(_) => Ok(()),
             Err(MutationError::NotFound) => Err(WriteError::Refused("no such row".into())),
             Err(MutationError::PolicyDenied { reason, .. }) => Err(WriteError::Refused(reason)),

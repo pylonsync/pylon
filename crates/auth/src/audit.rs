@@ -78,9 +78,11 @@ pub struct AuditQuery {
     pub entity: Option<String>,
     pub entity_id: Option<String>,
     pub action: Option<String>,
-    /// Only events with `created_at` strictly before this (unix seconds),
-    /// for paging.
+    /// Only events with `created_at` strictly before this (unix seconds).
     pub before: Option<u64>,
+    /// Paging cursor: only events older than the event with this id (by
+    /// time, then by append order). Unknown ids match nothing.
+    pub before_id: Option<String>,
     /// Max rows. Clamped to 1..=1000.
     pub limit: usize,
 }
@@ -313,16 +315,25 @@ impl AuditBackend for InMemoryAuditBackend {
     }
     fn find(&self, query: &AuditQuery) -> Result<Vec<AuditEvent>, String> {
         let g = self.events.lock().unwrap();
-        // Newest first; within one second, most recently appended first.
-        let mut out: Vec<AuditEvent> = g
+        // (created_at, append position) orders events; a cursor keeps only
+        // events strictly older than its event.
+        let cursor = match &query.before_id {
+            None => None,
+            Some(id) => match g.iter().position(|e| &e.id == id) {
+                Some(pos) => Some((g[pos].created_at, pos)),
+                None => return Ok(Vec::new()),
+            },
+        };
+        let mut out: Vec<(u64, usize, AuditEvent)> = g
             .iter()
-            .rev()
-            .filter(|e| query.matches(e))
-            .cloned()
+            .enumerate()
+            .filter(|(_, e)| query.matches(e))
+            .filter(|(pos, e)| cursor.is_none_or(|c| (e.created_at, *pos) < c))
+            .map(|(pos, e)| (e.created_at, pos, e.clone()))
             .collect();
-        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        out.sort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
         out.truncate(query.bounded_limit());
-        Ok(out)
+        Ok(out.into_iter().map(|(_, _, e)| e).collect())
     }
     fn find_for_tenant(&self, tenant_id: &str, limit: usize) -> Vec<AuditEvent> {
         let g = self.events.lock().unwrap();

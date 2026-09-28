@@ -71,17 +71,21 @@ through a write, call `ctx.audit.log` yourself.
 
 ## Read the log
 
-From a function:
+From an action:
 
 ```ts
 const events = await ctx.audit.list({ entity: "Lead", entityId: leadId });
 ```
 
-Filters: `entity`, `entityId`, `actor`, `action`, `before`, `limit`
-(default 100, max 1000). `action: "lead.export"` matches the stored
-`app.lead.export`; `entity.update` and auth action names such as
-`sign_in` match as given. Results are newest first; to page, pass
-`before` set to the oldest `createdAt` you have.
+`ctx.audit.list` is available in actions only; mutations can log but
+not read.
+
+Filters: `entity`, `entityId`, `actor`, `action`, `before` (unix
+seconds), `limit` (default 100, max 1000). `action: "lead.export"`
+matches the stored `app.lead.export`; framework actions
+(`entity.update`, `retention.delete`) and auth action names such as
+`sign_in` match as given. Results are newest first. To
+page, pass `beforeId` set to the `id` of the last event you have.
 
 A caller with an active tenant reads that tenant's events. A caller
 without a tenant reads only events it performed. Admin callers can pass
@@ -95,7 +99,7 @@ curl "https://<app>/api/admin/audit?tenant=org_123&entity=Lead&limit=50" \
 ```
 
 Query parameters: `tenant`, `entity`, `id`, `actor`, `subject`,
-`action`, `before`, `limit`.
+`action`, `before`, `beforeId`, `limit`.
 
 Each event looks like:
 

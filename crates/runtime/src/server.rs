@@ -2822,6 +2822,71 @@ fn start_server(
             .map(|f| Arc::clone(f) as Arc<dyn pylon_router::FnOps>)
     });
 
+    // Data retention: an hourly sweep deletes rows past their entity's
+    // `retention` period through the entity pipeline and records each
+    // deletion in the audit log. Rules were validated at boot.
+    let retention: Option<
+        Arc<(
+            crate::entity_writer::EntityWriter,
+            Vec<crate::retention::RetentionRule>,
+        )>,
+    > = match crate::retention::rules_from_manifest(runtime.manifest()) {
+        Ok(rules) if !rules.is_empty() => {
+            let notifier: Arc<dyn pylon_router::ChangeNotifier> = Arc::new(
+                WsSseNotifier::with_cluster_bus(
+                    Arc::clone(&ws_hub),
+                    Arc::clone(&sse_hub),
+                    runtime.manifest().auth.user.clone(),
+                    Arc::clone(&cluster_bus),
+                )
+                .with_reactive(Arc::clone(&reactive_registry))
+                .with_policy(Arc::clone(&policy_engine)),
+            );
+            let writer = crate::entity_writer::EntityWriter::new(
+                Arc::clone(&runtime),
+                Arc::clone(&change_log),
+                notifier,
+                Arc::clone(&policy_engine),
+                Arc::clone(&plugin_reg),
+            );
+            Some(Arc::new((writer, rules)))
+        }
+        Ok(_) => None,
+        Err(e) => {
+            tracing::error!("[retention] {}: {}", e.code, e.message);
+            None
+        }
+    };
+    if let Some(ret) = &retention {
+        let ret = Arc::clone(ret);
+        let audit_for_retention = Arc::clone(&audit);
+        let _ = scheduler.schedule(
+            "pylon.retention.sweep",
+            "7 * * * *",
+            Arc::new(move |_job| {
+                let (writer, rules) = ret.as_ref();
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                match crate::retention::sweep(writer, &audit_for_retention, rules, now) {
+                    Ok(report) => {
+                        if report.deleted + report.failed > 0 {
+                            tracing::info!(
+                                "[retention] sweep: {} deleted, {} held, {} failed",
+                                report.deleted,
+                                report.held,
+                                report.failed
+                            );
+                        }
+                        JobResult::Success
+                    }
+                    Err(e) => JobResult::Failure(format!("{}: {}", e.code, e.message)),
+                }
+            }),
+        );
+    }
+
     // Shards call functions and write entity fields (issue #33). The host
     // holds the functions weakly: they hold the host for ctx.shards. Writes
     // take the entity API's pipeline, with the request loop's notifier.
@@ -3633,6 +3698,7 @@ fn start_server(
         let passkeys = Arc::clone(&passkeys);
         let verification = Arc::clone(&verification);
         let audit = Arc::clone(&audit);
+        let retention = retention.clone();
         let trusted_devices = Arc::clone(&trusted_devices);
         let org_sso = Arc::clone(&org_sso);
         let saml = Arc::clone(&saml);
@@ -5561,6 +5627,43 @@ fn start_server(
             return;
         }
 
+        // Run a retention sweep now. Admin only.
+        if url == "/api/admin/retention/run" {
+            let (status, body) = if !auth_ctx.is_admin {
+                (403u16, json_error("FORBIDDEN", "this endpoint requires admin auth"))
+            } else if method != Method::Post {
+                (405, json_error("METHOD_NOT_ALLOWED", "POST only"))
+            } else if let Some(ret) = &retention {
+                let (writer, rules) = ret.as_ref();
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                match crate::retention::sweep(writer, &aud, rules, now) {
+                    Ok(report) => (
+                        200,
+                        serde_json::to_string(&report).unwrap_or_else(|_| "{}".into()),
+                    ),
+                    Err(e) => (500, json_error(&e.code, &e.message)),
+                }
+            } else {
+                (
+                    200,
+                    serde_json::json!({ "deleted": 0, "held": 0, "failed": 0, "rules": 0 })
+                        .to_string(),
+                )
+            };
+            let response = with_security_headers(
+                Response::from_string(&body)
+                    .with_status_code(status)
+                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+                    .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap()),
+            );
+            let _ = request.respond(response);
+            mt.record_request(method.as_str(), status);
+            return;
+        }
+
         // Audit log for operators, across tenants. Admin only.
         //   GET /api/admin/audit?tenant=&entity=&id=&actor=&action=&before=&limit=
         if url == "/api/admin/audit" || url.starts_with("/api/admin/audit?") {
@@ -5591,6 +5694,7 @@ fn start_server(
                         .get("action")
                         .map(|a| crate::app_audit::stored_action(a)),
                     before: params.get("before").and_then(|v| v.parse().ok()),
+                    before_id: params.get("beforeId").cloned(),
                     limit: params
                         .get("limit")
                         .and_then(|v| v.parse().ok())

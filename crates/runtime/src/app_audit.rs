@@ -116,6 +116,14 @@ pub(crate) fn handle_op(
             Ok(serde_json::json!({ "id": id }))
         }
         "list" => {
+            // Mutations only log: in a Postgres mutation the transaction
+            // holds a pool connection, and a read here would need a second.
+            if MUTATION_AUDIT_BUFFER.with(|cell| cell.borrow().is_some()) {
+                return Err((
+                    "AUDIT_LIST_IN_MUTATION".to_string(),
+                    "ctx.audit.list is available in actions, not mutations".to_string(),
+                ));
+            }
             let query = list_query(req, auth)?;
             let events = store
                 .find(&query)
@@ -138,6 +146,7 @@ fn list_query(req: &AuditOpMessage, auth: &AuthInfo) -> Result<AuditQuery, (Stri
         entity_id: req.entity_id.clone(),
         action: req.action.as_deref().map(stored_action),
         before: req.before,
+        before_id: req.before_id.clone(),
         limit: req.limit.unwrap_or(100),
         ..Default::default()
     };
@@ -200,11 +209,14 @@ const AUTH_ACTIONS: &[&str] = &[
     "anonymous_merge",
 ];
 
+/// Prefixes of events the framework writes itself. `ctx.audit.log` always
+/// stores under `app.`, so an app cannot write into these.
+const SYSTEM_ACTION_PREFIXES: &[&str] = &[APP_ACTION_PREFIX, "entity.", "retention."];
+
 /// The stored name for an action filter: `lead.export` → `app.lead.export`.
-/// Names that already carry a prefix, and auth action names, are kept.
+/// Names in a system namespace, and auth action names, are kept.
 pub(crate) fn stored_action(action: &str) -> String {
-    if action.starts_with(APP_ACTION_PREFIX)
-        || action.starts_with("entity.")
+    if SYSTEM_ACTION_PREFIXES.iter().any(|p| action.starts_with(p))
         || AUTH_ACTIONS.contains(&action)
     {
         action.to_string()
@@ -650,10 +662,24 @@ mod tests {
     }
 
     #[test]
+    fn list_is_refused_inside_a_mutation() {
+        let s = store();
+        let _guard = crate::datastore::ScheduleBufferGuard::enter();
+        let err = handle_op(
+            &s,
+            &msg("list", serde_json::json!({})),
+            &auth(None, None, true),
+        )
+        .unwrap_err();
+        assert_eq!(err.0, "AUDIT_LIST_IN_MUTATION");
+    }
+
+    #[test]
     fn stored_action_prefixes_only_app_names() {
         assert_eq!(stored_action("lead.export"), "app.lead.export");
         assert_eq!(stored_action("app.lead.export"), "app.lead.export");
         assert_eq!(stored_action("entity.update"), "entity.update");
+        assert_eq!(stored_action("retention.delete"), "retention.delete");
         assert_eq!(stored_action("sign_in"), "sign_in");
     }
 }

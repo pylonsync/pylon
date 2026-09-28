@@ -894,6 +894,29 @@ pub struct ManifestEntity {
     /// log (who, when, which row, which fields changed — not the values).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub audit: bool,
+    /// Delete rows once they are older than a retention period (see
+    /// [`ManifestRetention`]). A system job enforces it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<ManifestRetention>,
+}
+
+/// Retention rule for an entity.
+///
+/// - With `after` (a duration such as "365d"), a row is deleted once
+///   `field` is older than that.
+/// - Without `after`, `field` is itself the expiry time: the row is
+///   deleted once `field` is in the past. Apps with a retention period per
+///   tenant set it on each row at insert.
+///
+/// `field` is a `datetime` field, or an `int`/`float` field holding unix
+/// milliseconds. Rows whose `hold` field (a `bool`) is true are kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestRetention {
+    pub field: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold: Option<String>,
 }
 
 fn default_crdt_enabled() -> bool {
@@ -917,6 +940,7 @@ impl Default for ManifestEntity {
             sync_scope: None,
             sync_limit: None,
             audit: false,
+            retention: None,
         }
     }
 }

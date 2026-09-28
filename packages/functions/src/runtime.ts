@@ -1013,6 +1013,7 @@ export function buildAudit(callId: string): Audit {
         actor: filter?.actor ?? null,
         tenant: filter?.tenant ?? null,
         before: filter?.before ?? null,
+        before_id: filter?.beforeId ?? null,
         limit: filter?.limit ?? null,
       })) as AuditEntry[];
     },

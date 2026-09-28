@@ -27,6 +27,7 @@ pub mod listen;
 pub mod llm;
 pub mod log;
 pub mod log_ring;
+pub mod retention;
 
 /// What [`Runtime::prune_crdt_snapshots`] removed, per entity.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -1006,6 +1007,7 @@ impl Runtime {
             ensure_cron_lease_table_pg(&store)?;
         }
         validate_encrypted_fields(&manifest)?;
+        retention::rules_from_manifest(&manifest)?;
         // Encryption-key check happens after key load — see below.
         let entities: HashMap<String, ManifestEntity> = manifest
             .entities
@@ -1751,6 +1753,7 @@ impl Runtime {
         force_vector_fields_server_only(&mut manifest);
         validate_manifest_org_roles(&manifest)?;
         validate_encrypted_fields(&manifest)?;
+        retention::rules_from_manifest(&manifest)?;
         // Encryption key + connections requirement check must run
         // BEFORE schema init — a manifest declaring connections
         // without a key shouldn't even reach the CREATE TABLE step.

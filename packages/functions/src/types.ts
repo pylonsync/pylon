@@ -677,7 +677,7 @@ export interface Workflows {
  * The application audit log (`ctx.audit` on mutations and actions).
  * Append-only, stored with the auth audit events.
  */
-export interface Audit {
+export interface AuditLog {
   /**
    * Record an event. The actor and tenant come from the caller's session.
    * `action` is a short dotted name (`lead.export`, `script.update`) and
@@ -696,13 +696,23 @@ export interface Audit {
     subject?: string;
     meta?: Record<string, unknown>;
   }): Promise<{ id: string }>;
+}
+
+/**
+ * `ctx.audit` on actions: {@link AuditLog.log} plus reads. Mutations get
+ * only `log`: in a Postgres mutation the transaction holds a connection,
+ * and a read would need a second.
+ */
+export interface Audit extends AuditLog {
   /**
    * Read events, newest first. A caller with a tenant reads that tenant's
    * events; a caller without one reads only events it performed. Admin
    * callers may pass `tenant` or read all tenants. `action` matches
-   * `lead.export` as `app.lead.export`; `entity.update` and auth action
-   * names match as given. `limit` defaults to 100 (max 1000); page with
-   * `before` set to the oldest `createdAt` seen.
+   * `lead.export` as `app.lead.export`; framework actions
+   * (`entity.update`, `retention.delete`) and auth action names match as
+   * given. `limit` defaults to 100 (max 1000). To page,
+   * pass `beforeId` set to the last event's `id`. `before` (unix seconds)
+   * limits by time.
    */
   list(filter?: {
     entity?: string;
@@ -711,6 +721,7 @@ export interface Audit {
     action?: string;
     tenant?: string;
     before?: number;
+    beforeId?: string;
     limit?: number;
   }): Promise<AuditEntry[]>;
 }
@@ -719,7 +730,7 @@ export interface AuditEntry {
   id: string;
   /** Unix seconds. */
   createdAt: number;
-  /** `app.<action>`, `entity.insert|update|delete`, or an auth action. */
+  /** `app.<action>`, `entity.insert|update|delete`, `retention.delete`, or an auth action. */
   action: string;
   actor: string | null;
   subject: string | null;
@@ -1176,8 +1187,8 @@ export interface MutationCtx<R extends AuthRequirement = "optional"> {
   connections: Connections;
   /** Durable workflows: start / deliver events — see {@link Workflows}. */
   workflows: Workflows;
-  /** Application audit log — see {@link Audit}. */
-  audit: Audit;
+  /** Application audit log (write only in mutations) — see {@link AuditLog}. */
+  audit: AuditLog;
   /** Signed file-download URLs — see {@link Files}. */
   files: Files;
   /** Shard tickets, reads, and inputs after the commit — see {@link Shards}. */

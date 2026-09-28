@@ -639,6 +639,9 @@ pub struct AuditOpMessage {
     /// list: only events before this time (unix seconds).
     #[serde(default)]
     pub before: Option<u64>,
+    /// list: paging cursor, the id of the last event of the previous page.
+    #[serde(default)]
+    pub before_id: Option<String>,
     /// list: max rows.
     #[serde(default)]
     pub limit: Option<usize>,

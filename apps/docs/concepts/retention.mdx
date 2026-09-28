@@ -1,0 +1,90 @@
+---
+title: "Data retention"
+description: "Delete rows automatically once they pass a retention period, with legal holds and an audit record of each deletion."
+---
+
+Declare `retention` on an entity and Pylon deletes rows once they pass
+the retention period. A system job runs every hour. Each row is deleted
+through the same path as an entity-API delete: plugin hooks run, sync
+clients receive the delete, and CRDT and search data for the row are
+removed. Each deletion is recorded in the [audit log](/concepts/audit-log)
+as `retention.delete`.
+
+## A fixed period
+
+```ts
+const Recording = entity(
+  "Recording",
+  {
+    dealerId: field.string(),
+    url: field.string(),
+    createdAt: field.datetime(),
+    legalHold: field.bool().optional(),
+  },
+  { retention: { field: "createdAt", after: "365d", hold: "legalHold" } },
+);
+```
+
+A row is deleted once `createdAt` is more than 365 days old. Durations
+use `s`, `m`, `h`, `d`, `w`, or `y` (365 days).
+
+## A period per tenant
+
+Leave out `after`. `field` is then the expiry time itself, and a row is
+deleted once it is in the past. Set it on each row from the tenant's
+setting:
+
+```ts
+const Transcript = entity(
+  "Transcript",
+  { dealerId: field.string(), text: field.richtext(), deleteAfter: field.datetime() },
+  { retention: { field: "deleteAfter" } },
+);
+
+// functions/saveTranscript.ts
+export default mutation({
+  async handler(ctx, args: { dealerId: string; text: string }) {
+    const dealer = await ctx.db.get("Dealer", args.dealerId);
+    const days = dealer.retentionDays ?? 365;
+    await ctx.db.insert("Transcript", {
+      ...args,
+      deleteAfter: new Date(Date.now() + days * 86_400_000).toISOString(),
+    });
+  },
+});
+```
+
+When a tenant shortens its period, update `deleteAfter` on its existing
+rows.
+
+## Legal hold
+
+`hold` names a `bool` field. Rows where it is `true` are kept, however
+old they are. Clear the field to release the hold; the next sweep
+deletes the row if it has expired.
+
+## Rules
+
+- `field` is a `datetime` field, or an `int`/`float` field holding unix
+  milliseconds.
+- `hold` must be a `bool` field.
+- A missing field, a wrong type, or an unparsable duration fails boot
+  with `RETENTION_MANIFEST_INVALID`.
+- Datetime values are compared as stored. Store UTC ISO-8601 strings
+  (`new Date().toISOString()`) on SQLite.
+
+## Run a sweep now
+
+```bash
+curl -X POST https://<app>/api/admin/retention/run \
+  -H "Authorization: Bearer $PYLON_ADMIN_TOKEN"
+# {"deleted":12,"held":1,"failed":0}
+```
+
+`held` counts expired rows kept by a hold. `failed` counts deletes that
+failed; they are retried on the next sweep and logged. On Postgres, one
+replica runs each scheduled sweep.
+
+Retention deletes the row only. Files in storage that a row points to
+(`url` above) are not deleted; remove them from a `before_delete` plugin
+hook or a scheduled function.

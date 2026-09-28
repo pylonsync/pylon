@@ -147,6 +147,17 @@ impl AuditBackend for SqliteAuditBackend {
             params.push(Box::new(before.min(i64::MAX as u64) as i64));
             clauses.push(format!("created_at < ?{}", params.len()));
         }
+        if let Some(id) = &q.before_id {
+            // Strictly older than the cursor event by (created_at, rowid).
+            // An unknown id makes both subqueries NULL, so nothing matches.
+            params.push(Box::new(id.clone()));
+            let i = params.len();
+            clauses.push(format!(
+                "(created_at, rowid) < \
+                 ((SELECT created_at FROM {SQLITE_TABLE} WHERE id = ?{i}), \
+                  (SELECT rowid FROM {SQLITE_TABLE} WHERE id = ?{i}))"
+            ));
+        }
         params.push(Box::new(q.bounded_limit() as i64));
         let limit_idx = params.len();
         let where_sql = if clauses.is_empty() {
@@ -365,6 +376,8 @@ mod pg {
                                AND ($5::TEXT IS NULL OR entity_id = $5)
                                AND ($6::TEXT IS NULL OR action = $6)
                                AND ($7::BIGINT IS NULL OR created_at < $7)
+                             AND ($9::TEXT IS NULL OR (created_at, seq) <
+                                  (SELECT created_at, seq FROM {PG_TABLE} WHERE id = $9))
                              ORDER BY created_at DESC, seq DESC
                              LIMIT $8"
                         ),
@@ -377,6 +390,7 @@ mod pg {
                             &q.action,
                             &before,
                             &limit,
+                            &q.before_id,
                         ],
                     )
                 })
@@ -604,6 +618,24 @@ mod tests {
         assert_eq!(q(&|q| q.entity_id = Some("l2".into())).len(), 1);
         assert_eq!(q(&|q| q.before = Some(1002)).len(), 2);
         assert_eq!(q(&|q| q.limit = 1).len(), 1);
+        // Paging with the cursor walks every event exactly once, even
+        // when a page ends inside one second.
+        let mut seen = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = q(&|q| {
+                q.limit = 2;
+                q.before_id = cursor.clone();
+            });
+            if page.is_empty() {
+                break;
+            }
+            cursor = page.last().map(|e| e.id.clone());
+            seen.extend(page.into_iter().map(|e| e.id));
+        }
+        let all: Vec<String> = q(&|_| {}).into_iter().map(|e| e.id).collect();
+        assert_eq!(seen, all);
+        assert!(q(&|q| q.before_id = Some("evt_unknown".into())).is_empty());
         let first = &q(&|q| q.entity_id = Some("l2".into()))[0];
         assert_eq!(first.entity.as_deref(), Some("Lead"));
         assert_eq!(first.metadata.get("k").map(String::as_str), Some("v"));
