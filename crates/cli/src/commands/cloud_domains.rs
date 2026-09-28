@@ -136,9 +136,7 @@ fn run_add(
         hostname: &'a str,
     }
     #[derive(Deserialize)]
-    #[allow(dead_code)]
     struct Out {
-        id: Option<String>,
         #[serde(rename = "dnsTarget")]
         dns_target: Option<String>,
     }
@@ -232,14 +230,14 @@ fn run_verify(
     // Certificate check: asks Cloudflare / Fly for the certificate state and
     // moves the domain to `ready` once it is issued. Without it a domain
     // stays `provisioning` in `pylon domains list`.
-    let refresh: Refresh = match post_json(creds, "/api/fn/refreshProjectDomain", &args) {
-        Ok(o) => o,
-        Err(e) => {
-            output::print_error(&e);
-            return ExitCode::Error;
-        }
-    };
-    let domain_status = refresh.status.unwrap_or_else(|| domain.status.clone());
+    // A failure here (a Cloudflare or Fly outage, a role without access)
+    // still reports the DNS result.
+    let (refreshed, refresh_error) =
+        match post_json::<_, Refresh>(creds, "/api/fn/refreshProjectDomain", &args) {
+            Ok(r) => (r.status, None),
+            Err(e) => (None, Some(e)),
+        };
+    let domain_status = refreshed.unwrap_or_else(|| domain.status.clone());
     // The records still to add, and the reason it is not ready, when any.
     let (recipe, error) = if domain_status == "ready" {
         (None, None)
@@ -262,14 +260,12 @@ fn run_verify(
                 "domainStatus": domain_status,
                 "records": recipe.as_ref().map(DnsRecipe::records).unwrap_or_default(),
                 "error": error,
+                "refreshError": refresh_error,
             }))
             .unwrap_or_default()
         );
-        return match dns.status.as_deref() {
-            Some("wrong") | Some("missing") => ExitCode::Error,
-            _ if domain_status == "error" => ExitCode::Error,
-            _ => ExitCode::Ok,
-        };
+        // JSON callers read the result from the body.
+        return ExitCode::Ok;
     }
 
     let dns_ok = match dns.status.as_deref() {
@@ -299,6 +295,9 @@ fn run_verify(
             true
         }
     };
+    if let Some(e) = &refresh_error {
+        println!("  ! Could not check the certificate: {e}");
+    }
     match domain_status.as_str() {
         "ready" => println!("✓ {} — certificate issued, domain ready", domain.hostname),
         status => {
@@ -351,6 +350,8 @@ struct DnsRecipe {
     ipv6: Option<String>,
     #[serde(default)]
     apex: bool,
+    #[serde(default)]
+    saas: bool,
 }
 
 #[derive(Deserialize)]
@@ -358,29 +359,43 @@ struct RecipeRecord {
     name: String,
     value: String,
     purpose: String,
+    /// `TXT` or `CNAME`, when the control plane sends it.
+    #[serde(rename = "type")]
+    kind: Option<String>,
 }
 
 impl DnsRecipe {
     /// Every record to add, as `{type, name, value, purpose}`.
     fn records(&self) -> Vec<serde_json::Value> {
         let mut out = Vec::new();
-        if self.apex {
+        let ip_purpose = if self.apex {
+            "Route the apex to the app"
+        } else {
+            "Route the hostname to the app (instead of the CNAME)"
+        };
+        if !self.apex {
+            if let Some(target) = &self.cname_target {
+                out.push(serde_json::json!({"type": "CNAME", "name": self.hostname, "value": target, "purpose": "Route the hostname to the app"}));
+            }
+        }
+        // An apex always uses A/AAAA; a hostname off Cloudflare may use them
+        // instead of the CNAME.
+        if self.apex || !self.saas {
             if let Some(ip) = &self.ipv4 {
-                out.push(serde_json::json!({"type": "A", "name": self.hostname, "value": ip, "purpose": "Route the apex to the app"}));
+                out.push(serde_json::json!({"type": "A", "name": self.hostname, "value": ip, "purpose": ip_purpose}));
             }
             if let Some(ip) = &self.ipv6 {
-                out.push(serde_json::json!({"type": "AAAA", "name": self.hostname, "value": ip, "purpose": "Route the apex to the app"}));
+                out.push(serde_json::json!({"type": "AAAA", "name": self.hostname, "value": ip, "purpose": ip_purpose}));
             }
-        } else if let Some(target) = &self.cname_target {
-            out.push(serde_json::json!({"type": "CNAME", "name": self.hostname, "value": target, "purpose": "Route the hostname to the app"}));
         }
         for r in &self.txt_records {
-            // The control plane lists every proof here; the ones that are
-            // CNAMEs (Fly's origin validation) say so in their purpose.
-            let kind = if r.purpose.contains("(CNAME") {
-                "CNAME"
-            } else {
-                "TXT"
+            // The control plane lists every proof under txtRecords. Use its
+            // `type` when sent; older control planes mark the CNAME (Fly's
+            // origin validation) only in the purpose text.
+            let kind = match r.kind.as_deref() {
+                Some(k) => k,
+                None if r.purpose.contains("(CNAME") => "CNAME",
+                None => "TXT",
             };
             out.push(serde_json::json!({"type": kind, "name": r.name, "value": r.value, "purpose": r.purpose}));
         }
@@ -506,5 +521,31 @@ mod tests {
             .map(|r| r["type"].as_str().unwrap().to_string())
             .collect();
         assert_eq!(kinds, ["CNAME", "TXT", "CNAME", "TXT"]);
+    }
+
+    #[test]
+    fn an_explicit_record_type_wins_over_the_purpose_text() {
+        let r = recipe(serde_json::json!({
+            "hostname": "www.acme.com", "cnameTarget": "customers.stack0.app",
+            "txtRecords": [
+                {"name": "_acme-challenge.www.acme.com", "value": "x.flydns.net.", "purpose": "Origin validation", "type": "CNAME"}
+            ],
+            "saas": true
+        }));
+        assert_eq!(r.records()[1]["type"], "CNAME");
+    }
+
+    #[test]
+    fn a_hostname_off_cloudflare_lists_the_ips_as_an_alternative() {
+        let r = recipe(serde_json::json!({
+            "hostname": "app.acme.com", "cnameTarget": "pylon-acme.fly.dev",
+            "txtRecords": [], "ipv4": "66.241.124.1", "ipv6": null, "saas": false
+        }));
+        let kinds: Vec<_> = r
+            .records()
+            .iter()
+            .map(|r| r["type"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(kinds, ["CNAME", "A"]);
     }
 }
