@@ -495,6 +495,7 @@ fn handle_org_sso_callback(ctx: &RouterContext, org_id: &str, raw: &str) -> (u16
         ctx.orgs.add_member(org_id, &user_id, role);
     }
     // Mint session + audit + 302 to the caller's success URL.
+    accept_invites_for_verified_email(ctx, &user_id, &email);
     let session = create_session_with_device(ctx, user_id.clone());
     ctx.audit.log(
         audit(ctx, pylon_auth::audit::AuditAction::SignIn)
@@ -826,6 +827,7 @@ fn handle_saml_acs(ctx: &RouterContext, org_id: &str, body: &str) -> (u16, Strin
             .unwrap_or(pylon_auth::org::OrgRole::Member);
         ctx.orgs.add_member(org_id, &user_id, role);
     }
+    accept_invites_for_verified_email(ctx, &user_id, &canonical_email);
     let session = create_session_with_device(ctx, user_id.clone());
     ctx.audit.log(
         audit(ctx, pylon_auth::audit::AuditAction::SignIn)
@@ -1017,6 +1019,57 @@ fn maybe_merge_anonymous(
     // session-fixation surface.
     ctx.session_store.revoke_all_for_user(&from_user_id);
     Some((from_user_id, summary))
+}
+
+/// The caller just proved control of `email` (a magic code or link, an
+/// email verification code, a password-reset link, or an identity
+/// provider's assertion): accept every pending invite addressed to it.
+fn accept_invites_for_verified_email(ctx: &RouterContext, user_id: &str, email: &str) {
+    for m in ctx.orgs.accept_pending_for_verified_email(user_id, email) {
+        ctx.audit.log(
+            audit(ctx, pylon_auth::audit::AuditAction::OrgInviteAccept)
+                .user(user_id.to_string())
+                .actor(user_id.to_string())
+                .tenant(m.org_id.clone())
+                .meta("method", "verified_email")
+                .build(),
+        );
+    }
+}
+
+/// The signed-in user's email when it is verified (`emailVerified` set on
+/// the User row). Errors when there is no session, no email, or no
+/// verification; a User entity without an `emailVerified` field can never
+/// be verified here.
+fn verified_email(ctx: &RouterContext) -> Result<(String, String), (u16, String)> {
+    let user_id = ctx
+        .auth_ctx
+        .user_id
+        .clone()
+        .ok_or_else(|| (401, json_error("AUTH_REQUIRED", "Login required")))?;
+    let row = ctx
+        .store
+        .get_by_id(&ctx.store.manifest().auth.user.entity, &user_id)
+        .ok()
+        .flatten()
+        .ok_or_else(|| (401, json_error("AUTH_REQUIRED", "Login required")))?;
+    let email = row
+        .get("email")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| (400, json_error("NO_EMAIL", "Account has no email")))?;
+    let verified = row
+        .get("emailVerified")
+        .is_some_and(|v| !v.is_null() && v != &serde_json::Value::Bool(false));
+    if !verified {
+        return Err((
+            403,
+            json_error(
+                "EMAIL_NOT_VERIFIED",
+                "Verify your email address first. The User entity needs an `emailVerified` datetime field to record it.",
+            ),
+        ));
+    }
+    Ok((user_id, pylon_auth::normalize_email(email)))
 }
 
 /// Optional fields the auth routes stamp on the User row for
@@ -1523,6 +1576,7 @@ pub(crate) fn handle(
                         }
                     }
                 };
+                accept_invites_for_verified_email(ctx, &user_id, &email.to_string());
                 let session = create_session_with_device(ctx, user_id.clone());
                 ctx.maybe_set_session_cookie(&session.token);
                 // Wave-7 D: anonymous → authenticated merge. If the request
@@ -1700,6 +1754,7 @@ pub(crate) fn handle(
                 // null forever. Bug: users could "verify" any number
                 // of times and still be flagged unverified.
                 let now = pylon_kernel::util::now_iso();
+                accept_invites_for_verified_email(ctx, user_id, &email);
                 // Schemas without an emailVerified field will reject
                 // the unknown column. Schemas with it (recommended)
                 // accept the update. Log + return failures so a
@@ -1709,7 +1764,7 @@ pub(crate) fn handle(
                 if let Err(e) = ctx.store.update(
                     &ctx.store.manifest().auth.user.entity,
                     user_id,
-                    &stamp_user_fields(ctx, serde_json::json!({ "emailVerified": now })),
+                    &serde_json::json!({ "emailVerified": now }),
                 ) {
                     tracing::warn!(
                         "[auth] email/verify: failed to persist emailVerified for user {}: {}",
@@ -4965,6 +5020,69 @@ pub(crate) fn handle(
     //    login page can render the failure.
     // The JSON POST below is unchanged — programmatic accepts (and app
     // landing pages like /invite/:token) keep their exact contract.
+    // GET /api/auth/invites/mine — pending invites for the signed-in
+    // user's verified email, across orgs.
+    if url == "/api/auth/invites/mine" && method == HttpMethod::Get {
+        let (_, email) = match verified_email(ctx) {
+            Ok(v) => v,
+            Err(e) => return Some(e),
+        };
+        let payload: Vec<serde_json::Value> = ctx
+            .orgs
+            .pending_invites_for_email(&email)
+            .iter()
+            .map(|i| {
+                serde_json::json!({
+                    "id": i.id,
+                    "org_id": i.org_id,
+                    "email": i.email,
+                    "role": i.role.as_str(),
+                    "invited_by": i.invited_by,
+                    "created_at": i.created_at,
+                    "expires_at": i.expires_at,
+                })
+            })
+            .collect();
+        return Some((
+            200,
+            serde_json::to_string(&payload).unwrap_or_else(|_| "[]".into()),
+        ));
+    }
+
+    // POST /api/auth/invites/by-id/:id/accept — accept an invite addressed
+    // to the signed-in user's verified email, without the emailed token.
+    if let Some(invite_id) = url
+        .strip_prefix("/api/auth/invites/by-id/")
+        .and_then(|r| r.strip_suffix("/accept"))
+    {
+        if method != HttpMethod::Post {
+            return Some((405, json_error("METHOD_NOT_ALLOWED", "POST only")));
+        }
+        let (user_id, email) = match verified_email(ctx) {
+            Ok(v) => v,
+            Err(e) => return Some(e),
+        };
+        return Some(
+            match ctx.orgs.accept_invite_by_id(invite_id, &user_id, &email) {
+                Ok(m) => (
+                    200,
+                    serde_json::json!({ "org_id": m.org_id, "role": m.role.as_str() }).to_string(),
+                ),
+                Err(e) => {
+                    let code = match e {
+                        pylon_auth::org::AcceptError::NotFound => "INVITE_NOT_FOUND",
+                        pylon_auth::org::AcceptError::Expired => "INVITE_EXPIRED",
+                        pylon_auth::org::AcceptError::AlreadyAccepted => "ALREADY_ACCEPTED",
+                        pylon_auth::org::AcceptError::EmailMismatch => "WRONG_EMAIL",
+                        pylon_auth::org::AcceptError::AlreadyMember => "ALREADY_MEMBER",
+                        pylon_auth::org::AcceptError::InvalidRole => "BAD_ROLE",
+                    };
+                    (400, json_error(code, &e.to_string()))
+                }
+            },
+        );
+    }
+
     if let Some(rest) = url.strip_prefix("/api/auth/invites/") {
         if let Some(token) = rest.strip_suffix("/accept") {
             if method == HttpMethod::Get {
@@ -6767,6 +6885,7 @@ pub(crate) fn handle(
         }
         // Revoke ALL existing sessions — same posture as password change.
         let revoked = ctx.session_store.revoke_all_for_user(&user_id);
+        accept_invites_for_verified_email(ctx, &user_id, &consumed.email);
         let session = create_session_with_device(ctx, user_id.clone());
         ctx.maybe_set_session_cookie(&session.token);
         ctx.audit.log(
@@ -6917,6 +7036,7 @@ pub(crate) fn handle(
                     }
                 }
             };
+            accept_invites_for_verified_email(ctx, &user_id, &consumed.email);
             let session = create_session_with_device(ctx, user_id.clone());
             ctx.maybe_set_session_cookie(&session.token);
             // Browser flow → 302 to dashboard; SDK flow → JSON.
@@ -7069,6 +7189,7 @@ pub(crate) fn handle(
         // Revoke other sessions on email change — same blast-radius
         // posture as password change.
         ctx.session_store.revoke_all_for_user(&user_id);
+        accept_invites_for_verified_email(ctx, &user_id, &new_email);
         let session = create_session_with_device(ctx, user_id.clone());
         ctx.maybe_set_session_cookie(&session.token);
         return Some((

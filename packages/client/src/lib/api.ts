@@ -288,6 +288,35 @@ export async function acceptInvite(
 	);
 }
 
+/** A pending invite addressed to the signed-in user's email. */
+export interface MyInvite {
+	id: string;
+	org_id: string;
+	email: string;
+	role: string;
+	invited_by: string;
+	created_at: number;
+	expires_at: number;
+}
+
+/**
+ * Pending invites for the signed-in user's verified email, across orgs.
+ * Rejects with `EMAIL_NOT_VERIFIED` until the User row has `emailVerified`.
+ */
+export async function myInvites(): Promise<MyInvite[]> {
+	return get<MyInvite[]>("/api/auth/invites/mine");
+}
+
+/** Accept an invite from {@link myInvites} without the emailed token. */
+export async function acceptInviteById(
+	inviteId: string,
+): Promise<{ org_id: string; role: string }> {
+	return post<{ org_id: string; role: string }>(
+		`/api/auth/invites/by-id/${encodeURIComponent(inviteId)}/accept`,
+		{},
+	);
+}
+
 export interface ConnectionAuthUrl {
 	url: string;
 }

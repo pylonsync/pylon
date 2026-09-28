@@ -127,6 +127,8 @@ All endpoints are under `/api/auth/`. Org management requires a session. API-key
 | `/orgs/:id/invites` | GET | Owner/Admin | List pending invites |
 | `/orgs/:id/invites/:invite_id` | DELETE | Owner/Admin | Revoke pending invite |
 | `/invites/:token/accept` | POST | invited user | Accept an invite |
+| `/invites/mine` | GET | verified email | Pending invites for the caller's email |
+| `/invites/by-id/:id/accept` | POST | verified email | Accept an invite without the token |
 | `/select-org` | POST | any session | Switch the session's active tenant |
 
 Non-member callers get `404 ORG_NOT_FOUND` on `/orgs/:id/*`. This is by design, so probing cannot enumerate org ids.
@@ -228,6 +230,34 @@ Error cases (all `400` except `401` for unauthenticated):
 | `ALREADY_MEMBER` | Caller is already a member of the org |
 
 Pylon keeps the original invite row (it does not delete it) and stamps `accepted_at`. This preserves the audit trail.
+
+### Invites for a verified email
+
+A user who signs up without the invite link still joins. When a sign-in
+proves the address, Pylon accepts every pending invite for it:
+
+- a magic code or magic link,
+- `/api/auth/email/verify` (the code sent after password sign-up),
+- a password-reset link,
+- confirming an email change,
+- org SSO (OIDC or SAML).
+
+Password sign-up alone does not prove the address, so it accepts nothing.
+
+To show invites in your onboarding, declare `emailVerified:
+field.datetime().optional()` on the User entity. Pylon sets it on each of
+the proofs above. Then:
+
+```ts
+import { myInvites, acceptInviteById } from "@pylonsync/client";
+
+const invites = await myInvites(); // GET /api/auth/invites/mine
+await acceptInviteById(invites[0].id); // POST /api/auth/invites/by-id/:id/accept
+```
+
+Both reject with `403 EMAIL_NOT_VERIFIED` until `emailVerified` is set.
+The org invite list (`GET /orgs/:id/invites`) shows only invites that can
+still be accepted: not accepted and not expired.
 
 ## Managing roles
 

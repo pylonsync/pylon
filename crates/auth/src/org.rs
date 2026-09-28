@@ -749,7 +749,79 @@ impl OrgStore {
             }
         }
         let row = invite_row.ok_or(AcceptError::NotFound)?;
-        let invite = row_to_invite(&row, &self.declared_roles).ok_or(AcceptError::InvalidRole)?;
+        self.accept_row(&row, accepting_user_id, accepting_email)
+    }
+
+    /// Pending invites (not accepted, not expired) addressed to `email`,
+    /// across every org.
+    pub fn pending_invites_for_email(&self, email: &str) -> Vec<Invite> {
+        if self.is_disabled() {
+            return Vec::new();
+        }
+        let now = now_secs();
+        self.store
+            .query_filtered(
+                &self.cfg.invite_entity,
+                &serde_json::json!({ "email": email.to_lowercase() }),
+            )
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|row| row_to_invite(row, &self.declared_roles))
+            .filter(|i| i.accepted_at.is_none() && i.expires_at > now)
+            .collect()
+    }
+
+    /// Accept invite `invite_id` for a user whose email is verified. The
+    /// caller must have proved `verified_email` (a magic code, an email
+    /// verification code, or a provider's verified claim); the invite
+    /// must be addressed to it. No token is needed.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn accept_invite_by_id(
+        &self,
+        invite_id: &str,
+        accepting_user_id: &str,
+        verified_email: &str,
+    ) -> Result<Membership, AcceptError> {
+        if self.is_disabled() {
+            return Err(AcceptError::NotFound);
+        }
+        let row = self
+            .store
+            .get_by_id(&self.cfg.invite_entity, invite_id)
+            .ok()
+            .flatten()
+            .ok_or(AcceptError::NotFound)?;
+        self.accept_row(&row, accepting_user_id, verified_email)
+    }
+
+    /// Accept every pending invite addressed to `verified_email`. Returns
+    /// the memberships created; invites that fail (already a member, a
+    /// concurrent accept) are skipped.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn accept_pending_for_verified_email(
+        &self,
+        accepting_user_id: &str,
+        verified_email: &str,
+    ) -> Vec<Membership> {
+        self.pending_invites_for_email(verified_email)
+            .into_iter()
+            .filter_map(|i| {
+                self.accept_invite_by_id(&i.id, accepting_user_id, verified_email)
+                    .ok()
+            })
+            .collect()
+    }
+
+    /// Shared accept step: checks expiry, accepted-at, email, and existing
+    /// membership, CAS-stamps `acceptedAt`, then inserts the membership.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn accept_row(
+        &self,
+        row: &serde_json::Value,
+        accepting_user_id: &str,
+        accepting_email: &str,
+    ) -> Result<Membership, AcceptError> {
+        let invite = row_to_invite(row, &self.declared_roles).ok_or(AcceptError::InvalidRole)?;
         if invite.accepted_at.is_some() {
             return Err(AcceptError::AlreadyAccepted);
         }
@@ -1349,7 +1421,8 @@ mod tests {
             .create_invite(&org.id, "carol@example.com", OrgRole::Member, "u-alice")
             .unwrap();
         assert_eq!(s.pending_invites(&org.id).len(), 2);
-        s.accept_invite(&bob.token, "u-bob", "bob@example.com").unwrap();
+        s.accept_invite(&bob.token, "u-bob", "bob@example.com")
+            .unwrap();
         let pending: Vec<String> = s
             .pending_invites(&org.id)
             .into_iter()
@@ -1358,6 +1431,37 @@ mod tests {
         assert_eq!(pending, vec!["carol@example.com".to_string()]);
         // The full list still has the accepted row.
         assert_eq!(s.list_invites(&org.id).len(), 2);
+    }
+
+    #[test]
+    fn verified_email_accepts_pending_invites_without_a_token() {
+        let s = store();
+        let acme = s.create("Acme", "u-alice").unwrap();
+        let beta = s.create("Beta", "u-alice").unwrap();
+        s.create_invite(&acme.id, "Bob@Example.com", OrgRole::Admin, "u-alice")
+            .unwrap();
+        s.create_invite(&beta.id, "bob@example.com", OrgRole::Member, "u-alice")
+            .unwrap();
+        s.create_invite(&beta.id, "carol@example.com", OrgRole::Member, "u-alice")
+            .unwrap();
+        assert_eq!(s.pending_invites_for_email("BOB@example.com").len(), 2);
+
+        let joined = s.accept_pending_for_verified_email("u-bob", "bob@example.com");
+        assert_eq!(joined.len(), 2);
+        assert_eq!(s.role_of(&acme.id, "u-bob"), Some(OrgRole::Admin));
+        assert_eq!(s.role_of(&beta.id, "u-bob"), Some(OrgRole::Member));
+        assert!(s.pending_invites_for_email("bob@example.com").is_empty());
+
+        // By id: the email must match the invite.
+        let carol = s.pending_invites_for_email("carol@example.com").remove(0);
+        assert_eq!(
+            s.accept_invite_by_id(&carol.id, "u-mallory", "mallory@example.com")
+                .unwrap_err(),
+            AcceptError::EmailMismatch
+        );
+        assert!(s
+            .accept_invite_by_id(&carol.id, "u-carol", "carol@example.com")
+            .is_ok());
     }
 
     #[test]

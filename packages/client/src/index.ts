@@ -91,6 +91,8 @@ export type { UseAuthReturn } from "./hooks/useAuth";
 // + error-mapping logic the built-in components use.
 export {
 	acceptInvite,
+	acceptInviteById,
+	myInvites,
 	ApiError,
 	changePassword,
 	completePasswordReset,
@@ -128,5 +130,6 @@ export type {
 	OrgMember,
 	OrgSummary,
 	PendingInvite,
+	MyInvite,
 	SessionResponse,
 } from "./lib/api";
