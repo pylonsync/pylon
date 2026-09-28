@@ -231,6 +231,74 @@ fn spawn_streaming_response<R: std::io::Read + Send + 'static>(
     Ok(())
 }
 
+/// Body framing for an SSE response written raw through
+/// `Request::into_writer()`.
+///
+/// tiny_http keeps an HTTP/1.1 connection open after the handler drops
+/// the writer, waiting for the client's next request. A body delimited by
+/// connection close therefore never ends: the browser holds the
+/// connection until the server's idle timeout (~50 s), and six such
+/// replies use up its HTTP/1.1 connection pool. So HTTP/1.1 bodies are
+/// chunked, and the terminal zero-length chunk ends the response the
+/// moment the stream ends; the connection then serves the client's next
+/// request. HTTP/1.0 has no chunked encoding, and tiny_http closes a 1.0
+/// connection after one response, so its body ends at close.
+pub(crate) struct SseBody<W: std::io::Write> {
+    inner: W,
+    chunked: bool,
+}
+
+impl<W: std::io::Write> SseBody<W> {
+    pub(crate) fn new(inner: W, http_version: &tiny_http::HTTPVersion) -> Self {
+        Self {
+            inner,
+            chunked: *http_version >= tiny_http::HTTPVersion(1, 1),
+        }
+    }
+
+    /// The framing header line(s) for the response head.
+    pub(crate) fn head_headers(&self) -> &'static str {
+        if self.chunked {
+            "Transfer-Encoding: chunked\r\n"
+        } else {
+            "Connection: close\r\n"
+        }
+    }
+
+    /// Write the response head as is (it is not part of the body).
+    pub(crate) fn write_head(&mut self, head: &str) -> std::io::Result<()> {
+        self.inner.write_all(head.as_bytes())?;
+        self.inner.flush()
+    }
+
+    /// Write `bytes` as body data and flush, so the client sees each SSE
+    /// frame as soon as it is written.
+    pub(crate) fn send(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        if self.chunked {
+            write!(self.inner, "{:x}\r\n", bytes.len())?;
+            self.inner.write_all(bytes)?;
+            self.inner.write_all(b"\r\n")?;
+        } else {
+            self.inner.write_all(bytes)?;
+        }
+        self.inner.flush()
+    }
+
+    /// End the body. Chunked: the terminal chunk, after which the client
+    /// has the whole response. Close-delimited: nothing to write; the
+    /// connection closes when the writer drops.
+    pub(crate) fn finish(&mut self) -> std::io::Result<()> {
+        if self.chunked {
+            self.inner.write_all(b"0\r\n\r\n")?;
+            self.inner.flush()?;
+        }
+        Ok(())
+    }
+}
+
 /// Serve a hub-backed resumable stream as SSE over the raw socket.
 ///
 /// Replays frames after `since`, then live-tails with heartbeats until
@@ -238,7 +306,9 @@ fn spawn_streaming_response<R: std::io::Read + Send + 'static>(
 /// Written via `Request::into_writer()` with an explicit flush per
 /// event — `request.respond()` sits behind an 8KB chunked-transfer
 /// buffer that would hold early tokens hostage (same fix as the dev
-/// live-reload SSE; see `frontend.rs::serve_dev_live_reload`).
+/// live-reload SSE; see `frontend.rs::serve_dev_live_reload`). The body
+/// is framed by [`SseBody`], so the response ends right after the
+/// terminal frame.
 ///
 /// The producer never blocks on this connection: frames come from the
 /// hub's ring, and a disconnect just drops the subscriber while the
@@ -268,12 +338,12 @@ fn spawn_hub_sse(
         Some(g) => g,
         None => return Err(request),
     };
-    let mut writer = request.into_writer();
+    let http_version = request.http_version().clone();
+    let mut body = SseBody::new(request.into_writer(), &http_version);
     let _ = std::thread::Builder::new()
         .name("pylon-fn-stream".into())
         .stack_size(256 * 1024)
         .spawn(move || {
-            use std::io::Write as _;
             let _slot = slot;
             // Head + retry hint in one write. The stream id travels in
             // the X-Pylon-Stream-Id header ONLY — an in-band frame
@@ -282,11 +352,12 @@ fn spawn_hub_sse(
             // ignored by every existing parser. The CORS expose header
             // makes it readable from browser fetch.
             let prelude = if legacy_quiet { "" } else { "retry: 1000\n\n" };
+            let framing = body.head_headers();
             let head = format!(
                 "HTTP/1.1 200 OK\r\n\
                  Content-Type: text/event-stream\r\n\
                  Cache-Control: no-cache\r\n\
-                 Connection: close\r\n\
+                 {framing}\
                  X-Accel-Buffering: no\r\n\
                  X-Content-Type-Options: nosniff\r\n\
                  X-Frame-Options: DENY\r\n\
@@ -294,10 +365,9 @@ fn spawn_hub_sse(
                  X-Pylon-Stream-Id: {stream_id}\r\n\
                  Access-Control-Expose-Headers: X-Pylon-Stream-Id\r\n\
                  Access-Control-Allow-Origin: {cors_origin}\r\n\
-                 \r\n\
-                 {prelude}"
+                 \r\n"
             );
-            if writer.write_all(head.as_bytes()).is_err() || writer.flush().is_err() {
+            if body.write_head(&head).is_err() || body.send(prelude.as_bytes()).is_err() {
                 metrics.record_request(method, 200);
                 return;
             }
@@ -324,10 +394,11 @@ fn spawn_hub_sse(
                             out.push('\n');
                             after = f.seq;
                         }
-                        if writer.write_all(out.as_bytes()).is_err() || writer.flush().is_err() {
+                        if body.send(out.as_bytes()).is_err() {
                             break; // client gone — buffer lives on
                         }
                         if ended {
+                            let _ = body.finish();
                             break;
                         }
                     }
@@ -335,11 +406,14 @@ fn spawn_hub_sse(
                         if legacy_quiet {
                             continue; // old parsers would yield "" per comment
                         }
-                        if writer.write_all(b": hb\n\n").is_err() || writer.flush().is_err() {
+                        if body.send(b": hb\n\n").is_err() {
                             break;
                         }
                     }
-                    crate::stream_hub::WaitOutcome::Ended => break,
+                    crate::stream_hub::WaitOutcome::Ended => {
+                        let _ = body.finish();
+                        break;
+                    }
                     crate::stream_hub::WaitOutcome::Gone(oldest) => {
                         // The reader fell more than a full buffer behind
                         // a fast producer. Tell it where the window
@@ -352,8 +426,9 @@ fn spawn_hub_sse(
                                 "oldestSeq": oldest,
                             })
                         );
-                        let _ = writer.write_all(frame.as_bytes());
-                        let _ = writer.flush();
+                        if body.send(frame.as_bytes()).is_ok() {
+                            let _ = body.finish();
+                        }
                         break;
                     }
                 }
@@ -432,6 +507,36 @@ impl std::io::Read for StreamingBody {
             }
             Err(_) => Ok(0), // Channel closed = EOF
         }
+    }
+}
+
+#[cfg(test)]
+mod sse_body_tests {
+    use super::SseBody;
+
+    #[test]
+    fn http_1_1_body_is_chunked_and_ends_with_the_terminal_chunk() {
+        let mut out = Vec::new();
+        let mut body = SseBody::new(&mut out, &tiny_http::HTTPVersion(1, 1));
+        assert_eq!(body.head_headers(), "Transfer-Encoding: chunked\r\n");
+        body.write_head("HEAD\r\n\r\n").unwrap();
+        body.send(b"data: a\n\n").unwrap();
+        body.send(b"").unwrap(); // an empty write is not a terminal chunk
+        body.finish().unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "HEAD\r\n\r\n9\r\ndata: a\n\n\r\n0\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn http_1_0_body_is_raw_and_ends_at_close() {
+        let mut out = Vec::new();
+        let mut body = SseBody::new(&mut out, &tiny_http::HTTPVersion(1, 0));
+        assert_eq!(body.head_headers(), "Connection: close\r\n");
+        body.send(b"data: a\n\n").unwrap();
+        body.finish().unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "data: a\n\n");
     }
 }
 

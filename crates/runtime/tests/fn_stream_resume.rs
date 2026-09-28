@@ -230,6 +230,41 @@ fn sse_post_until(port: u16, fn_name: &str, needle: &str) -> (String, TcpStream)
     (acc, stream)
 }
 
+/// Decode a chunked HTTP/1.1 body. Returns `None` while the terminal
+/// chunk has not arrived.
+fn dechunk(body: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut rest = body;
+    loop {
+        let line_end = rest.windows(2).position(|w| w == b"\r\n")?;
+        let size =
+            usize::from_str_radix(std::str::from_utf8(&rest[..line_end]).ok()?.trim(), 16).ok()?;
+        rest = &rest[line_end + 2..];
+        if size == 0 {
+            return rest.starts_with(b"\r\n").then_some(out);
+        }
+        if rest.len() < size + 2 {
+            return None;
+        }
+        out.extend_from_slice(&rest[..size]);
+        rest = &rest[size + 2..];
+    }
+}
+
+/// Head + body of a raw response, with a chunked body decoded.
+fn decode_response(raw: &[u8]) -> String {
+    let text = String::from_utf8_lossy(raw);
+    let Some(split) = text.find("\r\n\r\n") else {
+        return text.into_owned();
+    };
+    let head = &text[..split + 4];
+    if !head.contains("Transfer-Encoding: chunked") {
+        return text.into_owned();
+    }
+    let body = dechunk(&raw[split + 4..]).expect("complete chunked body");
+    format!("{head}{}", String::from_utf8_lossy(&body))
+}
+
 /// GET the resume endpoint and read the whole response (server closes
 /// the connection when the stream ends).
 fn resume_get(port: u16, stream_id: &str, last_event_id: Option<u64>) -> String {
@@ -246,7 +281,7 @@ fn resume_get(port: u16, stream_id: &str, last_event_id: Option<u64>) -> String 
     stream.write_all(request.as_bytes()).expect("write");
     let mut response = Vec::new();
     let _ = stream.read_to_end(&mut response);
-    String::from_utf8_lossy(&response).into_owned()
+    decode_response(&response)
 }
 
 fn stream_id_of(response: &str) -> String {
@@ -349,4 +384,108 @@ fn plain_json_call_leaves_no_resumable_stream() {
     // The completed stream stays resumable within retention.
     let resumed = resume_get(port, &stream_id, None);
     assert!(resumed.starts_with("HTTP/1.1 200"), "{resumed}");
+}
+
+/// Send `request` and read until the response body is complete, failing
+/// if that takes longer than `budget`. Returns the raw bytes.
+fn read_complete_response(stream: &mut TcpStream, budget: Duration) -> Vec<u8> {
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .ok();
+    let start = Instant::now();
+    let mut raw = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        if let Some(split) = text.find("\r\n\r\n") {
+            if text[..split].contains("Transfer-Encoding: chunked")
+                && dechunk(&raw[split + 4..]).is_some()
+            {
+                return raw;
+            }
+        }
+        assert!(
+            start.elapsed() < budget,
+            "the response did not end within {budget:?}; got so far: {text}"
+        );
+        match stream.read(&mut buf) {
+            Ok(0) => return raw, // closed: the body ends at close
+            Ok(n) => raw.extend_from_slice(&buf[..n]),
+            Err(_) => {} // read timeout, poll again
+        }
+    }
+}
+
+/// A browser keeps its HTTP/1.1 connections alive. The SSE response was
+/// delimited by connection close, but tiny_http kept the connection open
+/// for a next request, so the response never ended: the browser held the
+/// connection ~50 s after the terminal `result` frame and ran out of its
+/// six connections after about five streamed calls. The response must
+/// end right after the terminal frame, and the connection must then
+/// serve the next request.
+#[test]
+fn keep_alive_stream_ends_right_after_the_result_frame() {
+    let port = start_stub_server();
+    let host_port = format!("127.0.0.1:{port}");
+    let body = "{}";
+    let mut stream = TcpStream::connect(&host_port).expect("connect");
+    stream
+        .write_all(
+            format!(
+                "POST /api/fn/eventFn HTTP/1.1\r\nHost: {host_port}\r\n\
+                 Accept: text/event-stream\r\n\
+                 Content-Type: application/json\r\n\
+                 Content-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .expect("write");
+    let raw = read_complete_response(&mut stream, Duration::from_secs(3));
+    let response = decode_response(&raw);
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.contains("event: result"), "{response}");
+    let stream_id = stream_id_of(&response);
+
+    // The same connection serves the next request.
+    stream
+        .write_all(
+            format!(
+                "GET /api/fn-streams/{stream_id} HTTP/1.1\r\nHost: {host_port}\r\n\
+                 Accept: text/event-stream\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .expect("write second request");
+    let raw = read_complete_response(&mut stream, Duration::from_secs(3));
+    let resumed = decode_response(&raw);
+    assert!(resumed.starts_with("HTTP/1.1 200"), "{resumed}");
+    assert!(resumed.contains("data: plain"), "{resumed}");
+    assert!(resumed.contains("event: result"), "{resumed}");
+}
+
+/// HTTP/1.0 has no chunked encoding: the body ends when the server closes
+/// the connection, right after the terminal frame.
+#[test]
+fn http_1_0_stream_closes_right_after_the_result_frame() {
+    let port = start_stub_server();
+    let host_port = format!("127.0.0.1:{port}");
+    let body = "{}";
+    let mut stream = TcpStream::connect(&host_port).expect("connect");
+    stream
+        .write_all(
+            format!(
+                "POST /api/fn/eventFn HTTP/1.0\r\nHost: {host_port}\r\n\
+                 Accept: text/event-stream\r\n\
+                 Content-Type: application/json\r\n\
+                 Content-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .expect("write");
+    let raw = read_complete_response(&mut stream, Duration::from_secs(3));
+    let response = String::from_utf8_lossy(&raw);
+    assert!(!response.contains("Transfer-Encoding"), "{response}");
+    assert!(response.contains("event: result"), "{response}");
 }
