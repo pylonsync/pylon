@@ -7081,6 +7081,53 @@ mod tests {
         );
     }
 
+    /// The function-transaction path: a mutation's `ctx.db.update` goes
+    /// through `TxStore` on the held write connection, and a handler error
+    /// ends the transaction with `rollback_write`. A reader afterwards (the
+    /// `crdt_snapshot` path WS subscribers and CRDT pulls use) gets the
+    /// committed doc, not the rolled-back edit left in the doc cache.
+    #[test]
+    fn a_rolled_back_function_transaction_leaves_no_crdt_edit_in_the_cache() {
+        use pylon_http::DataStore;
+        let rt = Runtime::in_memory(test_manifest()).unwrap();
+        let id = rt
+            .insert(
+                "User",
+                &serde_json::json!({"email": "f@y.com", "displayName": "Committed"}),
+            )
+            .unwrap();
+        let read = |rt: &Runtime| {
+            let bytes = rt.crdt_snapshot("User", &id).unwrap().unwrap();
+            let doc = pylon_crdt::loro::LoroDoc::new();
+            pylon_crdt::apply_update(&doc, &bytes).unwrap();
+            let fields = rt
+                .crdt_fields_for(rt.require_entity("User").unwrap())
+                .unwrap();
+            pylon_crdt::project_doc_to_json(&doc, &fields)
+        };
+        // The doc is cached before the transaction, as on a live server.
+        assert_eq!(read(&rt)["displayName"], "Committed");
+        {
+            let conn = rt.lock_conn_pub().unwrap();
+            begin_write(&conn).unwrap();
+            let tx = crate::datastore::TxStore::new(&rt, &conn);
+            assert!(tx
+                .update(
+                    "User",
+                    &id,
+                    &serde_json::json!({"displayName": "RolledBack"})
+                )
+                .unwrap());
+            drop(tx);
+            rt.rollback_write(&conn).unwrap();
+        }
+        assert_eq!(read(&rt)["displayName"], "Committed");
+        assert_eq!(
+            rt.get_by_id("User", &id).unwrap().unwrap()["displayName"],
+            "Committed"
+        );
+    }
+
     /// A COMMIT that fails ends the transaction and drops the CRDT docs it
     /// changed from the cache, as a rollback does.
     #[test]
