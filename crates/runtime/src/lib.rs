@@ -499,6 +499,54 @@ fn validate_encrypted_fields(manifest: &AppManifest) -> Result<(), RuntimeError>
     Ok(())
 }
 
+/// Fields whose values must never reach a search index or any other
+/// copy a caller can query: `serverOnly` and encrypted fields, framework
+/// fields (`_`-prefixed), the auth User row's hidden fields
+/// (`passwordHash` and `auth.user.hide`), and credential hashes (`*Hash`).
+/// `$search` matches any indexed column (FTS5 column filters such as
+/// `passwordHash:abc`), so an indexed secret is a probe oracle.
+pub(crate) fn is_secret_field(
+    manifest: &AppManifest,
+    entity: &ManifestEntity,
+    field: &ManifestField,
+) -> bool {
+    let name = field.name.as_str();
+    if field.server_only || field.encrypted || name.starts_with('_') {
+        return true;
+    }
+    if name.ends_with("Hash") || name.ends_with("_hash") || name == "hash" {
+        return true;
+    }
+    let user = &manifest.auth.user;
+    entity.name == user.entity && (name == "passwordHash" || user.hide.iter().any(|h| h == name))
+}
+
+/// An explicit `search.text` / `search.facets` list must not name a secret
+/// field (see [`is_secret_field`]). Fails boot instead of indexing it.
+fn validate_search_fields(manifest: &AppManifest) -> Result<(), RuntimeError> {
+    let mut problems = Vec::new();
+    for ent in &manifest.entities {
+        let Some(search) = &ent.search else { continue };
+        for name in search.text.iter().chain(search.facets.iter()) {
+            if let Some(f) = ent.fields.iter().find(|f| &f.name == name) {
+                if is_secret_field(manifest, ent, f) {
+                    problems.push(format!(
+                        "{}.{name}: a serverOnly, encrypted, or credential field cannot be searchable",
+                        ent.name
+                    ));
+                }
+            }
+        }
+    }
+    if problems.is_empty() {
+        return Ok(());
+    }
+    Err(RuntimeError {
+        code: "SEARCH_MANIFEST_INVALID".into(),
+        message: format!("Invalid search config:\n  - {}", problems.join("\n  - ")),
+    })
+}
+
 fn validate_manifest_org_roles(manifest: &AppManifest) -> Result<(), RuntimeError> {
     pylon_kernel::validate_org_roles(&manifest.auth.org_roles).map_err(|message| RuntimeError {
         code: "BAD_ORG_ROLE".into(),
@@ -1008,6 +1056,7 @@ impl Runtime {
         }
         validate_encrypted_fields(&manifest)?;
         retention::rules_from_manifest(&manifest)?;
+        validate_search_fields(&manifest)?;
         // Encryption-key check happens after key load — see below.
         let entities: HashMap<String, ManifestEntity> = manifest
             .entities
@@ -1754,6 +1803,7 @@ impl Runtime {
         validate_manifest_org_roles(&manifest)?;
         validate_encrypted_fields(&manifest)?;
         retention::rules_from_manifest(&manifest)?;
+        validate_search_fields(&manifest)?;
         // Encryption key + connections requirement check must run
         // BEFORE schema init — a manifest declaring connections
         // without a key shouldn't even reach the CREATE TABLE step.
@@ -1821,6 +1871,7 @@ impl Runtime {
                 .fields
                 .iter()
                 .filter(|f| matches!(f.field_type.as_str(), "string" | "richtext" | "text"))
+                .filter(|f| !is_secret_field(&manifest, entity, f))
                 .map(|f| f.name.as_str())
                 .collect();
             let fts_name = format!("{}_fts", entity.name);
@@ -9558,5 +9609,132 @@ mod rotation_crdt_tests {
                 .get(0)
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod search_secret_field_tests {
+    //! Secret fields never reach the `$search` index: an indexed column is
+    //! a probe oracle through FTS5 column filters.
+    use super::*;
+
+    fn field(name: &str, server_only: bool) -> ManifestField {
+        ManifestField {
+            name: name.into(),
+            field_type: "string".into(),
+            optional: true,
+            unique: false,
+            crdt: None,
+            server_only,
+            readonly: false,
+            default: None,
+            enum_values: None,
+            encrypted: false,
+            sync_omit: false,
+        }
+    }
+
+    fn manifest() -> AppManifest {
+        AppManifest {
+            manifest_version: 1,
+            name: "search-secrets".into(),
+            version: "0.1.0".into(),
+            entities: vec![
+                ManifestEntity {
+                    name: "User".into(),
+                    fields: vec![
+                        field("email", false),
+                        field("passwordHash", false),
+                        field("bio", false),
+                    ],
+                    crdt: false,
+                    ..Default::default()
+                },
+                ManifestEntity {
+                    name: "OrgInvite".into(),
+                    fields: vec![
+                        field("email", false),
+                        field("tokenHash", false),
+                        field("note", true),
+                    ],
+                    crdt: false,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn fts_columns(rt: &Runtime, entity: &str) -> Vec<String> {
+        let conn = rt.lock_conn_pub().unwrap();
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info(\"{entity}_fts\")"))
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect()
+    }
+
+    #[test]
+    fn secret_fields_are_not_indexed_or_searchable() {
+        let rt = Runtime::in_memory(manifest()).unwrap();
+        assert_eq!(fts_columns(&rt, "User"), vec!["email", "bio"]);
+        assert_eq!(fts_columns(&rt, "OrgInvite"), vec!["email"]);
+
+        rt.insert(
+            "User",
+            &serde_json::json!({ "email": "a@b.co", "passwordHash": "argon2secretvalue", "bio": "hi" }),
+        )
+        .unwrap();
+        rt.insert(
+            "OrgInvite",
+            &serde_json::json!({ "email": "c@d.co", "tokenHash": "tokhashvalue", "note": "private" }),
+        )
+        .unwrap();
+        for (entity, probe) in [
+            ("User", "argon2secretvalue"),
+            ("OrgInvite", "tokhashvalue"),
+            ("OrgInvite", "private"),
+        ] {
+            let hits = rt
+                .query_filtered(entity, &serde_json::json!({ "$search": probe }))
+                .unwrap_or_default();
+            assert!(hits.is_empty(), "{entity} matched {probe}");
+        }
+        let hits = rt
+            .query_filtered("User", &serde_json::json!({ "$search": "hi" }))
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn an_old_index_with_secret_columns_is_rebuilt_at_boot() {
+        let dir = std::env::temp_dir().join(format!("pylon-fts-secret-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app.db").to_str().unwrap().to_string();
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE \"User\" (id TEXT PRIMARY KEY, email TEXT, passwordHash TEXT, bio TEXT);
+                 CREATE VIRTUAL TABLE \"User_fts\" USING fts5(email, passwordHash, bio, content='User', content_rowid='rowid');",
+            )
+            .unwrap();
+        }
+        let rt = Runtime::open(&path, manifest()).unwrap();
+        assert_eq!(fts_columns(&rt, "User"), vec!["email", "bio"]);
+        drop(rt);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_config_naming_a_secret_fails_boot() {
+        let mut m = manifest();
+        m.entities[0].search = Some(pylon_kernel::ManifestSearchConfig {
+            text: vec!["passwordHash".into()],
+            ..Default::default()
+        });
+        let err = Runtime::in_memory(m).err().expect("boot must fail");
+        assert_eq!(err.code, "SEARCH_MANIFEST_INVALID");
     }
 }
