@@ -315,9 +315,9 @@ fn proxy_websocket(
     }
 }
 
-/// The SSE stream: the machine's whole response, head and body, is copied
-/// to the client on a thread that holds the stream slot, so a long stream
-/// never holds a request worker.
+/// The SSE stream: the machine's response is relayed to the client on a
+/// thread that holds the stream slot, so a long stream never holds a
+/// request worker. See [`relay_stream`] for the framing.
 fn proxy_stream(
     request: Request,
     machine_id: &str,
@@ -335,27 +335,181 @@ fn proxy_stream(
         Ok(s) => s,
         Err(e) => return unreachable(request, address, &e),
     };
-    let mut writer = request.into_writer();
+    let version = request.http_version().clone();
+    let writer = request.into_writer();
+    let address = address.to_string();
     let _ = std::thread::Builder::new()
         .name("pylon-shard-stream-proxy".into())
         .stack_size(128 * 1024)
         .spawn(move || {
             let _slot = slot;
-            let mut upstream = upstream;
-            let mut buf = [0u8; 16 * 1024];
-            // Copy and flush each read: SSE events must not wait in a buffer.
-            loop {
-                match upstream.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if writer.write_all(&buf[..n]).is_err() || writer.flush().is_err() {
-                            break;
-                        }
-                    }
+            let body = crate::server::SseBody::new(writer, &version);
+            match read_head(upstream) {
+                Ok((stream, status, headers, rest)) => {
+                    let upstream =
+                        std::io::BufReader::new(std::io::Cursor::new(rest).chain(stream));
+                    relay_stream(status, &headers, upstream, body);
+                }
+                Err(e) => {
+                    tracing::warn!("[shards] proxy to {address} failed: {e}");
+                    let mut writer = body.into_inner();
+                    let body = serde_json::json!({ "error": {
+                        "code": "SHARD_MACHINE_UNREACHABLE",
+                        "message": "the machine that runs the shard did not answer",
+                    }})
+                    .to_string();
+                    let _ = write!(
+                        writer,
+                        "HTTP/1.1 502 Bad Gateway\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = writer.flush();
                 }
             }
         });
     200
+}
+
+/// Relay the machine's response (its head already read) to the client.
+///
+/// The client's connection outlives this response: tiny_http keeps an
+/// HTTP/1.1 connection open for the client's next request after the
+/// writer drops. So the body is re-framed for the client ([`SseBody`]:
+/// chunked on HTTP/1.1, close-delimited on HTTP/1.0) and always ended,
+/// including when the machine's stream breaks off mid-body. An SSE client
+/// then reconnects at once instead of waiting on a response that never
+/// ends. A body with a `Content-Length` is copied as is.
+///
+/// [`SseBody`]: crate::server::SseBody
+fn relay_stream<R: std::io::BufRead, W: Write>(
+    status: u16,
+    headers: &[(String, String)],
+    mut upstream: R,
+    mut body: crate::server::SseBody<W>,
+) {
+    let header = |name: &str| {
+        headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    };
+    let chunked =
+        header("Transfer-Encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
+    let length: Option<u64> = if chunked {
+        None
+    } else {
+        header("Content-Length").and_then(|v| v.parse().ok())
+    };
+    let mut head = format!("HTTP/1.1 {status} {}\r\n", reason_phrase(status));
+    for (k, v) in headers {
+        let framing = [
+            "transfer-encoding",
+            "content-length",
+            "connection",
+            "keep-alive",
+        ]
+        .iter()
+        .any(|f| k.eq_ignore_ascii_case(f));
+        if !framing {
+            head.push_str(&format!("{k}: {v}\r\n"));
+        }
+    }
+    if let Some(n) = length {
+        head.push_str(&format!("Content-Length: {n}\r\n\r\n"));
+        if body.write_head(&head).is_err() {
+            return;
+        }
+        let mut writer = body.into_inner();
+        let _ = std::io::copy(&mut upstream.take(n), &mut writer);
+        let _ = writer.flush();
+        return;
+    }
+    head.push_str(body.head_headers());
+    head.push_str("\r\n");
+    if body.write_head(&head).is_err() {
+        return;
+    }
+    let delivered = if chunked {
+        relay_chunks(&mut upstream, &mut body)
+    } else {
+        relay_until_eof(&mut upstream, &mut body)
+    };
+    if delivered {
+        let _ = body.finish();
+    }
+}
+
+/// Copy a chunked body's data to `body`, one flush per chunk (SSE events
+/// must not wait in a buffer). Returns `false` when the client is gone;
+/// `true` when the machine's body ended, cleanly or not.
+fn relay_chunks<R: std::io::BufRead, W: Write>(
+    upstream: &mut R,
+    body: &mut crate::server::SseBody<W>,
+) -> bool {
+    let mut line = String::new();
+    let mut data = Vec::new();
+    loop {
+        line.clear();
+        match upstream.read_line(&mut line) {
+            Ok(0) | Err(_) => return true,
+            Ok(_) => {}
+        }
+        let size_field = line.trim().split(';').next().unwrap_or("");
+        let Ok(size) = u64::from_str_radix(size_field, 16) else {
+            return true;
+        };
+        if size == 0 {
+            return true;
+        }
+        data.clear();
+        match (&mut *upstream).take(size).read_to_end(&mut data) {
+            Ok(n) if n as u64 == size => {}
+            _ => return true,
+        }
+        // The CRLF after the chunk data.
+        line.clear();
+        if upstream.read_line(&mut line).is_err() {
+            return true;
+        }
+        if body.send(&data).is_err() {
+            return false;
+        }
+    }
+}
+
+/// Copy a close-delimited body to `body` until the machine closes.
+fn relay_until_eof<R: Read, W: Write>(
+    upstream: &mut R,
+    body: &mut crate::server::SseBody<W>,
+) -> bool {
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        match upstream.read(&mut buf) {
+            Ok(0) | Err(_) => return true,
+            Ok(n) => {
+                if body.send(&buf[..n]).is_err() {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+fn reason_phrase(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        409 => "Conflict",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        _ => "",
+    }
 }
 
 fn forward_http(mut request: Request, machine_id: &str, address: &str, client_ip: &str) -> u16 {
@@ -454,6 +608,81 @@ mod tests {
         assert_eq!(shard_of("/api/other"), None);
         assert!(is_stream("/api/shards/zone/connect?sid=u"));
         assert!(!is_stream("/api/shards/zone/input"));
+    }
+
+    fn relayed(status: u16, headers: &[(&str, &str)], upstream: &[u8], http_1_1: bool) -> String {
+        let headers: Vec<(String, String)> = headers
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let version = if http_1_1 {
+            tiny_http::HTTPVersion(1, 1)
+        } else {
+            tiny_http::HTTPVersion(1, 0)
+        };
+        let mut out = Vec::new();
+        relay_stream(
+            status,
+            &headers,
+            std::io::BufReader::new(upstream),
+            crate::server::SseBody::new(&mut out, &version),
+        );
+        String::from_utf8(out).unwrap()
+    }
+
+    const SSE: &[(&str, &str)] = &[
+        ("Content-Type", "text/event-stream"),
+        ("Transfer-Encoding", "chunked"),
+    ];
+
+    /// The machine's chunked SSE body reaches an HTTP/1.1 client chunked
+    /// and ended with the terminal chunk.
+    #[test]
+    fn a_relayed_stream_is_chunked_and_ends() {
+        let out = relayed(200, SSE, b"9\r\ndata: a\n\n\r\n0\r\n\r\n", true);
+        assert!(out.starts_with("HTTP/1.1 200 OK\r\n"), "{out}");
+        assert!(out.contains("Content-Type: text/event-stream\r\n"), "{out}");
+        assert_eq!(out.matches("Transfer-Encoding").count(), 1, "{out}");
+        assert!(
+            out.ends_with("\r\n\r\n9\r\ndata: a\n\n\r\n0\r\n\r\n"),
+            "{out}"
+        );
+    }
+
+    /// Before, the relay copied the machine's bytes until it closed, so a
+    /// stream that broke off mid-body (the machine died) left the client
+    /// waiting on a response that never ended until the server's idle
+    /// timeout. Now the response ends and the SSE client reconnects.
+    #[test]
+    fn a_stream_that_breaks_off_still_ends_for_the_client() {
+        let out = relayed(200, SSE, b"9\r\ndata: a\n\n\r\n1f\r\ndata: tru", true);
+        assert!(out.ends_with("9\r\ndata: a\n\n\r\n0\r\n\r\n"), "{out}");
+    }
+
+    /// Before, an HTTP/1.0 client got the machine's chunked encoding,
+    /// which HTTP/1.0 does not have.
+    #[test]
+    fn an_http_1_0_client_gets_a_plain_body() {
+        let out = relayed(200, SSE, b"9\r\ndata: a\n\n\r\n0\r\n\r\n", false);
+        assert!(!out.contains("Transfer-Encoding"), "{out}");
+        assert!(out.contains("Connection: close\r\n"), "{out}");
+        assert!(out.ends_with("\r\n\r\ndata: a\n\n"), "{out}");
+    }
+
+    /// An error answer with a length is copied as is.
+    #[test]
+    fn a_body_with_a_length_is_copied() {
+        let out = relayed(
+            403,
+            &[
+                ("Content-Type", "application/json"),
+                ("Content-Length", "2"),
+            ],
+            b"{}",
+            true,
+        );
+        assert!(out.starts_with("HTTP/1.1 403 Forbidden\r\n"), "{out}");
+        assert!(out.ends_with("Content-Length: 2\r\n\r\n{}"), "{out}");
     }
 
     #[test]

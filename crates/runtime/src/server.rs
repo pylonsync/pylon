@@ -270,6 +270,12 @@ impl<W: std::io::Write> SseBody<W> {
         }
     }
 
+    /// The underlying writer, for a body that needs no framing (a known
+    /// length).
+    pub(crate) fn into_inner(self) -> W {
+        self.inner
+    }
+
     /// Write the response head as is (it is not part of the body).
     pub(crate) fn write_head(&mut self, head: &str) -> std::io::Result<()> {
         self.inner.write_all(head.as_bytes())?;
