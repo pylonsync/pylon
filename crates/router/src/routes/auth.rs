@@ -451,7 +451,7 @@ fn handle_org_sso_callback(ctx: &RouterContext, org_id: &str, raw: &str) -> (u16
                 if let Err(e) = ctx.store.update(
                     &user_entity,
                     &id,
-                    &serde_json::json!({ "emailVerified": now }),
+                    &stamp_user_fields(ctx, serde_json::json!({ "emailVerified": now })),
                 ) {
                     tracing::warn!(
                         "[auth] oauth: failed to persist emailVerified for user {}: {}",
@@ -464,12 +464,15 @@ fn handle_org_sso_callback(ctx: &RouterContext, org_id: &str, raw: &str) -> (u16
         }
         _ => match ctx.store.insert(
             &user_entity,
-            &serde_json::json!({
-                "email": &email,
-                "displayName": display_name,
-                "emailVerified": now,
-                "createdAt": now,
-            }),
+            &stamp_user_fields(
+                ctx,
+                serde_json::json!({
+                    "email": &email,
+                    "displayName": display_name,
+                    "emailVerified": now,
+                    "createdAt": now,
+                }),
+            ),
         ) {
             Ok(id) => id,
             Err(e) => {
@@ -787,7 +790,7 @@ fn handle_saml_acs(ctx: &RouterContext, org_id: &str, body: &str) -> (u16, Strin
                 if let Err(e) = ctx.store.update(
                     &user_entity,
                     &id,
-                    &serde_json::json!({ "emailVerified": now }),
+                    &stamp_user_fields(ctx, serde_json::json!({ "emailVerified": now })),
                 ) {
                     tracing::warn!(
                         "[auth] saml: failed to persist emailVerified for user {}: {}",
@@ -800,12 +803,12 @@ fn handle_saml_acs(ctx: &RouterContext, org_id: &str, body: &str) -> (u16, Strin
         }
         _ => match ctx.store.insert(
             &user_entity,
-            &serde_json::json!({
+            &stamp_user_fields(ctx, serde_json::json!({
                 "email": &canonical_email,
                 "displayName": assertion.name.clone().unwrap_or_else(|| canonical_email.clone()),
                 "emailVerified": now,
                 "createdAt": now,
-            }),
+            })),
         ) {
             Ok(id) => id,
             Err(e) => {
@@ -1014,6 +1017,39 @@ fn maybe_merge_anonymous(
     // session-fixation surface.
     ctx.session_store.revoke_all_for_user(&from_user_id);
     Some((from_user_id, summary))
+}
+
+/// Optional fields the auth routes stamp on the User row for
+/// convenience. An app's User entity may leave any of them out, so a write
+/// drops the ones the entity does not declare. Other fields (`email`,
+/// `passwordHash`) pass through, so a missing essential field still fails
+/// loudly.
+const OPTIONAL_USER_STAMPS: &[&str] = &[
+    "displayName",
+    "avatarColor",
+    "emailVerified",
+    "createdAt",
+    "updatedAt",
+];
+
+/// `row` without the [`OPTIONAL_USER_STAMPS`] the User entity does not
+/// declare.
+fn stamp_user_fields(ctx: &RouterContext, row: serde_json::Value) -> serde_json::Value {
+    let manifest = ctx.store.manifest();
+    let Some(user) = manifest
+        .entities
+        .iter()
+        .find(|e| e.name == manifest.auth.user.entity)
+    else {
+        return row;
+    };
+    let serde_json::Value::Object(mut obj) = row else {
+        return row;
+    };
+    obj.retain(|k, _| {
+        !OPTIONAL_USER_STAMPS.contains(&k.as_str()) || user.fields.iter().any(|f| &f.name == k)
+    });
+    serde_json::Value::Object(obj)
 }
 
 pub(crate) fn handle(
@@ -1431,7 +1467,10 @@ pub(crate) fn handle(
                             if let Err(e) = ctx.store.update(
                                 &ctx.store.manifest().auth.user.entity,
                                 &id,
-                                &serde_json::json!({ "emailVerified": now }),
+                                &stamp_user_fields(
+                                    ctx,
+                                    serde_json::json!({ "emailVerified": now }),
+                                ),
                             ) {
                                 tracing::warn!(
                                         "[auth] magic-code login: failed to persist emailVerified for user {}: {}",
@@ -1455,12 +1494,15 @@ pub(crate) fn handle(
                         // thing a silent fallback hides.
                         match ctx.store.insert(
                             &ctx.store.manifest().auth.user.entity,
-                            &serde_json::json!({
-                                "email": email,
-                                "displayName": email,
-                                "emailVerified": now,
-                                "createdAt": now,
-                            }),
+                            &stamp_user_fields(
+                                ctx,
+                                serde_json::json!({
+                                    "email": email,
+                                    "displayName": email,
+                                    "emailVerified": now,
+                                    "createdAt": now,
+                                }),
+                            ),
                         ) {
                             Ok(id) => id,
                             Err(e) => {
@@ -1667,7 +1709,7 @@ pub(crate) fn handle(
                 if let Err(e) = ctx.store.update(
                     &ctx.store.manifest().auth.user.entity,
                     user_id,
-                    &serde_json::json!({ "emailVerified": now }),
+                    &stamp_user_fields(ctx, serde_json::json!({ "emailVerified": now })),
                 ) {
                     tracing::warn!(
                         "[auth] email/verify: failed to persist emailVerified for user {}: {}",
@@ -1810,13 +1852,16 @@ pub(crate) fn handle(
 
         let user_id = match ctx.store.insert(
             &ctx.store.manifest().auth.user.entity,
-            &serde_json::json!({
-                "email": email,
-                "displayName": display_name,
-                "avatarColor": avatar_color,
-                "passwordHash": hash,
-                "createdAt": now,
-            }),
+            &stamp_user_fields(
+                ctx,
+                serde_json::json!({
+                    "email": email,
+                    "displayName": display_name,
+                    "avatarColor": avatar_color,
+                    "passwordHash": hash,
+                    "createdAt": now,
+                }),
+            ),
         ) {
             Ok(id) => id,
             Err(e) => return Some((400, json_error(&e.code, &e.message))),
@@ -2950,7 +2995,7 @@ pub(crate) fn handle(
                     let _ = ctx.store.update(
                         &user_entity,
                         &id,
-                        &serde_json::json!({ "emailVerified": now_iso }),
+                        &stamp_user_fields(ctx, serde_json::json!({ "emailVerified": now_iso })),
                     );
                 }
                 (id, false)
@@ -3477,7 +3522,7 @@ pub(crate) fn handle(
         match ctx.store.update(
             &ctx.store.manifest().auth.user.entity,
             &user_id,
-            &serde_json::json!({"passwordHash": new_hash}),
+            &stamp_user_fields(ctx, serde_json::json!({"passwordHash": new_hash})),
         ) {
             Ok(_) => {}
             Err(e) => return Some((400, json_error(&e.code, &e.message))),
@@ -3575,10 +3620,13 @@ pub(crate) fn handle(
         match ctx.store.update(
             &ctx.store.manifest().auth.user.entity,
             &user_id,
-            &serde_json::json!({
-                "totpSecret": sealed,
-                "totpVerified": false,
-            }),
+            &stamp_user_fields(
+                ctx,
+                serde_json::json!({
+                    "totpSecret": sealed,
+                    "totpVerified": false,
+                }),
+            ),
         ) {
             Ok(_) => {}
             Err(e) => return Some((400, json_error(&e.code, &e.message))),
@@ -3726,7 +3774,7 @@ pub(crate) fn handle(
                 let _ = ctx.store.update(
                     &ctx.store.manifest().auth.user.entity,
                     &user_id,
-                    &serde_json::json!({"totpBackupCodes": kept}),
+                    &stamp_user_fields(ctx, serde_json::json!({"totpBackupCodes": kept})),
                 );
             }
             // Post-write verify: the consumed hash MUST be absent now.
@@ -3762,7 +3810,7 @@ pub(crate) fn handle(
             match ctx.store.update(
                 &ctx.store.manifest().auth.user.entity,
                 &user_id,
-                &serde_json::json!({"totpVerified": true}),
+                &stamp_user_fields(ctx, serde_json::json!({"totpVerified": true})),
             ) {
                 Ok(_) => {}
                 Err(e) => return Some((400, json_error(&e.code, &e.message))),
@@ -3962,7 +4010,10 @@ pub(crate) fn handle(
         match ctx.store.update(
             &ctx.store.manifest().auth.user.entity,
             &user_id,
-            &serde_json::json!({"totpSecret": null, "totpVerified": false}),
+            &stamp_user_fields(
+                ctx,
+                serde_json::json!({"totpSecret": null, "totpVerified": false}),
+            ),
         ) {
             Ok(_) => {}
             Err(e) => return Some((400, json_error(&e.code, &e.message))),
@@ -6410,7 +6461,7 @@ pub(crate) fn handle(
                     let _ = ctx.store.update(
                         &ctx.store.manifest().auth.user.entity,
                         &user_id,
-                        &serde_json::json!({"stripeCustomerId": c.id}),
+                        &stamp_user_fields(ctx, serde_json::json!({"stripeCustomerId": c.id})),
                     );
                     customer_id = Some(c.id);
                 }
@@ -7080,7 +7131,7 @@ pub(crate) fn handle(
         return match ctx.store.update(
             &ctx.store.manifest().auth.user.entity,
             &user_id,
-            &serde_json::json!({"totpBackupCodes": hashes}),
+            &stamp_user_fields(ctx, serde_json::json!({"totpBackupCodes": hashes})),
         ) {
             Ok(_) => Some((200, serde_json::json!({"codes": codes}).to_string())),
             Err(e) => Some((400, json_error(&e.code, &e.message))),
