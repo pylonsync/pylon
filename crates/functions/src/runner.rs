@@ -145,6 +145,12 @@ pub type ScheduleHook = Box<
         + Sync,
 >;
 
+/// Callback invoked when a function calls `ctx.scheduler.cancel(id)`.
+/// Returns `Ok(true)` when a pending or buffered job was cancelled,
+/// `Ok(false)` when the job was unknown, running, or finished, and `Err`
+/// when the cancel could not be persisted (the job still runs).
+pub type CancelScheduleHook = Box<dyn Fn(&str) -> Result<bool, String> + Send + Sync>;
+
 /// Callback invoked when a running function asks to run *another* function
 /// (action → query/mutation). The wrapper is responsible for any per-type
 /// setup — notably wrapping mutations in their own BEGIN/COMMIT, which
@@ -400,6 +406,7 @@ pub struct FnRunner {
     call_counter: AtomicU64,
     pub trace_log: TraceLog,
     schedule_hook: Mutex<Option<ScheduleHook>>,
+    cancel_schedule_hook: Mutex<Option<CancelScheduleHook>>,
     /// Optional override for nested function calls (action → query/mutation).
     /// When set, the runner delegates `RunFn` messages to this hook so the
     /// caller can wrap mutations in their own transaction. When absent, we
@@ -474,6 +481,7 @@ impl FnRunner {
             call_counter: AtomicU64::new(0),
             trace_log: TraceLog::new(trace_capacity),
             schedule_hook: Mutex::new(None),
+            cancel_schedule_hook: Mutex::new(None),
             nested_call_hook: Mutex::new(None),
             file_url_signer: Mutex::new(None),
             shard_ticket_signer: Mutex::new(None),
@@ -575,6 +583,11 @@ impl FnRunner {
     /// Install a callback to handle `ctx.scheduler` requests from functions.
     pub fn set_schedule_hook(&self, hook: ScheduleHook) {
         *self.schedule_hook.lock().unwrap() = Some(hook);
+    }
+
+    /// Install a callback to handle `ctx.scheduler.cancel` requests.
+    pub fn set_cancel_schedule_hook(&self, hook: CancelScheduleHook) {
+        *self.cancel_schedule_hook.lock().unwrap() = Some(hook);
     }
 
     /// Install a callback used for nested function calls (action → query or
@@ -1667,10 +1680,26 @@ impl FnRunner {
                 }
 
                 TsMessage::CancelSchedule(cancel) if cancel.call_id == call_id => {
-                    let reply = DbResultMessage::ok(
-                        call_id.clone(),
-                        serde_json::json!({"cancelled": true}),
-                    );
+                    let result: Option<Result<bool, String>> = {
+                        let hook = self.cancel_schedule_hook.lock().unwrap();
+                        hook.as_ref().map(|cb| cb(&cancel.schedule_id))
+                    };
+                    let reply = match result {
+                        Some(Ok(cancelled)) => DbResultMessage::ok(
+                            call_id.clone(),
+                            serde_json::json!({ "cancelled": cancelled }),
+                        ),
+                        Some(Err(e)) => {
+                            DbResultMessage::err(call_id.clone(), "SCHEDULE_CANCEL_FAILED", &e)
+                        }
+                        // No hook means no job queue: nothing was cancelled,
+                        // and saying otherwise would hide a job that runs.
+                        None => DbResultMessage::err(
+                            call_id.clone(),
+                            "SCHEDULE_CANCEL_FAILED",
+                            "this host has no job queue wired, so the schedule cannot be cancelled",
+                        ),
+                    };
                     self.send(&reply)?;
                 }
 

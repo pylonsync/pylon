@@ -65,7 +65,10 @@ impl PgJobStore {
                     WHERE status = 'running';
                 CREATE INDEX IF NOT EXISTS _pylon_jobs_terminal_idx
                     ON _pylon_jobs (completed_at)
-                    WHERE status IN ('completed', 'dead');",
+                    WHERE status IN ('completed', 'dead');
+                CREATE INDEX IF NOT EXISTS _pylon_jobs_cancelled_idx
+                    ON _pylon_jobs (completed_at)
+                    WHERE status = 'cancelled';",
             )?;
             tx.commit()
         })
@@ -317,16 +320,37 @@ impl PgJobStore {
         })
     }
 
-    pub fn cleanup_completed(&self, max_age_secs: u64) -> Result<usize, String> {
-        let cutoff = now_secs_i64().saturating_sub(max_age_secs.min(i64::MAX as u64) as i64);
+    /// Cancel a job that has not started. Returns false when the job is
+    /// unknown, running, or finished. The row lock orders this against
+    /// `claim`, so a job is either claimed or cancelled, never both.
+    pub fn cancel(&self, id: &str) -> Result<bool, String> {
+        let now = now_secs_i64();
         self.pool.with_client(|client| {
             client
                 .execute(
-                    "DELETE FROM _pylon_jobs
-                     WHERE status IN ('completed','dead') AND completed_at < $1",
-                    &[&cutoff],
+                    "UPDATE _pylon_jobs
+                     SET status='cancelled', completed_at=$2
+                     WHERE id=$1 AND status IN ('pending','retrying')",
+                    &[&id, &now],
                 )
-                .map(|n| n as usize)
+                .map(|n| n == 1)
+        })
+    }
+
+    pub fn cleanup_completed(&self, max_age_secs: u64) -> Result<usize, String> {
+        let cutoff = now_secs_i64().saturating_sub(max_age_secs.min(i64::MAX as u64) as i64);
+        self.pool.with_client(|client| {
+            // Two statements so each matches its partial index.
+            let finished = client.execute(
+                "DELETE FROM _pylon_jobs
+                 WHERE status IN ('completed','dead') AND completed_at < $1",
+                &[&cutoff],
+            )?;
+            let cancelled = client.execute(
+                "DELETE FROM _pylon_jobs WHERE status = 'cancelled' AND completed_at < $1",
+                &[&cutoff],
+            )?;
+            Ok((finished + cancelled) as usize)
         })
     }
 
@@ -381,25 +405,11 @@ fn priority_from_i16(priority: i16) -> Priority {
 }
 
 fn status_to_str(status: &JobStatus) -> &'static str {
-    match status {
-        JobStatus::Pending => "pending",
-        JobStatus::Running => "running",
-        JobStatus::Completed => "completed",
-        JobStatus::Failed => "failed",
-        JobStatus::Retrying => "retrying",
-        JobStatus::Dead => "dead",
-    }
+    status.as_str()
 }
 
 fn status_from_str(status: &str) -> JobStatus {
-    match status {
-        "running" => JobStatus::Running,
-        "completed" => JobStatus::Completed,
-        "failed" => JobStatus::Failed,
-        "retrying" => JobStatus::Retrying,
-        "dead" => JobStatus::Dead,
-        _ => JobStatus::Pending,
-    }
+    JobStatus::from_stored(status)
 }
 
 fn parse_stamp(value: &str) -> u64 {
@@ -517,6 +527,75 @@ mod tests {
             Ok(())
         })
         .expect("cleanup test job");
+    }
+
+    #[test]
+    fn cancel_wins_or_loses_against_claim_but_never_both() {
+        let Some(pool) = test_pool() else {
+            return;
+        };
+        let suffix = pylon_cluster::new_instance_id();
+        let name = format!("cancel_handler_{suffix}");
+        let store = Arc::new(
+            PgJobStore::open(Arc::clone(&pool), format!("cancel_{suffix}")).expect("job store"),
+        );
+
+        // A pending job cancels once, then reports false.
+        let id = format!("job_cancel_{suffix}");
+        store.enqueue(&test_job(id.clone(), name.clone())).unwrap();
+        assert!(store.cancel(&id).unwrap());
+        assert!(!store.cancel(&id).unwrap());
+        assert_eq!(
+            store.load(&id).unwrap().unwrap().status,
+            JobStatus::Cancelled
+        );
+        assert!(store
+            .claim(Some("distributed-test"), &[name.clone()], 30)
+            .unwrap()
+            .is_none());
+        assert!(!store.cancel(&format!("missing_{suffix}")).unwrap());
+
+        // A claimed job cannot be cancelled.
+        let running = format!("job_running_{suffix}");
+        store
+            .enqueue(&test_job(running.clone(), name.clone()))
+            .unwrap();
+        let (_, token) = store
+            .claim(Some("distributed-test"), &[name.clone()], 30)
+            .unwrap()
+            .unwrap();
+        assert!(!store.cancel(&running).unwrap());
+        assert!(store.complete(&running, &token).unwrap());
+
+        // Race claim against cancel; exactly one side wins each round.
+        let mut ids = vec![id, running];
+        for round in 0..30 {
+            let race = format!("job_race_{suffix}_{round}");
+            store
+                .enqueue(&test_job(race.clone(), name.clone()))
+                .unwrap();
+            let claimer = Arc::clone(&store);
+            let handlers = vec![name.clone()];
+            let claim = std::thread::spawn(move || {
+                claimer
+                    .claim(Some("distributed-test"), &handlers, 30)
+                    .unwrap()
+                    .is_some()
+            });
+            let cancelled = store.cancel(&race).unwrap();
+            let claimed = claim.join().unwrap();
+            assert!(
+                cancelled ^ claimed,
+                "round {round}: cancelled={cancelled} claimed={claimed}"
+            );
+            ids.push(race);
+        }
+
+        pool.with_client(|client| {
+            client.execute("DELETE FROM _pylon_jobs WHERE id = ANY($1)", &[&ids])?;
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[test]

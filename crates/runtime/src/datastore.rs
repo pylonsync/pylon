@@ -18,16 +18,30 @@ use crate::Runtime;
 /// is dropped without enqueuing, so a failed mutation can't leave behind
 /// scheduled side-effects (the docs claim this; before this buffer the
 /// claim was false).
+///
+/// The job is built at schedule time, so its id is real: the handler gets
+/// the same id the committed job carries, and `ctx.scheduler.cancel(id)`
+/// works before and after commit.
 #[derive(Debug, Clone)]
 pub(crate) struct PendingSchedule {
-    pub fn_name: String,
-    pub args: serde_json::Value,
-    pub delay_ms: Option<u64>,
-    pub run_at: Option<u64>,
-    /// Identity captured at schedule time. Threaded into the job
-    /// when the surrounding mutation commits so the eventual handler
-    /// runs as the scheduling caller.
-    pub auth: Option<crate::jobs::JobAuth>,
+    /// The job to enqueue, including the auth captured at schedule time
+    /// so the eventual handler runs as the scheduling caller.
+    pub job: crate::jobs::Job,
+}
+
+/// Remove a schedule buffered by the mutation running on this thread.
+/// True when `job_id` was buffered (it will now never be enqueued).
+pub(crate) fn cancel_buffered_schedule(job_id: &str) -> bool {
+    MUTATION_SCHEDULE_BUFFER.with(|cell| {
+        let slot = cell.borrow();
+        let Some(buffer) = slot.as_ref() else {
+            return false;
+        };
+        let mut buffer = buffer.borrow_mut();
+        let before = buffer.len();
+        buffer.retain(|p| p.job.id != job_id);
+        buffer.len() != before
+    })
 }
 
 thread_local! {
@@ -4621,37 +4635,12 @@ impl FnOpsImpl {
     /// handler's buffer is dropped without flushing.
     fn flush_pending_schedules(&self, pending: Vec<PendingSchedule>) {
         for sched in pending {
-            let delay_secs = match (sched.delay_ms, sched.run_at) {
-                (Some(ms), _) => ms / 1000,
-                (None, Some(ts)) => {
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64;
-                    if ts > now {
-                        (ts - now) / 1000
-                    } else {
-                        0
-                    }
-                }
-                _ => 0,
-            };
-            if let Err(e) = self.job_queue.try_enqueue_with_auth(
-                &sched.fn_name,
-                sched.args,
-                crate::jobs::Priority::Normal,
-                delay_secs,
-                3,
-                "functions",
-                sched.auth,
-            ) {
+            let name = sched.job.name.clone();
+            if let Err(e) = self.job_queue.try_enqueue_job(sched.job) {
                 // Schedule was already acked OK to the TS handler — the
                 // mutation has committed. Best we can do now is log
                 // loudly so an operator notices the dropped enqueue.
-                tracing::warn!(
-                    "[functions] post-COMMIT enqueue failed for \"{}\": {e}",
-                    sched.fn_name
-                );
+                tracing::warn!("[functions] post-COMMIT enqueue failed for \"{name}\": {e}");
             }
         }
     }
@@ -4662,18 +4651,8 @@ impl FnOpsImpl {
         pending: Vec<PendingSchedule>,
     ) -> Result<(), FnCallError> {
         for schedule in pending {
-            let delay_secs = pending_schedule_delay_secs(&schedule);
             job_queue
-                .try_enqueue_with_auth_in_transaction(
-                    store,
-                    &schedule.fn_name,
-                    schedule.args,
-                    crate::jobs::Priority::Normal,
-                    delay_secs,
-                    3,
-                    "functions",
-                    schedule.auth,
-                )
+                .enqueue_job_in_transaction(store, schedule.job)
                 .map_err(|message| FnCallError {
                     code: "SCHEDULE_PERSIST_FAILED".into(),
                     message,
@@ -4683,8 +4662,10 @@ impl FnOpsImpl {
     }
 }
 
-fn pending_schedule_delay_secs(schedule: &PendingSchedule) -> u64 {
-    match (schedule.delay_ms, schedule.run_at) {
+/// Seconds from now until a schedule should run: `delay_ms`, or the gap
+/// to the absolute `run_at` (epoch ms), or zero.
+fn schedule_delay_secs(delay_ms: Option<u64>, run_at: Option<u64>) -> u64 {
+    match (delay_ms, run_at) {
         (Some(ms), _) => ms / 1000,
         (None, Some(timestamp)) => {
             let now = std::time::SystemTime::now()
@@ -5956,6 +5937,7 @@ fn install_schedule_hook(
     registry: &Arc<FnRegistry>,
     job_queue: Arc<crate::jobs::JobQueue>,
 ) {
+    let job_queue_for_cancel = Arc::clone(&job_queue);
     let registry_for_schedule = Arc::clone(registry);
     runner.set_schedule_hook(Box::new(
         move |fn_name, args, delay_ms, run_at, caller| {
@@ -5994,52 +5976,42 @@ fn install_schedule_hook(
                 is_guest: caller.caller_is_guest,
             };
 
-            // Check the thread-local first. If we're inside a mutation, the
-            // buffer is `Some` and we defer.
-            let buffered = MUTATION_SCHEDULE_BUFFER.with(|cell| {
-                let slot = cell.borrow();
-                slot.as_ref()
-                    .map(|b| {
-                        b.borrow_mut().push(PendingSchedule {
-                            fn_name: fn_name.to_string(),
-                            args: args.clone(),
-                            delay_ms,
-                            run_at,
-                            auth: Some(job_auth.clone()),
-                        });
-                    })
-                    .is_some()
-            });
-            if buffered {
-                return Ok(format!("pending:{fn_name}"));
-            }
-
-            let delay_secs = match (delay_ms, run_at) {
-                (Some(ms), _) => ms / 1000,
-                (None, Some(ts)) => {
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64;
-                    if ts > now {
-                        (ts - now) / 1000
-                    } else {
-                        0
-                    }
-                }
-                _ => 0,
-            };
-            job_queue.try_enqueue_with_auth(
+            let job = job_queue.new_job(
                 fn_name,
                 args,
                 crate::jobs::Priority::Normal,
-                delay_secs,
+                schedule_delay_secs(delay_ms, run_at),
                 3,
                 "functions",
                 Some(job_auth),
-            )
+            );
+            let id = job.id.clone();
+
+            // Inside a mutation the buffer is `Some`: defer the enqueue
+            // until the transaction commits. The id is already real.
+            let buffered = MUTATION_SCHEDULE_BUFFER.with(|cell| {
+                let slot = cell.borrow();
+                slot.as_ref()
+                    .map(|b| b.borrow_mut().push(PendingSchedule { job: job.clone() }))
+                    .is_some()
+            });
+            if buffered {
+                return Ok(id);
+            }
+            job_queue.try_enqueue_job(job)
         },
     ));
+
+    // `ctx.scheduler.cancel(id)`: drop a schedule buffered by the running
+    // mutation, else cancel the pending job. Takes effect at once; a
+    // mutation that later rolls back does not bring the job back.
+    let cancel_queue = Arc::clone(&job_queue_for_cancel);
+    runner.set_cancel_schedule_hook(Box::new(move |job_id| {
+        if cancel_buffered_schedule(job_id) {
+            return Ok(true);
+        }
+        cancel_queue.cancel_pending(job_id)
+    }));
 }
 
 /// Wire `ctx.email.send` → runtime's EmailAdapter on a single
@@ -9493,5 +9465,59 @@ mod ssr_client_read_fence_tests {
             "serverOnly fields must be stripped from hit docs"
         );
         assert_eq!(hits[0]["score"], serde_json::json!(0.9));
+    }
+}
+
+#[cfg(test)]
+mod schedule_cancel_tests {
+    use super::*;
+
+    fn job(queue: &crate::jobs::JobQueue, name: &str) -> crate::jobs::Job {
+        queue.new_job(
+            name,
+            serde_json::json!({}),
+            crate::jobs::Priority::Normal,
+            3600,
+            3,
+            "functions",
+            None,
+        )
+    }
+
+    #[test]
+    fn a_schedule_cancelled_in_the_same_mutation_is_never_enqueued() {
+        let queue = crate::jobs::JobQueue::new(10);
+        let guard = ScheduleBufferGuard::enter();
+        let keep = job(&queue, "keep");
+        let drop_me = job(&queue, "reminder");
+        let drop_id = drop_me.id.clone();
+        MUTATION_SCHEDULE_BUFFER.with(|cell| {
+            let slot = cell.borrow();
+            let buffer = slot.as_ref().unwrap();
+            buffer
+                .borrow_mut()
+                .push(PendingSchedule { job: keep.clone() });
+            buffer.borrow_mut().push(PendingSchedule { job: drop_me });
+        });
+
+        assert!(cancel_buffered_schedule(&drop_id));
+        assert!(!cancel_buffered_schedule(&drop_id));
+        let remaining = guard.take();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].job.id, keep.id);
+    }
+
+    #[test]
+    fn outside_a_mutation_there_is_no_buffer_to_cancel_from() {
+        assert!(!cancel_buffered_schedule("job_anything"));
+    }
+
+    #[test]
+    fn buffered_schedule_keeps_its_id_through_the_flush() {
+        let queue = crate::jobs::JobQueue::new(10);
+        let pending = job(&queue, "reminder");
+        let id = pending.id.clone();
+        assert_eq!(queue.try_enqueue_job(pending).unwrap(), id);
+        assert!(queue.cancel_pending(&id).unwrap());
     }
 }

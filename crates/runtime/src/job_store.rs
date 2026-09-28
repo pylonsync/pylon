@@ -241,7 +241,7 @@ impl JobStore {
         let cutoff_str = format!("{cutoff}Z");
 
         conn.execute(
-            "DELETE FROM jobs WHERE status IN ('completed', 'dead') AND completed_at < ?1",
+            "DELETE FROM jobs WHERE status IN ('completed', 'dead', 'cancelled') AND completed_at < ?1",
             rusqlite::params![cutoff_str],
         )
         .unwrap_or(0)
@@ -297,26 +297,11 @@ fn int_to_priority(n: i32) -> Priority {
 }
 
 fn status_to_str(s: &JobStatus) -> &'static str {
-    match s {
-        JobStatus::Pending => "pending",
-        JobStatus::Running => "running",
-        JobStatus::Completed => "completed",
-        JobStatus::Failed => "failed",
-        JobStatus::Retrying => "retrying",
-        JobStatus::Dead => "dead",
-    }
+    s.as_str()
 }
 
 fn str_to_status(s: &str) -> JobStatus {
-    match s {
-        "pending" => JobStatus::Pending,
-        "running" => JobStatus::Running,
-        "completed" => JobStatus::Completed,
-        "failed" => JobStatus::Failed,
-        "retrying" => JobStatus::Retrying,
-        "dead" => JobStatus::Dead,
-        _ => JobStatus::Pending,
-    }
+    JobStatus::from_stored(s)
 }
 
 // ---------------------------------------------------------------------------
@@ -443,6 +428,16 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_status_roundtrips() {
+        let store = JobStore::in_memory().unwrap();
+        store.save(&make_job("jc", JobStatus::Cancelled)).unwrap();
+        assert_eq!(
+            store.load("jc").unwrap().unwrap().status,
+            JobStatus::Cancelled
+        );
+    }
+
+    #[test]
     fn load_pending_returns_actionable_jobs() {
         let store = JobStore::in_memory().unwrap();
 
@@ -451,6 +446,7 @@ mod tests {
         store.save(&make_job("j3", JobStatus::Retrying)).unwrap();
         store.save(&make_job("j4", JobStatus::Completed)).unwrap();
         store.save(&make_job("j5", JobStatus::Dead)).unwrap();
+        store.save(&make_job("j6", JobStatus::Cancelled)).unwrap();
 
         let pending = store.load_pending().unwrap();
         assert_eq!(pending.len(), 3);

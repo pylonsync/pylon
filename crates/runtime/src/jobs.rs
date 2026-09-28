@@ -48,6 +48,38 @@ pub enum JobStatus {
     Failed,
     Retrying,
     Dead,
+    /// Removed from the queue by `ctx.scheduler.cancel` before it ran.
+    /// Terminal: restore and claim paths never pick it up again.
+    Cancelled,
+}
+
+impl JobStatus {
+    /// The status string stored in the job tables and accepted by the
+    /// job listing filters.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Retrying => "retrying",
+            Self::Dead => "dead",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// Parse a stored status string. Unknown strings map to `Pending`.
+    pub fn from_stored(s: &str) -> Self {
+        match s {
+            "running" => Self::Running,
+            "completed" => Self::Completed,
+            "failed" => Self::Failed,
+            "retrying" => Self::Retrying,
+            "dead" => Self::Dead,
+            "cancelled" => Self::Cancelled,
+            _ => Self::Pending,
+        }
+    }
 }
 
 /// Auth context propagated from the function that scheduled this job.
@@ -350,33 +382,17 @@ impl JobQueue {
         self.try_enqueue_job(job)
     }
 
-    /// Insert a scheduled function job through the mutation's held Postgres
-    /// transaction. The task and the application writes then commit or roll
-    /// back together.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn try_enqueue_with_auth_in_transaction(
+    /// Insert a prebuilt job through the mutation's held Postgres
+    /// transaction. The job row and the application writes then commit or
+    /// roll back together.
+    pub(crate) fn enqueue_job_in_transaction(
         &self,
         tx_store: &dyn pylon_http::DataStore,
-        name: &str,
-        payload: serde_json::Value,
-        priority: Priority,
-        delay_secs: u64,
-        max_retries: u32,
-        queue: &str,
-        auth: Option<JobAuth>,
+        job: Job,
     ) -> Result<String, String> {
         if !self.is_distributed() {
             return Err("transactional durable enqueue requires the Postgres job store".into());
         }
-        let job = self.new_job(
-            name,
-            payload,
-            priority,
-            delay_secs,
-            max_retries,
-            queue,
-            auth,
-        );
         let encoded = serde_json::to_value(&job)
             .map_err(|e| format!("failed to encode scheduled job: {e}"))?;
         tx_store
@@ -385,8 +401,11 @@ impl JobQueue {
         Ok(job.id)
     }
 
+    /// Build a pending job with a fresh id without enqueuing it. The id
+    /// carries this process's instance id, so it never repeats the id of a
+    /// job an earlier process left in the job store.
     #[allow(clippy::too_many_arguments)]
-    fn new_job(
+    pub(crate) fn new_job(
         &self,
         name: &str,
         payload: serde_json::Value,
@@ -397,11 +416,7 @@ impl JobQueue {
         auth: Option<JobAuth>,
     ) -> Job {
         let sequence = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let id = if self.is_distributed() {
-            format!("job_{}_{sequence}", self.instance_id)
-        } else {
-            format!("job_{sequence}")
-        };
+        let id = format!("job_{}_{sequence}", self.instance_id);
         let now = now_iso();
         Job {
             id: id.clone(),
@@ -422,7 +437,7 @@ impl JobQueue {
         }
     }
 
-    fn try_enqueue_job(&self, job: Job) -> Result<String, String> {
+    pub(crate) fn try_enqueue_job(&self, job: Job) -> Result<String, String> {
         if let Some(store) = self.pg_store() {
             store.enqueue(&job)?;
             self.notify.notify_one();
@@ -643,6 +658,40 @@ impl JobQueue {
         }
     }
 
+    /// Cancel a job that has not started. Returns `Ok(true)` when the job
+    /// was pending or waiting to retry and is now `Cancelled` in the store.
+    /// Returns `Ok(false)` when the id is unknown or the job is running or
+    /// already finished; the job is left unchanged. Returns `Err` when the
+    /// cancelled state could not be persisted; the job then stays queued.
+    ///
+    /// A worker claims a job and this method cancels it under the same
+    /// lock (the in-memory `pending` mutex, or the Postgres row lock), so
+    /// a job is either claimed or cancelled, never both.
+    pub fn cancel_pending(&self, job_id: &str) -> Result<bool, String> {
+        if let Some(store) = self.pg_store() {
+            return store.cancel(job_id);
+        }
+        let mut pending = self.pending.lock().unwrap();
+        let Some(idx) = pending.iter().position(|j| j.id == job_id) else {
+            return Ok(false);
+        };
+        let mut cancelled = pending[idx].clone();
+        cancelled.status = JobStatus::Cancelled;
+        cancelled.completed_at = Some(now_iso());
+        // Persist before the job leaves the queue, while the `pending`
+        // lock is held: a persist failure changes nothing, and no worker
+        // can claim the job in between.
+        if let Some(store) = self.store.lock().unwrap().as_ref() {
+            store
+                .save(&cancelled)
+                .map_err(|e| format!("persist failed for job {job_id}: {e}"))?;
+        }
+        pending.remove(idx);
+        drop(pending);
+        self.push_history(cancelled);
+        Ok(true)
+    }
+
     /// Process the next available job using registered handlers.
     /// Returns true if a job was processed.
     pub fn process_one(&self) -> bool {
@@ -829,15 +878,7 @@ impl JobQueue {
 
         for job in all_jobs {
             if let Some(s) = status {
-                let job_status = match &job.status {
-                    JobStatus::Pending => "pending",
-                    JobStatus::Running => "running",
-                    JobStatus::Completed => "completed",
-                    JobStatus::Failed => "failed",
-                    JobStatus::Retrying => "retrying",
-                    JobStatus::Dead => "dead",
-                };
-                if job_status != s {
+                if job.status.as_str() != s {
                     continue;
                 }
             }
@@ -962,33 +1003,6 @@ impl JobQueue {
             for job in dead.into_iter().rev() {
                 dead_letters.push_back(job);
             }
-        }
-
-        // Ensure the ID counter doesn't collide with restored IDs.
-        // Walk both queues to find the max numeric suffix.
-        let max_pending = pending
-            .iter()
-            .filter_map(|j| {
-                j.id.strip_prefix("job_")
-                    .and_then(|n| n.parse::<u64>().ok())
-            })
-            .max()
-            .unwrap_or(0);
-        let max_dead = self
-            .dead_letters
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|j| {
-                j.id.strip_prefix("job_")
-                    .and_then(|n| n.parse::<u64>().ok())
-            })
-            .max()
-            .unwrap_or(0);
-        let max_id = max_pending.max(max_dead);
-        let current = self.next_id.load(Ordering::Relaxed);
-        if max_id >= current {
-            self.next_id.store(max_id + 1, Ordering::Relaxed);
         }
 
         pending_count + dead_count
@@ -1628,10 +1642,10 @@ mod tests {
         assert_eq!(job.status, JobStatus::Pending);
         assert!(job.started_at.is_none());
 
-        // ID counter should be past restored IDs.
+        // A new id never repeats a restored one.
         let new_id = q.enqueue("new", serde_json::json!({}));
-        let num: u64 = new_id.strip_prefix("job_").unwrap().parse().unwrap();
-        assert!(num > 200);
+        assert!(new_id != "job_100" && new_id != "job_200");
+        assert_eq!(q.pending_count(), 3);
     }
 
     #[test]
@@ -1677,11 +1691,178 @@ mod tests {
             Some("UNAUTHENTICATED: log in first")
         );
 
-        // ID counter must also account for restored dead-letter IDs,
-        // otherwise the next enqueue collides and INSERT OR REPLACE
+        // A new id must not repeat the dead job's id, or INSERT OR REPLACE
         // overwrites the dead row.
         let new_id = q.enqueue("fresh", serde_json::json!({}));
-        let num: u64 = new_id.strip_prefix("job_").unwrap().parse().unwrap();
-        assert!(num > 999, "next_id should be past dead job ids, got {num}");
+        assert_ne!(new_id, "job_999");
+    }
+
+    // -----------------------------------------------------------------------
+    // Cancellation
+    // -----------------------------------------------------------------------
+
+    fn delayed(q: &JobQueue, delay_secs: u64) -> String {
+        q.try_enqueue_with_options(
+            "reminder",
+            serde_json::json!({"leadId": "l_1"}),
+            Priority::Normal,
+            delay_secs,
+            3,
+            "functions",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn job_ids_do_not_repeat_across_processes() {
+        // A restarted process must never hand out an id that an app still
+        // holds from the previous process, or `cancel(oldId)` would cancel
+        // someone else's job.
+        let first = JobQueue::new(10);
+        let second = JobQueue::new(10);
+        let a = first.enqueue("x", serde_json::json!({}));
+        let b = second.enqueue("x", serde_json::json!({}));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn cancel_pending_delayed_job_removes_it_and_marks_it_cancelled() {
+        let q = JobQueue::new(100);
+        let id = delayed(&q, 3600);
+
+        assert!(q.cancel_pending(&id).unwrap());
+
+        assert_eq!(q.pending_count(), 0);
+        assert!(q.dequeue(Duration::from_millis(10)).is_none());
+        let job = q.get_job(&id).unwrap();
+        assert_eq!(job.status, JobStatus::Cancelled);
+        assert!(job.completed_at.is_some());
+        assert_eq!(q.list_jobs(Some("cancelled"), None, 10).len(), 1);
+    }
+
+    #[test]
+    fn cancelled_ready_job_never_reaches_its_handler() {
+        let q = JobQueue::new(100);
+        let ran = Arc::new(AtomicU64::new(0));
+        let ran_in_handler = Arc::clone(&ran);
+        q.register(
+            "reminder",
+            Arc::new(move |_| {
+                ran_in_handler.fetch_add(1, Ordering::SeqCst);
+                JobResult::Success
+            }),
+        );
+        let id = delayed(&q, 0);
+        assert!(q.cancel_pending(&id).unwrap());
+        assert!(!q.process_one());
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn cancel_running_job_returns_false_and_leaves_it_running() {
+        let q = JobQueue::new(100);
+        let id = q.enqueue("test", serde_json::json!({}));
+        let _job = q.dequeue(Duration::from_millis(10)).unwrap();
+
+        assert!(!q.cancel_pending(&id).unwrap());
+
+        let job = q.get_job(&id).unwrap();
+        assert_eq!(job.status, JobStatus::Running);
+        assert_eq!(q.running_count(), 1);
+    }
+
+    #[test]
+    fn cancel_after_the_job_ran_returns_false() {
+        let q = JobQueue::new(100);
+        q.register("reminder", Arc::new(|_| JobResult::Success));
+        let id = delayed(&q, 0);
+        assert!(q.process_one());
+
+        assert!(!q.cancel_pending(&id).unwrap());
+        assert_eq!(q.get_job(&id).unwrap().status, JobStatus::Completed);
+    }
+
+    #[test]
+    fn cancel_twice_returns_true_then_false() {
+        let q = JobQueue::new(100);
+        let id = delayed(&q, 3600);
+        assert!(q.cancel_pending(&id).unwrap());
+        assert!(!q.cancel_pending(&id).unwrap());
+        assert_eq!(q.get_job(&id).unwrap().status, JobStatus::Cancelled);
+    }
+
+    #[test]
+    fn cancel_unknown_job_returns_false() {
+        let q = JobQueue::new(100);
+        assert!(!q.cancel_pending("job_missing").unwrap());
+        assert!(!q.cancel_pending("").unwrap());
+    }
+
+    #[test]
+    fn cancel_a_job_waiting_to_retry() {
+        let q = JobQueue::new(100);
+        let id = q.enqueue("flaky", serde_json::json!({}));
+        let _ = q.dequeue(Duration::from_millis(10)).unwrap();
+        q.fail(&id, "boom");
+        assert_eq!(q.get_job(&id).unwrap().status, JobStatus::Retrying);
+
+        assert!(q.cancel_pending(&id).unwrap());
+        assert_eq!(q.pending_count(), 0);
+        assert_eq!(q.get_job(&id).unwrap().status, JobStatus::Cancelled);
+    }
+
+    #[test]
+    fn cancelled_job_is_not_restored_after_restart() {
+        let store = Arc::new(crate::job_store::JobStore::in_memory().unwrap());
+        let q = JobQueue::new(100);
+        q.attach_store(Arc::clone(&store));
+        let cancelled = delayed(&q, 3600);
+        let kept = delayed(&q, 3600);
+        assert!(q.cancel_pending(&cancelled).unwrap());
+
+        assert_eq!(
+            store.load(&cancelled).unwrap().unwrap().status,
+            JobStatus::Cancelled
+        );
+
+        // A new process restores from the same store.
+        let restarted = JobQueue::new(100);
+        assert_eq!(restarted.restore_from(&store), 1);
+        assert!(restarted.get_job(&cancelled).is_none());
+        assert_eq!(restarted.get_job(&kept).unwrap().status, JobStatus::Pending);
+        assert!(!restarted.cancel_pending(&cancelled).unwrap());
+    }
+
+    #[test]
+    fn claim_and_cancel_race_has_exactly_one_winner() {
+        // A worker and a cancel race for the same ready job, many times.
+        // Each round, exactly one side wins: either the handler runs and
+        // cancel reports false, or cancel reports true and the handler
+        // never runs.
+        for _ in 0..200 {
+            let q = Arc::new(JobQueue::new(10));
+            let ran = Arc::new(AtomicU64::new(0));
+            let ran_in_handler = Arc::clone(&ran);
+            q.register(
+                "reminder",
+                Arc::new(move |_| {
+                    ran_in_handler.fetch_add(1, Ordering::SeqCst);
+                    JobResult::Success
+                }),
+            );
+            let id = delayed(&q, 0);
+            let worker_q = Arc::clone(&q);
+            let worker = std::thread::spawn(move || worker_q.process_one());
+            let cancelled = q.cancel_pending(&id).unwrap();
+            worker.join().unwrap();
+            // Drain anything the worker missed so a lost job would show.
+            while q.process_one() {}
+            let runs = ran.load(Ordering::SeqCst);
+            assert_eq!(
+                runs + u64::from(cancelled),
+                1,
+                "cancelled={cancelled} runs={runs}"
+            );
+        }
     }
 }

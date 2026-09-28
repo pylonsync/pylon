@@ -77,15 +77,36 @@ SQLite jobs stay on one machine. Do not run one SQLite database on multiple repl
 To run something later (not on a repeating schedule), schedule it from inside a mutation or action:
 
 ```ts
-// run a function after a delay
-await ctx.scheduler.runAfter(60_000, "sendReminder", { todoId });   // 60s later
+// run a function after a delay; returns the job id
+const reminderId = await ctx.scheduler.runAfter(60_000, "sendReminder", { todoId });
 
 // run at a specific time
 await ctx.scheduler.runAt(dueDate.getTime(), "expireHold", { holdId });
 
-// cancel a pending run
-await ctx.scheduler.cancel(scheduleId);
+// cancel a run that has not started
+const { cancelled } = await ctx.scheduler.cancel(reminderId);
 ```
+
+`cancel` resolves `{ cancelled: true }` when the job will not run. It
+resolves `{ cancelled: false }` when the id is unknown or the job already
+started or finished; a running job is not interrupted. It rejects with
+`SCHEDULE_CANCEL_FAILED` when the cancel could not be saved, and the job
+then still runs. Cancelled jobs stay cancelled across restarts and on
+every Postgres replica.
+
+Store the id to cancel later, for example on the appointment row:
+
+```ts
+const reminder24h = await ctx.scheduler.runAt(startsAt - 24 * 3600_000, "sendReminder", { appointmentId });
+await ctx.db.update("Appointment", appointmentId, { reminder24h });
+
+// on reschedule
+await ctx.scheduler.cancel(appointment.reminder24h);
+```
+
+Inside a mutation, cancelling a job the same mutation scheduled removes
+it before commit. Cancelling any other job takes effect at once and is
+not undone if the mutation later fails.
 
 The scheduled function runs with the auth identity of the caller that scheduled it. Pylon enforces this identity at schedule time. The `args` you pass are delivered verbatim. Like crons, these scheduled calls are durable across restarts.
 

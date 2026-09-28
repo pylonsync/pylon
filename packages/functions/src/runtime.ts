@@ -842,10 +842,10 @@ function buildScheduler(callId: string): Scheduler {
       return r.id || "";
     },
     async cancel(scheduleId) {
-      await rpc(callId, {
+      return (await rpc(callId, {
         type: "cancel_schedule",
         schedule_id: scheduleId,
-      });
+      })) as { cancelled: boolean };
     },
   };
 }

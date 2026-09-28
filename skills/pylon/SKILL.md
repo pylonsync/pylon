@@ -558,7 +558,8 @@ ctx.db.delete(entity, id)              // => boolean
 ctx.db.link(entity, id, relation, targetId) / ctx.db.unlink(entity, id, relation)
 ctx.db.advisoryLock(key)               // serialize a TOCTOU-prone quota/uniqueness check
 throw ctx.error("CODE", "message")     // typed error → rolls the tx back
-ctx.scheduler.runAfter(delayMs, "fnName", args)   // enqueue delayed call
+ctx.scheduler.runAfter(delayMs, "fnName", args)   // enqueue delayed call; returns the job id
+ctx.scheduler.cancel(jobId)                       // { cancelled } — false if it already started/finished
 ctx.scheduler.runAt(unixMs, "fnName", args)       // enqueue at a wall-clock time (Unix ms, e.g. new Date(iso).getTime())
 
 // ---- action ctx — NO ctx.db. Read/write via runQuery/runMutation; + email, error, scheduler, llm, rooms, stream ----

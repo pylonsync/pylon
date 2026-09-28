@@ -371,8 +371,21 @@ export interface Scheduler {
     args: Record<string, unknown>
   ): Promise<string>;
 
-  /** Cancel a previously scheduled function. */
-  cancel(scheduleId: string): Promise<void>;
+  /**
+   * Cancel a scheduled function that has not started. Pass the id
+   * `runAfter` or `runAt` returned.
+   *
+   * Resolves `{ cancelled: true }` when the job will not run, and
+   * `{ cancelled: false }` when the id is unknown or the job already
+   * started or finished (a running job is not interrupted). Rejects with
+   * `SCHEDULE_CANCEL_FAILED` when the cancel could not be saved; the job
+   * then still runs.
+   *
+   * Inside a mutation, cancelling a job scheduled by the same mutation
+   * drops it before commit. Cancelling any other job takes effect at
+   * once and stays cancelled even if the mutation later fails.
+   */
+  cancel(scheduleId: string): Promise<{ cancelled: boolean }>;
 }
 
 /**
