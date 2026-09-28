@@ -1418,6 +1418,9 @@ export class SyncEngine {
       this.pullHold.push(...changes);
       return Promise.resolve();
     }
+    // Reset fence (see `resetDepth`).
+    if (this.resetDepth > 0 && !opts.isPull) return Promise.resolve();
+    const epoch = this.replicaEpoch;
     // Group commit for live frames (WS events, tab broadcasts without a
     // pull cursor). While an earlier batch is still applying and writing
     // to IndexedDB, frames that arrive join the next queued batch instead
@@ -1428,29 +1431,49 @@ export class SyncEngine {
     if (!opts.isPull && targetCursor === undefined) {
       const fromBroadcast = opts.fromBroadcast === true;
       const open = this.liveBatch;
-      if (open && open.fromBroadcast === fromBroadcast) {
+      if (open && open.fromBroadcast === fromBroadcast && open.epoch === epoch) {
         open.changes.push(...changes);
         return open.promise;
       }
       const batch: LiveBatch = {
         changes: [...changes],
         fromBroadcast,
+        epoch,
         promise: Promise.resolve(),
       };
       batch.promise = this.chainApply(() => {
         // Close the batch when it starts: frames from here on go into
         // the next one, so each frame is applied exactly once, in order.
         if (this.liveBatch === batch) this.liveBatch = null;
-        return this.applyBatch(batch.changes, undefined, { fromBroadcast });
+        return this.applyBatch(batch.changes, undefined, { fromBroadcast }, epoch);
       });
       this.liveBatch = batch;
       return batch.promise;
     }
-    return this.chainApply(() => this.applyBatch(changes, targetCursor, opts));
+    return this.chainApply(() => this.applyBatch(changes, targetCursor, opts, epoch));
   }
 
   /** Live frames waiting for their apply to start. See `enqueueApply`. */
   private liveBatch: LiveBatch | null = null;
+
+  /** Bumped by every replica reset. An apply step records the epoch it
+   *  was queued in and drops its work when a reset happened since: its
+   *  changes belong to the replica that was wiped. */
+  private replicaEpoch = 0;
+  /** > 0 while `resetReplicaInner` runs. Live frames that arrive then
+   *  come from the socket of the replica being wiped; the pull that
+   *  follows every reset delivers anything current. */
+  private resetDepth = 0;
+
+  /**
+   * Offline writes held while nobody is signed in, and the user they
+   * belong to (`undefined` = no hold). A session that expires or signs
+   * out keeps its queue here instead of discarding it; the next
+   * identity decides: the same user (or a guest becoming a user) gets
+   * the writes pushed, anyone else gets them discarded. Pushes wait
+   * while the hold is set.
+   */
+  private heldQueueOwner: string | null | undefined = undefined;
 
   /** Chain one apply step behind every queued one. Anything chained
    *  here closes the open live batch first, so later live frames can
@@ -1469,7 +1492,11 @@ export class SyncEngine {
     changes: ChangeEvent[],
     targetCursor: SyncCursor | undefined,
     opts: { fromBroadcast?: boolean; isPull?: boolean },
+    epoch: number,
   ): Promise<void> {
+    // Queued before a replica reset: these changes belong to the wiped
+    // replica (another identity, or a cursor the server rejected).
+    if (epoch !== this.replicaEpoch) return;
     // Per-event monotonic filter: re-applies of an already-seen seq
     // are skipped before touching the store. Without that, a
     // retransmit (WS + pull window overlap) would have us run
@@ -1511,14 +1538,27 @@ export class SyncEngine {
         const durable = await persistence.saveBatch(rows, cursorToSave);
         if (!durable) this.persistDegraded = true;
         cursorOnDisk = durable && cursorToSave !== null;
-      } else {
-        const durable = await this.store.applyChangesAsync(filtered);
+      } else if (this.store._persistFn) {
+        // Row by row, in order. Stop writing once a reset happened: the
+        // reset cleared disk and later rows would land after it.
+        const rows = this.store.applyInMemory(filtered);
+        let durable = true;
+        for (const row of rows) {
+          if (epoch !== this.replicaEpoch) break;
+          const result = this.store._persistFn(row);
+          if (result instanceof Promise && (await result) === false) durable = false;
+        }
         // A row in this batch didn't reach disk (quota / abort). Latch
         // the degraded flag so we never persist a cursor ahead of the
         // durable replica — the next cold start must re-pull this gap.
         if (!durable) this.persistDegraded = true;
+      } else {
+        this.store.applyInMemory(filtered);
       }
     }
+    // A reset ran while this batch was writing: it wiped memory and
+    // disk, so the cursor must not move back up to this batch's seqs.
+    if (epoch !== this.replicaEpoch) return;
     if (advance) {
       // In-memory cursor ALWAYS advances — live sync stays correct.
       this.cursor = advance;
@@ -1693,6 +1733,19 @@ export class SyncEngine {
   private async resetReplicaInner(
     opts: { wipeMutations?: boolean } = {},
   ): Promise<void> {
+    this.replicaEpoch += 1;
+    this.liveBatch = null;
+    this.resetDepth += 1;
+    try {
+      await this.resetReplicaSteps(opts);
+    } finally {
+      this.resetDepth -= 1;
+    }
+  }
+
+  private async resetReplicaSteps(
+    opts: { wipeMutations?: boolean },
+  ): Promise<void> {
     const wipeMutations = opts.wipeMutations === true;
     this.cursor = { last_seq: 0 };
     // The replica is about to be wiped and will re-pull from 0 (org switch,
@@ -1734,7 +1787,7 @@ export class SyncEngine {
     if (this.persistence) {
       try {
         await this.persistence.clear();
-        await this.persistence.saveCursor(this.cursor);
+        await this.persistence.saveCursor({ last_seq: 0 });
         // clear() wiped the cursor store (identity tag included). The
         // replica is about to be re-pulled for the CURRENT identity, so
         // re-tag it to match — otherwise the on-disk tag reads "unknown"
@@ -1880,22 +1933,27 @@ export class SyncEngine {
     // the replica from seq=0 under the new identity.
     const { tokenChanged } = this.session.observeToken(this.currentToken());
     if (tokenChanged) {
-      // We're holding the "pull" slot in the op queue — bypass the
-      // queue's reset path to avoid self-deadlock. Identity flipped, so
-      // wipe the old identity's pending offline writes.
-      await this.resetReplicaInner({ wipeMutations: true });
-      // Token flipped → the cached tenant is for the previous user. Pull
-      // the fresh session in parallel with the cursor catch-up below.
-      // This pull already reset the replica and cycles the transport,
-      // so the session refresh must not do either a second time.
-      void this.refreshResolvedSession({ replicaAlreadyReset: true });
       // The live socket was opened with the OLD token (the bearer rides
       // the WS subprotocol at connect time), so the server keeps
       // fanning out the previous identity's events to it. Cycle the
-      // transport: stop() closes the socket, start() reconnects and
+      // transport BEFORE the reset so no old-identity frame lands in the
+      // new replica: stop() closes the socket, start() reconnects and
       // reads the token fresh. The new socket's onConnected pull sees
       // the token as already observed, so this does not recurse.
       this.cycleTransport();
+      // Hold the queued offline writes until the session refresh below
+      // says who signed in; it pushes or discards them.
+      if (this.heldQueueOwner === undefined) {
+        this.heldQueueOwner = this.session.resolved().userId;
+      }
+      // We're holding the "pull" slot in the op queue — bypass the
+      // queue's reset path to avoid self-deadlock.
+      await this.resetReplicaInner({ wipeMutations: false });
+      // Token flipped → the cached tenant is for the previous user. Pull
+      // the fresh session in parallel with the cursor catch-up below.
+      // This pull already reset the replica and cycled the transport,
+      // so the session refresh must not do either a second time.
+      void this.refreshResolvedSession({ replicaAlreadyReset: true });
     }
 
     // Capture whether this pull started from cursor=0 BEFORE the
@@ -2641,25 +2699,31 @@ export class SyncEngine {
       // (anonymous → signed in). Wipe, reconnect as the new identity,
       // and pull every entity from zero. Always wipes, whatever
       // `resetOnTenantFlip` says.
+      //
+      // Leader only. A follower hears about the flip from the leader's
+      // `session` message, which arrives AFTER the leader's `reset` and
+      // the re-pulled rows; acting on it again would wipe those rows and
+      // the IndexedDB the tabs share.
       const userFlipped =
         this.session.hasObserved() && prevUserId !== next.userId;
-      if (userFlipped) {
+      if (userFlipped && this.isMultiTabLeader) {
         if (!opts.replicaAlreadyReset) {
           // Mark the current token as seen so the pull below does not
           // detect the same flip and reset a second time.
           this.session.observeToken(this.currentToken());
-          // Keep queued writes only for guest → user (the server merges
-          // the guest's rows into the new account). Any other flip drops
-          // them so one identity's writes never push as another.
-          const isGuestToUser =
-            typeof prevUserId === "string" &&
-            prevUserId.startsWith("guest_") &&
-            typeof next.userId === "string" &&
-            !next.userId.startsWith("guest_");
-          await this.resetReplica({ wipeMutations: !isGuestToUser });
+          if (this.heldQueueOwner === undefined) this.heldQueueOwner = prevUserId;
+          // Close the old identity's socket before the wipe so none of
+          // its frames land in the new replica.
           this.cycleTransport();
-          if (this.isMultiTabLeader) await this.pull();
+          await this.resetReplica({ wipeMutations: false });
+          this.settleHeldQueue(next.userId);
+          await this.pull();
+        } else {
+          this.settleHeldQueue(next.userId);
         }
+        if (this.mutations.pending().length > 0) void this.push();
+      } else if (userFlipped) {
+        // Follower: the leader's reset already wiped this tab.
       } else if (verdict.tenantChanged && !opts.replicaAlreadyReset) {
         // `resetOnTenantFlip: false` — the app has declared its read
         // policies MEMBERSHIP-scoped, so the replica is already valid
@@ -2668,7 +2732,9 @@ export class SyncEngine {
         // Only the TENANT verdict honors the flag; user flips (token
         // change, guardReplicaIdentity) always wipe.
         const skipReset = this.config.resetOnTenantFlip === false;
-        if (verdict.replicaInvalidated && !skipReset) {
+        // Leader only, like the user flip above: a follower's replica is
+        // wiped by the leader's `reset` message.
+        if (verdict.replicaInvalidated && !skipReset && this.isMultiTabLeader) {
           // Route reset through the public (queued) method so the
           // wipe serializes against in-flight pulls / WS-event
           // applies / pushes. sessionChain serializes session
@@ -2696,7 +2762,15 @@ export class SyncEngine {
       this.session.commitObservation(next);
       // The reset above tagged the replica with the outgoing user (the
       // session was not committed yet). Re-tag it with the new owner.
-      if (userFlipped) this.persistReplicaIdentity();
+      if (userFlipped && this.isMultiTabLeader) this.persistReplicaIdentity();
+      // A token change for the SAME user (rotation) held the queue too;
+      // release it now that the session says who is signed in.
+      if (this.isMultiTabLeader && this.heldQueueOwner !== undefined) {
+        this.settleHeldQueue(next.userId);
+        if (this.heldQueueOwner === undefined && this.mutations.pending().length > 0) {
+          void this.push();
+        }
+      }
       if (verdict.identityChanged || firstResolution) {
         // The first answer flips `sessionResolved()` even when the
         // session itself matches the placeholder (anonymous caller).
@@ -2707,6 +2781,30 @@ export class SyncEngine {
       }
     }).catch(() => {});
     return this.sessionChain;
+  }
+
+  /**
+   * Decide what happens to the held offline writes now that `nextUserId`
+   * is signed in (see `heldQueueOwner`). Signed out: keep holding. The
+   * owner again, or a guest becoming a user: release them for push. Any
+   * other identity: discard them, so one user's writes never push as
+   * another's.
+   */
+  private settleHeldQueue(nextUserId: string | null): void {
+    const owner = this.heldQueueOwner;
+    if (owner === undefined) return;
+    if (nextUserId === null) {
+      if (owner === null) this.heldQueueOwner = undefined;
+      return;
+    }
+    this.heldQueueOwner = undefined;
+    const guestToUser =
+      typeof owner === "string" &&
+      owner.startsWith("guest_") &&
+      !nextUserId.startsWith("guest_");
+    if (owner !== nextUserId && !guestToUser) {
+      this.mutations.clearAll();
+    }
   }
 
   private async rawFetch(path: string): Promise<Response> {
@@ -2955,6 +3053,13 @@ export class SyncEngine {
     for (const id of pendingIds) this.attemptedOps.add(id);
     if (pending.length === 0) return;
 
+    // Writes held across a sign-out wait for the next identity (see
+    // `heldQueueOwner`). Release their callers; the writes stay queued.
+    if (this.heldQueueOwner !== undefined) {
+      for (const m of pending) this.mutations.settleQueued(m.id);
+      return;
+    }
+
     // Multi-tab follower: we don't own the network. Forward the
     // pending batch to the leader and let it push. The leader
     // broadcasts `mutations-acked` when the server confirms; that
@@ -2992,7 +3097,12 @@ export class SyncEngine {
           const r =
             (m.change.op_id ? byOpId.get(m.change.op_id) : undefined) ??
             resp.results[i];
-          if (!r) continue;
+          if (!r) {
+            // No verdict for this op: it stays queued for the next push.
+            // Release its caller like a transient failure.
+            this.mutations.settleQueued(m.id);
+            continue;
+          }
           // applied: first-time commit at r.seq.
           // replayed: same op_id arrived again after a confirmed apply;
           // r.seq is the original write's seq. Both are terminal-success
@@ -3036,6 +3146,8 @@ export class SyncEngine {
             this.mutations.markApplied(pending[i].id);
           } else if (errors[i - applied]) {
             this.failPushedMutation(pending[i], errors[i - applied]);
+          } else {
+            this.mutations.settleQueued(pending[i].id);
           }
         }
       }
@@ -3235,6 +3347,22 @@ export class SyncEngine {
     // Mark the promise handled: push() can settle it before we await it.
     outcome.catch(() => {});
     await this.push();
+    if (!this.isMultiTabLeader) {
+      // A follower forwards the write and waits for the leader's verdict.
+      // A frozen or dying leader must not hang the caller: after the
+      // timeout the write counts as queued (a later verdict still rolls it
+      // back and marks it failed).
+      const timer = setTimeout(
+        () => this.mutations.settleQueued(opId),
+        FOLLOWER_OUTCOME_TIMEOUT_MS,
+      );
+      try {
+        await outcome;
+      } finally {
+        clearTimeout(timer);
+      }
+      return;
+    }
     await outcome;
   }
 
@@ -3990,10 +4118,16 @@ export class SyncEngine {
 // SSR / Hydration types
 // ---------------------------------------------------------------------------
 
+/** How long a follower tab's insert/update/delete waits for the leader's
+ *  verdict before it resolves as queued. */
+const FOLLOWER_OUTCOME_TIMEOUT_MS = 5_000;
+
 /** Live change frames queued for one apply step (see `enqueueApply`). */
 interface LiveBatch {
   changes: ChangeEvent[];
   fromBroadcast: boolean;
+  /** `replicaEpoch` when the batch opened. */
+  epoch: number;
   promise: Promise<void>;
 }
 

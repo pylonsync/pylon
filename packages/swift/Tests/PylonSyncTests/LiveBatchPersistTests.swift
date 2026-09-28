@@ -26,17 +26,22 @@ final class LiveBatchPersistTests: XCTestCase {
         func loadAllRows() async throws -> [String: [Row]] { try await inner.loadAllRows() }
         func loadCursor() async throws -> SyncCursor? { try await inner.loadCursor() }
         func saveCursor(_ cursor: SyncCursor) async throws { try await inner.saveCursor(cursor) }
+        private func locked<T>(_ body: () -> T) -> T {
+            lock.lock(); defer { lock.unlock() }
+            return body()
+        }
         func persist(_ change: ChangeEvent) async throws {
-            lock.lock(); _rowWrites += 1; lock.unlock()
+            locked { _rowWrites += 1 }
             try await inner.persist(change)
         }
         func clearRows() async throws { try await inner.clearRows() }
         func persistBatch(_ changes: [ChangeEvent], cursor: SyncCursor?) async throws {
-            lock.lock()
-            _batches += 1
-            let fail = failNextBatch
-            failNextBatch = false
-            lock.unlock()
+            let fail: Bool = locked {
+                _batches += 1
+                let f = failNextBatch
+                failNextBatch = false
+                return f
+            }
             if fail { throw PylonError.http(status: 507, code: "DISK_FULL", message: nil) }
             try await inner.persistBatch(changes, cursor: cursor)
         }

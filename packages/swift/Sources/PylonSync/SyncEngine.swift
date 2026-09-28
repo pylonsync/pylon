@@ -122,9 +122,27 @@ public actor SyncEngine {
     /// Set when a batch failed to write; the on-disk cursor then stays
     /// frozen so a restart re-pulls the gap (TS `persistDegraded`).
     private var persistDegraded = false
-    /// Bumped by `resetReplica`: a batch taken before the wipe must not
-    /// land after it.
-    private var writeEpoch: UInt64 = 0
+    /// Bumped by every replica reset. A pull records the epoch it started
+    /// in and drops its pages once a reset happened: they belong to the
+    /// wiped replica.
+    private var replicaEpoch: UInt64 = 0
+    /// > 0 while `resetReplica` runs. Live frames arriving then come from
+    /// the socket of the replica being wiped and are dropped; the pull
+    /// that follows every reset delivers anything current.
+    private var resetDepth = 0
+    /// The user the replica is being synced for. Set at the START of an
+    /// identity flip (before any await), so a session refresh that runs
+    /// during the flip (the reconnect's `connectWs`) sees no second flip.
+    private var replicaUserId: String? = nil
+    private var replicaUserKnown = false
+    /// Offline writes held while nobody is signed in, and the user they
+    /// belong to (nil = no hold). A session that expires or signs out
+    /// keeps its queue here instead of discarding it; the next identity
+    /// decides: the same user (or a guest becoming a user) gets them
+    /// pushed, anyone else gets them discarded. Pushes wait while held.
+    /// Parity with TS `heldQueueOwner`.
+    private var heldQueue: HeldQueue? = nil
+    private struct HeldQueue { let owner: String? }
     private var lastSeenToken: String? = nil
     private var lastSeenTokenObserved = false
     private var lastSeenTenant: String? = nil
@@ -340,20 +358,23 @@ public actor SyncEngine {
     public func pull() async {
         let tokenNow = await client.currentToken()
         if lastSeenTokenObserved && lastSeenToken != tokenNow {
-            // Identity flip → wipe the previous identity's rows AND queued
-            // writes (don't push user A's offline mutations under B's token).
-            await resetReplica(wipeMutations: true)
-            // This pull already reset the replica and cycles the socket,
-            // so the session refresh must not do either a second time.
-            Task { await self.refreshResolvedSession(replicaAlreadyReset: true) }
+            lastSeenToken = tokenNow
             // The live socket authenticated as the OLD identity and keeps
             // streaming that identity's events until it reconnects. Cycle
-            // it so the next connect binds the new token. Parity with the
-            // TS engine's transport cycle on `tokenChanged`.
+            // it BEFORE the wipe so none of its frames land in the new
+            // replica. Parity with the TS engine's `tokenChanged` path.
             cycleTransport()
+            // Hold the queued offline writes until the session refresh says
+            // who signed in; it pushes or discards them.
+            if heldQueue == nil { heldQueue = HeldQueue(owner: resolvedSession.userId) }
+            await resetReplica(wipeMutations: false)
+            // This pull already reset the replica and cycled the socket, so
+            // the session refresh must not do either a second time.
+            Task { await self.refreshResolvedSession(replicaAlreadyReset: true) }
         }
         lastSeenToken = tokenNow
         lastSeenTokenObserved = true
+        let epoch = replicaEpoch
 
         // A cold pull (cursor == 0) drains a full snapshot — paginated by the
         // server via `snapshot_after` (NOT `has_more`), which the engine
@@ -393,6 +414,10 @@ public actor SyncEngine {
                 pages += 1
                 let since = snapshotAfter != nil ? sinceParam : nextSince
                 let resp = try await client.syncPull(since: since, snapshotAfter: snapshotAfter)
+                // A reset ran while this page was in flight: it belongs to
+                // the wiped replica. The pull that follows the reset
+                // starts over.
+                if epoch != replicaEpoch { break }
                 // Reset the 410 circuit breaker ONLY on a successful DELTA
                 // pull — a snapshot success leaving the counter intact means
                 // repeated resyncs escalate backoff instead of melting egress.
@@ -405,6 +430,7 @@ public actor SyncEngine {
                 // and this task interleave only at suspension points
                 // (the network await vs. the store await).
                 pendingApply = Task {
+                    if epoch != self.replicaEpoch { return }
                     // Per-event monotonic filter: an already-seen seq is
                     // skipped before touching the store, so a retransmit
                     // (WS + pull window overlap) is not applied twice.
@@ -433,6 +459,8 @@ public actor SyncEngine {
                 }
             }
             if let pending = pendingApply { await pending.value }
+            // Cut short by a reset: nothing here describes the new replica.
+            if epoch != replicaEpoch { return }
             // Pull landed cleanly → replay the frames held during it, in
             // arrival order. Each one re-checks the seq gate against the
             // now-advanced cursor, so frames the pull already delivered
@@ -663,6 +691,12 @@ public actor SyncEngine {
         let pendingIds = Set(pending.map(\.id))
         attemptedOps = attemptedOps.intersection(pendingIds).union(pendingIds)
         guard !pending.isEmpty else { return }
+        // Writes held across a sign-out wait for the next identity (see
+        // `heldQueue`). Release their callers; the writes stay queued.
+        if heldQueue != nil {
+            for m in pending { await mutations.settleQueued(m.id) }
+            return
+        }
         let req = PushRequest(changes: pending.map(\.change), client_id: clientId)
         do {
             let resp = try await client.syncPush(req)
@@ -677,7 +711,12 @@ public actor SyncEngine {
                 var byOpId: [String: PushOpResult] = [:]
                 for r in results { if let op = r.op_id { byOpId[op] = r } }
                 for m in pending {
-                    guard let r = byOpId[m.id] else { continue }
+                    guard let r = byOpId[m.id] else {
+                        // No verdict for this op: it stays queued for the
+                        // next push. Release its caller (TS parity).
+                        await mutations.settleQueued(m.id)
+                        continue
+                    }
                     switch r.status {
                     case "applied", "replayed", "deduped":
                         await mutations.markApplied(m.id)
@@ -697,10 +736,11 @@ public actor SyncEngine {
                 for (i, m) in pending.enumerated() {
                     if i < resp.applied {
                         await mutations.markApplied(m.id)
+                    } else if i - resp.applied < resp.errors.count {
+                        await failPushedMutation(m, error: resp.errors[i - resp.applied])
                     } else {
-                        let idx = i - resp.applied
-                        let msg = idx < resp.errors.count ? resp.errors[idx] : "rejected"
-                        await failPushedMutation(m, error: msg)
+                        // No error for this op: it stays queued (TS parity).
+                        await mutations.settleQueued(m.id)
                     }
                 }
             }
@@ -1079,6 +1119,8 @@ public actor SyncEngine {
             return
         }
         if let change = parsed.toChangeEvent() {
+            // Reset fence (see `resetDepth`).
+            if resetDepth > 0 { return }
             // Pull fence: while a pull is in flight, hold live frames so
             // they can't advance the cursor past rows the pull hasn't
             // delivered yet (see `pullHold`). Replayed after the pull.
@@ -1155,11 +1197,10 @@ public actor SyncEngine {
             let batch = pendingWrites
             let batchCursor = pendingCursor
             let waiters = writeWaiters
-            let epoch = writeEpoch
             pendingWrites = []
             pendingCursor = nil
             writeWaiters = []
-            if let persistence, epoch == writeEpoch {
+            if let persistence {
                 do {
                     try await persistence.persistBatch(batch, cursor: persistDegraded ? nil : batchCursor)
                 } catch {
@@ -1237,28 +1278,38 @@ public actor SyncEngine {
             // reconnect as the new identity, and pull every entity from
             // zero. Always wipes, whatever `resetOnTenantFlip` says.
             // Parity with the TS engine's `applySessionTransition`.
-            let prevUserId = resolvedSession.userId
+            let prevUserId = replicaUserKnown ? replicaUserId : resolvedSession.userId
             if lastSeenTenantObserved && prevUserId != next.userId {
+                // Claim the flip before any await: a refresh that runs
+                // during it (the reconnect's `connectWs`) must not see it
+                // again and reset a second time.
+                replicaUserId = next.userId
+                replicaUserKnown = true
                 lastSeenTenant = next.tenantId
                 lastSeenTenantObserved = true
                 if !replicaAlreadyReset {
+                    if heldQueue == nil { heldQueue = HeldQueue(owner: prevUserId) }
+                    // Close the old identity's socket before the wipe.
+                    cycleTransport()
+                    await resetReplica(wipeMutations: false)
                     // Mark the current token as seen so the pull below does
                     // not detect the same flip and reset a second time.
                     lastSeenToken = await client.currentToken()
                     lastSeenTokenObserved = true
-                    // Keep queued writes only for guest → user (the server
-                    // merges the guest's rows into the new account).
-                    let guestToUser = (prevUserId?.hasPrefix("guest_") ?? false)
-                        && next.userId != nil
-                        && !(next.userId?.hasPrefix("guest_") ?? false)
-                    await resetReplica(wipeMutations: !guestToUser)
-                    cycleTransport()
+                    await settleHeldQueue(nextUserId: next.userId)
+                    resolvedSession = next
+                    store.notify()
                     await pull()
+                } else {
+                    await settleHeldQueue(nextUserId: next.userId)
+                    resolvedSession = next
+                    store.notify()
                 }
-                resolvedSession = next
-                store.notify()
+                if !(await mutations.pending().isEmpty) { Task { await self.push() } }
                 return
             }
+            replicaUserId = next.userId
+            replicaUserKnown = true
             let tenantNow = next.tenantId
             // Same verdict as the TS SessionResolver.inspectSession:
             //   tenantChanged      — a tenant we had observed moved.
@@ -1276,6 +1327,14 @@ public actor SyncEngine {
             let skipReset = !config.resetOnTenantFlip
             // A token-flip pull already reset and re-pulled under the new
             // credentials, so the tenant it carries is already applied.
+            if heldQueue != nil {
+                // A token change for the same user (rotation) held the
+                // queue; release it now that the session is known.
+                await settleHeldQueue(nextUserId: next.userId)
+                if heldQueue == nil, !(await mutations.pending().isEmpty) {
+                    Task { await self.push() }
+                }
+            }
             if tenantChanged && replicaAlreadyReset {
                 lastSeenTenant = tenantNow
                 lastSeenTenantObserved = true
@@ -1285,14 +1344,16 @@ public actor SyncEngine {
                 }
                 return
             }
+            // Record the tenant before any await so a refresh that runs
+            // during the reset sees no second flip.
+            lastSeenTenant = tenantNow
+            lastSeenTenantObserved = true
             if tenantChanged {
                 if replicaInvalidated && !skipReset {
                     // Tenant flip is an identity change → wipe rows + queued writes.
                     await resetReplica(wipeMutations: true)
                 }
             }
-            lastSeenTenant = tenantNow
-            lastSeenTenantObserved = true
             if next != resolvedSession {
                 resolvedSession = next
                 store.notify()
@@ -1310,6 +1371,22 @@ public actor SyncEngine {
         }
     }
 
+    /// Decide what happens to the held offline writes now that
+    /// `nextUserId` is signed in (see `heldQueue`). Parity with TS
+    /// `settleHeldQueue`.
+    private func settleHeldQueue(nextUserId: String?) async {
+        guard let held = heldQueue else { return }
+        guard let nextUserId else {
+            if held.owner == nil { heldQueue = nil }
+            return
+        }
+        heldQueue = nil
+        let guestToUser = (held.owner?.hasPrefix("guest_") ?? false) && !nextUserId.hasPrefix("guest_")
+        if held.owner != nextUserId && !guestToUser {
+            await mutations.wipeAll()
+        }
+    }
+
     public func notifySessionChanged() async {
         await refreshResolvedSession()
     }
@@ -1322,18 +1399,20 @@ public actor SyncEngine {
     /// resnapshot, where pending offline writes are still valid and must
     /// survive. Mirrors the TS `resetReplicaInner({ wipeMutations })`.
     public func resetReplica(wipeMutations: Bool = false) async {
+        replicaEpoch &+= 1
+        resetDepth += 1
+        defer { resetDepth -= 1 }
         cursor = SyncCursor()
         store.clearAll()
         // Drop writes queued for the old replica and let an in-flight batch
         // finish BEFORE clearing disk, so none of it lands after the wipe.
         pendingWrites = []
         pendingCursor = nil
-        writeEpoch &+= 1
         await waitForPersistIdle()
         persistDegraded = false
         if let persistence {
             try? await persistence.clearRows()
-            try? await persistence.saveCursor(cursor)
+            try? await persistence.saveCursor(SyncCursor())
         }
         if wipeMutations {
             await mutations.wipeAll()

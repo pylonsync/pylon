@@ -23,6 +23,10 @@ final class SyncEngineParityP1Tests: XCTestCase {
             me = ["user_id": userId, "tenant_id": tenantId ?? NSNull(), "is_admin": false, "roles": []]
         }
         func primePush(_ statuses: [Int]) { pushOutcomes = statuses }
+        /// `/api/auth/me` answers anonymous (an expired or revoked session).
+        func setAnonymous() {
+            me = ["user_id": NSNull(), "tenant_id": NSNull(), "is_admin": false, "roles": []]
+        }
         /// Entities whose pushed writes are rejected per op (HTTP 200 with
         /// a per-op error), like a write policy denial.
         var denied: [String: (code: String, message: String)] = [:]

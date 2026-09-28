@@ -175,6 +175,27 @@ final class IdentityResyncTests: XCTestCase {
         await engine.stop()
     }
 
+    /// The flip cycles the socket, and the reconnect's `connectWs` refreshes
+    /// the session while the flip's own pull is still running. It must not
+    /// see a second flip and reset + re-snapshot again.
+    func testSignInOnTheWebSocketTransportResetsAndSnapshotsOnce() async throws {
+        let server = Server()
+        await server.addUser(token: "tokU1", userId: "u1")
+        await server.seed("Company", "c1")
+        let (engine, client) = await makeEngine(server, transport: .websocket) { _, _ in IdleSocket() }
+        await engine.start()
+        let before = await server.pullSinces.count
+
+        await client.setSession(token: "tokU1")
+        await engine.notifySessionChanged()
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let after = Array(await server.pullSinces.dropFirst(before))
+        XCTAssertEqual(after.filter { $0 == 0 }.count, 1, "one from-zero snapshot per sign-in, saw \(after)")
+        let store = await engine.store
+        XCTAssertEqual(store.list("Company").count, 1)
+        await engine.stop()
+    }
+
     func testConcurrentScopedReconcilesFetchEveryEntity() async throws {
         let server = Server()
         await server.addUser(token: "tokU1", userId: "u1")
