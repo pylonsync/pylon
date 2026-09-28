@@ -2817,7 +2817,7 @@ impl Runtime {
     /// configured but encrypted fields present, or AEAD primitive
     /// rejection), returns a `RuntimeError` so the write surfaces
     /// `ENCRYPTION_FAILED` instead of silently writing plaintext.
-    fn maybe_encrypt_row(
+    pub(crate) fn maybe_encrypt_row(
         &self,
         entity: &str,
         data: &serde_json::Value,
@@ -2860,7 +2860,7 @@ impl Runtime {
     ///     form back into the real JSON value — callers (functions,
     ///     entity endpoints, serverData, sync events) never see the
     ///     string form.
-    fn normalize_row_on_read(&self, entity: &str, row: &mut serde_json::Value) {
+    pub(crate) fn normalize_row_on_read(&self, entity: &str, row: &mut serde_json::Value) {
         if let (Some(fields), Some(key)) = (self.encrypted_fields.get(entity), &self.encryption_key)
         {
             let field_refs: Vec<&str> = fields.iter().map(String::as_str).collect();
@@ -3042,6 +3042,11 @@ impl Runtime {
                 code: "QUERY_FAILED".into(),
                 message: format!("rotate {entity}.{field}: {e}"),
             })
+    }
+
+    /// Whether `entity` declares any `encrypted()` field.
+    pub(crate) fn has_encrypted_fields(&self, entity: &str) -> bool {
+        self.encrypted_fields.contains_key(entity)
     }
 
     /// The loaded field-encryption key set, if any.
@@ -5050,7 +5055,13 @@ impl Runtime {
                 code: "QUERY_FAILED".into(),
                 message: format!("Query failed: {e}"),
             })?;
-        Ok(rows.flatten().collect())
+        // Same read boundary as every other path: decrypt encrypted
+        // fields, parse json and vector fields.
+        let mut out: Vec<serde_json::Value> = rows.flatten().collect();
+        for row in &mut out {
+            self.normalize_row_on_read(entity, row);
+        }
+        Ok(out)
     }
 
     /// Graph query using a pre-held connection (for transactions).
@@ -5614,7 +5625,7 @@ pub(crate) fn is_dynamic_default(default: &serde_json::Value) -> bool {
     default.as_object().and_then(|o| o.get("$auth")).is_some()
 }
 
-fn resolve_or_generate_id(data: &serde_json::Value) -> Result<String, RuntimeError> {
+pub(crate) fn resolve_or_generate_id(data: &serde_json::Value) -> Result<String, RuntimeError> {
     let obj = match data.as_object() {
         Some(o) => o,
         None => return Ok(generate_id()),

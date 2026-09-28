@@ -3746,15 +3746,44 @@ impl<'a> DataStore for HookEnforcingDataStore<'a> {
 /// — the lifetime tracks through.
 pub(crate) struct PgBufferedTxStore<'a> {
     inner: &'a dyn DataStore,
+    /// Encrypts `encrypted()` fields on write and normalizes rows on read
+    /// (decrypt, parse `json` and vector fields), the same as the
+    /// runtime's own read and write paths.
+    runtime: &'a crate::Runtime,
     pending: std::sync::Mutex<Vec<pylon_sync::ChangeEvent>>,
 }
 
 impl<'a> PgBufferedTxStore<'a> {
-    pub(crate) fn new(inner: &'a dyn DataStore) -> Self {
+    pub(crate) fn new(inner: &'a dyn DataStore, runtime: &'a crate::Runtime) -> Self {
         Self {
             inner,
+            runtime,
             pending: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// `data` with its `encrypted()` fields sealed. For an insert, an id
+    /// is assigned first so the ciphertext is bound to the row.
+    fn encrypt_for_write<'d>(
+        &self,
+        entity: &str,
+        data: &'d serde_json::Value,
+        assign_id: bool,
+    ) -> Result<std::borrow::Cow<'d, serde_json::Value>, DataError> {
+        if !self.runtime.has_encrypted_fields(entity) {
+            return Ok(std::borrow::Cow::Borrowed(data));
+        }
+        let mut owned = data.clone();
+        if assign_id {
+            let id = crate::resolve_or_generate_id(&owned).map_err(runtime_err_to_data)?;
+            if let Some(obj) = owned.as_object_mut() {
+                obj.insert("id".into(), serde_json::Value::String(id));
+            }
+        }
+        self.runtime
+            .maybe_encrypt_row(entity, &owned)
+            .map(std::borrow::Cow::Owned)
+            .map_err(runtime_err_to_data)
     }
 
     fn record(
@@ -3800,16 +3829,7 @@ impl<'a> PgBufferedTxStore<'a> {
     /// here — this wrapper is the read surface mutations see, and the
     /// buffered change events must carry the parsed value too.
     fn normalize(&self, entity: &str, row: &mut serde_json::Value) {
-        if let Some(ent) = self
-            .inner
-            .manifest()
-            .entities
-            .iter()
-            .find(|e| e.name == entity)
-        {
-            crate::parse_json_fields_in_row(ent, row);
-            crate::parse_vector_fields_in_row(ent, row);
-        }
+        self.runtime.normalize_row_on_read(entity, row);
     }
 
     /// Typed dims/finiteness check for vector fields — the BYTEA bind
@@ -3832,6 +3852,29 @@ impl<'a> PgBufferedTxStore<'a> {
     }
 }
 
+/// Normalize every row in a graph query result (`{ Entity: [rows] }`).
+fn normalize_graph_result(
+    result: &mut serde_json::Value,
+    mut normalize: impl FnMut(&str, &mut serde_json::Value),
+) {
+    if let Some(obj) = result.as_object_mut() {
+        for (entity, rows) in obj.iter_mut() {
+            if let Some(rows) = rows.as_array_mut() {
+                for row in rows {
+                    normalize(entity, row);
+                }
+            }
+        }
+    }
+}
+
+fn runtime_err_to_data(e: crate::RuntimeError) -> DataError {
+    DataError {
+        code: e.code,
+        message: e.message,
+    }
+}
+
 impl<'a> DataStore for PgBufferedTxStore<'a> {
     fn manifest(&self) -> &pylon_kernel::AppManifest {
         self.inner.manifest()
@@ -3839,7 +3882,8 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
 
     fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, DataError> {
         self.validate_vectors(entity, data)?;
-        let id = self.inner.insert(entity, data)?;
+        let data = self.encrypt_for_write(entity, data, true)?;
+        let id = self.inner.insert(entity, &data)?;
         // Re-read inside the same PG tx so the broadcast carries the
         // full materialized row (server-stamped fields included). See
         // the equivalent comment on TxStore::insert. Re-read errors
@@ -3903,7 +3947,8 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
         if let Some(r) = pre_row.as_mut() {
             self.normalize(entity, r);
         }
-        let updated = self.inner.update(entity, id, data)?;
+        let data = self.encrypt_for_write(entity, data, false)?;
+        let updated = self.inner.update(entity, id, &data)?;
         if updated {
             let mut payload = match self.inner.get_by_id(entity, id) {
                 Ok(Some(full)) => full,
@@ -4046,7 +4091,9 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
     }
 
     fn query_graph(&self, query: &serde_json::Value) -> Result<serde_json::Value, DataError> {
-        self.inner.query_graph(query)
+        let mut result = self.inner.query_graph(query)?;
+        normalize_graph_result(&mut result, |entity, row| self.normalize(entity, row));
+        Ok(result)
     }
 
     fn aggregate(
@@ -4763,7 +4810,7 @@ impl FnOpsImpl {
                         (serde_json::Value, FnTrace, Vec<pylon_sync::ChangeEvent>),
                         FnCallError,
                     > = pg.with_transaction_crdt(crdt_hook, move |inner_store: &dyn DataStore| {
-                        let buffered = PgBufferedTxStore::new(inner_store);
+                        let buffered = PgBufferedTxStore::new(inner_store, self.runtime.as_ref());
                         // Wrap in HookEnforcingDataStore so TS-mutation
                         // ctx.db.X writes fire the same plugin chain as
                         // the entity-API path. Outside the buffer so
@@ -7154,11 +7201,12 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>, runner: &Arc<FnRunner>) {
                         });
                         let plugins = Arc::clone(&ops.plugins);
                         let tx_job_queue = Arc::clone(&ops.job_queue);
+                        let tx_runtime = Arc::clone(&ops.runtime);
                         let tx_result: Result<
                             (serde_json::Value, Vec<pylon_sync::ChangeEvent>),
                             FnCallError,
                         > = pg.with_transaction_crdt(crdt_hook, move |inner_store: &dyn DataStore| {
-                            let buffered = PgBufferedTxStore::new(inner_store);
+                            let buffered = PgBufferedTxStore::new(inner_store, tx_runtime.as_ref());
                             // Same wrap-with-hooks dance as the top-level
                             // mutation path so nested ctx.runMutation
                             // calls still fire TenantScopePlugin.
@@ -9519,5 +9567,146 @@ mod schedule_cancel_tests {
         let id = pending.id.clone();
         assert_eq!(queue.try_enqueue_job(pending).unwrap(), id);
         assert!(queue.cancel_pending(&id).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod mutation_read_boundary_tests {
+    //! Reads and writes inside a mutation transaction (`TxStore` on SQLite,
+    //! `PgBufferedTxStore` on Postgres) must match the runtime's own read
+    //! boundary: `json` fields parsed (null stays null), `encrypted()`
+    //! fields sealed on write and decrypted on read.
+    use super::*;
+    use pylon_kernel::{AppManifest, ManifestEntity, ManifestField};
+
+    const KEY: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn manifest() -> AppManifest {
+        let field = |name: &str, ty: &str, optional: bool, encrypted: bool| ManifestField {
+            name: name.into(),
+            field_type: ty.into(),
+            optional,
+            unique: false,
+            crdt: None,
+            server_only: encrypted,
+            readonly: false,
+            default: None,
+            enum_values: None,
+            encrypted,
+            sync_omit: false,
+        };
+        AppManifest {
+            manifest_version: 1,
+            name: "boundary".into(),
+            version: "0.1.0".into(),
+            entities: vec![ManifestEntity {
+                name: "Rep".into(),
+                fields: vec![
+                    field("orgId", "string", false, false),
+                    field("hours", "json", true, false),
+                    field("state", "json", true, false),
+                    field("ssn", "string", true, true),
+                ],
+                indexes: vec![],
+                relations: vec![],
+                crdt: false,
+                sync: true,
+                search: None,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn check_reads(store: &dyn DataStore) {
+        let id = store
+            .insert(
+                "Rep",
+                &serde_json::json!({
+                    "orgId": "o1",
+                    "hours": null,
+                    "state": {"step": 2},
+                    "ssn": "123-45-6789",
+                }),
+            )
+            .unwrap();
+        let rows = store
+            .query_filtered("Rep", &serde_json::json!({ "orgId": "o1" }))
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["hours"], serde_json::Value::Null, "{:?}", rows[0]);
+        assert_eq!(rows[0]["state"], serde_json::json!({"step": 2}));
+        assert_eq!(rows[0]["ssn"], "123-45-6789");
+
+        let graph = store
+            .query_graph(&serde_json::json!({ "Rep": { "where": { "orgId": "o1" } } }))
+            .unwrap();
+        assert_eq!(graph["Rep"][0]["hours"], serde_json::Value::Null);
+        assert_eq!(graph["Rep"][0]["state"], serde_json::json!({"step": 2}));
+        assert_eq!(graph["Rep"][0]["ssn"], "123-45-6789");
+
+        let got = store.get_by_id("Rep", &id).unwrap().unwrap();
+        assert_eq!(got["ssn"], "123-45-6789");
+
+        store
+            .update("Rep", &id, &serde_json::json!({ "ssn": "987-65-4321" }))
+            .unwrap();
+        let got = store.get_by_id("Rep", &id).unwrap().unwrap();
+        assert_eq!(got["ssn"], "987-65-4321");
+    }
+
+    #[test]
+    fn sqlite_mutation_reads_parse_json_and_decrypt() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("PYLON_ENCRYPTION_KEY", KEY);
+        let rt = Runtime::in_memory(manifest()).unwrap();
+        std::env::remove_var("PYLON_ENCRYPTION_KEY");
+        let conn = rt.lock_conn_pub().unwrap();
+        let tx = TxStore::new(&rt, &conn);
+        check_reads(&tx);
+        let raw: String = conn
+            .query_row("SELECT ssn FROM Rep", [], |r| r.get(0))
+            .unwrap();
+        assert!(raw.starts_with("enc:v2:"), "{raw}");
+    }
+
+    #[test]
+    fn postgres_mutation_writes_encrypt_and_reads_normalize() {
+        let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
+            eprintln!("skipping: PYLON_TEST_PG_URL not set");
+            return;
+        };
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let manifest = manifest();
+        let mut adapter =
+            pylon_storage::postgres::live::LivePostgresAdapter::connect(&url).unwrap();
+        adapter
+            .exec_raw("DROP TABLE IF EXISTS \"Rep\" CASCADE")
+            .unwrap();
+        let plan = adapter.plan_from_live(&manifest).unwrap();
+        adapter.apply_plan(&plan).unwrap();
+        std::env::set_var("PYLON_ENCRYPTION_KEY", KEY);
+        let rt = Runtime::open_postgres(&url, manifest).unwrap();
+        std::env::remove_var("PYLON_ENCRYPTION_KEY");
+
+        let pg = rt.pg_backend().unwrap();
+        pg.store
+            .with_transaction(|inner: &dyn DataStore| -> Result<(), DataError> {
+                let buffered = PgBufferedTxStore::new(inner, &rt);
+                check_reads(&buffered);
+                Ok(())
+            })
+            .unwrap();
+
+        let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+        let raw: String = client
+            .query_one("SELECT ssn FROM \"Rep\"", &[])
+            .unwrap()
+            .get(0);
+        assert!(
+            raw.starts_with("enc:v2:"),
+            "plaintext reached Postgres: {raw}"
+        );
     }
 }

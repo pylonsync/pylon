@@ -219,7 +219,8 @@ impl EntityWriter {
                 }
                 // Plugins run as on the entity API; change events are held
                 // until the commit.
-                let buffered = crate::datastore::PgBufferedTxStore::new(inner);
+                let buffered =
+                    crate::datastore::PgBufferedTxStore::new(inner, self.runtime.as_ref());
                 let hooked = crate::datastore::HookEnforcingDataStore::new(
                     &buffered,
                     plugins,
