@@ -787,7 +787,7 @@ fn rebuild_with_retry(port: u16, scope: &crate::listen::ListenScope) -> Option<A
 /// per-IP concurrency caps still bound total load; the spoofer can only
 /// scatter their own requests across buckets. For strict per-IP enforcement,
 /// lock the origin to the edge or pin a single unspoofable header.
-fn client_ip_headers() -> &'static [String] {
+pub(crate) fn client_ip_headers() -> &'static [String] {
     static H: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     H.get_or_init(|| {
         let on_fly = std::env::var_os("FLY_APP_NAME").is_some()
@@ -906,18 +906,49 @@ fn resolve_client_ip(request: &tiny_http::Request, trust_proxy_hops: usize) -> S
         .remote_addr()
         .map(|a| a.ip().to_string())
         .unwrap_or_default();
+    // tiny_http stores field names as AsciiStr; cast back to &str so
+    // we can do the case-insensitive compare RFC 7230 calls for.
+    client_ip_from(
+        socket_ip,
+        |name| {
+            request
+                .headers()
+                .iter()
+                .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name))
+                .map(|h| h.value.as_str().to_string())
+        },
+        client_ip_headers(),
+        trust_proxy_hops,
+    )
+}
+
+/// `PYLON_TRUST_PROXY_HOPS`: how many trusted reverse proxies sit in front
+/// of the server (see [`resolve_client_ip`]). 0 when unset.
+pub(crate) fn trust_proxy_hops_from_env() -> usize {
+    std::env::var("PYLON_TRUST_PROXY_HOPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+}
+
+/// The client IP of a request whose socket peer is `socket_ip`, from its
+/// headers (`header(name)`, any case): the configured client-IP headers,
+/// then X-Forwarded-For with `trust_proxy_hops` trusted proxies, then the
+/// socket address. Shared by the HTTP server and the dedicated WebSocket
+/// listener so both key per-client limits the same way.
+pub(crate) fn client_ip_from(
+    socket_ip: String,
+    header: impl Fn(&str) -> Option<String>,
+    client_ip_headers: &[String],
+    trust_proxy_hops: usize,
+) -> String {
     // Edge client-IP header(s) take precedence, tried in priority order (e.g.
     // Cloudflare's CF-Connecting-IP, then Fly-Client-IP). Use the first one
     // present + parseable on this request; a configured header that's absent
     // (a direct hit that bypassed that edge) falls through to the next, then
     // to the X-Forwarded-For logic — never trust a missing value.
-    for hdr in client_ip_headers() {
-        if let Some(v) = request
-            .headers()
-            .iter()
-            .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(hdr))
-            .map(|h| h.value.as_str().trim().to_string())
-        {
+    for hdr in client_ip_headers {
+        if let Some(v) = header(hdr).map(|v| v.trim().to_string()) {
             if v.parse::<std::net::IpAddr>().is_ok() {
                 return v;
             }
@@ -926,18 +957,7 @@ fn resolve_client_ip(request: &tiny_http::Request, trust_proxy_hops: usize) -> S
     if trust_proxy_hops == 0 {
         return socket_ip;
     }
-    // tiny_http stores field names as AsciiStr; cast back to &str so
-    // we can do the case-insensitive compare RFC 7230 calls for.
-    let xff = request
-        .headers()
-        .iter()
-        .find(|h| {
-            h.field
-                .as_str()
-                .as_str()
-                .eq_ignore_ascii_case("X-Forwarded-For")
-        })
-        .map(|h| h.value.as_str().to_string());
+    let xff = header("X-Forwarded-For");
     let Some(xff) = xff else {
         return socket_ip;
     };
@@ -3276,10 +3296,7 @@ fn start_server(
     // Nth-from-the-right address in XFF, which is the IP the closest
     // trusted proxy actually saw the request from. Without this, every
     // unauth caller behind the proxy shares one rate-limit bucket.
-    let trust_proxy_hops: usize = std::env::var("PYLON_TRUST_PROXY_HOPS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
+    let trust_proxy_hops: usize = trust_proxy_hops_from_env();
     if let Some(warning) = client_ip_source_warning(is_dev, trust_proxy_hops, client_ip_headers()) {
         tracing::warn!("{warning}");
     }

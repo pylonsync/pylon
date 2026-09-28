@@ -1769,7 +1769,7 @@ pub fn start_ws_server(
                     hub,
                     auth,
                     stream,
-                    peer_ip.map(|ip| ip.to_string()),
+                    peer_ip.map(|ip| ip.to_string()).unwrap_or_default(),
                     fetcher,
                     reactive_cl,
                     rooms_cl,
@@ -1793,7 +1793,8 @@ fn handle_ws_connection(
     hub: Arc<WsHub>,
     auth: Arc<WsAuth>,
     stream: TcpStream,
-    client_ip: Option<String>,
+    // The socket peer's address; empty when it could not be read.
+    socket_ip: String,
     snapshot_fetcher: Option<SnapshotFetcher>,
     reactive: Option<Arc<crate::reactive::ReactiveRegistry>>,
     rooms: Option<Arc<dyn RoomBridge>>,
@@ -1834,6 +1835,10 @@ fn handle_ws_connection(
     // header callback must return synchronously with a Response.
     let token_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let slot_for_cb = Arc::clone(&token_slot);
+    // The client's address as the HTTP server would resolve it (trusted
+    // proxy hops, client-IP headers), from the handshake headers.
+    let ip_slot: Arc<Mutex<String>> = Arc::new(Mutex::new(socket_ip.clone()));
+    let ip_for_cb = Arc::clone(&ip_slot);
     // Cap WebSocket frame size to bound memory per connection. The
     // tungstenite default (64 MiB) is too generous — a single client
     // can shovel huge frames and starve other connections. The cap
@@ -1892,6 +1897,12 @@ fn handle_ws_connection(
                 }
             }
             *slot_for_cb.lock().unwrap() = auth;
+            *ip_for_cb.lock().unwrap() = handshake_client_ip(
+                req,
+                socket_ip.clone(),
+                crate::server::client_ip_headers(),
+                crate::server::trust_proxy_hops_from_env(),
+            );
             Ok(resp)
         },
         Some(ws_config),
@@ -1905,6 +1916,7 @@ fn handle_ws_connection(
     // a custom error response, and we already have the socket open for
     // a clean close frame.
     let token = token_slot.lock().unwrap().clone();
+    let client_ip = Some(ip_slot.lock().unwrap().clone()).filter(|ip| !ip.is_empty());
 
     // Auth resolution happens inside run_authenticated_session so we
     // can't add the client to the hub until that completes — but we
@@ -1929,6 +1941,27 @@ fn handle_ws_connection(
         rooms,
         write_stream,
     );
+}
+
+/// The client IP of a WebSocket handshake on the dedicated listener,
+/// resolved as the HTTP server resolves a request's.
+fn handshake_client_ip(
+    req: &Request,
+    socket_ip: String,
+    client_ip_headers: &[String],
+    trust_proxy_hops: usize,
+) -> String {
+    crate::server::client_ip_from(
+        socket_ip,
+        |name| {
+            req.headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        },
+        client_ip_headers,
+        trust_proxy_hops,
+    )
 }
 
 /// Take an already-handshaken WebSocket, resolve its bearer token,
@@ -2245,17 +2278,17 @@ fn run_authenticated_session(
                         if let Some(reg) = reactive.as_ref() {
                             // Rate-limit key: the user, else the address,
                             // matching `POST /api/fn/<name>`.
-                            let rate_identity = auth_ctx
-                                .user_id
-                                .as_deref()
-                                .or(client_ip.as_deref())
-                                .unwrap_or("anon");
+                            let rate_identity = reactive_rate_identity(
+                                auth_ctx.user_id.as_deref(),
+                                client_ip.as_deref(),
+                                client_id,
+                            );
                             handle_reactive_control(
                                 reg,
                                 &hub,
                                 client_id,
                                 &auth_ctx,
-                                rate_identity,
+                                &rate_identity,
                                 kind,
                                 &parsed,
                             );
@@ -2582,6 +2615,22 @@ fn fanout_room_leaves_on_disconnect(
     for room in left_rooms {
         let member = serde_json::json!({ "user_id": user_id });
         hub.push_room_update(&room, "leave", Some(member), None);
+    }
+}
+
+/// The rate-limit key for a connection's reactive subscriptions: the
+/// user, else the client IP, else this connection alone. A shared
+/// fallback key would let one client with no known address use up the
+/// allowance of every other such client.
+fn reactive_rate_identity(
+    user_id: Option<&str>,
+    client_ip: Option<&str>,
+    client_id: u64,
+) -> String {
+    match (user_id, client_ip) {
+        (Some(user), _) => user.to_string(),
+        (None, Some(ip)) => ip.to_string(),
+        (None, None) => format!("ws-client:{client_id}"),
     }
 }
 
@@ -3487,6 +3536,46 @@ mod tests {
         fn recent_traces(&self, _: usize) -> Vec<pylon_functions::trace::FnTrace> {
             vec![]
         }
+    }
+
+    fn handshake(headers: &[(&str, &str)]) -> Request {
+        let mut req = Request::builder().uri("/");
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        req.body(()).unwrap()
+    }
+
+    /// Review P2: the dedicated WS listener keyed an anonymous
+    /// subscriber's rate limit on the raw socket address (behind a proxy,
+    /// every client shared the proxy's) and on the literal "anon" when the
+    /// address was unknown. It now resolves the client IP as HTTP does.
+    #[test]
+    fn the_ws_listener_resolves_the_client_ip_like_http() {
+        let proxy = "10.0.0.2".to_string();
+        let xff = handshake(&[("X-Forwarded-For", "203.0.113.9, 10.0.0.1")]);
+        // No trusted hop: the socket address, whatever the header says.
+        assert_eq!(handshake_client_ip(&xff, proxy.clone(), &[], 0), "10.0.0.2");
+        // One trusted proxy: the address it saw.
+        assert_eq!(handshake_client_ip(&xff, proxy.clone(), &[], 1), "10.0.0.1");
+        assert_eq!(
+            handshake_client_ip(&xff, proxy.clone(), &[], 2),
+            "203.0.113.9"
+        );
+        // A configured client-IP header wins.
+        let cf = handshake(&[("CF-Connecting-IP", "198.51.100.4")]);
+        assert_eq!(
+            handshake_client_ip(&cf, proxy, &["cf-connecting-ip".to_string()], 0),
+            "198.51.100.4"
+        );
+
+        assert_eq!(reactive_rate_identity(Some("u1"), Some("1.2.3.4"), 7), "u1");
+        assert_eq!(reactive_rate_identity(None, Some("1.2.3.4"), 7), "1.2.3.4");
+        assert_eq!(reactive_rate_identity(None, None, 7), "ws-client:7");
+        assert_ne!(
+            reactive_rate_identity(None, None, 7),
+            reactive_rate_identity(None, None, 8)
+        );
     }
 
     #[test]
