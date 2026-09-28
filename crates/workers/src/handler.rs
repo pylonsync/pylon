@@ -315,10 +315,17 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> WResult<Response> {
         trusted_origins: &[],
     };
 
-    let (status, response_body, _ct) = route(&ctx, method, &url, &body, auth_token.as_deref());
+    let (status, response_body, content_type) =
+        route(&ctx, method, &url, &body, auth_token.as_deref());
 
     let mut headers = Headers::new();
-    headers.set("Content-Type", "application/json")?;
+    // Headers a handler attached (Set-Cookie, Location, a webhook
+    // action's raw-response headers) go first; the server-owned headers
+    // below overwrite any clash.
+    for (name, value) in ctx.take_response_headers() {
+        headers.append(&name, &value)?;
+    }
+    headers.set("Content-Type", &content_type)?;
     headers.set("Access-Control-Allow-Origin", "*")?;
     headers.set(
         "Access-Control-Allow-Methods",

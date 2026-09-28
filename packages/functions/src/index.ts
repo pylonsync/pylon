@@ -21,6 +21,7 @@
 export { query, mutation, action } from "./define";
 export { v } from "./validators";
 export { workflow } from "./workflows";
+export type { RawResponse, RawResponseInit } from "./response";
 export {
   agent,
   isAgentDefinition,

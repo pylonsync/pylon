@@ -287,6 +287,86 @@ export default action({
 
 Actions have no `ctx.db`. They reach the database through `ctx.runQuery(name, args)` / `ctx.runMutation(name, args)`. Each of those runs as its own transaction, but the action as a whole is not atomic. If a sequence of writes must commit or roll back together, do them inside a single mutation and have the action call it once.
 
+## Receiving webhooks
+
+`POST /api/webhooks/<action>` calls an action with the raw request on
+`ctx.request`:
+
+| Field | |
+| --- | --- |
+| `method` | HTTP method. |
+| `path` | Path and query string, as received. |
+| `url` | Full URL the client requested (scheme, host, path, query). See below. |
+| `headers` | Header names lowercased; repeated headers joined with `, `. |
+| `rawBody` | The exact body bytes, for signature checks. |
+
+The action's `auth` mode applies. A provider does not sign in, so a
+receiver declares `auth: "public"` and verifies the provider's signature
+itself.
+
+By default the return value is sent as JSON with status 200. Return
+`ctx.response({ status, contentType, headers, body })` to send a
+different status, content type, or body. Only `/api/webhooks/<action>`
+sends it raw; `/api/fn/<action>` returns the same value as JSON.
+`status` must be 200-599. The server sets `Content-Length`,
+`Connection`, `Transfer-Encoding`, CORS, and its security headers, so an
+action cannot set those, and it cannot set `Set-Cookie`. Header values
+with CR, LF, or non-ASCII characters are rejected.
+
+This Twilio receiver verifies `X-Twilio-Signature`, hands the message
+to a workflow, and answers with TwiML:
+
+```ts
+// functions/twilioSms.ts
+import { action } from "@pylonsync/functions";
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+export default action({
+  auth: "public",
+  async handler(ctx) {
+    const req = ctx.request!;
+    const params = new URLSearchParams(req.rawBody);
+
+    // Twilio signs the full URL plus the POST params sorted by name.
+    const signed =
+      req.url +
+      [...params.keys()].sort().map((k) => k + params.get(k)).join("");
+    const expected = createHmac("sha1", process.env.TWILIO_AUTH_TOKEN!)
+      .update(signed)
+      .digest("base64");
+    const given = req.headers["x-twilio-signature"] ?? "";
+    if (
+      given.length !== expected.length ||
+      !timingSafeEqual(Buffer.from(given), Buffer.from(expected))
+    ) {
+      return ctx.response({ status: 403, body: "bad signature" });
+    }
+
+    const leadId = await ctx.runMutation("recordInboundSms", {
+      from: params.get("From"),
+      body: params.get("Body"),
+    });
+    const runs = await ctx.workflows.list({ key: leadId, status: "active" });
+    for (const run of runs) {
+      await ctx.workflows.sendEvent(run.id, "seller_replied", {
+        body: params.get("Body"),
+      });
+    }
+    return ctx.response({ contentType: "text/xml", body: "<Response/>" });
+  },
+});
+```
+
+`ctx.request.url` is the URL the provider called. Behind a proxy, Pylon
+takes the host from `X-Forwarded-Host`, then `Host`, but only when that
+host is trusted: loopback, the `PYLON_PUBLIC_URL` host,
+`PYLON_CANONICAL_HOST`, a `PYLON_TRUSTED_HOSTS` entry, or one of the
+app's domains. The scheme comes from `X-Forwarded-Proto` (`http` or
+`https`), else `https` (`http` for loopback). When the host is not
+trusted, the `PYLON_PUBLIC_URL` origin is used instead. Set
+`PYLON_PUBLIC_URL` in production so the URL matches what the provider
+signed.
+
 ## Streaming LLM output
 
 `ctx.llm.complete(request)` sends a completion and resolves once the model has finished generating. `ctx.llm.stream(request, onEvent)` sends the same request but calls `onEvent` for each event as the provider emits it, then resolves with the same assembled response `complete` would have returned. A handler can push text to the client as it arrives and still inspect `stop_reason` afterwards.

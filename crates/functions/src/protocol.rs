@@ -44,6 +44,12 @@ pub struct RequestInfo {
     pub method: String,
     /// Full request path (with query string if any).
     pub path: String,
+    /// The full URL the client requested: public scheme and host, then
+    /// `path`. Webhook providers that sign the whole URL (Twilio) verify
+    /// against this. See `pylon_router::public_url` for how the scheme
+    /// and host are chosen.
+    #[serde(default)]
+    pub url: String,
     /// Lowercased header names → values. Multi-value headers are joined
     /// with `, ` per RFC 7230. This trades some fidelity for a map shape
     /// that's ergonomic to consume from TS.

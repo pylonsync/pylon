@@ -8446,7 +8446,13 @@ fn start_server(
             return;
         }
 
-        let (status, response_body, content_type, is_studio, extra_headers) = if is_studio_shell_path(
+        let (status, response_body, content_type, is_studio, extra_headers): (
+            u16,
+            String,
+            std::borrow::Cow<'static, str>,
+            bool,
+            Vec<(String, String)>,
+        ) = if is_studio_shell_path(
             &url,
         ) && method == Method::Get
         {
@@ -8549,7 +8555,7 @@ fn start_server(
             (
                 200u16,
                 html,
-                "text/html",
+                "text/html".into(),
                 true,
                 Vec::<(String, String)>::new(),
             )
@@ -8588,7 +8594,7 @@ fn start_server(
                     (
                         200u16,
                         body,
-                        "application/javascript",
+                        "application/javascript".into(),
                         true,
                         Vec::<(String, String)>::new(),
                     )
@@ -8599,7 +8605,7 @@ fn start_server(
                         "STUDIO_EXT_NOT_FOUND",
                         "No studio.entry.tsx bundle is configured for this project.",
                     ),
-                    "application/json",
+                    "application/json".into(),
                     false,
                     Vec::new(),
                 ),
@@ -8615,7 +8621,7 @@ fn start_server(
                 (
                     e.status,
                     json_error(&e.code, &e.message),
-                    "application/json",
+                    "application/json".into(),
                     false,
                     Vec::new(),
                 )
@@ -8623,7 +8629,7 @@ fn start_server(
                 pr.try_handle_route(method.as_str(), &url, &body, &auth_ctx)
             {
                 // Plugin handled the route.
-                (s, b, "application/json", false, Vec::new())
+                (s, b, "application/json".into(), false, Vec::new())
             } else {
                 let notifier = WsSseNotifier::with_cluster_bus(
                     Arc::clone(&wh),
@@ -8706,7 +8712,7 @@ fn start_server(
                     response_headers: std::cell::RefCell::new(Vec::new()),
                 };
                 let http_method = HttpMethod::from_str(method.as_str());
-                let (s, b, _ct) = pylon_router::route(
+                let (s, b, ct) = pylon_router::route(
                     &router_ctx,
                     http_method,
                     &url,
@@ -8714,7 +8720,7 @@ fn start_server(
                     auth_token.as_deref(),
                 );
                 let extra_headers = router_ctx.take_response_headers();
-                (s, b, "application/json", false, extra_headers)
+                (s, b, ct, false, extra_headers)
             }
         };
 
@@ -8728,7 +8734,12 @@ fn start_server(
         crate::metrics::set_current_response_bytes(response_body.len());
         let mut response = Response::from_string(&response_body)
             .with_status_code(status)
-            .with_header(Header::from_bytes("Content-Type", content_type).unwrap())
+            .with_header(
+                Header::from_bytes("Content-Type", content_type.as_bytes().to_vec())
+                    .unwrap_or_else(|_| {
+                        Header::from_bytes("Content-Type", "application/json").unwrap()
+                    }),
+            )
             .with_header(
                 Header::from_bytes(
                     "Access-Control-Allow-Origin",

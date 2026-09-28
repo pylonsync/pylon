@@ -48,6 +48,7 @@ import type {
 } from "./types";
 import { normalizeAuthClaims } from "./auth";
 import { makeRequireMember } from "./member";
+import { response } from "./response";
 import { isDevMode } from "./ssr-runtime";
 import { validateArgs } from "./validators";
 import { serverBundle } from "./server-bundle";
@@ -1193,6 +1194,7 @@ function buildActionCtx(
     normalizedRequest = {
       method: String(r.method ?? ""),
       path: String(r.path ?? ""),
+      url: String(r.url ?? ""),
       headers: (r.headers as Record<string, string>) ?? {},
       rawBody: String(r.raw_body ?? r.rawBody ?? ""),
     };
@@ -1241,6 +1243,7 @@ function buildActionCtx(
       }) as Promise<any[]>,
     ),
     request: normalizedRequest,
+    response,
   };
 }
 

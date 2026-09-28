@@ -568,6 +568,8 @@ ctx.email.send(to, subject, body)      // transactional email via PYLON_EMAIL_* 
 ctx.email.send({ to, subject, text, html?, attachments? })  // options form: HTML + base64 attachments
 throw ctx.error("CODE", "message")
 ctx.request?.rawBody / ctx.request?.headers   // raw HTTP request (verify Stripe/GitHub webhook sigs)
+ctx.request?.url                              // full public URL (Twilio signs it)
+return ctx.response({ status, contentType, headers, body })  // raw reply from /api/webhooks/<name> (TwiML, empty 200)
 
 // ---- mutation + action: LLM, streaming, server push ----
 await ctx.llm.complete(request)         // request: { messages, system?, tools?, model?, max_tokens?, temperature? }

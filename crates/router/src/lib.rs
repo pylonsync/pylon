@@ -13,6 +13,8 @@ use std::cell::RefCell;
 
 pub mod merge;
 pub mod mutate;
+pub mod public_url;
+pub mod raw_response;
 mod routes;
 
 /// Test-only knob for the snapshot scan budget. Re-exported so integration
@@ -851,6 +853,39 @@ impl<'a> RouterContext<'a> {
         std::mem::take(&mut *self.response_headers.borrow_mut())
     }
 
+    /// Set the response's `Content-Type`. [`route`] returns it as the content
+    /// type (default `application/json`), so it never reaches the extra
+    /// headers the runtime drains with [`Self::take_response_headers`].
+    pub fn set_response_content_type(&self, content_type: impl Into<String>) {
+        self.add_response_header("Content-Type", content_type);
+    }
+
+    /// Remove every queued `Content-Type` header and return the last one.
+    fn take_response_content_type(&self) -> Option<String> {
+        let mut content_type = None;
+        self.response_headers.borrow_mut().retain(|(name, value)| {
+            if name.eq_ignore_ascii_case("content-type") {
+                content_type = Some(value.clone());
+                false
+            } else {
+                true
+            }
+        });
+        content_type
+    }
+
+    /// The full URL the client requested (`scheme://host/path?query`). See
+    /// [`public_url::request_public_url`] for how the scheme and host are
+    /// chosen and which proxy headers are trusted.
+    pub fn request_public_url(&self, path_and_query: &str) -> String {
+        public_url::request_public_url(
+            self.request_headers,
+            path_and_query,
+            &public_url::PublicOriginConfig::from_env(),
+            |host| (self.tenant_origin)(&format!("https://{host}")),
+        )
+    }
+
     /// Read the request's `Origin` header, if any. Browsers always send
     /// Origin on cross-origin XHR/fetch and on POSTs; non-browser
     /// callers (CLI, server-to-server) typically don't.
@@ -1404,16 +1439,22 @@ pub(crate) fn url_encode(s: &str) -> String {
 
 /// Route an HTTP request to the appropriate handler.
 ///
-/// Returns `(status_code, response_body, content_type)`.
+/// Returns `(status_code, response_body, content_type)`. The content type is
+/// `application/json` unless a handler set another with
+/// [`RouterContext::set_response_content_type`].
 pub fn route(
     ctx: &RouterContext,
     method: HttpMethod,
     url: &str,
     body: &str,
     auth_token: Option<&str>,
-) -> (u16, String, &'static str) {
+) -> (u16, String, std::borrow::Cow<'static, str>) {
     let (status, body) = route_inner(ctx, method, url, body, auth_token);
-    (status, body, "application/json")
+    let content_type = match ctx.take_response_content_type() {
+        Some(ct) => std::borrow::Cow::Owned(ct),
+        None => std::borrow::Cow::Borrowed("application/json"),
+    };
+    (status, body, content_type)
 }
 
 fn route_inner(
@@ -4596,6 +4637,10 @@ mod auth_gate_tests {
         registered: Vec<String>,
         calls: std::sync::Mutex<Vec<(String, serde_json::Value, Option<String>)>>,
         fail: bool,
+        /// Return value for successful calls. Default `{ "ok": true }`.
+        reply: Option<serde_json::Value>,
+        /// The `RequestInfo` of the last call.
+        last_request: std::sync::Mutex<Option<pylon_functions::protocol::RequestInfo>>,
         /// Per-function (type, auth mode, internal). Unlisted functions are
         /// non-internal `auth: "user"` mutations.
         defs: std::collections::HashMap<
@@ -4614,8 +4659,15 @@ mod auth_gate_tests {
                 registered: registered.iter().map(|s| s.to_string()).collect(),
                 calls: std::sync::Mutex::new(Vec::new()),
                 fail,
+                reply: None,
+                last_request: std::sync::Mutex::new(None),
                 defs: std::collections::HashMap::new(),
             }
+        }
+
+        fn replying(mut self, value: serde_json::Value) -> Self {
+            self.reply = Some(value);
+            self
         }
 
         fn define(
@@ -4666,7 +4718,7 @@ mod auth_gate_tests {
             args: serde_json::Value,
             auth: pylon_functions::protocol::AuthInfo,
             _on_stream: Option<pylon_functions::runner::StreamCallback>,
-            _request: Option<pylon_functions::protocol::RequestInfo>,
+            request: Option<pylon_functions::protocol::RequestInfo>,
             _stream_id: Option<String>,
         ) -> Result<
             (serde_json::Value, pylon_functions::trace::FnTrace),
@@ -4676,6 +4728,7 @@ mod auth_gate_tests {
                 .lock()
                 .unwrap()
                 .push((fn_name.to_string(), args, auth.user_id.clone()));
+            *self.last_request.lock().unwrap() = request;
             if self.fail {
                 return Err(pylon_functions::runner::FnCallError {
                     code: "PURGE_FAILED".into(),
@@ -4683,7 +4736,9 @@ mod auth_gate_tests {
                 });
             }
             Ok((
-                serde_json::json!({ "ok": true }),
+                self.reply
+                    .clone()
+                    .unwrap_or_else(|| serde_json::json!({ "ok": true })),
                 pylon_functions::trace::TraceBuilder::new(
                     "c1".into(),
                     fn_name.to_string(),
@@ -4726,6 +4781,84 @@ mod auth_gate_tests {
             out = (status, body);
         });
         out
+    }
+
+    fn twiml_reply() -> serde_json::Value {
+        serde_json::json!({
+            "__pylonResponse": 1,
+            "status": 200,
+            "headers": { "content-type": "text/xml", "X-Handled-By": "sms" },
+            "body": "<Response/>",
+        })
+    }
+
+    #[test]
+    fn webhook_sends_a_raw_response_as_is() {
+        let anon = AuthContext::anonymous();
+        let fns = webhook_fns().replying(twiml_reply());
+        with_ctx_functions(&anon, empty_manifest(), Some(&fns), |ctx| {
+            let (status, body, ct) = route(
+                ctx,
+                HttpMethod::Post,
+                "/api/webhooks/stripeWebhook?x=1",
+                "Body=hi&From=%2B1555",
+                None,
+            );
+            assert_eq!(status, 200);
+            assert_eq!(body, "<Response/>");
+            assert_eq!(ct, "text/xml");
+            let extra = ctx.take_response_headers();
+            assert_eq!(extra, vec![("x-handled-by".to_string(), "sms".to_string())]);
+        });
+        let req = fns.last_request.lock().unwrap().clone().unwrap();
+        assert_eq!(req.path, "/api/webhooks/stripeWebhook?x=1");
+        assert_eq!(req.raw_body, "Body=hi&From=%2B1555");
+        // No Host header in the test context and no configured origin:
+        // the URL falls back to the request target.
+        assert!(
+            req.url.ends_with("/api/webhooks/stripeWebhook?x=1"),
+            "{}",
+            req.url
+        );
+    }
+
+    #[test]
+    fn webhook_answers_500_for_an_invalid_raw_response() {
+        let anon = AuthContext::anonymous();
+        let fns = webhook_fns().replying(serde_json::json!({
+            "__pylonResponse": 1,
+            "headers": { "Set-Cookie": "session=stolen" },
+        }));
+        with_ctx_functions(&anon, empty_manifest(), Some(&fns), |ctx| {
+            let (status, body, ct) = route(
+                ctx,
+                HttpMethod::Post,
+                "/api/webhooks/stripeWebhook",
+                "",
+                None,
+            );
+            assert_eq!(status, 500);
+            assert!(body.contains("INVALID_WEBHOOK_RESPONSE"), "{body}");
+            assert_eq!(ct, "application/json");
+            assert!(ctx.take_response_headers().is_empty());
+        });
+    }
+
+    #[test]
+    fn fn_route_returns_a_raw_response_as_plain_json() {
+        let user = AuthContext::authenticated("u1".into());
+        let fns = webhook_fns().replying(twiml_reply());
+        with_ctx_functions(&user, empty_manifest(), Some(&fns), |ctx| {
+            let (status, body, ct) = route(ctx, HttpMethod::Post, "/api/fn/chargeCard", "{}", None);
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(ct, "application/json");
+            let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(value["body"], "<Response/>");
+            assert!(ctx
+                .take_response_headers()
+                .iter()
+                .all(|(n, _)| n != "x-handled-by"));
+        });
     }
 
     /// Prior vuln: `/api/webhooks/<fn>` skipped the function auth gate, so

@@ -1,6 +1,7 @@
 /**
  * Type definitions for the function system.
  */
+import type { RawResponse, RawResponseInit } from "./response";
 
 // ---------------------------------------------------------------------------
 // Auth
@@ -1322,13 +1323,35 @@ export interface ActionCtx<R extends AuthRequirement = "optional"> {
    * ```
    */
   request?: RequestInfo;
+  /**
+   * Build a raw HTTP response. When an action called through
+   * `/api/webhooks/<name>` returns it, the route sends this status,
+   * content type, headers, and body instead of JSON. Other routes return
+   * it as ordinary JSON data. Throws on an invalid status or header.
+   *
+   * ```ts
+   * // Twilio expects TwiML, not JSON.
+   * return ctx.response({ contentType: "text/xml", body: "<Response/>" });
+   * ```
+   */
+  response(init?: RawResponseInit): RawResponse;
 }
 
 /** HTTP request metadata available on an action's ctx when invoked via an
  *  HTTP route binding. Header names are lowercased. */
 export interface RequestInfo {
   method: string;
+  /** Request path with the query string, as received. */
   path: string;
+  /**
+   * The full URL the client requested: scheme, host, path, and query.
+   * Behind a proxy, the host comes from `X-Forwarded-Host` or `Host`
+   * only when it is trusted (loopback, the `PYLON_PUBLIC_URL` host,
+   * `PYLON_CANONICAL_HOST`, a `PYLON_TRUSTED_HOSTS` entry, or one of the
+   * app's domains); otherwise the `PYLON_PUBLIC_URL` origin is used. Use
+   * it to verify providers that sign the whole URL, such as Twilio.
+   */
+  url: string;
   headers: Record<string, string>;
   rawBody: string;
 }

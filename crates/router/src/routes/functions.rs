@@ -204,6 +204,73 @@ pub fn fn_auth_denial(fn_name: &str, gate: FnAuthGate) -> Option<(u16, String)> 
     fn_auth_error(fn_name, gate).map(|(status, code, message)| (status, json_error(code, &message)))
 }
 
+/// The HTTP request as the action sees it on `ctx.request`. Header names are
+/// lowercased and repeated headers joined with `, ` (RFC 9110). `path` is
+/// the request target (path and query); `url` adds the public scheme and
+/// host (see [`RouterContext::request_public_url`]).
+fn request_info(
+    ctx: &RouterContext,
+    method: String,
+    url: &str,
+    body: &str,
+) -> pylon_functions::protocol::RequestInfo {
+    let mut headers = std::collections::HashMap::new();
+    for (name, value) in ctx.request_headers {
+        headers
+            .entry(name.to_ascii_lowercase())
+            .and_modify(|existing: &mut String| {
+                existing.push_str(", ");
+                existing.push_str(value);
+            })
+            .or_insert_with(|| value.clone());
+    }
+    pylon_functions::protocol::RequestInfo {
+        method,
+        path: url.to_string(),
+        url: ctx.request_public_url(url),
+        headers,
+        raw_body: body.to_string(),
+    }
+}
+
+/// The HTTP response for a webhook action's return value. A value built by
+/// `ctx.response(...)` is sent as that raw response; any other value is
+/// JSON-encoded with status 200. A malformed raw response is a server-side
+/// bug in the action, so it answers 500 and logs the reason.
+fn webhook_response(
+    ctx: &RouterContext,
+    action_name: &str,
+    value: &serde_json::Value,
+) -> (u16, String) {
+    if !crate::raw_response::is_raw_response(value) {
+        return (
+            200,
+            serde_json::to_string(value).unwrap_or_else(|_| "null".into()),
+        );
+    }
+    match crate::raw_response::parse(value) {
+        Ok(raw) => {
+            ctx.set_response_content_type(raw.content_type);
+            for (name, value) in raw.headers {
+                ctx.add_response_header(name, value);
+            }
+            (raw.status, raw.body)
+        }
+        Err(reason) => {
+            tracing::error!(
+                "webhook action \"{action_name}\" returned an invalid response: {reason}"
+            );
+            (
+                500,
+                json_error(
+                    "INVALID_WEBHOOK_RESPONSE",
+                    &format!("Action \"{action_name}\" returned an invalid response: {reason}"),
+                ),
+            )
+        }
+    }
+}
+
 pub(crate) fn handle(
     ctx: &RouterContext,
     method: HttpMethod,
@@ -247,8 +314,10 @@ pub(crate) fn handle(
     }
 
     // /api/webhooks/:action_name — invoke an action with full request
-    // context (raw method/path/headers/body). Use for signed-payload
-    // webhooks (Stripe, GitHub, Slack).
+    // context (raw method/path/url/headers/body). Use for signed-payload
+    // webhooks (Stripe, GitHub, Slack, Twilio). The action's return value
+    // is the JSON body, unless it returns `ctx.response(...)`, which is
+    // sent as a raw HTTP response (see `raw_response`).
     if let Some(action_name) = url.strip_prefix("/api/webhooks/") {
         let action_name = action_name.split('?').next().unwrap_or(action_name);
         if !action_name.is_empty() {
@@ -324,31 +393,12 @@ pub(crate) fn handle(
                 return Some((429, body));
             }
 
-            let mut headers = std::collections::HashMap::new();
-            for (name, value) in ctx.request_headers {
-                headers
-                    .entry(name.to_ascii_lowercase())
-                    .and_modify(|existing: &mut String| {
-                        existing.push_str(", ");
-                        existing.push_str(value);
-                    })
-                    .or_insert_with(|| value.clone());
-            }
-            let request = pylon_functions::protocol::RequestInfo {
-                method: format!("{:?}", method).to_uppercase(),
-                path: url.to_string(),
-                headers,
-                raw_body: body.to_string(),
-            };
-
+            let request = request_info(ctx, format!("{:?}", method).to_uppercase(), url, body);
             let args = serde_json::json!({ "rawBody": body });
 
             return Some(
                 match fn_ops.call(action_name, args, auth, None, Some(request), None) {
-                    Ok((value, _trace)) => (
-                        200,
-                        serde_json::to_string(&value).unwrap_or_else(|_| "null".into()),
-                    ),
+                    Ok((value, _trace)) => webhook_response(ctx, action_name, &value),
                     Err(e) => (400, json_error(&e.code, &e.message)),
                 },
             );
@@ -459,17 +509,12 @@ pub(crate) fn handle(
             // can't reach the raw body. Queries + mutations don't have
             // ctx.request in their type signature, so passing this is
             // a no-op for them.
-            let request_info = pylon_functions::protocol::RequestInfo {
-                method: "POST".to_string(),
-                path: url.to_string(),
-                headers: ctx
-                    .request_headers
-                    .iter()
-                    .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
-                    .collect(),
-                raw_body: body.to_string(),
-            };
+            let request_info = request_info(ctx, "POST".to_string(), url, body);
 
+            // The return value is always JSON here, including a value
+            // built by `ctx.response(...)`: raw responses are sent only by
+            // `/api/webhooks/<name>`.
+            //
             // Bracket the action with the change-log's seq counter so
             // we can tell the SDK "this action generated events up to
             // seq N." The SDK uses that to short-circuit the latency
