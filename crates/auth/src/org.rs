@@ -834,23 +834,21 @@ impl OrgStore {
         if self.role_of(&invite.org_id, accepting_user_id).is_some() {
             return Err(AcceptError::AlreadyMember);
         }
-        // CAS-stamp acceptedAt BEFORE creating the membership. The
-        // `update` returns true on a successful row write — for a real
-        // CAS we'd want a "compare and set acceptedAt only if null"
-        // primitive, but the DataStore trait doesn't expose that today.
-        // Instead we update + re-read to verify the value we observed.
-        // Two parallel verifies that both pass the accepted_at=None
-        // check race here; the loser sees the winner's stamp on
-        // re-read and bails. (Race window shrinks further once we add
-        // a real CAS update on the DataStore trait.)
-        let now = now_secs();
-        let now_iso = iso(now);
+        // Stamp acceptedAt before creating the membership, then re-read it.
+        // Two accepts that both passed the check above race here; each
+        // writes its own millisecond timestamp, and only the one whose value
+        // reads back continues. The read-back is compared as a point in
+        // time: the store may rewrite the string (a datetime field is stored
+        // as UTC with milliseconds).
+        let now_ms = now_millis();
+        let now = now_ms / 1000;
+        let stamp = iso_millis(now_ms);
         let updated = self
             .store
             .update(
                 &self.cfg.invite_entity,
                 &invite.id,
-                &serde_json::json!({ "acceptedAt": now_iso }),
+                &serde_json::json!({ "acceptedAt": stamp }),
             )
             .unwrap_or(false);
         if !updated {
@@ -862,23 +860,33 @@ impl OrgStore {
             .ok()
             .flatten()
             .ok_or(AcceptError::NotFound)?;
-        let after_accepted = after
+        let after_ms = after
             .get("acceptedAt")
             .and_then(|v| v.as_str())
-            .map(String::from);
-        if after_accepted.as_deref() != Some(now_iso.as_str()) {
-            // A parallel verify won the CAS.
+            .and_then(parse_rfc3339_millis);
+        if after_ms != Some(now_ms) {
+            // A parallel accept won.
             return Err(AcceptError::AlreadyAccepted);
         }
         let membership_payload = serde_json::json!({
             "orgId": invite.org_id,
             "userId": accepting_user_id,
             "role": invite.role.as_str(),
-            "joinedAt": now_iso,
+            "joinedAt": stamp,
         });
-        self.store
+        if self
+            .store
             .insert(&self.cfg.member_entity, &membership_payload)
-            .map_err(|_| AcceptError::NotFound)?;
+            .is_err()
+        {
+            // Give the invite back so the user can accept it again.
+            let _ = self.store.update(
+                &self.cfg.invite_entity,
+                &invite.id,
+                &serde_json::json!({ "acceptedAt": serde_json::Value::Null }),
+            );
+            return Err(AcceptError::NotFound);
+        }
         Ok(Membership {
             org_id: invite.org_id,
             user_id: accepting_user_id.to_string(),
@@ -1002,6 +1010,28 @@ fn now_secs() -> u64 {
 
 fn now_iso() -> String {
     iso(now_secs())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn iso_millis(unix_millis: u64) -> String {
+    let dt = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(unix_millis as i64)
+        .unwrap_or_else(chrono::Utc::now);
+    dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_rfc3339_millis(s: &str) -> Option<u64> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .and_then(|dt| u64::try_from(dt.timestamp_millis()).ok())
 }
 
 fn iso(unix_seconds: u64) -> String {
