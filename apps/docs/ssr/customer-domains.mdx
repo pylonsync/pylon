@@ -40,8 +40,11 @@ Both subdomains (`sell.acme.com`) and apex domains (`acme.com`) work:
 - A subdomain gets a `CNAME` to `d.cnameTarget`, plus `TXT` records for
   ownership and the certificate.
 - An apex cannot be a CNAME, so `d.apex` is `true` and the customer adds
-  `A` and `AAAA` records pointing at your app, plus a `CNAME` and `TXT`
-  record for the certificate. `d.cnameTarget` is `null`.
+  `A` and `AAAA` records pointing at your app. `d.cnameTarget` is `null`.
+  The certificate is requested on the first `status()` call after those
+  records point only at your app; until then `status()` lists the DNS
+  problem in `errors`. A project can have 25 apex domains waiting for DNS
+  at once.
 
 Then poll `ctx.domains.status(hostname)`. When `status` is `"ready"`, the
 certificate is active and your app accepts requests for the host. Pylon
