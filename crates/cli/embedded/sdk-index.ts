@@ -432,6 +432,18 @@ export interface EntityDefinition {
    */
   sync?: boolean | SyncScope;
   /**
+   * Record every insert, update, and delete in the audit log: actor,
+   * tenant, row id, and the names of changed fields (not their values).
+   * Read it with `ctx.audit.list({ entity })` or `GET /api/admin/audit`.
+   */
+  audit?: boolean;
+  /**
+   * Delete rows once they pass a retention period. A system job runs
+   * hourly; each deletion goes through the entity pipeline and is recorded
+   * in the audit log as `retention.delete`. See {@link RetentionRule}.
+   */
+  retention?: RetentionRule;
+  /**
    * Per-row CRDT (Loro) documents. Default `true`: every write merges through
    * a document, and offline edits from several devices converge. Set `false`
    * for rows only the server writes and that nobody edits concurrently:
@@ -475,6 +487,25 @@ export interface SyncScope {
   limit?: number;
 }
 
+/**
+ * Retention rule for an entity.
+ *
+ * - `{ field: "createdAt", after: "365d" }` deletes a row once `createdAt`
+ *   is older than 365 days. Durations: `s`, `m`, `h`, `d`, `w`, `y`.
+ * - `{ field: "deleteAfter" }` (no `after`) deletes a row once
+ *   `deleteAfter` is in the past. Use it for a retention period per tenant:
+ *   set `deleteAfter` on each row at insert.
+ *
+ * `field` is a `datetime` field, or an `int`/`float` field holding unix
+ * milliseconds. Rows whose `hold` field (a `bool`) is true are kept, for
+ * example under a legal hold.
+ */
+export interface RetentionRule {
+  field: string;
+  after?: string;
+  hold?: string;
+}
+
 export function entity(
   name: string,
   fields: Record<string, FieldBuilder>,
@@ -489,6 +520,12 @@ export function entity(
     /** `false` for server-written rows that need no CRDT document. Mirrors
      *  {@link EntityDefinition.crdt}. */
     crdt?: boolean;
+    /** Record every write in the audit log. Mirrors
+     *  {@link EntityDefinition.audit}. */
+    audit?: boolean;
+    /** Delete rows past a retention period. Mirrors
+     *  {@link EntityDefinition.retention}. */
+    retention?: RetentionRule;
   },
 ): EntityDefinition {
   return {
@@ -499,6 +536,8 @@ export function entity(
     search: options?.search,
     sync: options?.sync,
     crdt: options?.crdt,
+    audit: options?.audit,
+    retention: options?.retention,
   };
 }
 
@@ -743,6 +782,10 @@ export interface ManifestEntity {
   sync_limit?: number;
   /** CRDT mode; omitted when true (the runtime default). */
   crdt?: boolean;
+  /** Audit every write; omitted when false. */
+  audit?: boolean;
+  /** Retention rule; omitted when unset. */
+  retention?: RetentionRule;
 }
 
 export interface ManifestRoute {
@@ -1273,6 +1316,16 @@ export function entitiesToManifest(
     // Emit only when opted OUT — the runtime defaults crdt to true.
     if (e.crdt === false) {
       result.crdt = false;
+    }
+    if (e.audit === true) {
+      result.audit = true;
+    }
+    if (e.retention) {
+      result.retention = {
+        field: e.retention.field,
+        ...(e.retention.after ? { after: e.retention.after } : {}),
+        ...(e.retention.hold ? { hold: e.retention.hold } : {}),
+      };
     }
     return result;
   });
