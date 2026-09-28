@@ -46,6 +46,9 @@ pub struct SweepReport {
     pub held: u64,
     /// Deletes that failed (logged); the row is tried again next sweep.
     pub failed: u64,
+    /// Rows deleted whose `retention.delete` audit record could not be
+    /// stored (logged at error level).
+    pub unaudited: u64,
 }
 
 /// Parse "90d", "12h", "30m", "45s", "2w", or "1y" (365 days) into seconds.
@@ -136,9 +139,12 @@ impl RetentionRule {
     fn cutoff(&self, now_secs: u64) -> serde_json::Value {
         let cutoff = now_secs.saturating_sub(self.after_secs.unwrap_or(0));
         match self.kind {
-            FieldKind::Datetime => {
-                serde_json::Value::String(pylon_kernel::util::epoch_to_iso(cutoff))
-            }
+            // With milliseconds, the format `defaultNow()` and
+            // `toISOString()` write, so SQLite's text comparison orders
+            // stored values correctly around the cutoff second.
+            FieldKind::Datetime => serde_json::Value::String(
+                pylon_kernel::util::epoch_to_iso(cutoff).replace('Z', ".000Z"),
+            ),
             FieldKind::EpochMillis => serde_json::json!(cutoff.saturating_mul(1000)),
         }
     }
@@ -167,30 +173,30 @@ fn sweep_rule(
     report: &mut SweepReport,
 ) -> Result<(), RuntimeError> {
     let cutoff = rule.cutoff(now_secs);
-    // Rows this pass keeps (held or failed) stay in the result set, so the
-    // next page starts after them.
-    let mut skip: u64 = 0;
+    // Keyset paging by id: a stable order however many rows share one
+    // timestamp, and unaffected by rows deleted or kept along the way.
+    let mut after_id: Option<String> = None;
     loop {
-        let filter = serde_json::json!({
+        let mut filter = serde_json::json!({
             rule.field.as_str(): { "$lte": cutoff },
-            "$order": { rule.field.as_str(): "asc" },
             "$limit": PAGE,
-            "$offset": skip,
         });
+        if let Some(last) = &after_id {
+            filter["id"] = serde_json::json!({ "$gt": last });
+        }
         let rows = writer.runtime().query_filtered(&rule.entity, &filter)?;
         let count = rows.len();
         for row in rows {
             let Some(id) = row.get("id").and_then(|v| v.as_str()) else {
-                skip += 1;
                 continue;
             };
+            after_id = Some(id.to_string());
             if rule
                 .hold
                 .as_deref()
                 .is_some_and(|h| row.get(h).and_then(|v| v.as_bool()) == Some(true))
             {
                 report.held += 1;
-                skip += 1;
                 continue;
             }
             match writer.delete(&rule.entity, id) {
@@ -202,7 +208,11 @@ fn sweep_rule(
                             .meta("field", rule.field.clone())
                             .meta("cutoff", cutoff.to_string().trim_matches('"').to_string())
                             .meta("by", "system");
-                    let mut event = match row.get("tenantId").and_then(|v| v.as_str()) {
+                    let tenant = row
+                        .get("tenantId")
+                        .or_else(|| row.get("tenant_id"))
+                        .and_then(|v| v.as_str());
+                    let mut event = match tenant {
                         Some(t) => event.tenant(t),
                         None => event,
                     };
@@ -210,6 +220,7 @@ fn sweep_rule(
                         event = event.meta("after_secs", after.to_string());
                     }
                     if let Err(e) = audit.try_log(&event.build()) {
+                        report.unaudited += 1;
                         tracing::error!(
                             "[retention] deleted {}/{id} but could not record it: {e}",
                             rule.entity
@@ -217,13 +228,11 @@ fn sweep_rule(
                     }
                 }
                 Err(WriteError::Refused(why)) if why == "no such row" => {
-                    // Deleted concurrently: nothing to do, and it left the
-                    // result set.
+                    // Deleted concurrently: nothing to do.
                 }
                 Err(e) => {
                     tracing::warn!("[retention] could not delete {}/{id}: {e:?}", rule.entity);
                     report.failed += 1;
-                    skip += 1;
                 }
             }
         }
@@ -406,7 +415,8 @@ mod tests {
             SweepReport {
                 deleted: 2,
                 held: 1,
-                failed: 0
+                failed: 0,
+                unaudited: 0
             }
         );
 
@@ -438,9 +448,71 @@ mod tests {
             SweepReport {
                 deleted: 0,
                 held: 1,
-                failed: 0
+                failed: 0,
+                unaudited: 0
             }
         );
+    }
+
+    fn tie_and_boundary(rt: Arc<crate::Runtime>) {
+        // 60 rows with one shared timestamp, every 7th on hold, more than
+        // one page: every non-held row goes in a single sweep.
+        let tied = iso(NOW - 40 * DAY);
+        let mut held = 0;
+        for i in 0..(PAGE as u64 + 60) {
+            let hold = i % 7 == 0;
+            held += u64::from(hold);
+            rt.insert(
+                "Recording",
+                &serde_json::json!({ "createdAt": tied, "tenantId": "t", "legalHold": hold }),
+            )
+            .unwrap();
+        }
+        // Stored with milliseconds, 500 ms after the cutoff instant: kept.
+        let after_cutoff = format!("{}.500Z", iso(NOW - 30 * DAY).trim_end_matches('Z'));
+        let kept = rt
+            .insert(
+                "Recording",
+                &serde_json::json!({ "createdAt": after_cutoff, "tenantId": "t", "legalHold": false }),
+            )
+            .unwrap();
+        let rules = rules_from_manifest(rt.manifest()).unwrap();
+        let report = sweep(&writer(Arc::clone(&rt)), &audit(), &rules, NOW).unwrap();
+        assert_eq!(report.deleted, PAGE as u64 + 60 - held);
+        assert_eq!(report.held, held);
+        assert!(rt.get_by_id("Recording", &kept).unwrap().is_some());
+        let left = rt
+            .query_filtered("Recording", &serde_json::json!({ "legalHold": false }))
+            .unwrap();
+        assert_eq!(
+            left.len(),
+            1,
+            "only the row after the cutoff remains unheld"
+        );
+    }
+
+    #[test]
+    fn sqlite_sweep_handles_ties_and_the_cutoff_second() {
+        tie_and_boundary(Arc::new(crate::Runtime::in_memory(manifest()).unwrap()));
+    }
+
+    #[test]
+    fn postgres_sweep_handles_ties_and_the_cutoff_second() {
+        let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
+            eprintln!("skipping: PYLON_TEST_PG_URL not set");
+            return;
+        };
+        let m = manifest();
+        let mut adapter =
+            pylon_storage::postgres::live::LivePostgresAdapter::connect(&url).unwrap();
+        for t in ["Recording", "Transcript"] {
+            adapter
+                .exec_raw(&format!("DROP TABLE IF EXISTS \"{t}\" CASCADE"))
+                .unwrap();
+        }
+        let plan = adapter.plan_from_live(&m).unwrap();
+        adapter.apply_plan(&plan).unwrap();
+        tie_and_boundary(Arc::new(crate::Runtime::open_postgres(&url, m).unwrap()));
     }
 
     #[test]

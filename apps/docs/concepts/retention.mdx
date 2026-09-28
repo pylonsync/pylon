@@ -78,11 +78,12 @@ deletes the row if it has expired.
 ```bash
 curl -X POST https://<app>/api/admin/retention/run \
   -H "Authorization: Bearer $PYLON_ADMIN_TOKEN"
-# {"deleted":12,"held":1,"failed":0}
+# {"deleted":12,"held":1,"failed":0,"unaudited":0}
 ```
 
 `held` counts expired rows kept by a hold. `failed` counts deletes that
-failed; they are retried on the next sweep and logged. On Postgres, one
+failed; they are retried on the next sweep and logged. `unaudited`
+counts rows deleted whose audit record could not be stored (logged). On Postgres, one
 replica runs each scheduled sweep.
 
 Retention deletes the row only. Files in storage that a row points to

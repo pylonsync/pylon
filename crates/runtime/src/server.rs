@@ -5649,8 +5649,8 @@ fn start_server(
             } else {
                 (
                     200,
-                    serde_json::json!({ "deleted": 0, "held": 0, "failed": 0, "rules": 0 })
-                        .to_string(),
+                    serde_json::to_string(&crate::retention::SweepReport::default())
+                        .unwrap_or_else(|_| "{}".into()),
                 )
             };
             let response = with_security_headers(
