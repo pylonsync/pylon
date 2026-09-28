@@ -432,6 +432,12 @@ export interface EntityDefinition {
    */
   sync?: boolean | SyncScope;
   /**
+   * Record every insert, update, and delete in the audit log: actor,
+   * tenant, row id, and the names of changed fields (not their values).
+   * Read it with `ctx.audit.list({ entity })` or `GET /api/admin/audit`.
+   */
+  audit?: boolean;
+  /**
    * Per-row CRDT (Loro) documents. Default `true`: every write merges through
    * a document, and offline edits from several devices converge. Set `false`
    * for rows only the server writes and that nobody edits concurrently:
@@ -489,6 +495,9 @@ export function entity(
     /** `false` for server-written rows that need no CRDT document. Mirrors
      *  {@link EntityDefinition.crdt}. */
     crdt?: boolean;
+    /** Record every write in the audit log. Mirrors
+     *  {@link EntityDefinition.audit}. */
+    audit?: boolean;
   },
 ): EntityDefinition {
   return {
@@ -499,6 +508,7 @@ export function entity(
     search: options?.search,
     sync: options?.sync,
     crdt: options?.crdt,
+    audit: options?.audit,
   };
 }
 
@@ -743,6 +753,8 @@ export interface ManifestEntity {
   sync_limit?: number;
   /** CRDT mode; omitted when true (the runtime default). */
   crdt?: boolean;
+  /** Audit every write; omitted when false. */
+  audit?: boolean;
 }
 
 export interface ManifestRoute {
@@ -1273,6 +1285,9 @@ export function entitiesToManifest(
     // Emit only when opted OUT — the runtime defaults crdt to true.
     if (e.crdt === false) {
       result.crdt = false;
+    }
+    if (e.audit === true) {
+      result.audit = true;
     }
     return result;
   });

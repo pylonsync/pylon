@@ -484,6 +484,11 @@ pub enum TsMessage {
     #[serde(rename = "connection")]
     Connection(ConnectionOpMessage),
 
+    /// `ctx.audit.log` / `ctx.audit.list` — the application audit log.
+    /// The host stamps the actor and tenant from the call's auth.
+    #[serde(rename = "audit_op")]
+    AuditOp(AuditOpMessage),
+
     /// `ctx.workflows.*` — start a durable workflow or deliver an event
     /// to a waiting one, from app code (mutations/actions). The host
     /// routes it to the WorkflowEngine via the workflow_op_hook.
@@ -562,6 +567,7 @@ impl TsMessage {
             TsMessage::RoomBroadcast(m) => Some(&m.call_id),
             TsMessage::Connection(m) => Some(&m.call_id),
             TsMessage::WorkflowOp(m) => Some(&m.call_id),
+            TsMessage::AuditOp(m) => Some(&m.call_id),
             TsMessage::Return(m) => Some(&m.call_id),
             TsMessage::Error(m) => Some(&m.call_id),
             TsMessage::ResponseStart(m) => Some(&m.call_id),
@@ -601,6 +607,41 @@ pub struct WorkflowOpMessage {
     pub event: Option<String>,
     #[serde(default)]
     pub data: Option<serde_json::Value>,
+}
+
+/// `ctx.audit.*` from app code. `op` is "log" or "list"; unused fields
+/// stay None. Replied to with a `result` frame.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuditOpMessage {
+    pub call_id: String,
+    pub op: String,
+    /// log: the action name. list: action filter.
+    #[serde(default)]
+    pub action: Option<String>,
+    /// log: entity the event is about. list: entity filter.
+    #[serde(default)]
+    pub entity: Option<String>,
+    /// log: row id. list: row id filter.
+    #[serde(default)]
+    pub entity_id: Option<String>,
+    /// log: user the event is about, when not the actor.
+    #[serde(default)]
+    pub subject: Option<String>,
+    /// log: extra details (an object).
+    #[serde(default)]
+    pub meta: Option<serde_json::Value>,
+    /// list: actor filter.
+    #[serde(default)]
+    pub actor: Option<String>,
+    /// list: tenant to read (admin callers only).
+    #[serde(default)]
+    pub tenant: Option<String>,
+    /// list: only events before this time (unix seconds).
+    #[serde(default)]
+    pub before: Option<u64>,
+    /// list: max rows.
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 /// Handshake payload from the TS runtime.

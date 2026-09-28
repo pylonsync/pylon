@@ -890,6 +890,10 @@ pub struct ManifestEntity {
     /// (or one an app forgot to narrow) still can't flood a replica.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync_limit: Option<usize>,
+    /// Record every insert, update, and delete of this entity in the audit
+    /// log (who, when, which row, which fields changed — not the values).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub audit: bool,
 }
 
 fn default_crdt_enabled() -> bool {
@@ -912,6 +916,7 @@ impl Default for ManifestEntity {
             sync: true,
             sync_scope: None,
             sync_limit: None,
+            audit: false,
         }
     }
 }

@@ -258,6 +258,18 @@ pub trait DataStore: Send + Sync {
         })
     }
 
+    /// Cancel a pending runtime-owned job inside the current transaction.
+    /// Returns whether a pending (or retrying) job was cancelled. Postgres
+    /// mutation handlers use it so `ctx.scheduler.cancel` commits or rolls
+    /// back with the mutation and needs no second pool connection. Stores
+    /// outside a held Postgres mutation transaction reject it.
+    fn cancel_internal_job(&self, _id: &str) -> Result<bool, DataError> {
+        Err(DataError {
+            code: "NOT_SUPPORTED".into(),
+            message: "transactional job cancel requires a Postgres mutation transaction".into(),
+        })
+    }
+
     /// True when machine `machine` holds shard `shard` under `epoch`, read in
     /// the current transaction with the placement row share-locked, so no
     /// other machine takes the shard over until the transaction ends (see

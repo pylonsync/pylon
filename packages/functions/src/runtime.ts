@@ -34,6 +34,8 @@ import type {
   Rooms,
   Workflows,
   WorkflowRunSummary,
+  Audit,
+  AuditEntry,
   Connections,
   Domains,
   TenantDomainResult,
@@ -987,6 +989,36 @@ export function buildRooms(callId: string): Rooms {
  * takes it from there, so `start` returns the instance id immediately.
  * Uses the queued call_id-keyed `rpc` (the reply carries no op_id).
  */
+/** Build `ctx.audit` — round-trips `audit_op` frames to the host. */
+export function buildAudit(callId: string): Audit {
+  return {
+    async log(event) {
+      return (await rpc(callId, {
+        type: "audit_op",
+        op: "log",
+        action: event.action,
+        entity: event.entity ?? null,
+        entity_id: event.entityId ?? null,
+        subject: event.subject ?? null,
+        meta: event.meta ?? null,
+      })) as { id: string };
+    },
+    async list(filter) {
+      return (await rpc(callId, {
+        type: "audit_op",
+        op: "list",
+        action: filter?.action ?? null,
+        entity: filter?.entity ?? null,
+        entity_id: filter?.entityId ?? null,
+        actor: filter?.actor ?? null,
+        tenant: filter?.tenant ?? null,
+        before: filter?.before ?? null,
+        limit: filter?.limit ?? null,
+      })) as AuditEntry[];
+    },
+  };
+}
+
 export function buildWorkflows(callId: string): Workflows {
   return {
     async start(name: string, input?: unknown, opts?: { key?: string }) {
@@ -1208,6 +1240,7 @@ function buildActionCtx(
     rooms,
     connections,
     workflows: buildWorkflows(callId),
+    audit: buildAudit(callId),
     domains: buildDomains(),
     env: process.env as Record<string, string>,
     async runQuery(fnName, args) {
@@ -1402,6 +1435,7 @@ async function handleCall(msg: CallMessage): Promise<void> {
         rooms,
         connections,
         workflows: buildWorkflows(msg.call_id),
+        audit: buildAudit(msg.call_id),
         error(code, message) {
           const err = new Error(message);
           (err as any).code = code;

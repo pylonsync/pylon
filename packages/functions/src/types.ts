@@ -381,9 +381,9 @@ export interface Scheduler {
    * `SCHEDULE_CANCEL_FAILED` when the cancel could not be saved; the job
    * then still runs.
    *
-   * Inside a mutation, cancelling a job scheduled by the same mutation
-   * drops it before commit. Cancelling any other job takes effect at
-   * once and stays cancelled even if the mutation later fails.
+   * Inside a mutation, the cancel commits or rolls back with the
+   * mutation: if the mutation throws, the job stays scheduled. From an
+   * action, it takes effect at once.
    */
   cancel(scheduleId: string): Promise<{ cancelled: boolean }>;
 }
@@ -671,6 +671,66 @@ export interface Workflows {
     status?: WorkflowRunStatus | "active";
     limit?: number;
   }): Promise<WorkflowRunSummary[]>;
+}
+
+/**
+ * The application audit log (`ctx.audit` on mutations and actions).
+ * Append-only, stored with the auth audit events.
+ */
+export interface Audit {
+  /**
+   * Record an event. The actor and tenant come from the caller's session.
+   * `action` is a short dotted name (`lead.export`, `script.update`) and
+   * is stored as `app.<action>`. `meta` values are stored as strings
+   * (non-strings as JSON text); keep secrets out of it.
+   *
+   * Inside a mutation the event is written after the mutation commits and
+   * dropped if it rolls back. Rejects with `AUDIT_WRITE_FAILED` when an
+   * action's event could not be stored.
+   */
+  log(event: {
+    action: string;
+    entity?: string;
+    entityId?: string;
+    /** The user the event is about, when not the actor. */
+    subject?: string;
+    meta?: Record<string, unknown>;
+  }): Promise<{ id: string }>;
+  /**
+   * Read events, newest first. A caller with a tenant reads that tenant's
+   * events; a caller without one reads only events it performed. Admin
+   * callers may pass `tenant` or read all tenants. `action` matches
+   * `lead.export` as `app.lead.export`; `entity.update` and auth action
+   * names match as given. `limit` defaults to 100 (max 1000); page with
+   * `before` set to the oldest `createdAt` seen.
+   */
+  list(filter?: {
+    entity?: string;
+    entityId?: string;
+    actor?: string;
+    action?: string;
+    tenant?: string;
+    before?: number;
+    limit?: number;
+  }): Promise<AuditEntry[]>;
+}
+
+export interface AuditEntry {
+  id: string;
+  /** Unix seconds. */
+  createdAt: number;
+  /** `app.<action>`, `entity.insert|update|delete`, or an auth action. */
+  action: string;
+  actor: string | null;
+  subject: string | null;
+  tenant: string | null;
+  entity: string | null;
+  entityId: string | null;
+  ip: string | null;
+  success: boolean;
+  reason: string | null;
+  /** For `entity.*` events, `fields` lists the changed field names. */
+  meta: Record<string, string>;
 }
 
 export type WorkflowRunStatus =
@@ -1116,6 +1176,8 @@ export interface MutationCtx<R extends AuthRequirement = "optional"> {
   connections: Connections;
   /** Durable workflows: start / deliver events — see {@link Workflows}. */
   workflows: Workflows;
+  /** Application audit log — see {@link Audit}. */
+  audit: Audit;
   /** Signed file-download URLs — see {@link Files}. */
   files: Files;
   /** Shard tickets, reads, and inputs after the commit — see {@link Shards}. */
@@ -1286,6 +1348,8 @@ export interface ActionCtx<R extends AuthRequirement = "optional"> {
   connections: Connections;
   /** Durable workflows: start / deliver events — see {@link Workflows}. */
   workflows: Workflows;
+  /** Application audit log — see {@link Audit}. */
+  audit: Audit;
   /** Attach / register custom domains for your app's OWN end-customers
    *  (platform domains) — see {@link Domains}. Cloud-only. */
   domains: Domains;

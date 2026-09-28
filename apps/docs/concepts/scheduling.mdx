@@ -104,9 +104,10 @@ await ctx.db.update("Appointment", appointmentId, { reminder24h });
 await ctx.scheduler.cancel(appointment.reminder24h);
 ```
 
-Inside a mutation, cancelling a job the same mutation scheduled removes
-it before commit. Cancelling any other job takes effect at once and is
-not undone if the mutation later fails.
+Inside a mutation, a cancel commits or rolls back with the mutation,
+like `runAfter`: if the mutation throws, the job stays scheduled. A job
+the same mutation scheduled is removed before it is ever enqueued. From
+an action, a cancel takes effect at once.
 
 The scheduled function runs with the auth identity of the caller that scheduled it. Pylon enforces this identity at schedule time. The `args` you pass are delivered verbatim. Like crons, these scheduled calls are durable across restarts.
 

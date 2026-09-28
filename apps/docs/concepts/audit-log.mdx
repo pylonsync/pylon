@@ -1,0 +1,117 @@
+---
+title: "Audit log"
+description: "Record who viewed, exported, or changed data: ctx.audit from functions, automatic records for chosen entities, and an admin read API."
+---
+
+Pylon keeps one append-only audit log per app. Auth events (sign-in,
+password reset, role changes) already go there. Your functions add their
+own events with `ctx.audit.log`, and entities declared `audit: true` get
+a record for every write.
+
+The log lives in the app database (`_pylon_audit_events`) on SQLite and
+Postgres. There is no API to change or delete an event.
+
+## Log an event
+
+Call `ctx.audit.log` from a mutation or an action:
+
+```ts
+// functions/exportLeads.ts
+import { action } from "@pylonsync/functions";
+
+export default action({
+  async handler(ctx, args: { leadIds: string[] }) {
+    const rows = await ctx.runQuery("leadsForExport", args);
+    await ctx.audit.log({
+      action: "lead.export",
+      entity: "Lead",
+      meta: { count: rows.length, format: "csv" },
+    });
+    return toCsv(rows);
+  },
+});
+```
+
+| Field | |
+| --- | --- |
+| `action` | Short dotted name: letters, digits, `.`, `_`, `-`, `:`. Stored as `app.<action>`. |
+| `entity`, `entityId` | Optional. The record the event is about. |
+| `subject` | Optional. The user the event is about, when not the actor. |
+| `meta` | Optional object, up to 50 keys. Values are stored as strings; non-strings as JSON text. Keep secrets out of it. |
+
+Pylon sets the actor (`ctx.auth.userId`) and tenant (`ctx.auth.tenantId`)
+from the caller's session. A function cannot choose them.
+
+Inside a mutation, the event is written after the mutation commits and
+dropped if it rolls back, so a change that did not happen leaves no
+record. From an action, the event is written at once, and `log` rejects
+with `AUDIT_WRITE_FAILED` if it could not be stored.
+
+## Record every write to an entity
+
+```ts
+const Script = entity(
+  "Script",
+  { body: field.richtext(), dealerId: field.string() },
+  { audit: true },
+);
+```
+
+Every insert, update, and delete of a `Script` row, from the entity API,
+`ctx.db` in a mutation, or a nested mutation, adds an event:
+
+| Action | `meta.fields` |
+| --- | --- |
+| `entity.insert` | Names of the fields written. |
+| `entity.update` | Names of the fields the write changed. |
+| `entity.delete` | Not set. |
+
+Field values are not recorded. For reads and exports, which do not go
+through a write, call `ctx.audit.log` yourself.
+
+## Read the log
+
+From a function:
+
+```ts
+const events = await ctx.audit.list({ entity: "Lead", entityId: leadId });
+```
+
+Filters: `entity`, `entityId`, `actor`, `action`, `before`, `limit`
+(default 100, max 1000). `action: "lead.export"` matches the stored
+`app.lead.export`; `entity.update` and auth action names such as
+`sign_in` match as given. Results are newest first; to page, pass
+`before` set to the oldest `createdAt` you have.
+
+A caller with an active tenant reads that tenant's events. A caller
+without a tenant reads only events it performed. Admin callers can pass
+`tenant` or read every tenant.
+
+Operators read across tenants over HTTP:
+
+```bash
+curl "https://<app>/api/admin/audit?tenant=org_123&entity=Lead&limit=50" \
+  -H "Authorization: Bearer $PYLON_ADMIN_TOKEN"
+```
+
+Query parameters: `tenant`, `entity`, `id`, `actor`, `subject`,
+`action`, `before`, `limit`.
+
+Each event looks like:
+
+```json
+{
+  "id": "evt_...",
+  "createdAt": 1790000000,
+  "action": "app.lead.export",
+  "actor": "user_1",
+  "subject": null,
+  "tenant": "org_123",
+  "entity": "Lead",
+  "entityId": null,
+  "ip": null,
+  "success": true,
+  "reason": null,
+  "meta": { "count": "12", "format": "csv" }
+}
+```

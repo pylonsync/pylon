@@ -149,7 +149,11 @@ pub type ScheduleHook = Box<
 /// Returns `Ok(true)` when a pending or buffered job was cancelled,
 /// `Ok(false)` when the job was unknown, running, or finished, and `Err`
 /// when the cancel could not be persisted (the job still runs).
-pub type CancelScheduleHook = Box<dyn Fn(&str) -> Result<bool, String> + Send + Sync>;
+///
+/// `store` is the call's store: inside a Postgres mutation it is the held
+/// transaction, so the cancel commits or rolls back with the mutation.
+pub type CancelScheduleHook =
+    Box<dyn Fn(&str, &dyn DataStore) -> Result<bool, String> + Send + Sync>;
 
 /// Callback invoked when a running function asks to run *another* function
 /// (action → query/mutation). The wrapper is responsible for any per-type
@@ -258,6 +262,17 @@ pub type LlmEmbedHook = Box<
 /// no members, which is informational, not an error.
 pub type RoomBroadcastHook =
     Box<dyn Fn(&str, &str, serde_json::Value) -> Result<bool, (String, String)> + Send + Sync>;
+
+/// Callback for `ctx.audit.*`. Receives the call's current auth (after
+/// any in-call elevation) so the host stamps the real actor and tenant.
+pub type AuditOpHook = Box<
+    dyn Fn(
+            &crate::protocol::AuditOpMessage,
+            &AuthInfo,
+        ) -> Result<serde_json::Value, (String, String)>
+        + Send
+        + Sync,
+>;
 
 /// Callback for `ctx.workflows.*` (start / send_event). Wired to the
 /// runtime's WorkflowEngine; returns the op's JSON result.
@@ -437,6 +452,7 @@ pub struct FnRunner {
     /// room events to the runtime's RoomManager + presence notifier.
     room_broadcast_hook: Mutex<Option<RoomBroadcastHook>>,
     workflow_op_hook: Mutex<Option<WorkflowOpHook>>,
+    audit_op_hook: Mutex<Option<AuditOpHook>>,
     /// Hook for `ctx.connections.*`. Wires authorize-url / get /
     /// list / disconnect calls to the runtime's ConnectionManager.
     connection_hook: Mutex<Option<ConnectionHook>>,
@@ -492,6 +508,7 @@ impl FnRunner {
             llm_embed_hook: Mutex::new(None),
             room_broadcast_hook: Mutex::new(None),
             workflow_op_hook: Mutex::new(None),
+            audit_op_hook: Mutex::new(None),
             connection_hook: Mutex::new(None),
             call_timeout: Mutex::new(DEFAULT_CALL_TIMEOUT),
             started_with: Mutex::new(None),
@@ -654,6 +671,11 @@ impl FnRunner {
     /// with `WORKFLOWS_NOT_CONFIGURED`.
     pub fn set_workflow_op_hook(&self, hook: WorkflowOpHook) {
         *self.workflow_op_hook.lock().unwrap() = Some(hook);
+    }
+
+    /// Install the `ctx.audit.*` handler.
+    pub fn set_audit_op_hook(&self, hook: AuditOpHook) {
+        *self.audit_op_hook.lock().unwrap() = Some(hook);
     }
 
     /// Install the `ctx.connections.*` hook. Without it, calls
@@ -1682,7 +1704,7 @@ impl FnRunner {
                 TsMessage::CancelSchedule(cancel) if cancel.call_id == call_id => {
                     let result: Option<Result<bool, String>> = {
                         let hook = self.cancel_schedule_hook.lock().unwrap();
-                        hook.as_ref().map(|cb| cb(&cancel.schedule_id))
+                        hook.as_ref().map(|cb| cb(&cancel.schedule_id, store))
                     };
                     let reply = match result {
                         Some(Ok(cancelled)) => DbResultMessage::ok(
@@ -1834,6 +1856,26 @@ impl FnRunner {
                                 "this app declares no shards; add `shards: [shard({ name, wasm })]` to buildManifest in app.ts",
                             ),
                         }
+                    };
+                    self.send(&reply)?;
+                }
+
+                TsMessage::AuditOp(req) if req.call_id == call_id => {
+                    let auth_now = current_auth_snapshot(&gate_auth, caller_is_admin);
+                    let result: Option<Result<serde_json::Value, (String, String)>> = {
+                        let hook = self.audit_op_hook.lock().unwrap();
+                        hook.as_ref().map(|cb| cb(&req, &auth_now))
+                    };
+                    let reply = match result {
+                        Some(Ok(value)) => DbResultMessage::ok(call_id.clone(), value),
+                        Some(Err((code, msg))) => {
+                            DbResultMessage::err(call_id.clone(), &code, &msg)
+                        }
+                        None => DbResultMessage::err(
+                            call_id.clone(),
+                            "AUDIT_NOT_CONFIGURED",
+                            "this host has no audit log wired",
+                        ),
                     };
                     self.send(&reply)?;
                 }

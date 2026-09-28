@@ -671,9 +671,16 @@ impl JobQueue {
         if let Some(store) = self.pg_store() {
             return store.cancel(job_id);
         }
+        Ok(self.cancel_pending_local(job_id)?.is_some())
+    }
+
+    /// In-memory half of [`Self::cancel_pending`]. Returns the job as it
+    /// was before the cancel, so a rolled-back mutation can hand it to
+    /// [`Self::restore_cancelled`].
+    pub(crate) fn cancel_pending_local(&self, job_id: &str) -> Result<Option<Job>, String> {
         let mut pending = self.pending.lock().unwrap();
         let Some(idx) = pending.iter().position(|j| j.id == job_id) else {
-            return Ok(false);
+            return Ok(None);
         };
         let mut cancelled = pending[idx].clone();
         cancelled.status = JobStatus::Cancelled;
@@ -686,10 +693,41 @@ impl JobQueue {
                 .save(&cancelled)
                 .map_err(|e| format!("persist failed for job {job_id}: {e}"))?;
         }
-        pending.remove(idx);
+        let original = pending
+            .remove(idx)
+            .expect("index found under the same lock");
         drop(pending);
         self.push_history(cancelled);
-        Ok(true)
+        Ok(Some(original))
+    }
+
+    /// Put back a job that [`Self::cancel_pending_local`] cancelled inside
+    /// a mutation that then rolled back. The job returns to the queue and
+    /// the store with its earlier status. A store failure is logged and
+    /// the job is queued anyway: it runs in this process, but a restart
+    /// before it runs would drop it.
+    pub(crate) fn restore_cancelled(&self, original: Job) {
+        if let Some(store) = self.store.lock().unwrap().as_ref() {
+            if let Err(e) = store.save(&original) {
+                tracing::error!(
+                    "[jobs] could not restore job {} after a rolled-back cancel: {e}",
+                    original.id
+                );
+            }
+        }
+        self.history
+            .lock()
+            .unwrap()
+            .retain(|j| !(j.id == original.id && j.status == JobStatus::Cancelled));
+        let priority = original.priority as u8;
+        let mut pending = self.pending.lock().unwrap();
+        let pos = pending
+            .iter()
+            .position(|j| (j.priority as u8) < priority)
+            .unwrap_or(pending.len());
+        pending.insert(pos, original);
+        drop(pending);
+        self.notify.notify_one();
     }
 
     /// Process the next available job using registered handlers.

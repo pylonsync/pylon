@@ -60,6 +60,51 @@ pub struct AuditEvent {
     /// Stringly-typed structured metadata. Avoid putting secrets
     /// here; the audit log is meant to be readable by ops.
     pub metadata: HashMap<String, String>,
+    /// Entity the event is about (application events), e.g. "Lead".
+    #[serde(default)]
+    pub entity: Option<String>,
+    /// Row id within `entity`.
+    #[serde(default)]
+    pub entity_id: Option<String>,
+}
+
+/// Filters for [`AuditBackend::find`]. Every set field must match.
+/// Results are newest first.
+#[derive(Debug, Clone, Default)]
+pub struct AuditQuery {
+    pub tenant_id: Option<String>,
+    pub actor_id: Option<String>,
+    pub user_id: Option<String>,
+    pub entity: Option<String>,
+    pub entity_id: Option<String>,
+    pub action: Option<String>,
+    /// Only events with `created_at` strictly before this (unix seconds),
+    /// for paging.
+    pub before: Option<u64>,
+    /// Max rows. Clamped to 1..=1000.
+    pub limit: usize,
+}
+
+impl AuditQuery {
+    pub fn bounded_limit(&self) -> usize {
+        self.limit.clamp(1, 1000)
+    }
+
+    /// Whether `e` passes every filter. Used by the in-memory backend and
+    /// by tests of the SQL backends.
+    pub fn matches(&self, e: &AuditEvent) -> bool {
+        fn eq(want: &Option<String>, got: &Option<String>) -> bool {
+            want.as_ref()
+                .is_none_or(|w| got.as_deref() == Some(w.as_str()))
+        }
+        eq(&self.tenant_id, &e.tenant_id)
+            && eq(&self.actor_id, &e.actor_id)
+            && eq(&self.user_id, &e.user_id)
+            && eq(&self.entity, &e.entity)
+            && eq(&self.entity_id, &e.entity_id)
+            && self.action.as_ref().is_none_or(|a| e.action.as_str() == a)
+            && self.before.is_none_or(|b| e.created_at < b)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,6 +200,8 @@ pub struct AuditEventBuilder {
     pub success: bool,
     pub reason: Option<String>,
     pub metadata: HashMap<String, String>,
+    pub entity: Option<String>,
+    pub entity_id: Option<String>,
 }
 
 impl AuditEventBuilder {
@@ -195,6 +242,11 @@ impl AuditEventBuilder {
         self.reason = Some(reason.into());
         self
     }
+    pub fn entity(mut self, entity: impl Into<String>, entity_id: Option<String>) -> Self {
+        self.entity = Some(entity.into());
+        self.entity_id = entity_id;
+        self
+    }
     pub fn meta(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.metadata.insert(key.into(), value.into());
         self
@@ -213,12 +265,27 @@ impl AuditEventBuilder {
             success: self.success,
             reason: self.reason,
             metadata: self.metadata,
+            entity: self.entity,
+            entity_id: self.entity_id,
         }
     }
 }
 
 pub trait AuditBackend: Send + Sync {
-    fn append(&self, event: &AuditEvent);
+    /// Write one event. Errors when it could not be stored.
+    fn try_append(&self, event: &AuditEvent) -> Result<(), String>;
+    /// Write one event, logging a failure instead of returning it. Auth
+    /// flows use this so a broken audit sink never blocks sign-in.
+    fn append(&self, event: &AuditEvent) {
+        if let Err(e) = self.try_append(event) {
+            tracing::warn!(
+                "[audit] failed to store {} event: {e}",
+                event.action.as_str()
+            );
+        }
+    }
+    /// Events matching every filter in `query`, newest first.
+    fn find(&self, query: &AuditQuery) -> Result<Vec<AuditEvent>, String>;
     /// Tenant-scoped query. Returns at most `limit` events newest-first.
     /// Backends MUST respect `tenant_id` to prevent cross-tenant leak.
     fn find_for_tenant(&self, tenant_id: &str, limit: usize) -> Vec<AuditEvent>;
@@ -240,8 +307,22 @@ impl Default for InMemoryAuditBackend {
 }
 
 impl AuditBackend for InMemoryAuditBackend {
-    fn append(&self, event: &AuditEvent) {
+    fn try_append(&self, event: &AuditEvent) -> Result<(), String> {
         self.events.lock().unwrap().push(event.clone());
+        Ok(())
+    }
+    fn find(&self, query: &AuditQuery) -> Result<Vec<AuditEvent>, String> {
+        let g = self.events.lock().unwrap();
+        // Newest first; within one second, most recently appended first.
+        let mut out: Vec<AuditEvent> = g
+            .iter()
+            .rev()
+            .filter(|e| query.matches(e))
+            .cloned()
+            .collect();
+        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        out.truncate(query.bounded_limit());
+        Ok(out)
     }
     fn find_for_tenant(&self, tenant_id: &str, limit: usize) -> Vec<AuditEvent> {
         let g = self.events.lock().unwrap();
@@ -291,6 +372,17 @@ impl AuditStore {
     /// `store.log(AuditEventBuilder::new(...).user(...).build())`.
     pub fn log(&self, event: AuditEvent) {
         self.backend.append(&event);
+    }
+
+    /// Write one event and report a storage failure. Application audit
+    /// events use this: a record that silently fails to save is worse
+    /// than an error.
+    pub fn try_log(&self, event: &AuditEvent) -> Result<(), String> {
+        self.backend.try_append(event)
+    }
+
+    pub fn find(&self, query: &AuditQuery) -> Result<Vec<AuditEvent>, String> {
+        self.backend.find(query)
     }
 
     pub fn find_for_tenant(&self, tenant_id: &str, limit: usize) -> Vec<AuditEvent> {
@@ -410,6 +502,8 @@ mod tests {
             success: true,
             reason: None,
             metadata: HashMap::new(),
+            entity: None,
+            entity_id: None,
         });
         s.backend.append(&AuditEvent {
             id: "evt_b".into(),
@@ -423,6 +517,8 @@ mod tests {
             success: true,
             reason: None,
             metadata: HashMap::new(),
+            entity: None,
+            entity_id: None,
         });
         let out = s.find_for_tenant("t", 10);
         assert_eq!(out[0].id, "evt_b"); // newest first
@@ -474,5 +570,44 @@ mod tests {
         let s = AuditStore::new();
         s.log(AuditEventBuilder::new(AuditAction::Custom("system.tick".into())).build());
         assert_eq!(s.find_for_tenant("tenant_a", 100).len(), 0);
+    }
+
+    #[test]
+    fn find_applies_every_filter() {
+        let s = AuditStore::new();
+        s.log(
+            AuditEventBuilder::new(AuditAction::Custom("app.lead.export".into()))
+                .actor("rep1")
+                .tenant("dealer_a")
+                .entity("Lead", Some("l1".into()))
+                .build(),
+        );
+        s.log(
+            AuditEventBuilder::new(AuditAction::Custom("app.lead.view".into()))
+                .actor("rep2")
+                .tenant("dealer_a")
+                .entity("Lead", Some("l2".into()))
+                .build(),
+        );
+        s.log(
+            AuditEventBuilder::new(AuditAction::Custom("app.lead.export".into()))
+                .actor("rep3")
+                .tenant("dealer_b")
+                .entity("Lead", Some("l1".into()))
+                .build(),
+        );
+        let q = |f: fn(&mut AuditQuery)| {
+            let mut q = AuditQuery {
+                tenant_id: Some("dealer_a".into()),
+                limit: 50,
+                ..Default::default()
+            };
+            f(&mut q);
+            s.find(&q).unwrap()
+        };
+        assert_eq!(q(|_| {}).len(), 2);
+        assert_eq!(q(|q| q.entity_id = Some("l1".into())).len(), 1);
+        assert_eq!(q(|q| q.action = Some("app.lead.view".into())).len(), 1);
+        assert_eq!(q(|q| q.actor_id = Some("rep3".into())).len(), 0);
     }
 }

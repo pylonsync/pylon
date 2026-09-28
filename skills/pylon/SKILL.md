@@ -164,6 +164,7 @@ encryptable. The matching arg validator is `v.json()`.
 - `.serverOnly()` — never serialized in HTTP responses (secrets, `passwordHash`, `stripeCustomerId`). Still readable inside functions via `ctx.db.*`.
 - `.syncOmit()` — stripped from REPLICATION only (snapshots, delta events, WS fanout, reconcile fetches); direct reads (`db.get`, lists, queries, SSR `serverData`) keep it. For heavy-but-not-secret columns — multi-KB JSON blobs, render plans, generated markdown — that would otherwise stream into every browser's replica on every sync. The replica row simply lacks the column; fetch by id when a detail view needs it. Declare such fields `.optional()` so the replica-row type is honest.
 - `.readonly()` — settable on insert, rejected on client update (closes IDOR-via-PATCH).
+- `entity(name, fields, { audit: true })` — every insert/update/delete lands in the audit log (actor, tenant, row id, changed field names; not values).
 - `.encrypted()` — AEAD-encrypted at rest (needs `PYLON_ENCRYPTION_KEY`; rotate by moving the old key to `PYLON_ENCRYPTION_PREVIOUS_KEYS` — a background pass re-encrypts, `POST /api/admin/encryption/rotate` runs one now).
 - `.crdt("text")` — upgrade string/richtext to LoroText for collaborative merge
 
@@ -560,6 +561,8 @@ ctx.db.advisoryLock(key)               // serialize a TOCTOU-prone quota/uniquen
 throw ctx.error("CODE", "message")     // typed error → rolls the tx back
 ctx.scheduler.runAfter(delayMs, "fnName", args)   // enqueue delayed call; returns the job id
 ctx.scheduler.cancel(jobId)                       // { cancelled } — false if it already started/finished
+ctx.audit.log({ action: "lead.export", entity, entityId, meta })  // append-only audit event; actor/tenant from session
+ctx.audit.list({ entity, entityId, action, limit })  // caller's tenant only (admins: any)
 ctx.scheduler.runAt(unixMs, "fnName", args)       // enqueue at a wall-clock time (Unix ms, e.g. new Date(iso).getTime())
 
 // ---- action ctx — NO ctx.db. Read/write via runQuery/runMutation; + email, error, scheduler, llm, rooms, stream ----

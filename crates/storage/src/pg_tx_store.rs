@@ -925,6 +925,20 @@ impl<'a> DataStore for PgTxStore<'a> {
         })
     }
 
+    fn cancel_internal_job(&self, id: &str) -> Result<bool, DataError> {
+        self.with_tx(|tx| {
+            tx.execute(
+                "UPDATE _pylon_jobs
+                 SET status = 'cancelled',
+                     completed_at = EXTRACT(EPOCH FROM clock_timestamp())::BIGINT
+                 WHERE id = $1 AND status IN ('pending', 'retrying')",
+                &[&id],
+            )
+            .map(|n| n == 1)
+            .map_err(pg_err_to_data)
+        })
+    }
+
     fn enqueue_internal_job(&self, job: &serde_json::Value) -> Result<(), DataError> {
         let required_str = |name: &str| {
             job.get(name)

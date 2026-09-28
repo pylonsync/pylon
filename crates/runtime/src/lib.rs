@@ -1,5 +1,6 @@
 pub mod account_backend;
 pub mod api_key_backend;
+pub mod app_audit;
 pub mod audit_backend;
 pub mod cache_handlers;
 pub mod cache_server;
@@ -2995,7 +2996,9 @@ impl Runtime {
     }
 
     /// Set `field` of row `id` to `new` only if it still equals `old`.
-    /// Returns whether the row changed.
+    /// Returns whether the row changed. On a `crdt: true` entity the
+    /// row's CRDT document is patched in the same transaction, so it does
+    /// not keep the old ciphertext.
     fn replace_stored_value(
         &self,
         entity: &str,
@@ -3011,37 +3014,68 @@ impl Runtime {
                 message: format!("{entity} has no field {field}"),
             });
         }
+        let patch = serde_json::json!({ field: new });
+        let query_err = |e: String| RuntimeError {
+            code: "QUERY_FAILED".into(),
+            message: format!("rotate {entity}.{field}: {e}"),
+        };
         if let Some(pg) = self.pg_backend() {
-            let sql = format!(
-                "UPDATE {} SET {} = $1 WHERE id = $2 AND {} = $3",
-                pylon_storage::postgres::quote_ident_pub(entity),
-                pylon_storage::postgres::quote_ident_pub(field),
-                pylon_storage::postgres::quote_ident_pub(field),
-            );
-            return pg
+            let table = pylon_storage::postgres::quote_ident_pub(entity);
+            let column = pylon_storage::postgres::quote_ident_pub(field);
+            if !ent.crdt {
+                let sql =
+                    format!("UPDATE {table} SET {column} = $1 WHERE id = $2 AND {column} = $3");
+                return pg
+                    .store
+                    .with_transaction_raw(|tx| -> Result<bool, RuntimeError> {
+                        tx.execute(&sql, &[&new, &id, &old])
+                            .map(|n| n == 1)
+                            .map_err(|e| query_err(e.to_string()))
+                    });
+            }
+            let crdt_fields = self.crdt_fields_for(ent)?;
+            let select = format!("SELECT {column} FROM {table} WHERE id = $1 FOR UPDATE");
+            let result = pg
                 .store
                 .with_transaction_raw(|tx| -> Result<bool, RuntimeError> {
-                    tx.execute(&sql, &[&new, &id, &old])
-                        .map(|n| n == 1)
-                        .map_err(|e| RuntimeError {
-                            code: "QUERY_FAILED".into(),
-                            message: format!("rotate {entity}.{field}: {e}"),
-                        })
+                    let current: Option<Option<String>> = tx
+                        .query_opt(&select, &[&id])
+                        .map_err(|e| query_err(e.to_string()))?
+                        .map(|row| row.get(0));
+                    if current.flatten().as_deref() != Some(old) {
+                        return Ok(false);
+                    }
+                    pg_crdt_patch(&pg.crdt, tx, ent, &crdt_fields, id, &patch)
+                        .map_err(|e| query_err(e.to_string()))?;
+                    pylon_storage::pg_tx_store::tx_update(tx, &self.manifest, entity, id, &patch)
+                        .map_err(data_err_to_runtime)
                 });
+            // The next read hydrates the document from what committed.
+            pg.crdt.evict(entity, id);
+            return result;
         }
         let conn = self.lock_write_conn()?;
-        let sql = format!(
-            "UPDATE {} SET {} = ?1 WHERE \"id\" = ?2 AND {} = ?3",
-            quote_ident(entity),
-            quote_ident(field),
-            quote_ident(field),
-        );
-        conn.execute(&sql, rusqlite::params![new, id, old])
-            .map(|n| n == 1)
-            .map_err(|e| RuntimeError {
-                code: "QUERY_FAILED".into(),
-                message: format!("rotate {entity}.{field}: {e}"),
-            })
+        with_write_tx(self, &conn, || -> Result<bool, RuntimeError> {
+            let select = format!(
+                "SELECT {} FROM {} WHERE \"id\" = ?1",
+                quote_ident(field),
+                quote_ident(entity)
+            );
+            let current: Option<String> =
+                match conn.query_row(&select, rusqlite::params![id], |r| r.get(0)) {
+                    Ok(v) => v,
+                    // Deleted since the read: nothing to rotate.
+                    Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(false),
+                    Err(e) => return Err(query_err(e.to_string())),
+                };
+            if current.as_deref() != Some(old) {
+                return Ok(false);
+            }
+            // The normal update path: the SQL row and, on a CRDT entity,
+            // the document. `new` is already ciphertext, so it is stored
+            // as given.
+            self.update_with_conn(&conn, entity, id, &patch)
+        })
     }
 
     /// Whether `entity` declares any `encrypted()` field.
@@ -9350,5 +9384,176 @@ mod tests {
         // Unblock the server's accept() so the thread can observe `stop`.
         let _ = std::net::TcpStream::connect(addr);
         server.join().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod rotation_crdt_tests {
+    //! Rotation on a `crdt: true` entity must update the row's CRDT
+    //! document too, or merges keep the old key's ciphertext.
+    use super::*;
+
+    const OLD_KEY: &str = "4444444444444444444444444444444444444444444444444444444444444444";
+    const NEW_KEY: &str = "5555555555555555555555555555555555555555555555555555555555555555";
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn manifest() -> AppManifest {
+        let field = |name: &str, ty: &str, encrypted: bool| ManifestField {
+            name: name.into(),
+            field_type: ty.into(),
+            optional: true,
+            unique: false,
+            crdt: None,
+            server_only: encrypted,
+            readonly: false,
+            default: None,
+            enum_values: None,
+            encrypted,
+            sync_omit: false,
+        };
+        AppManifest {
+            manifest_version: 1,
+            name: "rotate-crdt".into(),
+            version: "0.1.0".into(),
+            entities: vec![ManifestEntity {
+                name: "Note".into(),
+                fields: vec![
+                    field("title", "string", false),
+                    field("secret", "string", true),
+                    field("body", "richtext", true),
+                ],
+                indexes: vec![],
+                relations: vec![],
+                crdt: true,
+                sync: true,
+                search: None,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn with_keys<T>(current: &str, previous: &str, open: impl FnOnce() -> T) -> T {
+        std::env::set_var("PYLON_ENCRYPTION_KEY", current);
+        if previous.is_empty() {
+            std::env::remove_var("PYLON_ENCRYPTION_PREVIOUS_KEYS");
+        } else {
+            std::env::set_var("PYLON_ENCRYPTION_PREVIOUS_KEYS", previous);
+        }
+        let out = open();
+        std::env::remove_var("PYLON_ENCRYPTION_KEY");
+        std::env::remove_var("PYLON_ENCRYPTION_PREVIOUS_KEYS");
+        out
+    }
+
+    /// The persisted document's value for each encrypted field must be the
+    /// same ciphertext as the stored column. `snapshot` reads the sidecar
+    /// table directly, so no read-path reconciliation hides a stale doc.
+    fn assert_doc_matches_row(
+        rt: &Runtime,
+        id: &str,
+        snapshot: &dyn Fn(&Runtime, &str) -> Vec<u8>,
+    ) {
+        let ent = rt.require_entity("Note").unwrap().clone();
+        let fields = rt.crdt_fields_for(&ent).unwrap();
+        let doc = pylon_crdt::loro::LoroDoc::new();
+        pylon_crdt::apply_update(&doc, &snapshot(rt, id)).unwrap();
+        let projected = pylon_crdt::project_doc_to_json(&doc, &fields);
+        let stored = rt.list_after_stored("Note", None, 10).unwrap();
+        let row = stored.iter().find(|r| r["id"] == id).unwrap();
+        let current = rt
+            .encryption_key_for_test()
+            .unwrap()
+            .current_key_id()
+            .to_string();
+        for f in ["secret", "body"] {
+            let raw = row[f].as_str().unwrap();
+            assert!(raw.starts_with(&format!("enc:v2:{current}:")), "{f}: {raw}");
+            assert_eq!(projected[f], row[f], "{f} in the persisted CRDT doc");
+        }
+    }
+
+    fn exercise(
+        open: impl Fn(&str, &str) -> Runtime,
+        snapshot: &dyn Fn(&Runtime, &str) -> Vec<u8>,
+    ) {
+        let id = {
+            let rt = open(OLD_KEY, "");
+            rt.insert(
+                "Note",
+                &serde_json::json!({ "title": "t", "secret": "s-1", "body": "b-1" }),
+            )
+            .unwrap()
+        };
+        {
+            let rt = open(NEW_KEY, OLD_KEY);
+            let report = rt.rotate_encrypted_fields(10).unwrap();
+            assert_eq!((report.rotated, report.failed), (2, 0), "{report:?}");
+            assert_doc_matches_row(&rt, &id, snapshot);
+        }
+        // Old key gone: reads and a CRDT-merged update still work.
+        let rt = open(NEW_KEY, "");
+        let row = rt.get_by_id("Note", &id).unwrap().unwrap();
+        assert_eq!(row["secret"], "s-1");
+        assert_eq!(row["body"], "b-1");
+        rt.update("Note", &id, &serde_json::json!({ "title": "t2" }))
+            .unwrap();
+        assert_eq!(rt.get_by_id("Note", &id).unwrap().unwrap()["secret"], "s-1");
+    }
+
+    #[test]
+    fn sqlite_rotation_updates_the_crdt_document() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!("pylon-rotate-crdt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app.db").to_str().unwrap().to_string();
+        exercise(
+            |cur, prev| with_keys(cur, prev, || Runtime::open(&path, manifest()).unwrap()),
+            &|rt, id| {
+                rt.lock_conn_pub()
+                    .unwrap()
+                    .query_row(
+                        "SELECT snapshot FROM _pylon_crdt_snapshots WHERE entity = 'Note' AND row_id = ?1",
+                        [id],
+                        |r| r.get(0),
+                    )
+                    .unwrap()
+            },
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn postgres_rotation_updates_the_crdt_document() {
+        let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
+            eprintln!("skipping: PYLON_TEST_PG_URL not set");
+            return;
+        };
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let m = manifest();
+        let mut adapter =
+            pylon_storage::postgres::live::LivePostgresAdapter::connect(&url).unwrap();
+        adapter
+            .exec_raw("DROP TABLE IF EXISTS \"Note\" CASCADE")
+            .unwrap();
+        let plan = adapter.plan_from_live(&m).unwrap();
+        adapter.apply_plan(&plan).unwrap();
+        let snap_url = url.clone();
+        exercise(
+            |cur, prev| {
+                with_keys(cur, prev, || {
+                    Runtime::open_postgres(&url, manifest()).unwrap()
+                })
+            },
+            &move |_rt, id| {
+                let mut c = postgres::Client::connect(&snap_url, postgres::NoTls).unwrap();
+                c.query_one(
+                    "SELECT snapshot FROM _pylon_crdt_snapshots WHERE entity = 'Note' AND row_id = $1",
+                    &[&id],
+                )
+                .unwrap()
+                .get(0)
+            },
+        );
     }
 }

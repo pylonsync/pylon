@@ -83,6 +83,20 @@ pub(crate) struct ScheduleBufferGuard {
     current: std::rc::Rc<std::cell::RefCell<Vec<PendingSchedule>>>,
     previous_sends: Option<std::rc::Rc<std::cell::RefCell<Vec<(String, serde_json::Value)>>>>,
     sends: std::rc::Rc<std::cell::RefCell<Vec<(String, serde_json::Value)>>>,
+    previous_audits: Option<std::rc::Rc<std::cell::RefCell<Vec<pylon_auth::audit::AuditEvent>>>>,
+    audits: std::rc::Rc<std::cell::RefCell<Vec<pylon_auth::audit::AuditEvent>>>,
+    previous_cancels: Option<CancelledJobs>,
+    cancels: CancelledJobs,
+}
+
+/// Jobs a SQLite mutation cancelled, with the queue that holds them. Put
+/// back when the mutation rolls back (see `ScheduleBufferGuard::drop`).
+type CancelledJobs =
+    std::rc::Rc<std::cell::RefCell<Vec<(Arc<crate::jobs::JobQueue>, crate::jobs::Job)>>>;
+
+thread_local! {
+    pub(crate) static MUTATION_CANCELLED_JOBS: std::cell::RefCell<Option<CancelledJobs>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 impl ScheduleBufferGuard {
@@ -96,12 +110,33 @@ impl ScheduleBufferGuard {
         });
         let sends = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let previous_sends = MUTATION_SHARD_SENDS.with(|cell| cell.replace(Some(sends.clone())));
+        let audits = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let previous_audits =
+            crate::app_audit::MUTATION_AUDIT_BUFFER.with(|cell| cell.replace(Some(audits.clone())));
+        let cancels: CancelledJobs = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let previous_cancels =
+            MUTATION_CANCELLED_JOBS.with(|cell| cell.replace(Some(cancels.clone())));
         Self {
             previous,
             current,
             previous_sends,
             sends,
+            previous_audits,
+            audits,
+            previous_cancels,
+            cancels,
         }
+    }
+
+    /// Keep the cancels this mutation made: it committed.
+    pub(crate) fn commit_cancels(&self) {
+        self.cancels.borrow_mut().clear();
+    }
+
+    /// Drain the audit events captured during this guard's lifetime, to
+    /// write after COMMIT.
+    pub(crate) fn take_audits(&self) -> Vec<pylon_auth::audit::AuditEvent> {
+        std::mem::take(&mut *self.audits.borrow_mut())
     }
 
     /// Drain the `ctx.shards.send` calls captured during this guard's
@@ -138,6 +173,17 @@ impl Drop for ScheduleBufferGuard {
         MUTATION_SHARD_SENDS.with(|cell| {
             *cell.borrow_mut() = self.previous_sends.take();
         });
+        crate::app_audit::MUTATION_AUDIT_BUFFER.with(|cell| {
+            *cell.borrow_mut() = self.previous_audits.take();
+        });
+        MUTATION_CANCELLED_JOBS.with(|cell| {
+            *cell.borrow_mut() = self.previous_cancels.take();
+        });
+        // Cancels still here were made by a mutation that rolled back:
+        // put the jobs back.
+        for (queue, job) in self.cancels.borrow_mut().drain(..) {
+            queue.restore_cancelled(job);
+        }
     }
 }
 
@@ -3431,6 +3477,10 @@ impl<'a> HookEnforcingDataStore<'a> {
 }
 
 impl<'a> DataStore for HookEnforcingDataStore<'a> {
+    fn cancel_internal_job(&self, id: &str) -> Result<bool, DataError> {
+        self.inner.cancel_internal_job(id)
+    }
+
     fn manifest(&self) -> &pylon_kernel::AppManifest {
         self.inner.manifest()
     }
@@ -3876,6 +3926,10 @@ fn runtime_err_to_data(e: crate::RuntimeError) -> DataError {
 }
 
 impl<'a> DataStore for PgBufferedTxStore<'a> {
+    fn cancel_internal_job(&self, id: &str) -> Result<bool, DataError> {
+        self.inner.cancel_internal_job(id)
+    }
+
     fn manifest(&self) -> &pylon_kernel::AppManifest {
         self.inner.manifest()
     }
@@ -4641,6 +4695,9 @@ pub struct FnOpsImpl {
     /// non-mutation enqueue path; this clone is what the
     /// post-COMMIT flush uses.
     pub job_queue: Arc<crate::jobs::JobQueue>,
+    /// Audit store for `ctx.audit` and for events a mutation buffered.
+    /// Set by the server once the auth stores exist.
+    pub audit: std::sync::OnceLock<Arc<pylon_auth::audit::AuditStore>>,
     /// Plugin chain. Wrapped around mutation transactional stores so
     /// `ctx.db.insert/update/delete` from a TS handler fires the same
     /// `before_*`/`after_*` hooks the entity-API path runs. Without
@@ -4653,6 +4710,19 @@ pub struct FnOpsImpl {
 }
 
 impl FnOpsImpl {
+    /// Write the audit events a committed mutation buffered.
+    fn flush_audits(&self, events: Vec<pylon_auth::audit::AuditEvent>) {
+        if events.is_empty() {
+            return;
+        }
+        crate::app_audit::flush_committed(self.audit.get().map(|a| a.as_ref()), events);
+    }
+
+    /// Install the audit store for `ctx.audit` and post-commit flushes.
+    pub fn set_audit_store(&self, store: Arc<pylon_auth::audit::AuditStore>) {
+        let _ = self.audit.set(store);
+    }
+
     /// Send the `ctx.shards.send` inputs a committed mutation buffered.
     /// Delivery is at most once: a failure is logged.
     fn flush_shard_sends(&self, sends: Vec<(String, serde_json::Value)>) {
@@ -4914,6 +4984,8 @@ impl FnOpsImpl {
                             // skips this and the buffer is dropped.
                             self.flush_pending_schedules(sched_guard.take());
                             self.flush_shard_sends(sched_guard.take_sends());
+                            self.flush_audits(sched_guard.take_audits());
+                            sched_guard.commit_cancels();
                             drop(sched_guard);
                             Ok((value, trace))
                         }
@@ -5109,6 +5181,8 @@ impl FnOpsImpl {
                         // Their schedule-row inserts need write_conn, now free.
                         self.flush_pending_schedules(sched_guard.take());
                         self.flush_shard_sends(sched_guard.take_sends());
+                        self.flush_audits(sched_guard.take_audits());
+                        sched_guard.commit_cancels();
                         drop(sched_guard);
                         Ok(value)
                     }
@@ -5903,6 +5977,7 @@ pub fn try_spawn_functions(
         change_log,
         notifier,
         job_queue: Arc::clone(&job_queue_for_handlers),
+        audit: std::sync::OnceLock::new(),
         plugins,
         shards: shards.clone(),
     });
@@ -6053,12 +6128,45 @@ fn install_schedule_hook(
     // mutation, else cancel the pending job. Takes effect at once; a
     // mutation that later rolls back does not bring the job back.
     let cancel_queue = Arc::clone(&job_queue_for_cancel);
-    runner.set_cancel_schedule_hook(Box::new(move |job_id| {
-        if cancel_buffered_schedule(job_id) {
-            return Ok(true);
-        }
-        cancel_queue.cancel_pending(job_id)
+    runner.set_cancel_schedule_hook(Box::new(move |job_id, store| {
+        cancel_scheduled_job(&cancel_queue, job_id, store)
     }));
+}
+
+/// `ctx.scheduler.cancel(id)`. `store` is the calling function's store.
+///
+/// - A schedule the running mutation buffered is dropped from the buffer.
+/// - In a Postgres mutation the job is cancelled through the held
+///   transaction, so the cancel commits or rolls back with the mutation.
+/// - In a SQLite mutation the job is cancelled now and put back if the
+///   mutation rolls back.
+/// - Outside a mutation the job is cancelled now.
+pub(crate) fn cancel_scheduled_job(
+    queue: &Arc<crate::jobs::JobQueue>,
+    job_id: &str,
+    store: &dyn DataStore,
+) -> Result<bool, String> {
+    if cancel_buffered_schedule(job_id) {
+        return Ok(true);
+    }
+    match store.cancel_internal_job(job_id) {
+        Ok(cancelled) => return Ok(cancelled),
+        Err(e) if e.code == "NOT_SUPPORTED" => {}
+        Err(e) => return Err(format!("{}: {}", e.code, e.message)),
+    }
+    let in_mutation = MUTATION_CANCELLED_JOBS.with(|cell| cell.borrow().is_some());
+    if in_mutation && !queue.is_distributed() {
+        let Some(original) = queue.cancel_pending_local(job_id)? else {
+            return Ok(false);
+        };
+        MUTATION_CANCELLED_JOBS.with(|cell| {
+            if let Some(list) = cell.borrow().as_ref() {
+                list.borrow_mut().push((Arc::clone(queue), original));
+            }
+        });
+        return Ok(true);
+    }
+    queue.cancel_pending(job_id)
 }
 
 /// Wire `ctx.email.send` → runtime's EmailAdapter on a single
@@ -7260,6 +7368,8 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>, runner: &Arc<FnRunner>) {
                                 }
                                 ops.flush_pending_schedules(sched_guard.take());
                                 ops.flush_shard_sends(sched_guard.take_sends());
+                                ops.flush_audits(sched_guard.take_audits());
+                                sched_guard.commit_cancels();
                                 drop(sched_guard);
                                 Ok(value)
                             }
@@ -7365,6 +7475,8 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>, runner: &Arc<FnRunner>) {
                             }
                             ops.flush_pending_schedules(sched_guard.take());
                                 ops.flush_shard_sends(sched_guard.take_sends());
+                                ops.flush_audits(sched_guard.take_audits());
+                                sched_guard.commit_cancels();
                             drop(sched_guard);
                             Ok(value)
                         }
@@ -9558,6 +9670,82 @@ mod schedule_cancel_tests {
     #[test]
     fn outside_a_mutation_there_is_no_buffer_to_cancel_from() {
         assert!(!cancel_buffered_schedule("job_anything"));
+    }
+
+    #[test]
+    fn a_sqlite_mutation_cancel_is_undone_by_rollback_and_kept_by_commit() {
+        let queue = Arc::new(crate::jobs::JobQueue::new(10));
+        let rt = crate::Runtime::in_memory(pylon_kernel::AppManifest::default()).unwrap();
+        let rolled = queue.try_enqueue_job(job(&queue, "reminder")).unwrap();
+        let kept = queue.try_enqueue_job(job(&queue, "reminder")).unwrap();
+
+        {
+            let _guard = ScheduleBufferGuard::enter();
+            assert!(cancel_scheduled_job(&queue, &rolled, &rt).unwrap());
+            assert_eq!(queue.pending_count(), 1);
+            // Dropped without commit: the mutation rolled back.
+        }
+        assert_eq!(
+            queue.get_job(&rolled).unwrap().status,
+            crate::jobs::JobStatus::Pending
+        );
+        {
+            let guard = ScheduleBufferGuard::enter();
+            assert!(cancel_scheduled_job(&queue, &kept, &rt).unwrap());
+            guard.commit_cancels();
+        }
+        assert_eq!(
+            queue.get_job(&kept).unwrap().status,
+            crate::jobs::JobStatus::Cancelled
+        );
+        assert_eq!(queue.pending_count(), 1);
+        // Outside a mutation: at once.
+        assert!(cancel_scheduled_job(&queue, &rolled, &rt).unwrap());
+        assert!(!cancel_scheduled_job(&queue, &rolled, &rt).unwrap());
+    }
+
+    #[test]
+    fn a_postgres_mutation_cancel_commits_or_rolls_back_with_the_transaction() {
+        let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
+            eprintln!("skipping: PYLON_TEST_PG_URL not set");
+            return;
+        };
+        let rt = crate::Runtime::open_postgres(&url, pylon_kernel::AppManifest::default()).unwrap();
+        let pg = rt.pg_backend().unwrap();
+        let owner = format!("cancel_tx_{}", pylon_cluster::new_instance_id());
+        let job_store =
+            Arc::new(crate::pg_job_store::PgJobStore::open(pg.store.shared_pool(), owner).unwrap());
+        let queue = Arc::new(crate::jobs::JobQueue::new(10));
+        queue.attach_pg_store(Arc::clone(&job_store));
+        let rolled = queue.try_enqueue_job(job(&queue, "reminder_tx")).unwrap();
+        let kept = queue.try_enqueue_job(job(&queue, "reminder_tx")).unwrap();
+
+        let rolled_back: Result<(), DataError> = pg.store.with_transaction(|tx: &dyn DataStore| {
+            let _guard = ScheduleBufferGuard::enter();
+            assert!(cancel_scheduled_job(&queue, &rolled, tx).unwrap());
+            Err(DataError {
+                code: "HANDLER_ERROR".into(),
+                message: "mutation threw".into(),
+            })
+        });
+        assert!(rolled_back.is_err());
+        assert_eq!(
+            job_store.load(&rolled).unwrap().unwrap().status,
+            crate::jobs::JobStatus::Pending
+        );
+
+        pg.store
+            .with_transaction(|tx: &dyn DataStore| -> Result<(), DataError> {
+                let guard = ScheduleBufferGuard::enter();
+                assert!(cancel_scheduled_job(&queue, &kept, tx).unwrap());
+                guard.commit_cancels();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            job_store.load(&kept).unwrap().unwrap().status,
+            crate::jobs::JobStatus::Cancelled
+        );
     }
 
     #[test]

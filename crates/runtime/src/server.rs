@@ -2302,6 +2302,14 @@ fn start_server(
         reg.register(Arc::new(
             pylon_plugin::builtin::owner_stamp::OwnerStampPlugin::from_manifest(runtime.manifest()),
         ));
+        // Record writes to entities declared `audit: true`. Registered
+        // last so it sees each write as the plugins above left it.
+        if let Some(entity_audit) = crate::app_audit::EntityAuditPlugin::from_manifest(
+            runtime.manifest(),
+            Arc::clone(&audit),
+        ) {
+            reg.register(Arc::new(entity_audit));
+        }
         Arc::new(reg)
     });
     let room_mgr = Arc::new(RoomManager::new(120)); // 2 min idle timeout
@@ -2860,6 +2868,16 @@ fn start_server(
         // the pool as the internal `__pylon_workflow_run` action, so step
         // code runs with a full ActionCtx. Before this the engine POSTed
         // to a default URL nothing served and TS workflows never executed.
+        // `ctx.audit.*` and the post-commit flush of events a mutation
+        // buffered write to the same store as auth events.
+        ops.set_audit_store(Arc::clone(&audit));
+        for runner in ops.pool.runners() {
+            let store = Arc::clone(&audit);
+            runner.set_audit_op_hook(Box::new(move |req, auth| {
+                crate::app_audit::handle_op(&store, req, auth)
+            }));
+        }
+
         let wf_infos = ops.workflow_infos();
         if !wf_infos.is_empty() {
             for info in &wf_infos {
@@ -5540,6 +5558,63 @@ fn start_server(
             );
             let _ = request.respond(response);
             mt.record_request("POST", status);
+            return;
+        }
+
+        // Audit log for operators, across tenants. Admin only.
+        //   GET /api/admin/audit?tenant=&entity=&id=&actor=&action=&before=&limit=
+        if url == "/api/admin/audit" || url.starts_with("/api/admin/audit?") {
+            let (status, body) = if !auth_ctx.is_admin {
+                (403u16, json_error("FORBIDDEN", "this endpoint requires admin auth"))
+            } else if method != Method::Get {
+                (405, json_error("METHOD_NOT_ALLOWED", "GET only"))
+            } else {
+                let params: std::collections::HashMap<String, String> = url
+                    .split_once('?')
+                    .map(|(_, q)| {
+                        q.split('&')
+                            .filter(|pair| !pair.is_empty())
+                            .map(|pair| {
+                                let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+                                (percent_decode_str(k), percent_decode_str(v))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let query = pylon_auth::audit::AuditQuery {
+                    tenant_id: params.get("tenant").cloned(),
+                    actor_id: params.get("actor").cloned(),
+                    user_id: params.get("subject").cloned(),
+                    entity: params.get("entity").cloned(),
+                    entity_id: params.get("id").cloned(),
+                    action: params
+                        .get("action")
+                        .map(|a| crate::app_audit::stored_action(a)),
+                    before: params.get("before").and_then(|v| v.parse().ok()),
+                    limit: params
+                        .get("limit")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(100),
+                };
+                match aud.find(&query) {
+                    Ok(events) => (
+                        200,
+                        serde_json::Value::Array(
+                            events.iter().map(crate::app_audit::event_json).collect(),
+                        )
+                        .to_string(),
+                    ),
+                    Err(e) => (500, json_error("AUDIT_READ_FAILED", &e)),
+                }
+            };
+            let response = with_security_headers(
+                Response::from_string(&body)
+                    .with_status_code(status)
+                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+                    .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap()),
+            );
+            let _ = request.respond(response);
+            mt.record_request(method.as_str(), status);
             return;
         }
 

@@ -83,6 +83,8 @@ export type {
   Workflows,
   WorkflowRunSummary,
   WorkflowRunStatus,
+  Audit,
+  AuditEntry,
   VectorSearchQuery,
   VectorSearchResult,
   SearchResult,

@@ -42,6 +42,7 @@
               "concepts/functions",
               "concepts/scheduling",
               "concepts/workflows",
+              "concepts/audit-log",
               "concepts/agents",
               "concepts/streaming",
               "concepts/realtime",
