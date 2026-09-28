@@ -2555,7 +2555,16 @@ pub struct SessionStore {
     /// manifest's `auth.session.expires_in` config at server boot;
     /// falls back to `Session::DEFAULT_LIFETIME_SECS` (30 days).
     default_lifetime_secs: u64,
+    /// Called after sessions end. See [`SessionStore::on_session_end`].
+    end_listeners: Mutex<Vec<SessionEndListener>>,
 }
+
+/// Called with the user id of each session that ended: revoked (sign-out,
+/// password change or reset, account deletion, a guest merge), rotated
+/// away by [`SessionStore::refresh`], or swept after expiry. Runs on the
+/// thread that ended the session, after the store's lock is released, so
+/// it may read the store.
+pub type SessionEndListener = Arc<dyn Fn(&str) + Send + Sync>;
 
 impl Default for SessionStore {
     fn default() -> Self {
@@ -2569,6 +2578,32 @@ impl SessionStore {
             sessions: Mutex::new(HashMap::new()),
             backend: None,
             default_lifetime_secs: Session::DEFAULT_LIFETIME_SECS,
+            end_listeners: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Register a listener for ended sessions. Holders of long-lived
+    /// connections (the WebSocket hub) use it to re-check the connections
+    /// that authenticated with an ended session.
+    pub fn on_session_end(&self, listener: SessionEndListener) {
+        self.end_listeners.lock().unwrap().push(listener);
+    }
+
+    /// Tell the listeners that sessions of `user_ids` ended. Call with the
+    /// sessions lock released.
+    fn sessions_ended<'a>(&self, user_ids: impl IntoIterator<Item = &'a str>) {
+        let listeners = self.end_listeners.lock().unwrap().clone();
+        if listeners.is_empty() {
+            return;
+        }
+        let mut seen = std::collections::HashSet::new();
+        for user_id in user_ids {
+            if !seen.insert(user_id) {
+                continue;
+            }
+            for listener in &listeners {
+                listener(user_id);
+            }
         }
     }
 
@@ -2593,6 +2628,7 @@ impl SessionStore {
             sessions: Mutex::new(map),
             backend: Some(backend),
             default_lifetime_secs: Session::DEFAULT_LIFETIME_SECS,
+            end_listeners: Mutex::new(Vec::new()),
         }
     }
 
@@ -2648,13 +2684,23 @@ impl SessionStore {
     /// extends expiry. The old token is revoked. Returns the new session or
     /// None if the old token is missing/expired.
     pub fn refresh(&self, old_token: &str) -> Option<Session> {
+        let refreshed = self.refresh_inner(old_token);
+        if let Some((user_id, _)) = &refreshed {
+            self.sessions_ended([user_id.as_str()]);
+        }
+        refreshed.and_then(|(_, new)| new)
+    }
+
+    /// `refresh` without the listeners: the user id of the removed
+    /// session, and the new session unless the old one had expired.
+    fn refresh_inner(&self, old_token: &str) -> Option<(String, Option<Session>)> {
         let mut sessions = self.sessions.lock().unwrap();
         let old = sessions.remove(old_token)?;
         if let Some(b) = &self.backend {
             b.remove(old_token);
         }
         if old.is_expired() {
-            return None;
+            return Some((old.user_id, None));
         }
         // Use the store's configured lifetime so a manifest-set
         // `auth.session.expires_in` survives session refresh. Previous
@@ -2682,7 +2728,7 @@ impl SessionStore {
         if let Some(b) = &self.backend {
             b.save(&new);
         }
-        Some(new)
+        Some((old.user_id, Some(new)))
     }
 
     /// Every session in the store, including expired ones, with no
@@ -2708,6 +2754,14 @@ impl SessionStore {
 
     /// Revoke all sessions for a user. Returns the count removed.
     pub fn revoke_all_for_user(&self, user_id: &str) -> usize {
+        let n = self.revoke_all_for_user_inner(user_id);
+        if n > 0 {
+            self.sessions_ended([user_id]);
+        }
+        n
+    }
+
+    fn revoke_all_for_user_inner(&self, user_id: &str) -> usize {
         let mut sessions = self.sessions.lock().unwrap();
         let tokens: Vec<String> = sessions
             .iter()
@@ -2731,25 +2785,31 @@ impl SessionStore {
 
     /// Sweep expired sessions. Returns the count removed.
     pub fn sweep_expired(&self) -> usize {
-        let mut sessions = self.sessions.lock().unwrap();
-        let expired: Vec<String> = sessions
-            .iter()
-            .filter_map(|(t, s)| {
-                if s.is_expired() {
-                    Some(t.clone())
-                } else {
-                    None
+        let ended_users: Vec<String> = {
+            let mut sessions = self.sessions.lock().unwrap();
+            let expired: Vec<String> = sessions
+                .iter()
+                .filter_map(|(t, s)| {
+                    if s.is_expired() {
+                        Some(t.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let mut users = Vec::with_capacity(expired.len());
+            for t in &expired {
+                if let Some(s) = sessions.remove(t) {
+                    users.push(s.user_id);
                 }
-            })
-            .collect();
-        let n = expired.len();
-        for t in &expired {
-            sessions.remove(t);
-            if let Some(b) = &self.backend {
-                b.remove(t);
+                if let Some(b) = &self.backend {
+                    b.remove(t);
+                }
             }
-        }
-        n
+            users
+        };
+        self.sessions_ended(ended_users.iter().map(String::as_str));
+        ended_users.len()
     }
 
     /// Attach a device label to a session (typically on login from a browser).
@@ -2819,14 +2879,23 @@ impl SessionStore {
 
     /// Remove a session.
     pub fn revoke(&self, token: &str) -> bool {
-        let mut sessions = self.sessions.lock().unwrap();
-        let removed = sessions.remove(token).is_some();
-        if removed {
-            if let Some(b) = &self.backend {
-                b.remove(token);
+        let removed = {
+            let mut sessions = self.sessions.lock().unwrap();
+            let removed = sessions.remove(token);
+            if removed.is_some() {
+                if let Some(b) = &self.backend {
+                    b.remove(token);
+                }
             }
+            removed
+        };
+        match removed {
+            Some(session) => {
+                self.sessions_ended([session.user_id.as_str()]);
+                true
+            }
+            None => false,
         }
-        removed
     }
 }
 
@@ -4115,6 +4184,58 @@ mod tests {
 
         std::env::remove_var(key_id);
         std::env::remove_var(key_secret);
+    }
+
+    /// Every way a session ends reaches the end listeners, once per user,
+    /// and a listener may read the store (it runs with the lock released).
+    #[test]
+    fn ended_sessions_reach_the_listeners() {
+        use std::sync::{Arc, Mutex};
+        let listen = |store: &Arc<SessionStore>| {
+            let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+            let sink = Arc::clone(&seen);
+            let weak = Arc::downgrade(store);
+            store.on_session_end(Arc::new(move |user_id: &str| {
+                if let Some(store) = weak.upgrade() {
+                    let _ = store.list_for_user(user_id);
+                }
+                sink.lock().unwrap().push(user_id.to_string());
+            }));
+            seen
+        };
+        let store = Arc::new(SessionStore::new());
+        let seen = listen(&store);
+        let taken = |seen: &Arc<Mutex<Vec<String>>>| std::mem::take(&mut *seen.lock().unwrap());
+
+        let alice = store.create("alice".into());
+        assert!(store.revoke(&alice.token));
+        assert_eq!(taken(&seen), ["alice"]);
+        assert!(!store.revoke(&alice.token));
+        assert!(taken(&seen).is_empty(), "nothing ended the second time");
+
+        store.create("bob".into());
+        store.create("bob".into());
+        assert_eq!(store.revoke_all_for_user("bob"), 2);
+        assert_eq!(taken(&seen), ["bob"]);
+        assert_eq!(store.revoke_all_for_user("bob"), 0);
+        assert!(taken(&seen).is_empty());
+
+        let carol = store.create("carol".into());
+        let fresh = store.refresh(&carol.token).expect("refreshed");
+        assert_eq!(fresh.user_id, "carol");
+        assert_eq!(taken(&seen), ["carol"]);
+
+        for _ in 0..2 {
+            let mut expired = Session::new("dave".into());
+            expired.expires_at = 1;
+            store
+                .sessions
+                .lock()
+                .unwrap()
+                .insert(expired.token.clone(), expired);
+        }
+        assert_eq!(store.sweep_expired(), 2);
+        assert_eq!(taken(&seen), ["dave"]);
     }
 
     // -- Guest auth --

@@ -231,6 +231,11 @@ fn spawn_streaming_response<R: std::io::Read + Send + 'static>(
     Ok(())
 }
 
+/// How often every WebSocket's credential is re-checked (and expired
+/// sessions swept). Session events end connections at once; this bounds
+/// how long an expired session, JWT, or revoked API key keeps one open.
+const WS_REVALIDATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Body framing for an SSE response written raw through
 /// `Request::into_writer()`.
 ///
@@ -3024,9 +3029,12 @@ fn start_server(
     // dir, no Bun), reactive subscribes will fail at the FnOps lookup
     // — that's the correct behavior. The registry itself still works
     // for the rest of the codebase that holds an Arc.
+    // `fn_ops_dyn` includes a test override, so reactive subscriptions run
+    // through the same FnOps as `/api/fn`.
+    if let Some(ref ops) = fn_ops_dyn {
+        reactive_registry.set_fn_ops(Arc::clone(ops));
+    }
     if let Some(ref ops) = fn_ops_maybe {
-        let dyn_ops: Arc<dyn pylon_router::FnOps> = Arc::clone(ops) as Arc<dyn pylon_router::FnOps>;
-        reactive_registry.set_fn_ops(dyn_ops);
         // Register app-declared cron jobs (manifest.crons) now that functions
         // are loaded. The scheduler is already running (started above); adding
         // tasks to it is picked up on the next tick.
@@ -3438,6 +3446,56 @@ fn start_server(
         jwt_secret: jwt_secret().cloned(),
         jwt_issuer: jwt_issuer().cloned(),
     });
+    // A WebSocket keeps the identity it authenticated with. When a session
+    // ends (sign-out, revocation, password change, refresh, expiry), the
+    // connections that used it are ended and their reactive subscriptions
+    // dropped; the client reconnects with the token it holds now. The
+    // periodic pass also catches credentials no session event reports: an
+    // expired JWT, a revoked API key.
+    ws_hub.set_auth_resolver(Arc::clone(&ws_auth));
+    {
+        let hub = Arc::downgrade(&ws_hub);
+        let reactive = Arc::downgrade(&reactive_registry);
+        session_store.on_session_end(Arc::new(move |user_id: &str| {
+            let Some(hub) = hub.upgrade() else {
+                return;
+            };
+            let ended = hub.revalidate_user(user_id);
+            if let Some(reactive) = reactive.upgrade() {
+                for id in ended {
+                    reactive.disconnect_client(id);
+                }
+            }
+        }));
+    }
+    {
+        let hub = Arc::downgrade(&ws_hub);
+        let reactive = Arc::downgrade(&reactive_registry);
+        let sessions = Arc::downgrade(&session_store);
+        let _ = std::thread::Builder::new()
+            .name("pylon-ws-revalidate".into())
+            .stack_size(128 * 1024)
+            .spawn(move || loop {
+                std::thread::sleep(WS_REVALIDATE_INTERVAL);
+                // Expired sessions end here; the listener above ends
+                // their connections.
+                match sessions.upgrade() {
+                    Some(sessions) => {
+                        sessions.sweep_expired();
+                    }
+                    None => return,
+                }
+                let Some(hub) = hub.upgrade() else {
+                    return;
+                };
+                let ended = hub.revalidate_all_clients();
+                if let Some(reactive) = reactive.upgrade() {
+                    for id in ended {
+                        reactive.disconnect_client(id);
+                    }
+                }
+            });
+    }
     {
         let hub = Arc::clone(&ws_hub);
         let auth = Arc::clone(&ws_auth);
@@ -4298,9 +4356,10 @@ fn start_server(
         // Path is /api/sync/ws so it sits under existing `/api/*` rewrite
         // rules without forcing operators to add a new proxy entry.
         if url == "/api/sync/ws" && method == Method::Get {
-            if let Some(upgrade_req) =
+            if let Some(mut upgrade_req) =
                 crate::ws::inspect_ws_upgrade(request.headers(), &cookie_config.name)
             {
+                upgrade_req.client_ip = Some(dispatch_peer_ip_str.clone());
                 // CSWSH defense: an upgrade authenticated by the AMBIENT
                 // session cookie must originate from a trusted Origin.
                 // Browsers auto-attach the victim's cookie to a cross-origin

@@ -3,6 +3,8 @@
 //!
 //! - `sync: false` entities are never sent: the pull path leaves them out,
 //!   and so must the change broadcast and the replication cursor fetch.
+//! - A connection whose session ended (sign-out, revocation) is closed,
+//!   and its reactive subscriptions stop re-running.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -316,4 +318,154 @@ fn sync_false_entities_never_reach_a_subscribed_socket() {
     assert_eq!(status, 200, "{body}");
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(page["data"].as_array().map(Vec::len), Some(10), "{body}");
+}
+
+/// A `query` named `feed` that guests may subscribe to. Counts runs.
+struct FeedFns {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl pylon_router::FnOps for FeedFns {
+    fn get_fn(&self, name: &str) -> Option<pylon_functions::registry::FnDef> {
+        (name == "feed").then(|| pylon_functions::registry::FnDef {
+            name: name.into(),
+            fn_type: pylon_functions::protocol::FnType::Query,
+            args_schema: None,
+            internal: false,
+            auth: pylon_functions::registry::FnAuthMode::Guest,
+            timeout_secs: None,
+        })
+    }
+    fn list_fns(&self) -> Vec<pylon_functions::registry::FnDef> {
+        self.get_fn("feed").into_iter().collect()
+    }
+    fn call(
+        &self,
+        fn_name: &str,
+        _args: serde_json::Value,
+        _auth: pylon_functions::protocol::AuthInfo,
+        _on_stream: Option<pylon_functions::runner::StreamCallback>,
+        _request: Option<pylon_functions::protocol::RequestInfo>,
+        _stream_id: Option<String>,
+    ) -> Result<
+        (serde_json::Value, pylon_functions::trace::FnTrace),
+        pylon_functions::runner::FnCallError,
+    > {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        Ok((
+            serde_json::json!({ "run": n }),
+            pylon_functions::trace::FnTrace {
+                call_id: "t".into(),
+                fn_name: fn_name.into(),
+                fn_type: pylon_functions::protocol::FnType::Query,
+                user_id: None,
+                started_at: 0,
+                duration_ms: 0.0,
+                outcome: pylon_functions::trace::FnOutcome::Ok { value: None },
+                ops: vec![],
+                stream_bytes: 0,
+                stream_chunks: 0,
+                schedules: vec![],
+            },
+        ))
+    }
+    fn recent_traces(&self, _limit: usize) -> Vec<pylon_functions::trace::FnTrace> {
+        vec![]
+    }
+}
+
+fn start_server_with_feed() -> u16 {
+    start_server(); // the shared env setup; the server itself is unused
+    let port = available_port();
+    let rt = Arc::new(Runtime::in_memory(manifest()).unwrap());
+    let fns: Arc<dyn pylon_router::FnOps> = Arc::new(FeedFns {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    std::thread::spawn(move || {
+        let _ = pylon_runtime::server::start_server_for_test_with_fn_ops(rt, port, fns);
+    });
+    wait_for_port(port);
+    wait_for_port(port + 1);
+    port
+}
+
+fn mint_guest(port: u16) -> String {
+    let (status, body) = http(port, "POST", "/api/auth/guest", Some("{}"), None);
+    assert_eq!(status, 201, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    v["token"].as_str().unwrap().to_string()
+}
+
+fn subscribe_feed(ws: &mut Ws) {
+    ws.send(Message::Text(
+        serde_json::json!({"type": "reactive-subscribe", "sub_id": "s1", "fn_name": "feed"})
+            .to_string(),
+    ))
+    .unwrap();
+    let (frames, got) = read_until(ws, Duration::from_secs(10), |v| {
+        v["type"] == "reactive-result" || v["type"] == "reactive-error"
+    });
+    assert!(got, "no reactive reply: {frames:?}");
+    assert_eq!(
+        frames.last().unwrap()["type"],
+        "reactive-result",
+        "{frames:?}"
+    );
+}
+
+/// How a socket ended within `deadline`: `Some(close code)` for a close
+/// frame, `Some(None)` for a dropped connection, `None` if still open.
+fn ended_within(ws: &mut Ws, deadline: Duration) -> Option<Option<u16>> {
+    let start = Instant::now();
+    while start.elapsed() < deadline {
+        match ws.read() {
+            Ok(Message::Close(frame)) => return Some(frame.map(|f| u16::from(f.code))),
+            Ok(Message::Ping(d)) => {
+                let _ = ws.send(Message::Pong(d));
+            }
+            Ok(_) => {}
+            Err(tungstenite::Error::Io(e))
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(_) => return Some(None),
+        }
+    }
+    None
+}
+
+/// Before, a WebSocket kept the identity it connected with: after the
+/// session was revoked (sign-out), the socket stayed open and its reactive
+/// subscriptions kept re-running under the revoked identity. Now the
+/// socket that used the session is closed (Policy, 1008), and one on
+/// another session is not.
+#[test]
+fn signing_out_closes_the_sockets_that_used_the_session() {
+    let port = start_server_with_feed();
+    let revoked_token = mint_guest(port);
+    let other_token = mint_guest(port);
+    let mut revoked = connect_ws(port, &revoked_token);
+    let mut other = connect_ws(port, &other_token);
+    subscribe_feed(&mut revoked);
+    subscribe_feed(&mut other);
+
+    let (status, body) = http(
+        port,
+        "DELETE",
+        "/api/auth/session",
+        None,
+        Some(&revoked_token),
+    );
+    assert_eq!(status, 200, "{body}");
+
+    let ended = ended_within(&mut revoked, Duration::from_secs(5));
+    assert_eq!(
+        ended,
+        Some(Some(1008)),
+        "the socket of the revoked session stayed open or closed without a Policy frame"
+    );
+    assert_eq!(
+        ended_within(&mut other, Duration::from_secs(1)),
+        None,
+        "a socket on another session was closed"
+    );
 }

@@ -563,6 +563,15 @@ pub trait FnOps: Send + Sync {
         Err("runtime reload is not supported by this backend".to_string())
     }
 
+    /// A number that changes whenever the set of function definitions
+    /// changes (a dev reload, a runner respawn). Callers that checked a
+    /// definition earlier (reactive subscriptions) compare it to know
+    /// when to check again. Backends whose definitions never change
+    /// return a constant.
+    fn definitions_generation(&self) -> u64 {
+        0
+    }
+
     /// Execute a function. For streaming responses, `on_stream` is called for
     /// each chunk as it arrives from the function handler.
     ///

@@ -111,18 +111,34 @@ fn is_false(b: &bool) -> bool {
 /// available functions.
 pub struct FnRegistry {
     fns: Mutex<HashMap<String, FnDef>>,
+    /// Bumped on every change to the registered set. See
+    /// [`FnRegistry::generation`].
+    generation: std::sync::atomic::AtomicU64,
 }
 
 impl FnRegistry {
     pub fn new() -> Self {
         Self {
             fns: Mutex::new(HashMap::new()),
+            generation: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Changes whenever the registered set changes. A caller that checked
+    /// a definition compares it to know when to check again.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn bump_generation(&self) {
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Register a function. Called during startup handshake with the Bun process.
     pub fn register(&self, def: FnDef) {
         self.fns.lock().unwrap().insert(def.name.clone(), def);
+        self.bump_generation();
     }
 
     /// Register multiple functions at once (from startup handshake).
@@ -131,6 +147,8 @@ impl FnRegistry {
         for def in defs {
             fns.insert(def.name.clone(), def);
         }
+        drop(fns);
+        self.bump_generation();
     }
 
     /// Atomically replace the entire registered set. Used after the runtime
@@ -143,6 +161,8 @@ impl FnRegistry {
         for def in defs {
             fns.insert(def.name.clone(), def);
         }
+        drop(fns);
+        self.bump_generation();
     }
 
     /// Look up a function by name.

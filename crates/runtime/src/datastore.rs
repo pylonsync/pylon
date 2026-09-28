@@ -5265,6 +5265,10 @@ impl pylon_router::FnOps for FnOpsImpl {
         Ok(count)
     }
 
+    fn definitions_generation(&self) -> u64 {
+        self.registry.generation()
+    }
+
     fn wait_for_runner_ready(&self, timeout: std::time::Duration) -> bool {
         // Bridge the cold-boot window where the Rust listener is up but the
         // Bun runner hasn't finished spawning — see

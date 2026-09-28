@@ -401,6 +401,19 @@ pub struct WsClient {
     /// this slot is `None`; broadcasters only use `outbound_tx`.
     pub outbound_rx: Mutex<Option<mpsc::Receiver<Message>>>,
     pub auth: RwLock<AuthContext>,
+    /// The bearer token the connection authenticated with. Re-resolved
+    /// when a session of this user ends (see [`WsHub::revalidate_user`]).
+    token: Option<String>,
+    /// Set when the connection's token stopped resolving. The hub has
+    /// already dropped the client; the reader thread ends the session at
+    /// its next iteration and processes no further control messages.
+    revoked: std::sync::atomic::AtomicBool,
+}
+
+impl WsClient {
+    fn is_revoked(&self) -> bool {
+        self.revoked.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 type ClientSocket = Arc<WsClient>;
@@ -420,13 +433,21 @@ impl Shard {
         }
     }
 
-    fn add(&self, id: u64, ws: WebSocket<Box<dyn WsStream>>, auth: AuthContext) -> ClientSocket {
+    fn add(
+        &self,
+        id: u64,
+        ws: WebSocket<Box<dyn WsStream>>,
+        auth: AuthContext,
+        token: Option<String>,
+    ) -> ClientSocket {
         let (outbound_tx, outbound_rx) = mpsc::sync_channel(PER_CLIENT_OUTBOUND_DEPTH);
         let handle = Arc::new(WsClient {
             socket: Mutex::new(ws),
             outbound_tx,
             outbound_rx: Mutex::new(Some(outbound_rx)),
             auth: RwLock::new(auth),
+            token,
+            revoked: std::sync::atomic::AtomicBool::new(false),
         });
         self.clients.lock().unwrap().insert(id, Arc::clone(&handle));
         handle
@@ -776,6 +797,27 @@ impl Shard {
         self.clients.lock().unwrap().len()
     }
 
+    fn all_clients(&self) -> Vec<(u64, ClientSocket)> {
+        let clients = self.clients.lock().unwrap();
+        clients.iter().map(|(id, h)| (*id, Arc::clone(h))).collect()
+    }
+
+    /// The connections in this shard authenticated as `user_id`.
+    fn clients_of_user(&self, user_id: &str) -> Vec<(u64, ClientSocket)> {
+        let clients = self.clients.lock().unwrap();
+        clients
+            .iter()
+            .filter(|(_, h)| {
+                let auth = match h.auth.read() {
+                    Ok(g) => g,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                auth.user_id.as_deref() == Some(user_id)
+            })
+            .map(|(id, h)| (*id, Arc::clone(h)))
+            .collect()
+    }
+
     /// Refresh the `tenant_id` on every connection in this shard whose
     /// authenticated `user_id` matches. Returns the number of clients
     /// updated so the hub-level aggregator can log + emit metrics.
@@ -904,6 +946,10 @@ pub struct WsHub {
     /// Identity-completion hook re-applied when a client's active org
     /// changes (`update_tenant_for_user`). See [`AuthEnricher`].
     auth_enricher: Mutex<Option<AuthEnricher>>,
+    /// The token resolver the connections authenticated with, used to
+    /// re-resolve them when a session ends ([`WsHub::revalidate_user`]).
+    /// Set once at boot by the server.
+    auth_resolver: Mutex<Option<Arc<WsAuth>>>,
     /// Per-client CRDT subscriptions. Reader threads register `(entity,
     /// row_id)` pairs as the client mounts/unmounts useLoroDoc hooks;
     /// the binary CRDT broadcast path uses `subscribers()` to filter the
@@ -975,6 +1021,7 @@ impl WsHub {
             manifest,
             auth_user,
             auth_enricher: Mutex::new(None),
+            auth_resolver: Mutex::new(None),
             subscriptions: CrdtSubscriptions::new(),
             room_subscriptions: RoomSubscriptions::new(),
         })
@@ -1431,6 +1478,96 @@ impl WsHub {
             .sum()
     }
 
+    /// Install the resolver used to re-check connection tokens when a
+    /// session ends. Set once at boot by the server.
+    pub fn set_auth_resolver(&self, auth: Arc<WsAuth>) {
+        match self.auth_resolver.lock() {
+            Ok(mut g) => *g = Some(auth),
+            Err(poisoned) => *poisoned.into_inner() = Some(auth),
+        }
+    }
+
+    /// Re-resolve the token of every connection authenticated as
+    /// `user_id`, and end each connection whose token no longer resolves
+    /// to that user (logout, session revocation, password change). Returns
+    /// the ended connections' ids so the caller can drop their reactive
+    /// subscriptions.
+    ///
+    /// An ended connection is dropped from the hub at once (no further
+    /// broadcast, per-user push, or CRDT / room frame reaches it) and
+    /// gets a Policy close frame. The client reconnects with whatever
+    /// token it holds now: a refreshed one, or none after a logout. Its
+    /// reader thread processes no further messages.
+    pub fn revalidate_user(&self, user_id: &str) -> Vec<u64> {
+        self.revalidate(Some(user_id))
+    }
+
+    /// [`WsHub::revalidate_user`] for every authenticated connection.
+    /// Catches what no session event reports: an expired session or JWT,
+    /// a revoked API key.
+    pub fn revalidate_all_clients(&self) -> Vec<u64> {
+        self.revalidate(None)
+    }
+
+    fn revalidate(&self, only_user: Option<&str>) -> Vec<u64> {
+        let resolver = match self.auth_resolver.lock() {
+            Ok(g) => g.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        let Some(resolver) = resolver else {
+            return Vec::new();
+        };
+        let mut ended = Vec::new();
+        for shard in &self.shards {
+            let handles: Vec<(u64, ClientSocket)> = match only_user {
+                Some(user_id) => shard.clients_of_user(user_id),
+                None => shard.all_clients(),
+            };
+            for (id, handle) in handles {
+                // An anonymous connection has no credential to end.
+                if handle.token.is_none() {
+                    continue;
+                }
+                let user_id = match handle.auth.read() {
+                    Ok(g) => g.user_id.clone(),
+                    Err(poisoned) => poisoned.into_inner().user_id.clone(),
+                };
+                let still_valid = resolve_bearer_token(
+                    handle.token.as_deref(),
+                    &resolver.sessions,
+                    &resolver.api_keys,
+                    resolver.admin_token.as_deref(),
+                    resolver.jwt_secret.as_deref(),
+                    resolver.jwt_issuer.as_deref(),
+                )
+                .is_ok_and(|ctx| ctx.user_id == user_id);
+                if !still_valid {
+                    self.end_client(id, &handle);
+                    ended.push(id);
+                }
+            }
+        }
+        ended
+    }
+
+    /// Drop a connection whose credentials ended: out of the hub and every
+    /// subscription registry, marked revoked, and sent a Policy close.
+    fn end_client(&self, id: u64, handle: &ClientSocket) {
+        handle
+            .revoked
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.subscriptions.unsubscribe_all(id);
+        self.room_subscriptions.unsubscribe_all(id);
+        self.remove_client(id);
+        let _ =
+            handle
+                .outbound_tx
+                .try_send(Message::Close(Some(tungstenite::protocol::CloseFrame {
+                    code: tungstenite::protocol::frame::coding::CloseCode::Policy,
+                    reason: "session ended".into(),
+                })));
+    }
+
     /// Install the identity-completion hook used when a connection's
     /// active org changes. Set once at boot by the server, which owns the
     /// org store; see [`AuthEnricher`].
@@ -1456,12 +1593,13 @@ impl WsHub {
         &self,
         ws: WebSocket<Box<dyn WsStream>>,
         auth: AuthContext,
+        token: Option<String>,
     ) -> (u64, ClientSocket) {
         let mut next_id = self.next_id.lock().unwrap();
         let id = *next_id;
         *next_id += 1;
         let shard_idx = (id as usize) % NUM_SHARDS;
-        let handle = self.shards[shard_idx].add(id, ws, auth);
+        let handle = self.shards[shard_idx].add(id, ws, auth, token);
         (id, handle)
     }
 
@@ -1627,7 +1765,15 @@ pub fn start_ws_server(
             .stack_size(64 * 1024)
             .spawn(move || {
                 let _conn_slot = guard;
-                handle_ws_connection(hub, auth, stream, fetcher, reactive_cl, rooms_cl);
+                handle_ws_connection(
+                    hub,
+                    auth,
+                    stream,
+                    peer_ip.map(|ip| ip.to_string()),
+                    fetcher,
+                    reactive_cl,
+                    rooms_cl,
+                );
             });
         if spawn_result.is_err() {
             // Thread creation failed — guard is already dropped here, slot
@@ -1647,6 +1793,7 @@ fn handle_ws_connection(
     hub: Arc<WsHub>,
     auth: Arc<WsAuth>,
     stream: TcpStream,
+    client_ip: Option<String>,
     snapshot_fetcher: Option<SnapshotFetcher>,
     reactive: Option<Arc<crate::reactive::ReactiveRegistry>>,
     rooms: Option<Arc<dyn RoomBridge>>,
@@ -1776,6 +1923,7 @@ fn handle_ws_connection(
         hub,
         auth,
         token,
+        client_ip,
         snapshot_fetcher,
         reactive,
         rooms,
@@ -1792,11 +1940,15 @@ fn handle_ws_connection(
 /// Sends a clean close frame with a Policy code on auth failure so
 /// the client can surface a sensible error instead of a generic
 /// network drop.
+#[allow(clippy::too_many_arguments)]
 fn run_authenticated_session(
     ws: WebSocket<Box<dyn WsStream>>,
     hub: Arc<WsHub>,
     auth: Arc<WsAuth>,
     token: Option<String>,
+    // The client's address, for the per-function rate limit of an
+    // anonymous caller's reactive subscriptions. `None` when unknown.
+    client_ip: Option<String>,
     snapshot_fetcher: Option<SnapshotFetcher>,
     reactive: Option<Arc<crate::reactive::ReactiveRegistry>>,
     rooms: Option<Arc<dyn RoomBridge>>,
@@ -1852,7 +2004,7 @@ fn run_authenticated_session(
     // allows. Pre-fix the WS layer rejected anonymous upgrades up
     // front, contradicting the rest of the stack and making the live
     // sync demo silently fall back to no-broadcasts.
-    let (client_id, socket_handle) = hub.add_client(ws, auth_ctx.clone());
+    let (client_id, socket_handle) = hub.add_client(ws, auth_ctx.clone(), token);
 
     // Dual-thread path: spawn the writer thread on the cloned TcpStream.
     // It owns `outbound_rx` and `WebSocket::from_raw_socket`-wraps the
@@ -1918,6 +2070,38 @@ fn run_authenticated_session(
     };
 
     loop {
+        // The hub ended this connection (its session ended). It is already
+        // out of the hub and every registry; drop what the reader still
+        // holds and stop.
+        if socket_handle.is_revoked() {
+            if let Some(reg) = reactive.as_ref() {
+                reg.disconnect_client(client_id);
+            }
+            let snapshot_auth = match socket_handle.auth.read() {
+                Ok(g) => g.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            };
+            fanout_room_leaves_on_disconnect(&hub, &snapshot_auth, rooms.as_ref());
+            let disconnect = serde_json::json!({
+                "type": "presence",
+                "event": "disconnect",
+                "clientId": client_id,
+            });
+            hub.broadcast_presence(&disconnect.to_string());
+            if let Some(ref outbound_rx) = outbound_rx_for_reader {
+                // Single-thread mode: this thread owns the send side.
+                let mut guard = match socket_handle.socket.lock() {
+                    Ok(g) => g,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                while let Ok(out_msg) = outbound_rx.try_recv() {
+                    if guard.send(out_msg).is_err() {
+                        break;
+                    }
+                }
+            }
+            break;
+        }
         // Drain queued outbound BEFORE blocking on read — but ONLY if
         // we own the receiver (single-thread mode). In dual-thread mode
         // the writer thread handles delivery and broadcasts have zero
@@ -1964,6 +2148,11 @@ fn run_authenticated_session(
                     Err(_) => continue,
                 };
                 let kind = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                // A message that arrived after the session ended is not
+                // processed under the ended identity.
+                if socket_handle.is_revoked() {
+                    continue;
+                }
                 // Refresh the per-message auth view from the
                 // shard-stored RwLock. `update_tenant_for_user`
                 // mutates this slot when the user's session flips
@@ -2054,7 +2243,22 @@ fn run_authenticated_session(
                     ),
                     "reactive-subscribe" | "reactive-unsubscribe" => {
                         if let Some(reg) = reactive.as_ref() {
-                            handle_reactive_control(reg, &hub, client_id, &auth_ctx, kind, &parsed);
+                            // Rate-limit key: the user, else the address,
+                            // matching `POST /api/fn/<name>`.
+                            let rate_identity = auth_ctx
+                                .user_id
+                                .as_deref()
+                                .or(client_ip.as_deref())
+                                .unwrap_or("anon");
+                            handle_reactive_control(
+                                reg,
+                                &hub,
+                                client_id,
+                                &auth_ctx,
+                                rate_identity,
+                                kind,
+                                &parsed,
+                            );
                         } else {
                             // Reactive not wired (binary built without
                             // the function runtime, or no
@@ -2418,6 +2622,7 @@ fn handle_reactive_control(
     hub: &Arc<WsHub>,
     client_id: u64,
     auth_ctx: &pylon_auth::AuthContext,
+    rate_identity: &str,
     kind: &str,
     parsed: &serde_json::Value,
 ) {
@@ -2444,7 +2649,7 @@ fn handle_reactive_control(
                 hub.send_text_to(client_id, &frame);
                 return;
             }
-            if let Err((code, message)) = reg.check_subscribe(&fn_name, auth_ctx) {
+            if let Err((code, message)) = reg.check_subscribe(&fn_name, auth_ctx, rate_identity) {
                 let frame = serde_json::json!({
                     "type": "reactive-error",
                     "sub_id": sub_id,
@@ -2578,6 +2783,10 @@ pub struct WsUpgradeRequest {
     /// can't read the victim's token to set the subprotocol), so it
     /// stays Origin-agnostic for native clients that send no Origin.
     pub cookie_auth: bool,
+    /// The client's address as the HTTP server resolved it (trusted
+    /// proxy hops applied). Set by the dispatch site; `None` from
+    /// [`inspect_ws_upgrade`].
+    pub client_ip: Option<String>,
 }
 
 /// Pull the headers we need to perform a WS upgrade. Returns `None`
@@ -2652,6 +2861,7 @@ pub fn inspect_ws_upgrade(
         bearer_token,
         chosen_protocol,
         cookie_auth,
+        client_ip: None,
     })
 }
 
@@ -2710,6 +2920,7 @@ pub fn handle_http_upgrade(
         hub,
         auth,
         upgrade.bearer_token,
+        upgrade.client_ip,
         snapshot_fetcher,
         reactive,
         rooms,
@@ -3288,6 +3499,7 @@ mod tests {
                 &hub,
                 7,
                 &anon,
+                "127.0.0.1",
                 "reactive-subscribe",
                 &serde_json::json!({ "sub_id": name, "fn_name": name }),
             );
@@ -3298,6 +3510,7 @@ mod tests {
             &hub,
             7,
             &anon,
+            "127.0.0.1",
             "reactive-subscribe",
             &serde_json::json!({ "sub_id": "s1", "fn_name": "feed" }),
         );

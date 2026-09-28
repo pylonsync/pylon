@@ -47,7 +47,7 @@
 //! and the client looks frozen.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -123,6 +123,11 @@ pub struct ReactiveRegistry {
     fn_ops: Mutex<Option<Arc<dyn pylon_router::FnOps>>>,
     ws_hub: Arc<WsHub>,
     runner_started: AtomicBool,
+    /// `FnOps::definitions_generation` when the subscriptions were last
+    /// checked against the function definitions. The re-runner compares
+    /// it on every wake and re-checks every subscription when a reload
+    /// replaced the definitions.
+    checked_generation: AtomicU64,
 }
 
 struct RegistryInner {
@@ -184,6 +189,7 @@ impl ReactiveRegistry {
             fn_ops: Mutex::new(None),
             ws_hub,
             runner_started: AtomicBool::new(false),
+            checked_generation: AtomicU64::new(0),
         })
     }
 
@@ -235,7 +241,13 @@ impl ReactiveRegistry {
     /// after the registry (the registry feeds into the notifier which
     /// the runtime constructs). Caller wires this once at boot.
     pub fn set_fn_ops(&self, fn_ops: Arc<dyn pylon_router::FnOps>) {
+        self.checked_generation
+            .store(fn_ops.definitions_generation(), Ordering::SeqCst);
         *self.fn_ops.lock().unwrap() = Some(fn_ops);
+    }
+
+    fn current_fn_ops(&self) -> Option<Arc<dyn pylon_router::FnOps>> {
+        self.fn_ops.lock().unwrap().as_ref().map(Arc::clone)
     }
 
     /// Spawn the re-runner thread. Idempotent — calling twice does
@@ -264,43 +276,90 @@ impl ReactiveRegistry {
     /// duration of the call.
     /// Whether `auth` may subscribe to `fn_name`. The same checks as
     /// `POST /api/fn/<name>`: the function exists and isn't internal
-    /// (unless admin), and the caller passes its declared `auth` mode.
-    /// Reactive subscriptions re-run on every change, so only `query`
-    /// functions qualify. `Err((code, message))` on refusal. With no
-    /// function runtime wired yet, the check passes and the first run
-    /// reports REACTIVE_UNAVAILABLE as before.
+    /// (unless admin), the caller passes its declared `auth` mode, and the
+    /// function's rate limit for `rate_identity` (the user id, else the
+    /// client IP) has room. Reactive subscriptions re-run on every change,
+    /// so only `query` functions qualify. `Err((code, message))` on
+    /// refusal. With no function runtime wired yet, the check passes and
+    /// the first run reports REACTIVE_UNAVAILABLE as before.
     pub fn check_subscribe(
         &self,
         fn_name: &str,
         auth: &pylon_auth::AuthContext,
+        rate_identity: &str,
     ) -> Result<(), (String, String)> {
-        let fn_ops = self.fn_ops.lock().unwrap().as_ref().map(Arc::clone);
-        let Some(fn_ops) = fn_ops else {
+        let Some(fn_ops) = self.current_fn_ops() else {
             return Ok(());
         };
-        let not_found = || {
-            (
-                "FN_NOT_FOUND".to_string(),
-                format!("Function \"{fn_name}\" is not registered"),
-            )
-        };
-        let def = match fn_ops.get_fn(fn_name) {
-            Some(d) if d.internal && !auth.is_admin => return Err(not_found()),
-            Some(d) => d,
-            None => return Err(not_found()),
-        };
-        if let Some((_status, code, message)) =
-            pylon_router::fn_auth_error(fn_name, pylon_router::check_fn_auth(def.auth, auth))
-        {
-            return Err((code.to_string(), message));
-        }
-        if def.fn_type != pylon_functions::protocol::FnType::Query {
+        fn_gate(fn_ops.as_ref(), fn_name, auth)?;
+        if let Err(retry_after) = fn_ops.check_rate_limit(fn_name, rate_identity) {
             return Err((
-                "NOT_A_QUERY".to_string(),
-                format!("\"{fn_name}\" is not a query — only queries can be subscribed to"),
+                "RATE_LIMITED".to_string(),
+                format!("Function \"{fn_name}\" rate limit exceeded; retry in {retry_after}s"),
             ));
         }
         Ok(())
+    }
+
+    /// Re-check every subscription against the current function
+    /// definitions, as at subscribe time. A reload can remove a function,
+    /// make it internal, or tighten its `auth` mode; a subscription that
+    /// no longer passes is removed and its client gets a `reactive-error`.
+    /// Returns how many were removed.
+    pub fn revalidate_all(&self) -> usize {
+        let Some(fn_ops) = self.current_fn_ops() else {
+            return 0;
+        };
+        self.checked_generation
+            .store(fn_ops.definitions_generation(), Ordering::SeqCst);
+        let snapshot: Vec<(SubKey, String, AuthInfo, u64, u64)> = {
+            let inner = self.inner.lock().unwrap();
+            inner
+                .subs
+                .iter()
+                .map(|(k, s)| {
+                    (
+                        k.clone(),
+                        s.fn_name.clone(),
+                        s.auth.clone(),
+                        s.version,
+                        s.client_id,
+                    )
+                })
+                .collect()
+        };
+        let mut removed = 0;
+        for (key, fn_name, auth, version, client_id) in snapshot {
+            let Err((code, message)) = fn_gate(fn_ops.as_ref(), &fn_name, &auth_context(&auth))
+            else {
+                continue;
+            };
+            if self.remove_if_current(&key, version) {
+                removed += 1;
+                self.push_error(&key.1, client_id, &code, &message);
+            }
+        }
+        removed
+    }
+
+    /// Remove the subscription at `key` if it is still the registration
+    /// `version`. Returns whether it was removed.
+    fn remove_if_current(&self, key: &SubKey, version: u64) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        inner.running.remove(key);
+        let current = inner.subs.get(key).is_some_and(|s| s.version == version);
+        if current {
+            remove_locked(&mut inner, key);
+        }
+        current
+    }
+
+    /// Whether a reload replaced the function definitions since the
+    /// subscriptions were last checked.
+    fn definitions_changed(&self) -> bool {
+        self.current_fn_ops().is_some_and(|ops| {
+            ops.definitions_generation() != self.checked_generation.load(Ordering::SeqCst)
+        })
     }
 
     pub fn register_pending(
@@ -464,6 +523,11 @@ impl ReactiveRegistry {
                         .wait_timeout(inner, Duration::from_secs(5))
                         .unwrap()
                         .0;
+                    if self.definitions_changed() {
+                        drop(inner);
+                        self.revalidate_all();
+                        inner = self.inner.lock().unwrap();
+                    }
                 }
                 // Coalesce: drain at most N at a time so a flood
                 // doesn't starve fresh subscribes. 64 is enough for
@@ -485,8 +549,21 @@ impl ReactiveRegistry {
             };
 
             for sub in batch {
-                let outcome = self.run_handler(&sub.fn_name, sub.args.clone(), sub.auth.clone());
                 let key = sub.key();
+                // Every run passes the subscribe-time gate again: a reload
+                // may have removed the function or tightened its `auth`
+                // mode since the subscription was checked.
+                if let Some(fn_ops) = self.current_fn_ops() {
+                    if let Err((code, message)) =
+                        fn_gate(fn_ops.as_ref(), &sub.fn_name, &auth_context(&sub.auth))
+                    {
+                        if self.remove_if_current(&key, sub.version) {
+                            self.push_error(&sub.sub_id, sub.client_id, &code, &message);
+                        }
+                        continue;
+                    }
+                }
+                let outcome = self.run_handler(&sub.fn_name, sub.args.clone(), sub.auth.clone());
                 match outcome {
                     HandlerResult::Ok(outcome) => {
                         // Re-check that the sub still exists AND has
@@ -628,6 +705,53 @@ impl ReactiveRegistry {
     /// Whether anything is registered — diagnostic.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+/// The subscribe-time checks for `fn_name` under `auth`: registered, not
+/// internal (unless admin), the declared `auth` mode passes, and a query.
+fn fn_gate(
+    fn_ops: &dyn pylon_router::FnOps,
+    fn_name: &str,
+    auth: &pylon_auth::AuthContext,
+) -> Result<(), (String, String)> {
+    let not_found = || {
+        (
+            "FN_NOT_FOUND".to_string(),
+            format!("Function \"{fn_name}\" is not registered"),
+        )
+    };
+    let def = match fn_ops.get_fn(fn_name) {
+        Some(d) if d.internal && !auth.is_admin => return Err(not_found()),
+        Some(d) => d,
+        None => return Err(not_found()),
+    };
+    if let Some((_status, code, message)) =
+        pylon_router::fn_auth_error(fn_name, pylon_router::check_fn_auth(def.auth, auth))
+    {
+        return Err((code.to_string(), message));
+    }
+    if def.fn_type != pylon_functions::protocol::FnType::Query {
+        return Err((
+            "NOT_A_QUERY".to_string(),
+            format!("\"{fn_name}\" is not a query — only queries can be subscribed to"),
+        ));
+    }
+    Ok(())
+}
+
+/// The identity a subscription runs under, as an `AuthContext` for the
+/// function gate.
+fn auth_context(info: &AuthInfo) -> pylon_auth::AuthContext {
+    pylon_auth::AuthContext {
+        user_id: info.user_id.clone(),
+        is_admin: info.is_admin,
+        is_guest: info.is_guest,
+        roles: info.roles.clone(),
+        tenant_id: info.tenant_id.clone(),
+        api_key_id: None,
+        api_key_scopes: None,
+        is_trusted_device: false,
     }
 }
 
@@ -888,8 +1012,9 @@ mod tests {
         let anon = AuthContext::anonymous();
         let user = AuthContext::authenticated("u1".into());
         let admin = AuthContext::admin();
-        let code =
-            |name: &str, auth: &AuthContext| reg.check_subscribe(name, auth).err().map(|(c, _)| c);
+        let code = |name: &str, auth: &AuthContext| {
+            reg.check_subscribe(name, auth, "id").err().map(|(c, _)| c)
+        };
 
         assert_eq!(code("publicFeed", &anon), None);
         assert_eq!(code("myInbox", &anon).as_deref(), Some("AUTH_REQUIRED"));
@@ -903,6 +1028,189 @@ mod tests {
         assert_eq!(code("missing", &anon).as_deref(), Some("FN_NOT_FOUND"));
         assert_eq!(code("deleteAll", &anon).as_deref(), Some("NOT_A_QUERY"));
         assert_eq!(code("sendEmail", &admin).as_deref(), Some("NOT_A_QUERY"));
+    }
+
+    /// FnOps whose definitions can change under a live subscription (a
+    /// dev reload, a runner respawn). Counts handler runs.
+    struct ReloadableFns {
+        defs: Mutex<Vec<pylon_functions::registry::FnDef>>,
+        generation: std::sync::atomic::AtomicU64,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ReloadableFns {
+        fn new(defs: Vec<pylon_functions::registry::FnDef>) -> Arc<Self> {
+            Arc::new(Self {
+                defs: Mutex::new(defs),
+                generation: std::sync::atomic::AtomicU64::new(1),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            })
+        }
+
+        /// Replace the definitions, as `FnRegistry::replace_all` does.
+        fn reload(&self, defs: Vec<pylon_functions::registry::FnDef>) {
+            *self.defs.lock().unwrap() = defs;
+            self.generation.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl pylon_router::FnOps for ReloadableFns {
+        fn get_fn(&self, name: &str) -> Option<pylon_functions::registry::FnDef> {
+            self.defs
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|d| d.name == name)
+                .cloned()
+        }
+        fn list_fns(&self) -> Vec<pylon_functions::registry::FnDef> {
+            self.defs.lock().unwrap().clone()
+        }
+        fn call(
+            &self,
+            fn_name: &str,
+            _args: serde_json::Value,
+            _auth: AuthInfo,
+            _on_stream: Option<pylon_functions::runner::StreamCallback>,
+            _request: Option<pylon_functions::protocol::RequestInfo>,
+            _stream_id: Option<String>,
+        ) -> Result<
+            (serde_json::Value, pylon_functions::trace::FnTrace),
+            pylon_functions::runner::FnCallError,
+        > {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok((
+                serde_json::json!({ "run": n }),
+                pylon_functions::trace::FnTrace {
+                    call_id: "t".into(),
+                    fn_name: fn_name.into(),
+                    fn_type: pylon_functions::protocol::FnType::Query,
+                    user_id: None,
+                    started_at: 0,
+                    duration_ms: 0.0,
+                    outcome: pylon_functions::trace::FnOutcome::Ok { value: None },
+                    ops: vec![],
+                    stream_bytes: 0,
+                    stream_chunks: 0,
+                    schedules: vec![],
+                },
+            ))
+        }
+        fn recent_traces(&self, _limit: usize) -> Vec<pylon_functions::trace::FnTrace> {
+            vec![]
+        }
+        fn check_rate_limit(&self, _fn_name: &str, identity: &str) -> Result<(), u64> {
+            if identity == "limited" {
+                Err(7)
+            } else {
+                Ok(())
+            }
+        }
+        fn definitions_generation(&self) -> u64 {
+            self.generation.load(Ordering::SeqCst)
+        }
+    }
+
+    fn anon_info() -> AuthInfo {
+        AuthInfo {
+            user_id: None,
+            is_admin: false,
+            tenant_id: None,
+            roles: Vec::new(),
+            is_guest: false,
+        }
+    }
+
+    fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "timed out: {what}");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// A public query subscribed anonymously, whose function then turns
+    /// `auth: "user"` in a reload.
+    fn subscribed_then_tightened() -> (Arc<ReactiveRegistry>, Arc<ReloadableFns>) {
+        use pylon_functions::protocol::FnType;
+        use pylon_functions::registry::FnAuthMode;
+        let fns = ReloadableFns::new(vec![def("feed", FnType::Query, FnAuthMode::Public, false)]);
+        let reg = ReactiveRegistry::new(make_hub());
+        reg.set_fn_ops(Arc::clone(&fns) as Arc<dyn pylon_router::FnOps>);
+        reg.start_runner();
+        let anon = pylon_auth::AuthContext::anonymous();
+        assert!(reg.check_subscribe("feed", &anon, "1.2.3.4").is_ok());
+        reg.register_pending(
+            "s1".into(),
+            "feed".into(),
+            serde_json::json!({}),
+            anon_info(),
+            9,
+        );
+        wait_until("the first run", || fns.calls() == 1);
+        fns.reload(vec![def("feed", FnType::Query, FnAuthMode::User, false)]);
+        (reg, fns)
+    }
+
+    /// Before, a subscription was authorized once: a reload that made
+    /// the function `auth: "user"` left an anonymous subscription
+    /// re-running it on every change. A re-run passes the gate again.
+    #[test]
+    fn a_rerun_checks_the_function_gate_again() {
+        let (reg, fns) = subscribed_then_tightened();
+        {
+            let mut inner = reg.inner.lock().unwrap();
+            enqueue_dirty_locked(&mut inner, (9, "s1".to_string()));
+        }
+        reg.dirty_notify.notify_all();
+        wait_until("the subscription is dropped", || reg.is_empty());
+        assert_eq!(fns.calls(), 1, "the re-run ran under the old gate");
+    }
+
+    /// A reload also drops subscriptions that no change would re-run: the
+    /// re-runner notices the new definitions on its next wake.
+    #[test]
+    fn a_reload_revalidates_every_subscription() {
+        let (reg, fns) = subscribed_then_tightened();
+        assert_eq!(reg.revalidate_all(), 1);
+        assert!(reg.is_empty());
+        assert_eq!(fns.calls(), 1);
+
+        // And without the explicit call, from the definitions generation.
+        use pylon_functions::protocol::FnType;
+        use pylon_functions::registry::FnAuthMode;
+        fns.reload(vec![def("feed", FnType::Query, FnAuthMode::Public, false)]);
+        reg.register_pending(
+            "s2".into(),
+            "feed".into(),
+            serde_json::json!({}),
+            anon_info(),
+            9,
+        );
+        wait_until("the second subscription's first run", || fns.calls() == 2);
+        fns.reload(vec![def("feed", FnType::Query, FnAuthMode::User, false)]);
+        wait_until("the reload is noticed", || reg.is_empty());
+        assert_eq!(fns.calls(), 2);
+    }
+
+    /// Before, `reactive-subscribe` skipped the function's rate limit, so
+    /// subscribe/unsubscribe in a loop ran the function without limit.
+    #[test]
+    fn subscribe_applies_the_function_rate_limit() {
+        use pylon_functions::protocol::FnType;
+        use pylon_functions::registry::FnAuthMode;
+        let fns = ReloadableFns::new(vec![def("feed", FnType::Query, FnAuthMode::Public, false)]);
+        let reg = ReactiveRegistry::new(make_hub());
+        reg.set_fn_ops(fns as Arc<dyn pylon_router::FnOps>);
+        let anon = pylon_auth::AuthContext::anonymous();
+        assert!(reg.check_subscribe("feed", &anon, "ok").is_ok());
+        let (code, message) = reg.check_subscribe("feed", &anon, "limited").unwrap_err();
+        assert_eq!(code, "RATE_LIMITED");
+        assert!(message.contains("7s"), "{message}");
     }
 
     #[test]
