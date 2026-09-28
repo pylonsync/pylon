@@ -57,7 +57,8 @@ import { validateArgs } from "./validators";
 import { serverBundle } from "./server-bundle";
 import { fenceStdout } from "./stdout-fence";
 import { readdirSync } from "fs";
-import { join, basename } from "path";
+import { join, basename, resolve } from "path";
+import { pathToFileURL } from "url";
 
 // Bun runtime globals this process uses. The runtime executes under Bun, but
 // consuming apps type-check this source under node/DOM where the `Bun` global
@@ -1676,19 +1677,29 @@ function firstStackFrame(err: unknown): string {
  */
 function listModuleFiles(
   dir: string,
+  opts: { reportMissing?: boolean } = {},
 ): Array<{ name: string; file: string; load: () => Promise<any> }> {
   let files: string[];
   try {
     files = readdirSync(dir).filter(
       (f) => f.endsWith(".ts") || f.endsWith(".js"),
     );
-  } catch {
+  } catch (err) {
+    // A missing default directory is normal (see above). Anything else, or
+    // a directory the app named explicitly, means its functions would
+    // silently not register, so say why.
+    const missing = (err as NodeJS.ErrnoException)?.code === "ENOENT";
+    if (!missing || opts.reportMissing) {
+      console.error(`[functions] Cannot read ${dir}:`, err);
+    }
     return [];
   }
   return files.map((file) => ({
     name: basename(file, file.endsWith(".ts") ? ".ts" : ".js"),
     file,
-    load: () => import(join(dir, file)),
+    // A file URL: a bare Windows path ("D:\\app\\x.ts") is not a module
+    // specifier everywhere.
+    load: () => import(pathToFileURL(join(dir, file)).href),
   }));
 }
 
@@ -1699,6 +1710,9 @@ async function main() {
   fenceStdout();
 
   const fnDir = process.argv[2] || "./functions";
+  // `resolve`, not `join`: an absolute PYLON_FUNCTIONS_DIR (including a
+  // Windows drive path) must be used as is, not appended to the cwd.
+  const fnDirIsDefault = fnDir === "functions" || fnDir === "./functions";
   const bundle = serverBundle();
 
   const fnSources = bundle
@@ -1707,7 +1721,9 @@ async function main() {
         file: `${name} (bundled)`,
         load: bundle.functions[name],
       }))
-    : listModuleFiles(join(process.cwd(), fnDir));
+    : listModuleFiles(resolve(process.cwd(), fnDir), {
+        reportMissing: !fnDirIsDefault,
+      });
 
   const { isAgentDefinition, AGENT_MARKER } = await import("./agent");
   let agentsPresent = false;
@@ -1765,7 +1781,7 @@ async function main() {
         file: `${name} (bundled)`,
         load: bundle.workflows[name],
       }))
-    : listModuleFiles(join(process.cwd(), "workflows"));
+    : listModuleFiles(resolve(process.cwd(), "workflows"));
   for (const { file, load } of wfSources) {
     try {
       const mod = await load();

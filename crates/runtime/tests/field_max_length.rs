@@ -192,35 +192,6 @@ fn without_verbatim_prefix(p: PathBuf) -> PathBuf {
     }
 }
 
-/// `abs` relative to the current directory: the runtime joins
-/// `PYLON_FUNCTIONS_DIR` onto the process cwd.
-///
-/// Built from path components so it holds on Windows too. There the two
-/// paths must share a drive, which is why the test dirs live under
-/// `CARGO_TARGET_TMPDIR` (inside the target dir) and not the system temp
-/// dir (C: while the checkout may be on D:).
-fn relative_to_cwd(abs: &Path) -> String {
-    let cwd = without_verbatim_prefix(std::env::current_dir().unwrap().canonicalize().unwrap());
-    let abs = without_verbatim_prefix(abs.canonicalize().unwrap());
-    let from: Vec<_> = cwd.components().collect();
-    let to: Vec<_> = abs.components().collect();
-    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
-    assert!(
-        common > 0,
-        "{} and {} share no root",
-        cwd.display(),
-        abs.display()
-    );
-    let mut rel = PathBuf::new();
-    for _ in common..from.len() {
-        rel.push("..");
-    }
-    for part in &to[common..] {
-        rel.push(part);
-    }
-    rel.to_string_lossy().into_owned()
-}
-
 fn http(port: u16, method: &str, path: &str, token: Option<&str>, body: &str) -> (u16, Value) {
     let mut req = format!(
         "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\n\
@@ -284,7 +255,7 @@ fn http_and_function_writes_enforce_max_length() {
         // SAFETY: the only test in this binary that starts a server; set
         // before the server thread exists.
         unsafe {
-            std::env::set_var("PYLON_FUNCTIONS_DIR", relative_to_cwd(&fns));
+            std::env::set_var("PYLON_FUNCTIONS_DIR", &fns);
             std::env::set_var(
                 "PYLON_FUNCTIONS_RUNTIME",
                 repo_root().join("packages/functions/src/runtime.ts"),
