@@ -66,6 +66,17 @@ pub fn quote_ident_pub(name: &str) -> String {
     quote_ident(name)
 }
 
+/// Render a timestamp read from Postgres as an ISO 8601 UTC string with
+/// only the fractional digits the value has: none for whole seconds
+/// (`2026-04-29T14:28:34Z`, the `pylon_kernel::util::now_iso` shape), 3
+/// for milliseconds (`2026-04-29T14:28:34.789Z`, a JS `toISOString()`
+/// value), 6 for microseconds. A datetime written with milliseconds
+/// reads back with them, as on SQLite, which stores the string as given.
+#[cfg(feature = "postgres-live")]
+pub(crate) fn format_timestamp(dt: chrono::DateTime<chrono::Utc>) -> String {
+    dt.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+}
+
 /// Public re-export of [`live::row_to_json`] for sibling modules. Used
 /// by `pg_tx_store` so transactional reads return rows in the same
 /// JSON shape as the non-transactional path.
@@ -2312,22 +2323,15 @@ pub mod live {
                 Type::TIMESTAMPTZ => {
                     // Decode via chrono::DateTime<Utc> (postgres's
                     // `with-chrono-0_4` feature provides FromSql) and
-                    // re-format as ISO 8601 — the shape pylon's clients
-                    // expect (matches `pylon_kernel::util::now_iso`,
-                    // so timestamps round-trip with the same surface
-                    // across SQLite + PG).
+                    // re-format as ISO 8601 (see `format_timestamp`).
                     try_get_or_null::<Option<chrono::DateTime<chrono::Utc>>>(row, i)
                         .flatten()
-                        .map(|dt| {
-                            serde_json::Value::String(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
-                        })
+                        .map(|dt| serde_json::Value::String(super::format_timestamp(dt)))
                         .unwrap_or(serde_json::Value::Null)
                 }
                 Type::TIMESTAMP => try_get_or_null::<Option<chrono::NaiveDateTime>>(row, i)
                     .flatten()
-                    .map(|dt| {
-                        serde_json::Value::String(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
-                    })
+                    .map(|dt| serde_json::Value::String(super::format_timestamp(dt.and_utc())))
                     .unwrap_or(serde_json::Value::Null),
                 Type::DATE => try_get_or_null::<Option<chrono::NaiveDate>>(row, i)
                     .flatten()
@@ -2429,6 +2433,33 @@ pub mod live {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "postgres-live")]
+    #[test]
+    fn timestamps_keep_their_fractional_seconds() {
+        let at = |s: &str| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+        assert_eq!(
+            format_timestamp(at("2026-04-29T14:28:34Z")),
+            "2026-04-29T14:28:34Z"
+        );
+        assert_eq!(
+            format_timestamp(at("2026-04-29T14:28:34.789Z")),
+            "2026-04-29T14:28:34.789Z"
+        );
+        assert_eq!(
+            format_timestamp(at("2026-04-29T14:28:34.000123Z")),
+            "2026-04-29T14:28:34.000123Z"
+        );
+        // An offset is normalized to UTC.
+        assert_eq!(
+            format_timestamp(at("2026-04-29T16:28:34.5+02:00")),
+            "2026-04-29T14:28:34.500Z"
+        );
+    }
 
     /// Hand-rolled fixture that matches the snapshots in the tests
     /// below. Decoupled from any example's `pylon.manifest.json` so

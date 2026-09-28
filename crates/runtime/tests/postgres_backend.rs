@@ -750,6 +750,26 @@ fn timestamptz_binds_iso_string_correctly() {
         "nullable TIMESTAMPTZ should round-trip as JSON null, got {:?}",
         row["verifiedAt"]
     );
+
+    // Milliseconds survive a round trip, as on SQLite. Before, every read
+    // formatted to whole seconds, so `...34.789Z` came back `...34Z`.
+    rt.update(
+        "TsTest",
+        &id,
+        &serde_json::json!({"verifiedAt": "2026-04-29T14:28:34.789Z"}),
+    )
+    .unwrap();
+    let row = rt.get_by_id("TsTest", &id).unwrap().unwrap();
+    assert_eq!(row["createdAt"], "2026-04-29T14:28:34Z");
+    assert_eq!(row["verifiedAt"], "2026-04-29T14:28:34.789Z");
+    let found = rt
+        .query_filtered(
+            "TsTest",
+            &serde_json::json!({"verifiedAt": "2026-04-29T14:28:34.789Z"}),
+        )
+        .unwrap();
+    assert_eq!(found.len(), 1, "a filter on the exact millisecond value");
+    assert_eq!(found[0]["verifiedAt"], "2026-04-29T14:28:34.789Z");
 }
 
 #[test]
