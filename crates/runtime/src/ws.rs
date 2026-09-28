@@ -1539,7 +1539,7 @@ impl WsHub {
                     Ok(g) => g.user_id.clone(),
                     Err(poisoned) => poisoned.into_inner().user_id.clone(),
                 };
-                let still_valid = resolve_bearer_token(
+                let still_valid = pylon_auth::recheck_bearer_token(
                     handle.token.as_deref(),
                     &resolver.sessions,
                     &resolver.api_keys,

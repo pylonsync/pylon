@@ -336,6 +336,50 @@ pub fn resolve_bearer_token(
     jwt_secret: Option<&str>,
     jwt_issuer: Option<&str>,
 ) -> Result<AuthContext, &'static str> {
+    resolve_bearer(
+        token,
+        sessions,
+        api_keys,
+        admin_token,
+        jwt_secret,
+        jwt_issuer,
+        true,
+    )
+}
+
+/// [`resolve_bearer_token`] for re-checking a credential already in use
+/// (a WebSocket's periodic check): an API key's `last_used_at` is not
+/// touched, since the check is not a new use of the key.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn recheck_bearer_token(
+    token: Option<&str>,
+    sessions: &SessionStore,
+    api_keys: &api_key::ApiKeyStore,
+    admin_token: Option<&str>,
+    jwt_secret: Option<&str>,
+    jwt_issuer: Option<&str>,
+) -> Result<AuthContext, &'static str> {
+    resolve_bearer(
+        token,
+        sessions,
+        api_keys,
+        admin_token,
+        jwt_secret,
+        jwt_issuer,
+        false,
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_bearer(
+    token: Option<&str>,
+    sessions: &SessionStore,
+    api_keys: &api_key::ApiKeyStore,
+    admin_token: Option<&str>,
+    jwt_secret: Option<&str>,
+    jwt_issuer: Option<&str>,
+    touch_api_key: bool,
+) -> Result<AuthContext, &'static str> {
     let token = match token {
         Some(t) if !t.is_empty() => t,
         _ => return Ok(sessions.resolve(None)),
@@ -348,7 +392,12 @@ pub fn resolve_bearer_token(
     }
 
     if let Some(_pk) = token.strip_prefix("pk.") {
-        return match api_keys.verify(token) {
+        let verified = if touch_api_key {
+            api_keys.verify(token)
+        } else {
+            api_keys.verify_without_touch(token)
+        };
+        return match verified {
             Ok(key) => Ok(AuthContext::from_api_key(key.user_id, key.id, key.scopes)),
             Err(_) => Err("INVALID_API_KEY"),
         };

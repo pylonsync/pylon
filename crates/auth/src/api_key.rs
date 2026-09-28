@@ -229,6 +229,20 @@ impl ApiKeyStore {
     /// write storm on hot keys (one DB write per request was a real
     /// contention source under load).
     pub fn verify(&self, token: &str) -> Result<ApiKey, ApiKeyVerifyError> {
+        let key = self.verify_without_touch(token)?;
+        // Debounced last_used_at update — no point persisting a
+        // touch within 60s of the previous one.
+        let now = now_secs();
+        if key.last_used_at.map(|t| now - t > 60).unwrap_or(true) {
+            self.backend.touch(&key.id, now);
+        }
+        Ok(key)
+    }
+
+    /// [`Self::verify`] without touching `last_used_at`: for re-checking a
+    /// key that is already in use (a WebSocket's periodic credential
+    /// check), which is not a new use of the key.
+    pub fn verify_without_touch(&self, token: &str) -> Result<ApiKey, ApiKeyVerifyError> {
         let (id, secret) = parse_token(token).ok_or(ApiKeyVerifyError::Malformed)?;
         let key = self.backend.get(&id).ok_or(ApiKeyVerifyError::NotFound)?;
         if let Some(exp) = key.expires_at {
@@ -239,12 +253,6 @@ impl ApiKeyStore {
         let expected = hash_secret(&secret);
         if !crate::constant_time_eq(expected.as_bytes(), key.secret_hash.as_bytes()) {
             return Err(ApiKeyVerifyError::BadSecret);
-        }
-        // Debounced last_used_at update — no point persisting a
-        // touch within 60s of the previous one.
-        let now = now_secs();
-        if key.last_used_at.map(|t| now - t > 60).unwrap_or(true) {
-            self.backend.touch(&key.id, now);
         }
         Ok(key)
     }
@@ -360,6 +368,33 @@ mod tests {
         assert_eq!(verified.id, key.id);
         assert_eq!(verified.user_id, "user_1");
         assert_eq!(verified.scopes.as_deref(), Some("read,write"));
+    }
+
+    /// Review P3: the WebSocket's 30 s credential re-check went through
+    /// `verify`, which touched `last_used_at`, so an idle connected key
+    /// looked in use (and cost a backend write a minute). A re-check
+    /// verifies without touching; a real use still touches.
+    #[test]
+    fn a_recheck_does_not_touch_last_used() {
+        let store = ApiKeyStore::new();
+        let (plaintext, key) = store
+            .create("user_1".into(), "test".into(), None, None)
+            .expect("create");
+        let sessions = crate::SessionStore::new();
+        let ctx =
+            crate::recheck_bearer_token(Some(&plaintext), &sessions, &store, None, None, None)
+                .expect("recheck");
+        assert_eq!(ctx.user_id.as_deref(), Some("user_1"));
+        assert_eq!(store.backend.get(&key.id).unwrap().last_used_at, None);
+        crate::resolve_bearer_token(Some(&plaintext), &sessions, &store, None, None, None)
+            .expect("resolve");
+        assert!(store.backend.get(&key.id).unwrap().last_used_at.is_some());
+        // A revoked key fails the re-check.
+        store.revoke(&key.id);
+        assert!(
+            crate::recheck_bearer_token(Some(&plaintext), &sessions, &store, None, None, None)
+                .is_err()
+        );
     }
 
     /// Regression for the Pylon Cloud dead-credential incident: the PG
