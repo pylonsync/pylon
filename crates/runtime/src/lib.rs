@@ -7284,6 +7284,7 @@ mod tests {
                 enum_values: None,
                 encrypted: false,
                 sync_omit: false,
+                max_length: None,
             });
         let rt = Runtime::in_memory(manifest).unwrap();
         let insert = |email: &str, seen: &str| {
@@ -9870,6 +9871,7 @@ mod search_secret_field_tests {
             enum_values: None,
             encrypted: false,
             sync_omit: false,
+            max_length: None,
         }
     }
 

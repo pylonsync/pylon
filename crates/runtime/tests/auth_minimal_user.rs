@@ -25,6 +25,7 @@ fn field(name: &str, optional: bool, server_only: bool) -> ManifestField {
         enum_values: None,
         encrypted: false,
         sync_omit: false,
+        max_length: None,
     }
 }
 

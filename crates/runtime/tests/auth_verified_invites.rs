@@ -30,6 +30,7 @@ fn string_field(name: &str, optional: bool) -> ManifestField {
         enum_values: None,
         encrypted: false,
         sync_omit: false,
+        max_length: None,
     }
 }
 
