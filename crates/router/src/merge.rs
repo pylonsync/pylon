@@ -149,6 +149,7 @@ mod tests {
             enum_values: None,
             encrypted: false,
             sync_omit: false,
+            max_length: None,
         }
     }
 

@@ -114,6 +114,17 @@ Replica rows simply never hold the column, so declare such fields `.optional()` 
 
 If you want the field exposed to a specific client, re-serialize it inside a function return. `ctx.db.unsafe.get` (post v0.3.160) skips the strip; the default `ctx.db.get` honors it.
 
+**`.max(n)`** — caps a `string` or `richtext` field at `n` characters (Unicode code points). The server rejects a longer value with `400 FIELD_TOO_LONG` on every write path: `POST`/`PATCH /api/entities/*`, `/api/sync/push`, `ctx.db` inside functions, transactions, and collaborative (CRDT) edits, which are refused whole. Without a limit, a field accepts anything up to the request body cap (10 MB), and every client that syncs the entity downloads it.
+
+```ts
+const Profile = entity("Profile", {
+  displayName: field.string().max(80),
+  bio: field.richtext().max(2_000).optional(),
+});
+```
+
+For a limit that depends on the caller, compare `len(...)` in a policy, which counts characters the same way: `allowUpdate: "auth.isAdmin || len(data.bio) <= 280"`.
+
 **`.readonly()`** — the field is settable on insert but rejected on update. A client write that sets the field returns `400 READONLY_FIELD` before the policy runs. That covers `PATCH /api/entities/<entity>/<id>`, an update in `/api/sync/push`, `/api/link` and `/api/unlink` on a readonly foreign key, and a CRDT push that changes the field. Closes the canonical IDOR-via-update-payload shape:
 
 ```ts

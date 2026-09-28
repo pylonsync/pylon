@@ -3349,6 +3349,7 @@ impl Runtime {
     /// (legacy LWW path). Both produce the same on-disk row shape, so
     /// reads, indexes, FTS, and policies don't change between modes.
     pub fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, RuntimeError> {
+        validate_field_lengths(self.require_entity(entity)?, data)?;
         // Apply manifest-declared field defaults BEFORE any storage
         // backend sees the row. `field.X().defaultNow()` and
         // `.default(value)` both flow through here — without this
@@ -3757,6 +3758,7 @@ impl Runtime {
         id: &str,
         data: &serde_json::Value,
     ) -> Result<bool, RuntimeError> {
+        validate_field_lengths(self.require_entity(entity)?, data)?;
         let canonical_owned;
         let data = match canonicalize_datetime_fields(self.require_entity(entity)?, data) {
             Some(v) => {
@@ -4609,6 +4611,7 @@ impl Runtime {
         data: &serde_json::Value,
     ) -> Result<String, RuntimeError> {
         let ent = self.require_entity(entity)?;
+        validate_field_lengths(ent, data)?;
         let id = resolve_or_generate_id(data)?;
         let canonical_owned;
         let data = match canonicalize_datetime_fields(ent, data) {
@@ -4719,6 +4722,7 @@ impl Runtime {
         data: &serde_json::Value,
     ) -> Result<bool, RuntimeError> {
         let ent = self.require_entity(entity)?;
+        validate_field_lengths(ent, data)?;
         let canonical_owned;
         let data = match canonicalize_datetime_fields(ent, data) {
             Some(v) => {
@@ -5899,6 +5903,59 @@ pub(crate) fn entity_field_vector_dims(
         .and_then(|f| pylon_storage::vector::vector_dims(&f.field_type))
 }
 
+/// Reject writes whose string values are longer than their field's
+/// `maxLength` (`field.string().max(n)`), counted in characters (Unicode
+/// code points). Called with the plaintext at every mutation entry point
+/// (insert / update, direct and in-transaction, Postgres transactions,
+/// CRDT pushes), so no client can store more than the schema allows and
+/// then have it synced to every other client. Fields the write omits,
+/// `null`, and non-string values pass.
+pub(crate) fn validate_field_lengths(
+    ent: &pylon_kernel::ManifestEntity,
+    data: &serde_json::Value,
+) -> Result<(), RuntimeError> {
+    let Some(obj) = data.as_object() else {
+        return Ok(());
+    };
+    for f in &ent.fields {
+        if f.max_length.is_none() {
+            continue;
+        }
+        if let Some(value) = obj.get(&f.name) {
+            check_field_length(ent, f, value)?;
+        }
+    }
+    Ok(())
+}
+
+/// The `maxLength` check for one field's value. See
+/// [`validate_field_lengths`].
+pub(crate) fn check_field_length(
+    ent: &pylon_kernel::ManifestEntity,
+    field: &pylon_kernel::ManifestField,
+    value: &serde_json::Value,
+) -> Result<(), RuntimeError> {
+    let (Some(max), serde_json::Value::String(s)) = (field.max_length, value) else {
+        return Ok(());
+    };
+    // A string is never longer in characters than in bytes, so most
+    // values skip the count.
+    if s.len() <= max as usize {
+        return Ok(());
+    }
+    let chars = s.chars().count();
+    if chars > max as usize {
+        return Err(RuntimeError {
+            code: "FIELD_TOO_LONG".into(),
+            message: format!(
+                "{}.{} is {chars} characters; the limit is {max}",
+                ent.name, field.name
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Reject writes whose vector-field values are not finite number
 /// arrays of the declared dimension. Called at every mutation entry
 /// point (insert / update, direct and in-transaction) so a bad
@@ -6341,6 +6398,7 @@ mod tests {
                         enum_values: None,
                         encrypted: false,
                         sync_omit: false,
+                        max_length: None,
                     },
                     ManifestField {
                         name: "displayName".into(),
@@ -6354,6 +6412,7 @@ mod tests {
                         enum_values: None,
                         encrypted: false,
                         sync_omit: false,
+                        max_length: None,
                     },
                 ],
                 indexes: vec![ManifestIndex {
@@ -6402,6 +6461,7 @@ mod tests {
                 enum_values: None,
                 encrypted: false,
                 sync_omit: false,
+                max_length: None,
             },
             ManifestField {
                 name: "groupKey".into(),
@@ -6415,6 +6475,7 @@ mod tests {
                 enum_values: None,
                 encrypted: false,
                 sync_omit: false,
+                max_length: None,
             },
         ];
         post.indexes = vec![];
@@ -6489,6 +6550,7 @@ mod tests {
             enum_values: None,
             encrypted: false,
             sync_omit: false,
+            max_length: None,
         });
         ent.fields.push(ManifestField {
             name: "status".into(),
@@ -6502,6 +6564,7 @@ mod tests {
             enum_values: None,
             encrypted: false,
             sync_omit: false,
+            max_length: None,
         });
 
         let row = serde_json::json!({ "email": "a@b.com", "displayName": "A" });
@@ -6699,6 +6762,7 @@ mod tests {
                 enum_values: None,
                 encrypted: false,
                 sync_omit: false,
+                max_length: None,
             },
             ManifestField {
                 name: "displayName".into(),
@@ -6712,6 +6776,7 @@ mod tests {
                 enum_values: None,
                 encrypted: false,
                 sync_omit: false,
+                max_length: None,
             },
             ManifestField {
                 name: "avatarColor".into(),
@@ -6725,6 +6790,7 @@ mod tests {
                 enum_values: None,
                 encrypted: false,
                 sync_omit: false,
+                max_length: None,
             },
             ManifestField {
                 name: "createdAt".into(),
@@ -6738,6 +6804,7 @@ mod tests {
                 enum_values: None,
                 encrypted: false,
                 sync_omit: false,
+                max_length: None,
             },
         ];
         // Important: turn off CRDT mode for this test — CRDT mode writes
@@ -6848,6 +6915,7 @@ mod tests {
             enum_values: None,
             encrypted: false,
             sync_omit: false,
+            max_length: None,
         });
         let rt = Runtime::open(db, manifest).unwrap();
 
@@ -6897,6 +6965,7 @@ mod tests {
                 enum_values: None,
                 encrypted: false,
                 sync_omit: false,
+                max_length: None,
             },
             ManifestField {
                 name: "isWarmup".into(),
@@ -6910,6 +6979,7 @@ mod tests {
                 enum_values: None,
                 encrypted: false,
                 sync_omit: false,
+                max_length: None,
             },
             ManifestField {
                 name: "isCompleted".into(),
@@ -6923,6 +6993,7 @@ mod tests {
                 enum_values: None,
                 encrypted: false,
                 sync_omit: false,
+                max_length: None,
             },
             ManifestField {
                 name: "reps".into(),
@@ -6936,6 +7007,7 @@ mod tests {
                 enum_values: None,
                 encrypted: false,
                 sync_omit: false,
+                max_length: None,
             },
         ];
         manifest.entities[0].crdt = false;
@@ -9190,6 +9262,7 @@ mod tests {
             enum_values: None,
             encrypted,
             sync_omit: false,
+            max_length: None,
         };
         let manifest = AppManifest {
             required_env: Vec::new(),
@@ -9304,6 +9377,7 @@ mod tests {
             enum_values: None,
             encrypted: false,
             sync_omit: false,
+            max_length: None,
         };
         let ent = |name: &str, fields: Vec<ManifestField>, relations: Vec<ManifestRelation>| {
             ManifestEntity {
@@ -9644,6 +9718,7 @@ mod rotation_crdt_tests {
             enum_values: None,
             encrypted,
             sync_omit: false,
+            max_length: None,
         };
         AppManifest {
             manifest_version: 1,

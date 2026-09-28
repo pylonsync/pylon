@@ -760,6 +760,44 @@ pub fn validate_field_types(manifest: &AppManifest) -> Vec<Diagnostic> {
     diagnostics
 }
 
+/// Validate `maxLength` (`field.string().max(n)`): only `string` and
+/// `richtext` fields hold text to measure, and a limit of 0 would reject
+/// every non-empty value.
+pub fn validate_field_limits(manifest: &AppManifest) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    for entity in &manifest.entities {
+        for field in &entity.fields {
+            let Some(max) = field.max_length else {
+                continue;
+            };
+            if !matches!(field.field_type.as_str(), "string" | "richtext") {
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Error,
+                    code: "FIELD_MAX_LENGTH_TYPE".into(),
+                    message: format!(
+                        "Field \"{}\" in entity \"{}\" has maxLength but type \"{}\"",
+                        field.name, entity.name, field.field_type
+                    ),
+                    span: None,
+                    hint: Some(".max(n) applies to field.string() and field.richtext()".into()),
+                });
+            } else if max == 0 {
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Error,
+                    code: "FIELD_MAX_LENGTH_ZERO".into(),
+                    message: format!(
+                        "Field \"{}\" in entity \"{}\" has maxLength 0",
+                        field.name, entity.name
+                    ),
+                    span: None,
+                    hint: Some("Use a limit of at least 1".into()),
+                });
+            }
+        }
+    }
+    diagnostics
+}
+
 /// Extract the target entity name from an `id(EntityName)` type string.
 /// Returns `None` for non-id types or malformed patterns.
 fn extract_id_target(field_type: &str) -> Option<&str> {
@@ -811,6 +849,34 @@ mod tests {
             optional: false,
             unique: false,
         }
+    }
+
+    #[test]
+    fn max_length_only_on_text_fields_and_above_zero() {
+        let field = |name: &str, ty: &str, max: u32| pylon_kernel::ManifestField {
+            name: name.into(),
+            field_type: ty.into(),
+            max_length: Some(max),
+            ..Default::default()
+        };
+        let manifest = AppManifest {
+            entities: vec![pylon_kernel::ManifestEntity {
+                name: "Note".into(),
+                fields: vec![
+                    field("title", "string", 280),
+                    field("body", "richtext", 10_000),
+                    field("count", "int", 5),
+                    field("empty", "string", 0),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let codes: Vec<String> = validate_field_limits(&manifest)
+            .into_iter()
+            .map(|d| d.code)
+            .collect();
+        assert_eq!(codes, ["FIELD_MAX_LENGTH_TYPE", "FIELD_MAX_LENGTH_ZERO"]);
     }
 
     #[test]
@@ -1486,6 +1552,7 @@ mod tests {
                 enum_values: None,
                 encrypted: false,
                 sync_omit: false,
+                max_length: None,
             }],
             ..Default::default()
         }];
@@ -1689,6 +1756,7 @@ mod tests {
                 enum_values: None,
                 encrypted: false,
                 sync_omit: false,
+                max_length: None,
             }],
             ..Default::default()
         }];
@@ -1715,6 +1783,7 @@ mod tests {
                 enum_values: None,
                 encrypted: false,
                 sync_omit: false,
+                max_length: None,
             }],
             ..Default::default()
         }];
@@ -1752,6 +1821,7 @@ mod tests {
                     enum_values: None,
                     encrypted: false,
                     sync_omit: false,
+                    max_length: None,
                 }],
                 ..Default::default()
             }],
@@ -1799,6 +1869,7 @@ mod tests {
             enum_values: None,
             encrypted: false,
             sync_omit: false,
+            max_length: None,
         }
     }
 

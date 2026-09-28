@@ -1140,6 +1140,14 @@ pub struct ManifestField {
     /// symmetric and never reads as drift.
     #[serde(default, rename = "syncOmit", skip_serializing_if = "is_false_ref")]
     pub sync_omit: bool,
+    /// Longest value the field accepts, in characters (Unicode code
+    /// points), from `field.string().max(n)` / `field.richtext().max(n)`.
+    /// Every write path enforces it (entity API, sync push, `ctx.db` in
+    /// functions, transactions, CRDT pushes) and rejects a longer value
+    /// with `FIELD_TOO_LONG`. `None` = no limit beyond the request body
+    /// cap. Only valid on `string` and `richtext` fields.
+    #[serde(default, rename = "maxLength", skip_serializing_if = "Option::is_none")]
+    pub max_length: Option<u32>,
 }
 
 fn is_false_ref(b: &bool) -> bool {
@@ -1164,6 +1172,7 @@ impl Default for ManifestField {
             enum_values: None,
             encrypted: false,
             sync_omit: false,
+            max_length: None,
         }
     }
 }
@@ -1458,6 +1467,7 @@ mod tests {
             enum_values: None,
             encrypted: false,
             sync_omit: false,
+            max_length: None,
         }
     }
 

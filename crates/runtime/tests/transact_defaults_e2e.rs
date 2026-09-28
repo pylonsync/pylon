@@ -26,6 +26,7 @@ fn field(name: &str, ft: &str, default: Option<serde_json::Value>) -> ManifestFi
         enum_values: None,
         encrypted: false,
         sync_omit: false,
+        max_length: None,
     }
 }
 

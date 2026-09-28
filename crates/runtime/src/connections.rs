@@ -755,6 +755,7 @@ pub fn connection_entity() -> pylon_kernel::ManifestEntity {
         enum_values: None,
         encrypted: opts.encrypted,
         sync_omit: false,
+        max_length: None,
     };
     pylon_kernel::ManifestEntity {
         name: "_Connection".into(),

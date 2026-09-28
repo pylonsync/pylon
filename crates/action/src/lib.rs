@@ -116,6 +116,7 @@ mod tests {
                             enum_values: None,
                             encrypted: false,
                             sync_omit: false,
+                            max_length: None,
                         },
                         ManifestField {
                             name: "authorId".into(),
@@ -129,6 +130,7 @@ mod tests {
                             enum_values: None,
                             encrypted: false,
                             sync_omit: false,
+                            max_length: None,
                         },
                     ],
                     ..Default::default()
@@ -147,6 +149,7 @@ mod tests {
                         enum_values: None,
                         encrypted: false,
                         sync_omit: false,
+                        max_length: None,
                     }],
                     ..Default::default()
                 },
@@ -201,6 +204,7 @@ mod tests {
                     enum_values: None,
                     encrypted: false,
                     sync_omit: false,
+                    max_length: None,
                 },
                 ManifestField {
                     name: "y".into(),
@@ -214,6 +218,7 @@ mod tests {
                     enum_values: None,
                     encrypted: false,
                     sync_omit: false,
+                    max_length: None,
                 },
             ],
             ..Default::default()

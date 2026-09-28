@@ -2480,6 +2480,7 @@ mod tests {
             enum_values: None,
             encrypted: false,
             sync_omit: false,
+            max_length: None,
         };
         AppManifest {
             required_env: Vec::new(),
@@ -2876,6 +2877,7 @@ mod tests {
                 enum_values: None,
                 encrypted: false,
                 sync_omit: false,
+                max_length: None,
             });
         assert_ne!(base, schema_fingerprint(&added_field), "new column");
 

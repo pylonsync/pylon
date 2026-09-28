@@ -47,6 +47,7 @@ fn field(name: &str, ty: &str, crdt: Option<CrdtAnnotation>, optional: bool) -> 
         enum_values: None,
         encrypted: false,
         sync_omit: false,
+        max_length: None,
     }
 }
 
@@ -69,7 +70,11 @@ fn manifest() -> AppManifest {
                 field("outline", "json", Some(CrdtAnnotation::Tree), true),
                 field("likes", "int", Some(CrdtAnnotation::Counter), false),
                 field("done", "bool", None, false),
-                field("body", "richtext", None, true),
+                // A limit no other scenario reaches.
+                ManifestField {
+                    max_length: Some(100),
+                    ..field("body", "richtext", None, true)
+                },
             ],
             indexes: vec![],
             relations: vec![],
@@ -306,6 +311,51 @@ fn an_offline_edit_on_an_empty_doc_survives_a_seed() {
             assert_eq!(row["body"], "typed", "{}", env.name());
             assert_eq!(row["title"], "a", "{}", env.name());
         }
+    });
+}
+
+/// A push that grows a text field past its `maxLength` is refused whole:
+/// the row, the doc, and the next reader keep the text from before.
+#[test]
+fn a_push_past_max_length_is_refused() {
+    on_both(|env| {
+        let id = env.rt.insert("Doc", &fresh_doc()).unwrap();
+        let client = online_client(env, &id);
+        let before = client.oplog_vv();
+        let body = text_in(&client, "body");
+        // "hello" + 96 characters = 101, one past the limit.
+        body.insert(body.len_unicode(), &"x".repeat(96)).unwrap();
+        client.commit();
+        let update = client.export(ExportMode::updates(&before)).unwrap();
+        let err = env
+            .rt
+            .crdt_apply_update("Doc", &id, &update, &|_| Ok(()))
+            .unwrap_err();
+        assert_eq!(
+            err.code,
+            "FIELD_TOO_LONG",
+            "{}: {}",
+            env.name(),
+            err.message
+        );
+        assert_eq!(env.row(&id)["body"], "hello", "{}", env.name());
+        let doc = LoroDoc::new();
+        pylon_crdt::apply_update(&doc, &env.snapshot(&id)).unwrap();
+        assert_eq!(text_in(&doc, "body").to_string(), "hello", "{}", env.name());
+
+        // Up to the limit is fine.
+        let client = online_client(env, &id);
+        let before = client.oplog_vv();
+        let body = text_in(&client, "body");
+        body.insert(body.len_unicode(), &"x".repeat(95)).unwrap();
+        client.commit();
+        env.push(&id, &client, &before);
+        assert_eq!(
+            env.row(&id)["body"].as_str().unwrap().chars().count(),
+            100,
+            "{}",
+            env.name()
+        );
     });
 }
 

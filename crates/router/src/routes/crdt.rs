@@ -221,7 +221,9 @@ pub(crate) fn handle(
                     ),
                 )
             }
-            Err(e) if e.code == "READONLY_FIELD" => (400, json_error(&e.code, &e.message)),
+            Err(e) if e.code == "READONLY_FIELD" || e.code == "FIELD_TOO_LONG" => {
+                (400, json_error(&e.code, &e.message))
+            }
             Err(e) => {
                 let status = match e.code.as_str() {
                     "ENTITY_NOT_FOUND" => 404,

@@ -29,6 +29,7 @@ const noteOwner = policy({
 | `existing.*` | `object` | Synonym for `data.*` |
 | `now` | `string` | Current UTC time as an ISO-8601 string, for time windows |
 | `ago("30d")` | `string` | The instant that long before `now`, for rolling windows. Units `s`/`m`/`h`/`d`/`w`, compound allowed (`"1d12h"`). A malformed duration fails at boot, not silently at evaluation |
+| `len(data.bio)` | `number \| null` | The length of a string field in characters (Unicode code points). `null` when the value is not a string, so a comparison with it denies |
 
 Roles are checked with the `auth.hasRole("x")` / `auth.hasAnyRole("a", "b")` functions (below). There is no `auth.roles` array and no `auth.email` binding in policy expressions. (Email/roles live on the session and the SSR page `auth` prop, just not in the policy evaluator.)
 
@@ -54,12 +55,13 @@ true  false  null              // literals
 "string"  'string'             // string literals (either quote)
 ```
 
-Plus three built-in forms:
+Plus these built-in forms:
 
 ```
 auth.hasRole("admin")               // role check
 auth.hasAnyRole("admin", "owner")   // any-of role check
 ago("30d")                          // timestamp that duration before now (s/m/h/d/w)
+len(data.bio)                       // string length in characters
 exists(Entity where field == <expr> [and field == <expr>]*)   // correlated subquery
 ```
 

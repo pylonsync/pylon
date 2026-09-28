@@ -568,6 +568,16 @@ pub fn generate_openapi(manifest: &AppManifest, base_url: &str) -> Value {
 }
 
 /// Map an pylon field type string to an OpenAPI schema fragment.
+/// A field's property schema: its type, plus `maxLength` when the field
+/// declares one (`field.string().max(n)`).
+fn field_schema(field: &pylon_kernel::ManifestField) -> Value {
+    let mut schema = map_field_type(&field.field_type);
+    if let (Some(max), Some(obj)) = (field.max_length, schema.as_object_mut()) {
+        obj.insert("maxLength".into(), json!(max));
+    }
+    schema
+}
+
 fn map_field_type(field_type: &str) -> Value {
     match field_type {
         "string" => json!({ "type": "string" }),
@@ -603,7 +613,7 @@ fn build_fields_schema_with_id(fields: &[pylon_kernel::ManifestField]) -> Value 
     properties.insert("id".into(), json!({ "type": "string" }));
 
     for field in fields {
-        properties.insert(field.name.clone(), map_field_type(&field.field_type));
+        properties.insert(field.name.clone(), field_schema(field));
         if !field.optional {
             required.push(field.name.clone());
         }
@@ -622,7 +632,7 @@ fn build_fields_schema(fields: &[pylon_kernel::ManifestField]) -> Value {
     let mut required = Vec::new();
 
     for field in fields {
-        properties.insert(field.name.clone(), map_field_type(&field.field_type));
+        properties.insert(field.name.clone(), field_schema(field));
         if !field.optional {
             required.push(field.name.clone());
         }
@@ -673,6 +683,7 @@ mod tests {
                             enum_values: None,
                             encrypted: false,
                             sync_omit: false,
+                            max_length: None,
                         },
                         ManifestField {
                             name: "age".into(),
@@ -686,6 +697,7 @@ mod tests {
                             enum_values: None,
                             encrypted: false,
                             sync_omit: false,
+                            max_length: None,
                         },
                         ManifestField {
                             name: "score".into(),
@@ -699,6 +711,7 @@ mod tests {
                             enum_values: None,
                             encrypted: false,
                             sync_omit: false,
+                            max_length: None,
                         },
                         ManifestField {
                             name: "active".into(),
@@ -712,6 +725,7 @@ mod tests {
                             enum_values: None,
                             encrypted: false,
                             sync_omit: false,
+                            max_length: None,
                         },
                         ManifestField {
                             name: "createdAt".into(),
@@ -725,6 +739,7 @@ mod tests {
                             enum_values: None,
                             encrypted: false,
                             sync_omit: false,
+                            max_length: None,
                         },
                         ManifestField {
                             name: "bio".into(),
@@ -738,6 +753,7 @@ mod tests {
                             enum_values: None,
                             encrypted: false,
                             sync_omit: false,
+                            max_length: None,
                         },
                     ],
                     indexes: vec![ManifestIndex {
@@ -767,6 +783,7 @@ mod tests {
                             enum_values: None,
                             encrypted: false,
                             sync_omit: false,
+                            max_length: None,
                         },
                         ManifestField {
                             name: "authorId".into(),
@@ -780,6 +797,7 @@ mod tests {
                             enum_values: None,
                             encrypted: false,
                             sync_omit: false,
+                            max_length: None,
                         },
                     ],
                     indexes: vec![],
@@ -807,6 +825,7 @@ mod tests {
                         enum_values: None,
                         encrypted: false,
                         sync_omit: false,
+                        max_length: None,
                     },
                     ManifestField {
                         name: "notify".into(),
@@ -820,6 +839,7 @@ mod tests {
                         enum_values: None,
                         encrypted: false,
                         sync_omit: false,
+                        max_length: None,
                     },
                 ],
                 ..Default::default()
@@ -1037,6 +1057,25 @@ mod tests {
         assert!(user["properties"]["id"].is_object());
         assert!(user["properties"]["email"].is_object());
         assert!(user["properties"]["age"].is_object());
+    }
+
+    #[test]
+    fn max_length_reaches_the_property_schema() {
+        let field = pylon_kernel::ManifestField {
+            name: "title".into(),
+            field_type: "string".into(),
+            max_length: Some(120),
+            ..Default::default()
+        };
+        assert_eq!(
+            field_schema(&field),
+            json!({ "type": "string", "maxLength": 120 })
+        );
+        let plain = pylon_kernel::ManifestField {
+            max_length: None,
+            ..field
+        };
+        assert_eq!(field_schema(&plain), json!({ "type": "string" }));
     }
 
     #[test]

@@ -3173,6 +3173,7 @@ mod tests {
                         enum_values: None,
                         encrypted: false,
                         sync_omit: false,
+                        max_length: None,
                     },
                     ManifestField {
                         name: "tenantId".into(),
@@ -3186,6 +3187,7 @@ mod tests {
                         enum_values: None,
                         encrypted: false,
                         sync_omit: false,
+                        max_length: None,
                     },
                 ],
                 ..Default::default()
@@ -3243,6 +3245,7 @@ mod tests {
             enum_values: None,
             encrypted: false,
             sync_omit: false,
+            max_length: None,
         };
         let manifest = pylon_kernel::AppManifest {
             manifest_version: pylon_kernel::MANIFEST_VERSION,

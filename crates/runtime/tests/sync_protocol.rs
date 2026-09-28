@@ -41,6 +41,7 @@ fn test_manifest() -> AppManifest {
                         enum_values: None,
                         encrypted: false,
                         sync_omit: false,
+                        max_length: None,
                     },
                     ManifestField {
                         name: "body".into(),
@@ -54,6 +55,7 @@ fn test_manifest() -> AppManifest {
                         enum_values: None,
                         encrypted: false,
                         sync_omit: false,
+                        max_length: None,
                     },
                 ],
                 indexes: vec![],
@@ -112,6 +114,7 @@ fn secret_entity() -> ManifestEntity {
             enum_values: None,
             encrypted: false,
             sync_omit: false,
+            max_length: None,
         }],
         indexes: vec![],
         relations: vec![],
@@ -595,6 +598,7 @@ fn sync_false_entity_excluded_from_snapshot_and_delta() {
             enum_values: None,
             encrypted: false,
             sync_omit: false,
+            max_length: None,
         }],
         indexes: vec![],
         relations: vec![],
@@ -718,6 +722,7 @@ fn push_rejects_underscore_entities_for_non_admin() {
             enum_values: None,
             encrypted: false,
             sync_omit: false,
+            max_length: None,
         }],
         indexes: vec![],
         relations: vec![],
@@ -796,6 +801,7 @@ fn push_update_cannot_flip_readonly_field_for_non_admin() {
             enum_values: None,
             encrypted: false,
             sync_omit: false,
+            max_length: None,
         }
     }
     let mut manifest = test_manifest();
@@ -912,6 +918,7 @@ fn snapshot_pull_bounds_rows_scanned_for_sparse_policy() {
             enum_values: None,
             encrypted: false,
             sync_omit: false,
+            max_length: None,
         }
     }
     let mut manifest = test_manifest();
@@ -1286,6 +1293,7 @@ fn delta_pull_refills_pages_dropped_by_the_policy_fence() {
             enum_values: None,
             encrypted: false,
             sync_omit: false,
+            max_length: None,
         }
     }
     let mut manifest = test_manifest();
@@ -1521,6 +1529,7 @@ fn noop_update_appends_no_change_event() {
             enum_values: None,
             encrypted: false,
             sync_omit: false,
+            max_length: None,
         }],
         indexes: vec![],
         relations: vec![],
@@ -1647,6 +1656,7 @@ fn sync_omit_strips_replication_but_not_direct_reads() {
                 field_type: "string".into(),
                 optional: true,
                 sync_omit: true,
+                max_length: None,
                 ..Default::default()
             },
         ],

@@ -1208,6 +1208,12 @@ enum Ast {
     /// (`data.createdAt >= ago("30d")`) — `now` alone can only compare
     /// against timestamps already stored in the row.
     Ago(i64),
+    /// `len(data.title)` — the length of a string value in characters
+    /// (Unicode code points), as a number. Anything that is not a
+    /// string (a missing field, null) resolves to null, which every
+    /// comparison treats as deny-safe false. Lets a policy cap a value
+    /// per caller: `auth.isAdmin || len(data.bio) <= 280`.
+    Len(Vec<String>),
     /// `null` literal.
     Null,
     /// Degenerate: bare `auth.isAdmin` etc. resolves to a boolean.
@@ -1392,6 +1398,9 @@ impl<'a> Parser<'a> {
                     if name == "exists" {
                         return self.parse_exists_body();
                     }
+                    if name == "len" {
+                        return self.parse_len_body();
+                    }
                     let args = self.parse_string_args()?;
                     match self.peek() {
                         Some(Token::RParen) => {
@@ -1408,6 +1417,24 @@ impl<'a> Parser<'a> {
             }
             Some(other) => Err(format!("unexpected token {other:?}")),
             None => Err("unexpected end of expression".into()),
+        }
+    }
+
+    /// The inside of `len(<path>)`; the caller consumed `len(`.
+    fn parse_len_body(&mut self) -> Result<Ast, String> {
+        let path = match self.peek().cloned() {
+            Some(Token::Ident(path)) => {
+                self.bump();
+                path
+            }
+            _ => return Err("len takes one field path, e.g. len(data.title)".into()),
+        };
+        match self.peek() {
+            Some(Token::RParen) => {
+                self.bump();
+                Ok(Ast::Len(split_path(&path)))
+            }
+            _ => Err("len takes one field path, e.g. len(data.title)".into()),
         }
     }
 
@@ -1606,6 +1633,9 @@ impl<'a> Parser<'a> {
                         return Err("exists(...) cannot be used as a comparison operand".into());
                     }
                     self.bump();
+                    if name == "len" {
+                        return self.parse_len_body();
+                    }
                     let args = self.parse_string_args()?;
                     match self.peek() {
                         Some(Token::RParen) => {
@@ -1693,6 +1723,7 @@ fn ast_contains_exists(ast: &Ast) -> bool {
         | Ast::Str(_)
         | Ast::Num(_)
         | Ast::Ago(_)
+        | Ast::Len(_)
         | Ast::Null
         | Ast::Bool(_) => false,
     }
@@ -1840,7 +1871,13 @@ impl<'a> EvalEnv<'a> {
                     EvalResult::False(format!("exists({entity} ...) matched no rows"))
                 }
             }
-            Ast::Path(_) | Ast::Str(_) | Ast::Num(_) | Ast::Ago(_) | Ast::Null | Ast::Bool(_) => {
+            Ast::Path(_)
+            | Ast::Str(_)
+            | Ast::Num(_)
+            | Ast::Ago(_)
+            | Ast::Len(_)
+            | Ast::Null
+            | Ast::Bool(_) => {
                 // Bare value as boolean expression.
                 match self.value_of(ast) {
                     Value::Bool(true) => EvalResult::True,
@@ -1888,6 +1925,10 @@ impl<'a> EvalEnv<'a> {
                 Err(_) => Value::Null,
             },
             Ast::Path(parts) => self.resolve_path(parts),
+            Ast::Len(parts) => match self.resolve_path(parts) {
+                Value::Str(s) => Value::Num(s.chars().count() as f64),
+                _ => Value::Null,
+            },
             // Nested boolean ops evaluate to Bool.
             other => match self.eval(other) {
                 EvalResult::True => Value::Bool(true),
@@ -3258,6 +3299,47 @@ mod tests {
         let expired = serde_json::json!({ "expiresAt": "2000-01-01T00:00:00.000Z" });
         assert!(evaluate_allow("data.expiresAt > now", &auth, Some(&live), None).is_allowed());
         assert!(!evaluate_allow("data.expiresAt > now", &auth, Some(&expired), None).is_allowed());
+    }
+
+    // -----------------------------------------------------------------------
+    // `len(...)` — string length in characters
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn len_caps_a_string_per_caller() {
+        let user = AuthContext::authenticated("u1".into());
+        let admin = AuthContext::admin();
+        let expr = "auth.isAdmin || len(data.bio) <= 5";
+        let short = serde_json::json!({ "bio": "hello" });
+        let long = serde_json::json!({ "bio": "hello!" });
+        // Characters, not bytes: five emoji are twenty bytes.
+        let emoji = serde_json::json!({ "bio": "😀😀😀😀😀" });
+        assert!(evaluate_allow(expr, &user, Some(&short), None).is_allowed());
+        assert!(evaluate_allow(expr, &user, Some(&emoji), None).is_allowed());
+        assert!(!evaluate_allow(expr, &user, Some(&long), None).is_allowed());
+        assert!(evaluate_allow(expr, &admin, Some(&long), None).is_allowed());
+        // Not a string (missing, number): null, which no comparison allows.
+        let missing = serde_json::json!({});
+        let number = serde_json::json!({ "bio": 12 });
+        assert!(!evaluate_allow("len(data.bio) <= 5", &user, Some(&missing), None).is_allowed());
+        assert!(!evaluate_allow("len(data.bio) <= 5", &user, Some(&number), None).is_allowed());
+        // Both operand positions and a bare `len(...) > 0` truthiness check.
+        assert!(evaluate_allow("5 >= len(data.bio)", &user, Some(&short), None).is_allowed());
+        assert!(evaluate_allow("len(data.bio)", &user, Some(&short), None).is_allowed());
+        let empty = serde_json::json!({ "bio": "" });
+        assert!(!evaluate_allow("len(data.bio)", &user, Some(&empty), None).is_allowed());
+    }
+
+    #[test]
+    fn len_needs_one_path() {
+        let user = AuthContext::authenticated("u1".into());
+        let data = serde_json::json!({ "bio": "x" });
+        for bad in ["len(\"bio\") < 5", "len() < 5", "len(data.bio, data.x) < 5"] {
+            assert!(
+                !evaluate_allow(bad, &user, Some(&data), None).is_allowed(),
+                "{bad} must not parse into an allow"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

@@ -102,6 +102,14 @@ export interface FieldDefinition {
    */
   syncOmit?: boolean;
   /**
+   * Longest value the field accepts, in characters (Unicode code
+   * points). Set with `field.string().max(n)` or
+   * `field.richtext().max(n)`. The server rejects a longer value with
+   * `FIELD_TOO_LONG` on every write path: the entity API, sync push,
+   * `ctx.db` in functions, and collaborative (CRDT) edits.
+   */
+  maxLength?: number;
+  /**
    * When true, the field is **set on insert but cannot be changed
    * by client updates**. The framework rejects any `PATCH`/`PUT`
    * payload that mentions the field with a `READONLY_FIELD` error,
@@ -191,6 +199,15 @@ interface FieldBuilder {
    */
   syncOmit(): FieldBuilder;
   /**
+   * Cap the value at `n` characters (Unicode code points). String and
+   * richtext fields only. See [`FieldDefinition.maxLength`].
+   *
+   * Example: `bio: field.string().max(280)` stops any client, guests
+   * included, from storing a longer bio that every other client would
+   * then sync.
+   */
+  max(n: number): FieldBuilder;
+  /**
    * Mark the field as set-on-insert-only. See [`FieldDefinition.readonly`]
    * for the full semantics.
    *
@@ -272,6 +289,17 @@ function buildField(def: FieldDefinition): FieldBuilder {
     },
     syncOmit() {
       return buildField({ ...def, syncOmit: true });
+    },
+    max(n: number) {
+      if (def.type !== "string" && def.type !== "richtext") {
+        throw new Error(
+          `.max(n) applies to field.string() and field.richtext(), not ${def.type}`,
+        );
+      }
+      if (!Number.isInteger(n) || n < 1 || n > 0xffffffff) {
+        throw new Error(`.max(n): n must be a positive integer, got ${n}`);
+      }
+      return buildField({ ...def, maxLength: n });
     },
     readonly() {
       return buildField({ ...def, readonly: true });
@@ -715,6 +743,9 @@ export interface ManifestField {
   /** Set when the field is `field.X().syncOmit()` — see
    *  [`FieldDefinition.syncOmit`]. Omitted by default. */
   syncOmit?: boolean;
+  /** Set by `.max(n)` — see [`FieldDefinition.maxLength`]. Omitted when
+   *  the field has no limit. */
+  maxLength?: number;
   /** Set when the field is `field.X().readonly()` — see
    *  [`FieldDefinition.readonly`]. Omitted by default. */
   readonly?: boolean;
@@ -1239,6 +1270,9 @@ export function entitiesToManifest(
         }
         if (fb._def.syncOmit) {
           f.syncOmit = true;
+        }
+        if (fb._def.maxLength !== undefined) {
+          f.maxLength = fb._def.maxLength;
         }
         if (fb._def.readonly) {
           f.readonly = true;

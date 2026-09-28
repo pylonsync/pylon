@@ -329,12 +329,12 @@ impl Runtime {
                             Op::Insert { entity, data } => {
                                 let ent = manifest.entities.iter().find(|e| e.name == *entity);
                                 if let Some(e) = ent {
-                                    crate::validate_vector_fields(e, data).map_err(|e| {
-                                        DataError {
+                                    crate::validate_field_lengths(e, data)
+                                        .and_then(|()| crate::validate_vector_fields(e, data))
+                                        .map_err(|e| DataError {
                                             code: e.code,
                                             message: e.message,
-                                        }
-                                    })?;
+                                        })?;
                                 }
                                 // json fields: serialized for the SQL row, parsed
                                 // for the CRDT patch — same split as Runtime::insert.
@@ -375,12 +375,12 @@ impl Runtime {
                             Op::Update { entity, id, data } => {
                                 let ent = manifest.entities.iter().find(|e| e.name == *entity);
                                 if let Some(e) = ent {
-                                    crate::validate_vector_fields(e, data).map_err(|e| {
-                                        DataError {
+                                    crate::validate_field_lengths(e, data)
+                                        .and_then(|()| crate::validate_vector_fields(e, data))
+                                        .map_err(|e| DataError {
                                             code: e.code,
                                             message: e.message,
-                                        }
-                                    })?;
+                                        })?;
                                 }
                                 let ser = ent.and_then(|e| {
                                     crate::serialize_json_fields_for_storage(e, data)
@@ -1249,6 +1249,12 @@ impl DataStore for Runtime {
                             })
                             .map(|(k, v)| (k.clone(), v.clone()))
                             .collect();
+                        for (key, val) in &changes {
+                            if let Some(field) = ent.fields.iter().find(|f| &f.name == key) {
+                                crate::check_field_length(&ent, field, val)
+                                    .map_err(into_data_error)?;
+                            }
+                        }
                         if !changes.is_empty() {
                             let changes = serde_json::Value::Object(changes);
                             let stored = crate::serialize_json_fields_for_storage(&ent, &changes)
@@ -1388,6 +1394,9 @@ impl DataStore for Runtime {
                         && crate::same_json_value(before_push.get(key).unwrap_or(&null), val)
                     {
                         continue;
+                    }
+                    if let Some(field) = ent.fields.iter().find(|f| &f.name == key) {
+                        crate::check_field_length(&ent, field, val)?;
                     }
                     set_clauses.push(format!("{} = ?{idx}", crate::quote_ident(key.as_str())));
                     // Typed bind, not the raw shape-driven one: a `json`
@@ -3882,10 +3891,14 @@ impl<'a> PgBufferedTxStore<'a> {
         self.runtime.normalize_row_on_read(entity, row);
     }
 
-    /// Typed dims/finiteness check for vector fields — the BYTEA bind
-    /// arm downstream can't know the declared dims, so a wrong-length
-    /// embedding would land silently and never match a search.
-    fn validate_vectors(&self, entity: &str, data: &serde_json::Value) -> Result<(), DataError> {
+    /// The write checks the runtime's own insert/update run, for this
+    /// store's writes that go straight to the Postgres transaction:
+    /// `maxLength` on the plaintext (this runs before encryption), and
+    /// the typed dims/finiteness check for vector fields — the BYTEA
+    /// bind arm downstream can't know the declared dims, so a
+    /// wrong-length embedding would land silently and never match a
+    /// search.
+    fn validate_write(&self, entity: &str, data: &serde_json::Value) -> Result<(), DataError> {
         if let Some(ent) = self
             .inner
             .manifest()
@@ -3893,10 +3906,12 @@ impl<'a> PgBufferedTxStore<'a> {
             .iter()
             .find(|e| e.name == entity)
         {
-            crate::validate_vector_fields(ent, data).map_err(|e| DataError {
-                code: e.code,
-                message: e.message,
-            })?;
+            crate::validate_field_lengths(ent, data)
+                .and_then(|()| crate::validate_vector_fields(ent, data))
+                .map_err(|e| DataError {
+                    code: e.code,
+                    message: e.message,
+                })?;
         }
         Ok(())
     }
@@ -3935,7 +3950,7 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
     }
 
     fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, DataError> {
-        self.validate_vectors(entity, data)?;
+        self.validate_write(entity, data)?;
         let data = self.encrypt_for_write(entity, data, true)?;
         let id = self.inner.insert(entity, &data)?;
         // Re-read inside the same PG tx so the broadcast carries the
@@ -3993,7 +4008,7 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
     }
 
     fn update(&self, entity: &str, id: &str, data: &serde_json::Value) -> Result<bool, DataError> {
-        self.validate_vectors(entity, data)?;
+        self.validate_write(entity, data)?;
         // Snapshot pre-update so the buffered event carries
         // `prev_data` for the visibility-transition tombstone.
         // Matches the SQLite TxStore::update fix.
@@ -7207,6 +7222,7 @@ pub(crate) fn cron_lease_entity() -> pylon_kernel::ManifestEntity {
         enum_values: None,
         encrypted: false,
         sync_omit: false,
+        max_length: None,
     };
     pylon_kernel::ManifestEntity {
         name: "_CronLease".into(),
@@ -7968,6 +7984,7 @@ mod hook_enforcing_tests {
                         enum_values: None,
                         encrypted: false,
                         sync_omit: false,
+                        max_length: None,
                     },
                     ManifestField {
                         name: "tenantId".into(),
@@ -7981,6 +7998,7 @@ mod hook_enforcing_tests {
                         enum_values: None,
                         encrypted: false,
                         sync_omit: false,
+                        max_length: None,
                     },
                 ],
                 ..Default::default()
@@ -8468,6 +8486,7 @@ mod auto_broadcast_tests {
                     enum_values: None,
                     encrypted: false,
                     sync_omit: false,
+                    max_length: None,
                 }],
                 ..Default::default()
             }],
@@ -8943,6 +8962,7 @@ mod user_projection_broadcast_tests {
                         enum_values: None,
                         encrypted: false,
                         sync_omit: false,
+                        max_length: None,
                     },
                     ManifestField {
                         name: "email".into(),
@@ -8956,6 +8976,7 @@ mod user_projection_broadcast_tests {
                         enum_values: None,
                         encrypted: false,
                         sync_omit: false,
+                        max_length: None,
                     },
                     ManifestField {
                         name: "passwordHash".into(),
@@ -8969,6 +8990,7 @@ mod user_projection_broadcast_tests {
                         enum_values: None,
                         encrypted: false,
                         sync_omit: false,
+                        max_length: None,
                     },
                 ],
                 ..Default::default()
@@ -9224,6 +9246,7 @@ mod sqlite_transact_tx_safety_tests {
                         enum_values: None,
                         encrypted: false,
                         sync_omit: false,
+                        max_length: None,
                     },
                     ManifestField {
                         name: "displayName".into(),
@@ -9237,6 +9260,7 @@ mod sqlite_transact_tx_safety_tests {
                         enum_values: None,
                         encrypted: false,
                         sync_omit: false,
+                        max_length: None,
                     },
                 ],
                 indexes: vec![ManifestIndex {
@@ -9468,6 +9492,7 @@ mod ssr_client_read_fence_tests {
             enum_values: None,
             encrypted: false,
             sync_omit: false,
+            max_length: None,
         }
     }
 
@@ -9798,6 +9823,7 @@ mod mutation_read_boundary_tests {
             enum_values: None,
             encrypted,
             sync_omit: false,
+            max_length: None,
         };
         AppManifest {
             manifest_version: 1,

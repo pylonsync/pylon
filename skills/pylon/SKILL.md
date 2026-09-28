@@ -163,6 +163,7 @@ encryptable. The matching arg validator is `v.json()`.
 - `.owner()` — stamps the field with `auth.userId` on insert and **rejects a forged value** (403 `OWNER_MISMATCH`); also locked on update. Use for `authorId`/`buyerId`/`createdBy` so optimistic `db.insert` stays secure. Guests count (their stable guest id is stamped).
 - `.serverOnly()` — never serialized in HTTP responses (secrets, `passwordHash`, `stripeCustomerId`). Still readable inside functions via `ctx.db.*`.
 - `.syncOmit()` — stripped from REPLICATION only (snapshots, delta events, WS fanout, reconcile fetches); direct reads (`db.get`, lists, queries, SSR `serverData`) keep it. For heavy-but-not-secret columns — multi-KB JSON blobs, render plans, generated markdown — that would otherwise stream into every browser's replica on every sync. The replica row simply lacks the column; fetch by id when a detail view needs it. Declare such fields `.optional()` so the replica-row type is honest.
+- `.max(n)` — string/richtext only: reject values over `n` characters with `400 FIELD_TOO_LONG` on every write path (entity API, sync push, `ctx.db`, CRDT edits). Put one on every user-writable text field; without it a guest can store up to the 10 MB body cap and every client syncs it. Per-caller limits: `len(data.bio) <= 280` in a policy.
 - `.readonly()` — settable on insert, rejected on client update (closes IDOR-via-PATCH).
 - `entity(name, fields, { audit: true })` — every insert/update/delete lands in the audit log (actor, tenant, row id, changed field names; not values).
 - `entity(name, fields, { retention: { field: "createdAt", after: "365d", hold: "legalHold" } })` — hourly job deletes expired rows (audited as `retention.delete`); omit `after` to treat `field` as a per-row expiry time (per-tenant periods).
@@ -299,6 +300,7 @@ true  false  null                  // literals
 auth.hasRole("admin")              // role check
 auth.hasAnyRole("admin", "owner")  // any-of role check
 ago("30d")                         // timestamp <duration> before now (s/m/h/d/w)
+len(data.bio)                      // string length in characters (not a string → null → deny-safe)
 exists(Entity where field == <expr> [and field == <expr>]*)   // correlated subquery
 ```
 Ordering is **deny-safe**: comparing null, booleans, or a number against a non-numeric string is always false (so an unresolvable `data.publishAt <= now` denies). Still **no `in`, no `ends_with`/`starts_with`, no arithmetic (`+ - * /`).** Membership ("is the user in this org?") is `exists(...)`, not `in`. String prefix/suffix matching still belongs in a function.

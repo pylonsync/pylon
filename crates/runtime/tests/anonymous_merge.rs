@@ -29,6 +29,7 @@ fn field(name: &str, ty: &str) -> ManifestField {
         enum_values: None,
         encrypted: false,
         sync_omit: false,
+        max_length: None,
     }
 }
 
