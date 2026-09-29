@@ -625,6 +625,22 @@ pub struct Stack0FileStorage {
 }
 
 impl Stack0FileStorage {
+    /// `/cdn/assets/<id>` for an asset id. Stack0 ids are UUIDs: letters,
+    /// digits, `-`, `_`, and `.` only. Anything else (`?`, `#`, `/`) would
+    /// change which URL the request reaches, so it is refused.
+    fn asset_url(&self, id: &str) -> Result<String, FileStorageError> {
+        let safe = !id.is_empty()
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            && id != "."
+            && id != "..";
+        if !safe {
+            return Err(stack0_err("INVALID_ID", "Invalid file ID"));
+        }
+        Ok(format!("{}/cdn/assets/{}", self.base_url, id))
+    }
+
     pub fn new(api_key: impl Into<String>, project_slug: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
@@ -835,7 +851,7 @@ impl FileStorage for Stack0FileStorage {
         // file) needs the actual bytes.
         let agent = stack0_agent();
         let meta: serde_json::Value = agent
-            .get(&format!("{}/cdn/assets/{}", self.base_url, id))
+            .get(&self.asset_url(id)?)
             .set("Authorization", &format!("Bearer {}", self.api_key))
             .call()
             .map_err(|e| match &e {
@@ -863,7 +879,7 @@ impl FileStorage for Stack0FileStorage {
     fn delete(&self, id: &str) -> Result<bool, FileStorageError> {
         let agent = stack0_agent();
         match agent
-            .delete(&format!("{}/cdn/assets/{}", self.base_url, id))
+            .delete(&self.asset_url(id)?)
             .set("Authorization", &format!("Bearer {}", self.api_key))
             .call()
         {
@@ -880,7 +896,7 @@ impl FileStorage for Stack0FileStorage {
         // directly and skip pylon's `GET /api/files/<id>` entirely.
         let agent = stack0_agent();
         let meta: serde_json::Value = match agent
-            .get(&format!("{}/cdn/assets/{}", self.base_url, id))
+            .get(&self.asset_url(id)?)
             .set("Authorization", &format!("Bearer {}", self.api_key))
             .call()
         {
@@ -897,6 +913,19 @@ impl FileStorage for Stack0FileStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stack0_refuses_ids_that_would_change_the_request_url() {
+        // Base URL on a closed port: a refused id never reaches it.
+        let storage = Stack0FileStorage::new("k", "p").with_base_url("http://127.0.0.1:9");
+        for id in ["asset#x", "a/b", "a?b", "..", ""] {
+            assert_eq!(storage.delete(id).unwrap_err().code, "INVALID_ID", "{id:?}");
+            assert_eq!(storage.get(id).unwrap_err().code, "INVALID_ID", "{id:?}");
+        }
+        assert!(storage
+            .asset_url("0b8e5f2a-1c3d-4e5f-9a8b-7c6d5e4f3a2b")
+            .is_ok());
+    }
 
     #[test]
     fn local_store_and_get() {
