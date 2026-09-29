@@ -639,6 +639,8 @@ Events: `text_delta {text}` | `tool_use_start {id, name}` | `tool_input_delta {p
 
 **`ctx.files.signedUrl(fileId, { ttlSecs })` (≥0.4.1)** — `GET /api/files/<id>` serves only the file's owner (or an unscoped admin). For authorized cross-user reads (an organizer reviewing a member's upload), a server function mints a short-lived signed path: `await ctx.files.signedUrl(fileId, { ttlSecs: 300 })` → `/api/files/<id>?sig=<hmac>&exp=<unix>`, anonymously fetchable (works in `<img src>`). ttl defaults 300s, capped at 24h. Available on query/mutation/action ctx. WHO gets a URL is your function's job — gate the mint with `ctx.requireMember`. Invalid/expired signatures fall through to the normal owner check; nothing becomes enumerable.
 
+**Shard `onStop` (≥0.22.8)** — `shard({ ..., onStop: "fnName" })` runs that function as an admin background job when a shard of the kind ends, with `{ shardId, kind, reason }`; reason is `"stopped"` (ctx.shards.stop), `"idle"`, `"finished"`, or `"failed"`. Not run when the machine shuts down or the shard moves to another machine. Use it for cleanup instead of a polling cron.
+
 **`ctx.files.store(data, { name, contentType?, public? })` / `ctx.files.delete(fileId)` (≥0.22.8, actions only)** — write to or delete from the app's file storage (same backend as `/api/files`). `store` returns `{ id, url, size }` (≤25 MiB, or `PYLON_MAX_UPLOAD_BYTES` if lower); the file is owned by the calling user/tenant, or system-owned (signed URL / admin / `public` only) when there is no user. `delete` returns `{ deleted }`. Queries and mutations get `FILES_WRITE_NOT_ALLOWED`.
 
 **Functions bypass policies** — a `mutation`/`action` that reads or writes another tenant's

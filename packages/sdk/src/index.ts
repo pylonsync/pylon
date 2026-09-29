@@ -1082,6 +1082,13 @@ export interface ManifestShard {
     /** Inputs applied per subscriber per tick. Default 32. */
     maxPerTick?: number;
   };
+  /** A function to run when a shard of this kind ends, with
+   *  `{ shardId, kind, reason }`. `reason` is `"stopped"`
+   *  (`ctx.shards.stop`), `"idle"` (no subscribers for `idleShutdownSecs`),
+   *  `"finished"`, or `"failed"`. It runs as a background job with admin
+   *  auth, so it can be `internal: true`. A machine shutting down or moving
+   *  the shard to another machine does not run it. */
+  onStop?: string;
 }
 
 /**
@@ -1150,6 +1157,9 @@ function validateShard(def: ManifestShard): void {
   checkInt(def.input?.burst, "input.burst", 1, 100_000);
   checkInt(def.input?.maxQueued, "input.maxQueued", 1, 100_000);
   checkInt(def.input?.maxPerTick, "input.maxPerTick", 1, 100_000);
+  if (def.onStop !== undefined && (typeof def.onStop !== "string" || def.onStop === "")) {
+    fail("onStop must be a function name");
+  }
 }
 
 /** One environment variable the app declares it needs. */

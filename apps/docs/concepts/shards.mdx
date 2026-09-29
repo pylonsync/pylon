@@ -396,6 +396,31 @@ export default buildManifest({
 | `tickBudgetMs` | CPU time limit for the module in one tick (inputs, `tick`, snapshots), or in one authorize call. Only the module's own code counts: not the host's work, and not time the tick waits for a CPU. | 100 |
 | `idleShutdownSecs` | Stop a shard with no subscribers after this long. `0` never stops it. | 90 |
 | `input` | `ratePerSec`, `burst`, `maxQueued`, `maxPerTick` per subscriber. | 120, 240, 256, 32 |
+| `onStop` | A function to run when a shard of this kind ends. See below. | none |
+
+### Run a function when a shard ends
+
+`onStop` names a function that runs when a shard of the kind ends, with `{ shardId, kind, reason }`:
+
+- `"stopped"`: `ctx.shards.stop` or the admin API stopped it.
+- `"idle"`: it had no subscribers for `idleShutdownSecs`.
+- `"finished"`: the module ended it.
+- `"failed"`: the module trapped, panicked, or went over its budget.
+
+```ts
+shard({ name: "arena", wasm: "shards/arena.wasm", onStop: "raceEnded" });
+
+// functions/raceEnded.ts
+export default mutation({
+  internal: true,
+  handler: async (ctx, { shardId, reason }) => {
+    const race = await ctx.db.lookup("Race", "shardId", shardId);
+    if (race) await ctx.db.update("Race", race.id, { endedAt: new Date().toISOString(), endReason: reason });
+  },
+});
+```
+
+It runs as a background job with admin auth, so it can be `internal: true`, and a failed run is retried up to 3 times. It runs on the machine where the shard ended. A shard that stops because its machine shuts down, loses its lease, or hands it to another machine has not ended, so `onStop` does not run.
 
 ## Build the module
 

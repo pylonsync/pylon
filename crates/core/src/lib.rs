@@ -211,6 +211,11 @@ pub struct ManifestShard {
     pub idle_shutdown_secs: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<ManifestShardInput>,
+    /// A function to run when a shard of this kind ends (stopped, idle,
+    /// finished, or failed), with `{ shardId, kind, reason }`. It runs as a
+    /// background job with admin auth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_stop: Option<String>,
 }
 
 fn default_shard_tick_rate() -> u32 {

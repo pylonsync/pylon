@@ -6326,6 +6326,17 @@ pub fn try_spawn_functions(
         shards: shards.clone(),
     });
 
+    // A shard kind's `onStop` function runs as a job when one of its
+    // shards ends on this machine.
+    if let Some(host) = &shards {
+        install_shard_on_stop(
+            host,
+            ops.runtime.manifest(),
+            &ops.registry,
+            &job_queue_for_handlers,
+        );
+    }
+
     // Per-runner nested-call hooks. Has to be done AFTER
     // FnOpsImpl is built because the closures upgrade a Weak<ops>
     // to reach the runtime/notifier/plugins.
@@ -6481,6 +6492,64 @@ fn install_schedule_hook(
     let cancel_queue = Arc::clone(&job_queue_for_cancel);
     runner.set_cancel_schedule_hook(Box::new(move |job_id, store| {
         cancel_scheduled_job(&cancel_queue, job_id, store)
+    }));
+}
+
+/// Queue each shard kind's `onStop` function when one of its shards ends,
+/// with `{ shardId, kind, reason }` and admin auth. A name no function has
+/// is logged at boot and skipped.
+fn install_shard_on_stop(
+    host: &Arc<crate::shard_wasm::WasmShardHost>,
+    manifest: &pylon_kernel::AppManifest,
+    registry: &FnRegistry,
+    queue: &Arc<crate::jobs::JobQueue>,
+) {
+    let mut on_stop: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for kind in &manifest.shards {
+        let Some(fn_name) = kind.on_stop.as_ref() else {
+            continue;
+        };
+        if registry.get(fn_name).is_none() {
+            tracing::warn!(
+                "[shards] {}: onStop names \"{fn_name}\", which is not a function; it will not run",
+                kind.name
+            );
+            continue;
+        }
+        on_stop.insert(kind.name.clone(), fn_name.clone());
+    }
+    if on_stop.is_empty() {
+        return;
+    }
+    let queue = Arc::clone(queue);
+    host.on_shard_end(Box::new(move |ended| {
+        let Some(fn_name) = on_stop.get(&ended.kind) else {
+            return;
+        };
+        let job = queue.new_job(
+            fn_name,
+            serde_json::json!({
+                "shardId": ended.id,
+                "kind": ended.kind,
+                "reason": ended.reason,
+            }),
+            crate::jobs::Priority::Normal,
+            0,
+            3,
+            "functions",
+            Some(crate::jobs::JobAuth {
+                user_id: None,
+                is_admin: true,
+                tenant_id: None,
+                is_guest: false,
+            }),
+        );
+        if let Err(e) = queue.try_enqueue_job(job) {
+            tracing::warn!(
+                "[shards] could not queue onStop \"{fn_name}\" for shard {}: {e}",
+                ended.id
+            );
+        }
     }));
 }
 

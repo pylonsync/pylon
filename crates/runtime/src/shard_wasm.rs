@@ -1661,6 +1661,21 @@ pub struct ShardInfo {
 }
 
 /// The app's shard kinds and the shards created from them.
+/// A shard that ended on this machine: stopped by `ctx.shards.stop`, stopped
+/// by the idle sweep, finished on its own, or failed. A shard that stops
+/// because this machine shuts down, loses its lease, or hands the shard to
+/// another machine has not ended: it runs on elsewhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShardEnded {
+    pub id: String,
+    pub kind: String,
+    /// `"stopped"`, `"idle"`, `"finished"`, or `"failed"`.
+    pub reason: &'static str,
+}
+
+/// Receives [`ShardEnded`] events. Called without any host lock held.
+pub type ShardEndHook = Box<dyn Fn(&ShardEnded) + Send + Sync>;
+
 pub struct WasmShardHost {
     kinds: HashMap<String, Arc<WasmShardKind>>,
     /// Transfers in progress here, by (source shard, subscriber).
@@ -1690,6 +1705,10 @@ pub struct WasmShardHost {
     last_prune: Mutex<Option<Instant>>,
     /// This host, for hooks that outlive a call.
     weak_self: OnceLock<Weak<Self>>,
+    /// Called when a shard ends on this machine (see [`ShardEnded`]).
+    end_hook: OnceLock<ShardEndHook>,
+    /// Shards the idle sweep stopped and has not removed yet.
+    idle_stopped: Mutex<std::collections::HashSet<String>>,
     /// Each shard's groups, for messages to a group.
     groups: Mutex<HashMap<String, Vec<String>>>,
     /// Messages for the routing thread.
@@ -1901,6 +1920,8 @@ impl WasmShardHost {
             last_prune: Mutex::new(None),
             transfer_requests,
             weak_self: OnceLock::new(),
+            end_hook: OnceLock::new(),
+            idle_stopped: Mutex::new(std::collections::HashSet::new()),
             groups: Mutex::new(HashMap::new()),
             outgoing,
             bus: OnceLock::new(),
@@ -2270,6 +2291,36 @@ impl WasmShardHost {
         Ok(info)
     }
 
+    /// Call `hook` for every shard that ends on this machine. Set once;
+    /// later calls are ignored.
+    pub fn on_shard_end(&self, hook: ShardEndHook) {
+        let _ = self.end_hook.set(hook);
+    }
+
+    fn notify_ended(&self, events: Vec<ShardEnded>) {
+        let Some(hook) = self.end_hook.get() else {
+            return;
+        };
+        for event in &events {
+            hook(event);
+        }
+    }
+
+    /// [`Self::stop_local`] for a stop someone asked for, reported as
+    /// `"stopped"` when it removed the shard.
+    fn stop_local_requested(&self, id: &str) -> bool {
+        let kind = self.kind_of.read().unwrap().get(id).cloned();
+        let stopped = self.stop_local(id);
+        if let (true, Some(kind)) = (stopped, kind) {
+            self.notify_ended(vec![ShardEnded {
+                id: id.to_string(),
+                kind,
+                reason: "stopped",
+            }]);
+        }
+        stopped
+    }
+
     /// Stop and remove a shard. Its subscribers' connections close. On
     /// several machines, the machine that runs it stops it.
     pub fn stop(&self, id: &str) -> bool {
@@ -2281,7 +2332,7 @@ impl WasmShardHost {
     /// acts only on this machine's shard and placement.
     fn stop_where(&self, id: &str, forward: bool) -> bool {
         let Some(c) = self.cluster.get() else {
-            return self.registry.get(id).is_some() && self.stop_local(id);
+            return self.registry.get(id).is_some() && self.stop_local_requested(id);
         };
         #[cfg(test)]
         let step = |name: &'static str| {
@@ -2307,7 +2358,7 @@ impl WasmShardHost {
             self.registry.get(id).is_some()
         };
         if running {
-            let stopped = self.stop_local(id);
+            let stopped = self.stop_local_requested(id);
             c.saved_at.lock().unwrap().remove(id);
             let held = c.owned.lock().unwrap().remove(id);
             if let Some(epoch) = held {
@@ -2406,6 +2457,7 @@ impl WasmShardHost {
         let removed = self.registry.remove(id);
         self.kind_of.write().unwrap().remove(id);
         self.idle_since.lock().unwrap().remove(id);
+        self.idle_stopped.lock().unwrap().remove(id);
         drop(_guard);
         self.forget_calls(id);
         // Its last writes, before another machine may start it and read
@@ -3246,6 +3298,7 @@ impl WasmShardHost {
                 && !self.moving_in(&id)
             {
                 tracing::info!("[shard {id}] stopping: no subscribers for {limit:?}");
+                self.idle_stopped.lock().unwrap().insert(id.clone());
                 shard.stop();
             }
         }
@@ -3265,11 +3318,24 @@ impl WasmShardHost {
         let mut idle = self.idle_since.lock().unwrap();
         // Held shards that ended: their writes, then their placements.
         let mut ended: Vec<(String, i64)> = Vec::new();
+        // Shards that ended here, for the end hook once the locks are gone.
+        let mut ended_events: Vec<ShardEnded> = Vec::new();
         for (id, shard) in before
             .iter()
             .filter(|(id, _)| self.registry.get(id).is_none())
         {
-            kind_of.remove(id);
+            let kind = kind_of.remove(id);
+            let idle_stop = self.idle_stopped.lock().unwrap().remove(id);
+            let reason = if idle_stop {
+                "idle"
+            } else if shard.with_state(|sim| sim.failure()).is_some() {
+                "failed"
+            } else {
+                "finished"
+            };
+            // Without a cluster every removed shard ended here; in one, only
+            // those `ended_here` finds (below).
+            let mut ended_here = self.cluster.get().is_none();
             idle.remove(id);
             self.instances.lock().unwrap().remove(id);
             self.failures.lock().unwrap().remove(id);
@@ -3297,7 +3363,15 @@ impl WasmShardHost {
                 // machine once the placement is gone.
                 if let Some(epoch) = held {
                     ended.push((id.clone(), epoch));
+                    ended_here = true;
                 }
+            }
+            if let (true, Some(kind)) = (ended_here, kind) {
+                ended_events.push(ShardEnded {
+                    id: id.clone(),
+                    kind,
+                    reason,
+                });
             }
         }
         // No shard starts under these ids until their placements are
@@ -3309,6 +3383,7 @@ impl WasmShardHost {
             .unwrap()
             .extend(ended.iter().map(|(id, _)| id.clone()));
         drop((kind_of, idle, _guard));
+        self.notify_ended(ended_events);
         let Some(c) = self.cluster.get() else {
             return;
         };

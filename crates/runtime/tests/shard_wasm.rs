@@ -2107,3 +2107,59 @@ fn a_dead_machine_does_not_hold_up_messages_and_deliver_reaches_a_shard() {
     })
     .unwrap();
 }
+
+/// The end hook reports a stop someone asked for and an idle stop, once
+/// each, with the shard's kind.
+#[test]
+fn the_end_hook_reports_stopped_and_idle_shards() {
+    use pylon_runtime::shard_wasm::ShardEnded;
+    let kind = WasmShardKind::compile(
+        "zone",
+        &guest_wasm("zone"),
+        config(SnapshotFormat::Json),
+        WasmLimits {
+            idle_shutdown: Duration::from_secs(1),
+            ..WasmLimits::default()
+        },
+    )
+    .unwrap();
+    let host = WasmShardHost::new(vec![kind]);
+    let seen: Arc<std::sync::Mutex<Vec<ShardEnded>>> = Arc::default();
+    let sink = Arc::clone(&seen);
+    host.on_shard_end(Box::new(move |e| sink.lock().unwrap().push(e.clone())));
+    host.create("zone", "asked", &json!({})).unwrap();
+    host.create("zone", "empty", &json!({})).unwrap();
+
+    assert!(host.stop("asked"));
+    assert_eq!(
+        seen.lock().unwrap().as_slice(),
+        [ShardEnded {
+            id: "asked".into(),
+            kind: "zone".into(),
+            reason: "stopped"
+        }]
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while seen.lock().unwrap().len() < 2 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // Let a few more sweeps run: nothing is reported twice.
+    std::thread::sleep(Duration::from_millis(2500));
+    let seen = seen.lock().unwrap();
+    assert_eq!(
+        seen.as_slice(),
+        [
+            ShardEnded {
+                id: "asked".into(),
+                kind: "zone".into(),
+                reason: "stopped"
+            },
+            ShardEnded {
+                id: "empty".into(),
+                kind: "zone".into(),
+                reason: "idle"
+            }
+        ]
+    );
+}
