@@ -194,7 +194,10 @@ fn on_stop_runs_when_a_shard_is_stopped() {
             if status == 200 {
                 break;
             }
-            assert!(Instant::now() < deadline, "startAndStop failed: {status} {body}");
+            assert!(
+                Instant::now() < deadline,
+                "startAndStop failed: {status} {body}"
+            );
         }
         assert!(Instant::now() < deadline, "server never came up");
         std::thread::sleep(Duration::from_millis(200));
