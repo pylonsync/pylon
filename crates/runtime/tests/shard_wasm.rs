@@ -202,10 +202,8 @@ fn a_refused_input_comes_back_as_a_rejection() {
     assert_eq!(rejections.len(), 1);
     assert_eq!(rejections[0]["code"], "apply_failed");
     assert_eq!(rejections[0]["client_seq"], 7);
-    assert!(rejections[0]["message"]
-        .as_str()
-        .unwrap()
-        .contains("too far"));
+    // The guest's error text, exactly as the module returned it.
+    assert_eq!(rejections[0]["message"], "move (99, 0) is too far");
     assert_eq!(snap["players"], json!([]));
     assert!(s.is_running());
 }

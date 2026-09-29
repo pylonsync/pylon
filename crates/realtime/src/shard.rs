@@ -87,7 +87,9 @@ impl ShardAuth {
 pub trait SimState: Send + 'static {
     type Input: ShardInput;
     type Snapshot: EncodeSnapshot + Send + Clone + 'static;
-    type Error: std::fmt::Debug + Send + 'static;
+    /// Returned by [`Self::apply_input`]. Its `Display` text is the
+    /// `message` the client receives in the input-rejection frame, as is.
+    type Error: std::fmt::Debug + std::fmt::Display + Send + 'static;
 
     /// Apply a player/client input.
     ///
@@ -1562,13 +1564,13 @@ impl<S: SimState> Shard<S> {
                 if let Err(e) =
                     state.apply_input(&pending.subscriber_id, pending.input, pending.received_at)
                 {
-                    tracing::warn!("[realtime] apply_input error in shard {}: {:?}", self.id, e);
+                    tracing::warn!("[realtime] apply_input error in shard {}: {e}", self.id);
                     failed.push((
                         pending.subscriber_id,
                         InputRejection {
                             client_seq: pending.seq,
                             code: "apply_failed".into(),
-                            message: format!("{e:?}"),
+                            message: e.to_string(),
                         },
                     ));
                 }
@@ -2551,7 +2553,8 @@ mod tests {
         let body: crate::wire::InputRejection = serde_json::from_slice(&rej.bytes).unwrap();
         assert_eq!(body.client_seq, Some(7));
         assert_eq!(body.code, "apply_failed");
-        assert!(body.message.contains("negative"));
+        // The shard's own text, not its Debug form ("\"negative\"").
+        assert_eq!(body.message, "negative");
         // The failed input still counts as processed.
         assert_eq!(q.pop().unwrap().ack, 7);
     }
