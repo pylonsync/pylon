@@ -392,6 +392,7 @@ fn ensure_cron_lease_table_pg(
             field_type: f.field_type.clone(),
             optional: f.optional,
             unique: f.unique,
+            default: None,
         })
         .collect();
     let mut stmts = vec![pylon_storage::postgres::create_table_sql(

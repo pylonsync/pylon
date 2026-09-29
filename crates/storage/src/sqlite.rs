@@ -131,6 +131,19 @@ pub fn add_column_unique_index_sql(entity_name: &str, field: &FieldSpec) -> Opti
 ///   - float                        → 0
 ///   - id(X) when required          → NULLABLE + warning
 fn sqlite_add_column_null_default(field: &FieldSpec) -> String {
+    // A declared `.default(value)` fills the rows that already exist.
+    if let Some(value) = &field.default {
+        match crate::default_literal(&field.field_type, value, crate::SqlDialect::Sqlite) {
+            Some(lit) if field.optional => return format!(" DEFAULT {lit}"),
+            Some(lit) => return format!(" NOT NULL DEFAULT {lit}"),
+            None => tracing::warn!(
+                "[sqlite-migrate] field {} default {} does not fit type {}; existing rows get the type's zero value",
+                field.name,
+                value,
+                field.field_type
+            ),
+        }
+    }
     if field.optional {
         return String::new();
     }
@@ -1210,12 +1223,14 @@ mod tests {
                 field_type: "string".into(),
                 optional: false,
                 unique: true,
+                default: None,
             },
             FieldSpec {
                 name: "age".into(),
                 field_type: "int".into(),
                 optional: true,
                 unique: false,
+                default: None,
             },
         ];
         let sql = create_table_sql("User", &fields);
@@ -1268,6 +1283,7 @@ mod tests {
             field_type: "string".into(),
             optional: true,
             unique: false,
+            default: None,
         };
         let sql = add_column_sql("User", &field);
         assert_eq!(sql, "ALTER TABLE \"User\" ADD COLUMN \"bio\" TEXT");
@@ -1284,6 +1300,7 @@ mod tests {
             field_type: "string".into(),
             optional: false,
             unique: false,
+            default: None,
         };
         let sql = add_column_sql("Render", &field);
         assert_eq!(
@@ -1299,12 +1316,36 @@ mod tests {
             field_type: "int".into(),
             optional: false,
             unique: false,
+            default: None,
         };
         let sql = add_column_sql("Render", &field);
         assert_eq!(
             sql,
             "ALTER TABLE \"Render\" ADD COLUMN \"count\" INTEGER NOT NULL DEFAULT 0"
         );
+    }
+
+    #[test]
+    fn add_column_uses_the_declared_default_for_existing_rows() {
+        let spec = |ty: &str, optional: bool, default: serde_json::Value| FieldSpec {
+            name: "f".into(),
+            field_type: ty.into(),
+            optional,
+            unique: false,
+            default: Some(default),
+        };
+        assert!(add_column_sql("T", &spec("bool", false, true.into()))
+            .ends_with("INTEGER NOT NULL DEFAULT 1"));
+        assert!(add_column_sql("T", &spec("int", true, 7.into())).ends_with("INTEGER DEFAULT 7"));
+        assert!(add_column_sql("T", &spec("string", false, "it's".into()))
+            .ends_with("TEXT NOT NULL DEFAULT 'it''s'"));
+        assert!(
+            add_column_sql("T", &spec("json", true, serde_json::json!({"a": 1})))
+                .ends_with("TEXT DEFAULT '{\"a\":1}'")
+        );
+        // A default that does not fit the type keeps the zero value.
+        assert!(add_column_sql("T", &spec("bool", false, "yes".into()))
+            .ends_with("INTEGER NOT NULL DEFAULT 0"));
     }
 
     #[test]
@@ -1316,6 +1357,7 @@ mod tests {
             field_type: "bool".into(),
             optional: false,
             unique: false,
+            default: None,
         };
         let sql = add_column_sql("Render", &field);
         assert_eq!(
@@ -1331,6 +1373,7 @@ mod tests {
             field_type: "id(Organization)".into(),
             optional: false,
             unique: false,
+            default: None,
         };
         let sql = add_column_sql("Project", &field);
         // Reference types can't default to a sensible foreign id —
@@ -1404,6 +1447,7 @@ mod tests {
                     field_type: "string".into(),
                     optional: true,
                     unique: false,
+                    default: None,
                 },
             }],
         };
@@ -1448,6 +1492,7 @@ mod tests {
                     field_type: "string".into(),
                     optional: true,
                     unique: true,
+                    default: None,
                 },
             }],
         };
@@ -1475,6 +1520,7 @@ mod tests {
             field_type: "string".into(),
             optional: true,
             unique: true,
+            default: None,
         };
         assert_eq!(
             add_column_sql("Org", &field),
@@ -1668,6 +1714,7 @@ mod tests {
                     field_type: "string".into(),
                     optional: true,
                     unique: false,
+                    default: None,
                 },
             }],
         };

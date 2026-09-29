@@ -131,6 +131,73 @@ pub struct FieldSpec {
     pub field_type: String,
     pub optional: bool,
     pub unique: bool,
+    /// The field's static `.default(value)`. Adding the column to an
+    /// existing table fills existing rows with it. `None` for no default
+    /// and for defaults that depend on the request (`.owner()`) or the
+    /// clock (`.defaultNow()`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<serde_json::Value>,
+}
+
+/// SQL dialect for [`default_literal`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlDialect {
+    Sqlite,
+    Postgres,
+}
+
+/// `value` as a SQL literal for a column of `field_type`, for an
+/// `ADD COLUMN … DEFAULT`. `None` when the value does not fit the type (a
+/// string default on a bool field, a malformed datetime) or the type has no
+/// literal form (vectors); the caller then keeps its zero default.
+pub fn default_literal(
+    field_type: &str,
+    value: &serde_json::Value,
+    dialect: SqlDialect,
+) -> Option<String> {
+    fn quoted(s: &str) -> Option<String> {
+        // Postgres rejects NUL in text; SQLite would truncate at it.
+        (!s.contains('\0')).then(|| format!("'{}'", s.replace('\'', "''")))
+    }
+    match field_type {
+        "bool" => {
+            let b = value.as_bool()?;
+            Some(match (dialect, b) {
+                (SqlDialect::Sqlite, true) => "1".into(),
+                (SqlDialect::Sqlite, false) => "0".into(),
+                (SqlDialect::Postgres, true) => "TRUE".into(),
+                (SqlDialect::Postgres, false) => "FALSE".into(),
+            })
+        }
+        "int" => value.as_i64().map(|n| n.to_string()),
+        "float" => value
+            .as_f64()
+            .filter(|f| f.is_finite())
+            .map(|f| format!("{f:?}")),
+        "datetime" => {
+            let s = value.as_str()?;
+            pylon_kernel::util::iso_to_epoch(s).ok()?;
+            let lit = quoted(s)?;
+            Some(match dialect {
+                SqlDialect::Sqlite => lit,
+                SqlDialect::Postgres => format!("{lit}::TIMESTAMPTZ"),
+            })
+        }
+        // Stored as serialized JSON text on both backends.
+        "json" => quoted(&serde_json::to_string(value).ok()?),
+        t if t.starts_with("vector(") => None,
+        _ => quoted(value.as_str()?),
+    }
+}
+
+/// A field's `.default(value)` when it is a fixed value the database can
+/// store: not the auth-derived `{"$auth": ...}` of `.owner()` and not the
+/// `"now"` of `.defaultNow()`, which the runtime fills per insert.
+pub fn static_default(default: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+    let d = default?;
+    let dynamic =
+        d.as_object().is_some_and(|o| o.contains_key("$auth")) || d.as_str() == Some("now");
+    (!dynamic && !d.is_null()).then(|| d.clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +324,7 @@ pub fn plan_from_snapshot(snapshot: &SchemaSnapshot, target: &AppManifest) -> Sc
                         field_type: f.field_type.clone(),
                         optional: f.optional,
                         unique: f.unique,
+                        default: None,
                     })
                     .collect();
                 operations.push(SchemaOperation::CreateEntity {
@@ -294,6 +362,7 @@ pub fn plan_from_snapshot(snapshot: &SchemaSnapshot, target: &AppManifest) -> Sc
                                     field_type: field.field_type.clone(),
                                     optional: field.optional,
                                     unique: field.unique,
+                                    default: static_default(field.default.as_ref()),
                                 },
                             });
                         }
@@ -319,12 +388,14 @@ pub fn plan_from_snapshot(snapshot: &SchemaSnapshot, target: &AppManifest) -> Sc
                                     field_type: field.field_type.clone(),
                                     optional: target_optional,
                                     unique: field.unique,
+                                    default: None,
                                 };
                                 let previous_spec = FieldSpec {
                                     name: field.name.clone(),
                                     field_type: existing.column_type.clone(),
                                     optional: existing_optional,
                                     unique: field.unique,
+                                    default: None,
                                 };
                                 operations.push(SchemaOperation::AlterField {
                                     entity: entity.name.clone(),
@@ -361,12 +432,14 @@ pub fn plan_from_snapshot(snapshot: &SchemaSnapshot, target: &AppManifest) -> Sc
                                 field_type: col.column_type.clone(),
                                 optional: false,
                                 unique: false,
+                                default: None,
                             },
                             target: FieldSpec {
                                 name: col.name.clone(),
                                 field_type: col.column_type.clone(),
                                 optional: true,
                                 unique: false,
+                                default: None,
                             },
                         });
                     }
@@ -628,6 +701,7 @@ impl StorageAdapter for DryRunAdapter {
                     field_type: f.field_type.clone(),
                     optional: f.optional,
                     unique: f.unique,
+                    default: None,
                 })
                 .collect();
 
@@ -717,6 +791,7 @@ impl StorageAdapter for DiffAdapter {
                         field_type: f.field_type.clone(),
                         optional: f.optional,
                         unique: f.unique,
+                        default: None,
                     })
                     .collect();
                 operations.push(SchemaOperation::CreateEntity {
@@ -763,6 +838,7 @@ impl StorageAdapter for DiffAdapter {
                                 field_type: field.field_type.clone(),
                                 optional: field.optional,
                                 unique: field.unique,
+                                default: None,
                             },
                         });
                     }
@@ -1989,5 +2065,60 @@ mod tests {
             "expected RemoveSearchIndex, got {:?}",
             plan.operations
         );
+    }
+}
+
+#[cfg(test)]
+mod default_literal_tests {
+    use super::{default_literal, static_default, SqlDialect};
+    use serde_json::json;
+
+    #[test]
+    fn literals_per_type_and_dialect() {
+        assert_eq!(
+            default_literal("bool", &json!(true), SqlDialect::Postgres).as_deref(),
+            Some("TRUE")
+        );
+        assert_eq!(
+            default_literal("bool", &json!(false), SqlDialect::Sqlite).as_deref(),
+            Some("0")
+        );
+        assert_eq!(
+            default_literal("float", &json!(1.5), SqlDialect::Postgres).as_deref(),
+            Some("1.5")
+        );
+        assert_eq!(
+            default_literal(
+                "datetime",
+                &json!("2026-01-01T00:00:00Z"),
+                SqlDialect::Postgres
+            )
+            .as_deref(),
+            Some("'2026-01-01T00:00:00Z'::TIMESTAMPTZ")
+        );
+        assert_eq!(
+            default_literal("datetime", &json!("soon"), SqlDialect::Postgres),
+            None
+        );
+        assert_eq!(
+            default_literal("string", &json!("a\u{0}b"), SqlDialect::Postgres),
+            None
+        );
+        assert_eq!(
+            default_literal("vector(3)", &json!([0, 0, 0]), SqlDialect::Sqlite),
+            None
+        );
+        assert_eq!(
+            default_literal("int", &json!("7"), SqlDialect::Sqlite),
+            None
+        );
+    }
+
+    #[test]
+    fn request_and_clock_defaults_are_not_static() {
+        assert_eq!(static_default(Some(&json!({"$auth": "userId"}))), None);
+        assert_eq!(static_default(Some(&json!("now"))), None);
+        assert_eq!(static_default(Some(&json!(null))), None);
+        assert_eq!(static_default(Some(&json!(true))), Some(json!(true)));
     }
 }

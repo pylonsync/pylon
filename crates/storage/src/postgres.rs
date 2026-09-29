@@ -190,6 +190,19 @@ pub fn add_column_sql(entity_name: &str, field: &FieldSpec) -> String {
 /// warning so the operator knows the migration left the column
 /// nullable.
 fn pg_add_column_null_default(field: &FieldSpec) -> String {
+    // A declared `.default(value)` fills the rows that already exist.
+    if let Some(value) = &field.default {
+        match crate::default_literal(&field.field_type, value, crate::SqlDialect::Postgres) {
+            Some(lit) if field.optional => return format!(" DEFAULT {lit}"),
+            Some(lit) => return format!(" NOT NULL DEFAULT {lit}"),
+            None => tracing::warn!(
+                "[pg-migrate] field {} default {} does not fit type {}; existing rows get the type's zero value",
+                field.name,
+                value,
+                field.field_type
+            ),
+        }
+    }
     if field.optional {
         return String::new();
     }
@@ -276,6 +289,7 @@ impl StorageAdapter for PostgresAdapter {
                     field_type: f.field_type.clone(),
                     optional: f.optional,
                     unique: f.unique,
+                    default: None,
                 })
                 .collect();
 
@@ -2569,12 +2583,14 @@ mod tests {
                 field_type: "string".into(),
                 optional: false,
                 unique: true,
+                default: None,
             },
             FieldSpec {
                 name: "age".into(),
                 field_type: "int".into(),
                 optional: true,
                 unique: false,
+                default: None,
             },
         ];
         let sql = create_table_sql("User", &fields);
@@ -2591,6 +2607,7 @@ mod tests {
             field_type: "string".into(),
             optional: false,
             unique: false,
+            default: None,
         }];
         let sql = create_table_sql("my\"table", &fields);
         assert!(sql.contains("\"my\"\"table\""));
@@ -2637,6 +2654,7 @@ mod tests {
             field_type: "string".into(),
             optional: true,
             unique: false,
+            default: None,
         };
         let sql = add_column_sql("User", &field);
         assert_eq!(sql, "ALTER TABLE \"User\" ADD COLUMN \"bio\" TEXT");
@@ -2653,6 +2671,7 @@ mod tests {
             field_type: "string".into(),
             optional: false,
             unique: false,
+            default: None,
         };
         let sql = add_column_sql("Render", &field);
         assert_eq!(
@@ -2668,6 +2687,7 @@ mod tests {
             field_type: "int".into(),
             optional: false,
             unique: false,
+            default: None,
         };
         let sql = add_column_sql("Render", &field);
         assert_eq!(
@@ -2683,6 +2703,7 @@ mod tests {
             field_type: "bool".into(),
             optional: false,
             unique: false,
+            default: None,
         };
         let sql = add_column_sql("Render", &field);
         assert_eq!(
@@ -2698,6 +2719,7 @@ mod tests {
             field_type: "datetime".into(),
             optional: false,
             unique: false,
+            default: None,
         };
         let sql = add_column_sql("Render", &field);
         assert!(
@@ -2717,6 +2739,7 @@ mod tests {
             field_type: "id(Organization)".into(),
             optional: false,
             unique: false,
+            default: None,
         };
         let sql = add_column_sql("Project", &field);
         assert_eq!(sql, "ALTER TABLE \"Project\" ADD COLUMN \"orgId\" TEXT");
@@ -2738,6 +2761,7 @@ mod tests {
             field_type: "string".into(),
             optional: false,
             unique: true,
+            default: None,
         };
         let sql = add_column_sql("Org", &field);
         assert_eq!(
@@ -2822,6 +2846,7 @@ mod tests {
             field_type: "datetime".into(),
             optional: false,
             unique: false,
+            default: None,
         }];
         let sql = create_table_sql("User", &fields);
         // Postgres identifiers should be quoted for case-sensitivity.
