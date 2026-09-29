@@ -647,6 +647,17 @@ function buildActionFiles(callId: string): ActionFiles {
   return {
     ...buildFiles(callId),
     async store(data, opts) {
+      const size =
+        typeof data === "string" ? new TextEncoder().encode(data).byteLength : data.byteLength;
+      // Refused here, before encoding: a larger message would exceed the
+      // runner's frame limit and never reach the host's check.
+      if (size > FILES_STORE_MAX_BYTES) {
+        const err = new Error(
+          `ctx.files.store accepts at most ${FILES_STORE_MAX_BYTES} bytes (got ${size})`,
+        );
+        (err as { code?: string }).code = "FILE_TOO_LARGE";
+        throw err;
+      }
       return rpc(callId, {
         type: "files_op",
         op: "store",
@@ -665,6 +676,10 @@ function buildActionFiles(callId: string): ActionFiles {
     },
   };
 }
+
+/** Largest `ctx.files.store` payload. Mirrors the host's
+ *  FILES_STORE_MAX_BYTES; `PYLON_MAX_UPLOAD_BYTES` can lower the host's. */
+const FILES_STORE_MAX_BYTES = 25 * 1024 * 1024;
 
 /** Base64 of bytes, or of a string's UTF-8 encoding. */
 function toBase64(data: Uint8Array | ArrayBuffer | string): string {

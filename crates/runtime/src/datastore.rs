@@ -2648,6 +2648,19 @@ pub(crate) fn workflow_filter(
 /// `PYLON_MAX_UPLOAD_BYTES` lowers it further.
 pub(crate) const FILES_STORE_MAX_BYTES: usize = 25 * 1024 * 1024;
 
+/// Whether `id` can be a stored file's id. S3 ids carry the configured
+/// folder (`avatars/file_…`), so `/` is allowed between non-empty segments;
+/// `..`, a leading `/`, backslashes, query or fragment characters, and NUL
+/// are not. Backends apply their own stricter rules (local ids have no `/`).
+pub(crate) fn file_id_is_valid(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 512
+        && !id.contains(['\\', '?', '#', '\0'])
+        && id
+            .split('/')
+            .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+}
+
 /// Run one `ctx.files` write against `storage`. A stored file is owned by
 /// the calling user (and tenant); a call with no user makes a system-owned
 /// file that only a signed URL, an unscoped admin, or `public` can read.
@@ -2720,11 +2733,8 @@ pub(crate) fn run_files_op(
             }))
         }
         FilesOp::Delete { file_id } => {
-            if file_id.is_empty() || file_id.contains(['/', '?', '\\']) {
-                return Err(bad(
-                    "INVALID_FILE_ID",
-                    "file id must be a bare asset id".into(),
-                ));
+            if !file_id_is_valid(file_id) {
+                return Err(bad("INVALID_FILE_ID", "not a file id".into()));
             }
             let deleted = storage
                 .delete(file_id)
@@ -3100,12 +3110,17 @@ mod file_ownership_tests {
             }),
             "INVALID_FILE_DATA"
         );
-        assert_eq!(
-            err(pylon_functions::protocol::FilesOp::Delete {
-                file_id: "a/b".into()
-            }),
-            "INVALID_FILE_ID"
-        );
+        for bad_id in ["../etc", "/abs", "a//b", "a?b", "a\\b", ""] {
+            assert_eq!(
+                err(pylon_functions::protocol::FilesOp::Delete {
+                    file_id: bad_id.into()
+                }),
+                "INVALID_FILE_ID",
+                "{bad_id:?}"
+            );
+        }
+        // An S3 id with its folder is accepted.
+        assert!(file_id_is_valid("avatars/file_123"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -6345,11 +6360,8 @@ pub fn try_spawn_functions(
         // `ctx.files.signedUrl` — the runtime owns the signing secret, the
         // runner just forwards. Stateless closure, same on every runner.
         runner.set_file_url_signer(Box::new(|file_id: &str, ttl_secs: Option<u64>| {
-            if file_id.is_empty() || file_id.contains('/') || file_id.contains('?') {
-                return Err((
-                    "INVALID_FILE_ID".into(),
-                    "file id must be a bare asset id".into(),
-                ));
+            if !file_id_is_valid(file_id) {
+                return Err(("INVALID_FILE_ID".into(), "not a file id".into()));
             }
             Ok(crate::file_urls::signed_path(file_id, ttl_secs))
         }));
