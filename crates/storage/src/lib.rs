@@ -175,9 +175,10 @@ pub fn default_literal(
             .filter(|f| f.is_finite())
             .map(|f| format!("{f:?}")),
         "datetime" => {
-            let s = value.as_str()?;
-            pylon_kernel::util::iso_to_epoch(s).ok()?;
-            let lit = quoted(s)?;
+            // The stored form every write uses (UTC, milliseconds), so
+            // filters and ordering match migrated rows.
+            let canonical = pylon_kernel::util::canonical_datetime(value.as_str()?)?;
+            let lit = quoted(&canonical)?;
             Some(match dialect {
                 SqlDialect::Sqlite => lit,
                 SqlDialect::Postgres => format!("{lit}::TIMESTAMPTZ"),
@@ -838,7 +839,7 @@ impl StorageAdapter for DiffAdapter {
                                 field_type: field.field_type.clone(),
                                 optional: field.optional,
                                 unique: field.unique,
-                                default: None,
+                                default: static_default(field.default.as_ref()),
                             },
                         });
                     }
@@ -1088,6 +1089,32 @@ mod tests {
         assert!(plan.operations.iter().any(|op| matches!(
             op,
             SchemaOperation::CreateEntity { name, .. } if name == "Post"
+        )));
+    }
+
+    #[test]
+    fn diff_adapter_keeps_the_static_default_of_an_added_field() {
+        let old = minimal_manifest();
+        let mut new = minimal_manifest();
+        new.entities[0].fields.push(ManifestField {
+            name: "dailyReport".into(),
+            field_type: "bool".into(),
+            optional: false,
+            unique: false,
+            crdt: None,
+            server_only: false,
+            readonly: false,
+            default: Some(serde_json::json!(true)),
+            enum_values: None,
+            encrypted: false,
+            sync_omit: false,
+            max_length: None,
+        });
+        let plan = DiffAdapter { from: old }.plan_schema(&new).unwrap();
+        assert!(plan.operations.iter().any(|op| matches!(
+            op,
+            SchemaOperation::AddField { field, .. }
+                if field.name == "dailyReport" && field.default == Some(serde_json::json!(true))
         )));
     }
 
@@ -2094,7 +2121,16 @@ mod default_literal_tests {
                 SqlDialect::Postgres
             )
             .as_deref(),
-            Some("'2026-01-01T00:00:00Z'::TIMESTAMPTZ")
+            Some("'2026-01-01T00:00:00.000Z'::TIMESTAMPTZ")
+        );
+        assert_eq!(
+            default_literal(
+                "datetime",
+                &json!("2026-01-01T02:00:00+02:00"),
+                SqlDialect::Sqlite
+            )
+            .as_deref(),
+            Some("'2026-01-01T00:00:00.000Z'")
         );
         assert_eq!(
             default_literal("datetime", &json!("soon"), SqlDialect::Postgres),
