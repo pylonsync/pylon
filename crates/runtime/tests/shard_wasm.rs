@@ -2163,3 +2163,25 @@ fn the_end_hook_reports_stopped_and_idle_shards() {
         ]
     );
 }
+
+/// Shutting the host down is not an end: the hook hears nothing.
+#[test]
+fn shutdown_does_not_report_shards_as_ended() {
+    let host = WasmShardHost::new(vec![WasmShardKind::compile(
+        "zone",
+        &guest_wasm("zone"),
+        config(SnapshotFormat::Json),
+        WasmLimits::default(),
+    )
+    .unwrap()]);
+    let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = Arc::clone(&seen);
+    host.on_shard_end(Box::new(move |_| {
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }));
+    host.create("zone", "a", &json!({})).unwrap();
+    host.create("zone", "b", &json!({})).unwrap();
+    host.stop_all();
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 0);
+}

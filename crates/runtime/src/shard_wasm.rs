@@ -2306,19 +2306,18 @@ impl WasmShardHost {
         }
     }
 
-    /// [`Self::stop_local`] for a stop someone asked for, reported as
-    /// `"stopped"` when it removed the shard.
-    fn stop_local_requested(&self, id: &str) -> bool {
+    /// [`Self::stop_local`] for a stop someone asked for: the `"stopped"`
+    /// event when it removed the shard. The caller reports it once no lock
+    /// is held and the shard's last writes are out.
+    fn stop_local_requested(&self, id: &str) -> (bool, Option<ShardEnded>) {
         let kind = self.kind_of.read().unwrap().get(id).cloned();
         let stopped = self.stop_local(id);
-        if let (true, Some(kind)) = (stopped, kind) {
-            self.notify_ended(vec![ShardEnded {
-                id: id.to_string(),
-                kind,
-                reason: "stopped",
-            }]);
-        }
-        stopped
+        let event = kind.filter(|_| stopped).map(|kind| ShardEnded {
+            id: id.to_string(),
+            kind,
+            reason: "stopped",
+        });
+        (stopped, event)
     }
 
     /// Stop and remove a shard. Its subscribers' connections close. On
@@ -2327,12 +2326,23 @@ impl WasmShardHost {
         self.stop_where(id, true)
     }
 
+    /// Stop `id` (see [`Self::stop_where_ended`]), then report the end.
+    fn stop_where(&self, id: &str, forward: bool) -> bool {
+        let (stopped, event) = self.stop_where_ended(id, forward);
+        self.notify_ended(event.into_iter().collect());
+        stopped
+    }
+
     /// Stop `id`. With `forward`, a shard another live machine runs is
     /// stopped there; a request from another machine passes false, and
-    /// acts only on this machine's shard and placement.
-    fn stop_where(&self, id: &str, forward: bool) -> bool {
+    /// acts only on this machine's shard and placement. Returns the end
+    /// event when this machine stopped the shard.
+    fn stop_where_ended(&self, id: &str, forward: bool) -> (bool, Option<ShardEnded>) {
         let Some(c) = self.cluster.get() else {
-            return self.registry.get(id).is_some() && self.stop_local_requested(id);
+            if self.registry.get(id).is_none() {
+                return (false, None);
+            }
+            return self.stop_local_requested(id);
         };
         #[cfg(test)]
         let step = |name: &'static str| {
@@ -2358,7 +2368,7 @@ impl WasmShardHost {
             self.registry.get(id).is_some()
         };
         if running {
-            let stopped = self.stop_local_requested(id);
+            let (stopped, event) = self.stop_local_requested(id);
             c.saved_at.lock().unwrap().remove(id);
             let held = c.owned.lock().unwrap().remove(id);
             if let Some(epoch) = held {
@@ -2374,44 +2384,46 @@ impl WasmShardHost {
                     tracing::warn!("[shard {id}] could not release its placement: {e}");
                 }
                 self.ending.lock().unwrap().remove(id);
-                return stopped;
+                return (stopped, event);
             }
             // A copy the fence stopped: its placement is from an earlier
             // lease, and is removed below.
         }
         let placement = match c.dir.placement(id) {
             Ok(Some(p)) => p,
-            Ok(None) => return false,
+            Ok(None) => return (false, None),
             Err(e) => {
                 tracing::warn!("[shard {id}] stop: directory lookup failed: {e}");
-                return false;
+                return (false, None);
             }
         };
         if placement.machine_id == c.me.id {
             // Ending here: the stop, sweep or shutdown writing its last
             // fields releases the placement after them.
             if self.ending.lock().unwrap().contains(id) {
-                return false;
+                return (false, None);
             }
             // Placed here but not running (it failed to start, or it is
             // from an earlier lease): remove exactly that placement, so no
             // machine starts it again.
-            return c
+            let released = c
                 .dir
                 .release(id, &placement.machine_id, placement.epoch)
                 .unwrap_or(false);
+            return (released, None);
         }
         if !forward {
-            return false;
+            return (false, None);
         }
         let owner = match c.live(&placement.machine_id) {
             Ok(owner) => owner,
             Err(e) => {
                 tracing::warn!("[shard {id}] stop: machine lookup failed: {e}");
-                return false;
+                return (false, None);
             }
         };
-        match owner {
+        // Another machine stopping it reports the end there.
+        let stopped = match owner {
             // Its machine runs it: that machine stops it.
             Some(m) if m.epoch == placement.epoch => {
                 let Some(address) = m.address else {
@@ -2419,7 +2431,7 @@ impl WasmShardHost {
                         "[shard {id}] not stopped: machine {} runs it and has no address",
                         m.id
                     );
-                    return false;
+                    return (false, None);
                 };
                 drop(own);
                 let op = RemoteOp::Stop { id: id.to_string() };
@@ -2438,7 +2450,8 @@ impl WasmShardHost {
                 .dir
                 .release(id, &placement.machine_id, placement.epoch)
                 .unwrap_or(false),
-        }
+        };
+        (stopped, None)
     }
 
     /// Stop and remove a shard running in this process.
@@ -2579,7 +2592,8 @@ impl WasmShardHost {
                 if let Some(shard) = self.registry.get(&id) {
                     shard.stop_and_wait();
                 }
-                self.stop(&id);
+                // Shutdown is not an end: no end event.
+                self.stop_local(&id);
             }
             self.flush_writes(data::Flush::All);
             return;
@@ -3383,13 +3397,19 @@ impl WasmShardHost {
             .unwrap()
             .extend(ended.iter().map(|(id, _)| id.clone()));
         drop((kind_of, idle, _guard));
-        self.notify_ended(ended_events);
+        // The end events go out after each shard's last writes, so an
+        // onStop function reads its final state.
         let Some(c) = self.cluster.get() else {
+            for event in &ended_events {
+                self.flush_writes(data::Flush::Shard(&event.id));
+            }
+            self.notify_ended(ended_events);
             return;
         };
         for (id, _) in ended {
             self.end_placement(c, &id);
         }
+        self.notify_ended(ended_events);
     }
 
     /// Whether this machine takes over orphan `id`: it is the id's home
