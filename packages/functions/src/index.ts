@@ -114,4 +114,9 @@ export type {
   DomainContact,
   RegisterDomainOptions,
   RegisteredDomainResult,
+  // File storage from functions.
+  Files,
+  ActionFiles,
+  StoreFileOptions,
+  StoredFile,
 } from "./types";

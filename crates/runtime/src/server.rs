@@ -1572,7 +1572,7 @@ fn upload_max_bytes_from(value: Option<&str>) -> usize {
         .unwrap_or(DEFAULT_UPLOAD_MAX_BYTES)
 }
 
-fn upload_max_bytes() -> usize {
+pub(crate) fn upload_max_bytes() -> usize {
     let configured = std::env::var("PYLON_MAX_UPLOAD_BYTES").ok();
     upload_max_bytes_from(configured.as_deref())
 }

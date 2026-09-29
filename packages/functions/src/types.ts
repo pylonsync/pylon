@@ -992,6 +992,48 @@ export interface Files {
   signedUrl(fileId: string, opts?: { ttlSecs?: number }): Promise<string>;
 }
 
+/** Options for {@link ActionFiles.store}. */
+export interface StoreFileOptions {
+  /** File name, 1-255 characters, no path separators. */
+  name: string;
+  /** Defaults to `application/octet-stream`. */
+  contentType?: string;
+  /** Readable by anyone, signed in or not. Defaults to false. */
+  public?: boolean;
+}
+
+/** A file written by {@link ActionFiles.store}. */
+export interface StoredFile {
+  id: string;
+  /** Where the file is served: `/api/files/<id>` or the storage CDN URL. */
+  url: string;
+  size: number;
+}
+
+/**
+ * `ctx.files` in an action: the read-side {@link Files} plus writes to the
+ * app's file storage (the backend `/api/files` uses). Writes run only in
+ * actions: a stored or deleted file cannot roll back with a query or
+ * mutation.
+ *
+ * A stored file is owned by the calling user and tenant, as if that user
+ * had uploaded it. With no user (a scheduled job, a public webhook) the
+ * file is system-owned: readable through {@link Files.signedUrl}, by an
+ * unscoped admin, or by anyone when `public` is set.
+ */
+export interface ActionFiles extends Files {
+  /**
+   * Store bytes as a new file. At most 25 MiB, or `PYLON_MAX_UPLOAD_BYTES`
+   * when that is lower.
+   */
+  store(
+    data: Uint8Array | ArrayBuffer | string,
+    opts: StoreFileOptions,
+  ): Promise<StoredFile>;
+  /** Delete a stored file. `deleted` is false when it did not exist. */
+  delete(fileId: string): Promise<{ deleted: boolean }>;
+}
+
 /**
  * Shard tickets: short-lived, signed permission to join one realtime shard,
  * with claims the shard's authorization hooks read without a database
@@ -1436,7 +1478,7 @@ export interface ActionCtx<R extends AuthRequirement = "optional"> {
   /** Environment variables / secrets. */
   env: Record<string, string>;
   /** Signed file-download URLs — see {@link Files}. */
-  files: Files;
+  files: ActionFiles;
   /** Shard tickets, reads, and start/stop — see {@link Shards}. */
   shards: Shards;
   /** Run a registered query within its own read transaction. */

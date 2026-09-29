@@ -81,6 +81,8 @@ ctx.shards.get(shardId) / ctx.shards.list()                    // running shards
 // Actions only:
 ctx.shards.create(kind, shardId, params)  // start a WebAssembly shard (see Realtime shards)
 ctx.shards.stop(shardId)                  // stop it and close its connections
+ctx.files.store(data, { name, contentType, public })  // write a file to the app's storage
+ctx.files.delete(fileId)                  // delete a stored file
 ctx.agents.run(name, { input, as, context })  // run an agent() as a named user (see Agents)
 ```
 
@@ -100,6 +102,28 @@ export default query({
 ```
 
 The returned path (`/api/files/<id>?sig=<hmac>&exp=<unix>`) is anonymously fetchable until it expires. It works in `<img src>` and download links. `ttlSecs` defaults to 300 and is capped at 24 hours; a signed URL is a bearer capability, so keep lifetimes short. Invalid or expired signatures fall back to the ordinary owner check, so nothing new becomes enumerable.
+
+### Storing files from an action
+
+`ctx.files.store` writes bytes to the app's file storage (the same backend `/api/files` uses: local disk, S3, or Stack0) and returns `{ id, url, size }`. `ctx.files.delete(fileId)` removes a file and returns `{ deleted }`, which is `false` when the file was already gone.
+
+```ts
+export default action({
+  args: { raceId: v.id("Race"), jpegBase64: v.string() },
+  async handler(ctx, args) {
+    const photo = await ctx.files.store(Buffer.from(args.jpegBase64, "base64"), {
+      name: "finish.jpg",
+      contentType: "image/jpeg",
+    });
+    await ctx.runMutation("setRacePhoto", { raceId: args.raceId, fileId: photo.id });
+    return photo;
+  },
+});
+```
+
+- `data` is a `Uint8Array`, an `ArrayBuffer`, or a string (stored as UTF-8). The limit is 25 MiB, or `PYLON_MAX_UPLOAD_BYTES` when that is lower.
+- The file is owned by the calling user and tenant, as if that user had uploaded it. Called with no user (a scheduled job, a public webhook), the file is system-owned: readable through `ctx.files.signedUrl`, by an unscoped admin, or by anyone when `public: true`.
+- Both run only in actions. A query or mutation that calls them gets `FILES_WRITE_NOT_ALLOWED`, because a file write cannot roll back with the transaction.
 
 ### Shard tickets
 

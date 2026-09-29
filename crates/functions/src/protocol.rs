@@ -473,6 +473,13 @@ pub enum TsMessage {
     #[serde(rename = "sign_file_url")]
     SignFileUrl(SignFileUrlMessage),
 
+    /// `ctx.files.store(data, opts)` / `ctx.files.delete(id)` from an
+    /// action — write to or remove from the app's file storage. Refused
+    /// in queries and mutations: a file write cannot roll back with the
+    /// transaction.
+    #[serde(rename = "files_op")]
+    FilesOp(FilesOpMessage),
+
     /// `ctx.shards.ticket(shardId, {subscriberId, claims, ttlSecs})` — mint
     /// a signed shard ticket. The host signs with its ticket secret; the
     /// shard transports verify it. See `pylon_realtime::ticket`.
@@ -602,6 +609,7 @@ impl TsMessage {
             TsMessage::RunFn(m) => Some(&m.call_id),
             TsMessage::RunAgent(m) => Some(&m.call_id),
             TsMessage::SignFileUrl(m) => Some(&m.call_id),
+            TsMessage::FilesOp(m) => Some(&m.call_id),
             TsMessage::SignShardTicket(m) => Some(&m.call_id),
             TsMessage::ShardOp(m) => Some(&m.call_id),
             TsMessage::SendEmail(m) => Some(&m.call_id),
@@ -906,6 +914,32 @@ pub struct SignFileUrlMessage {
     pub ttl_secs: Option<u64>,
 }
 
+/// See [`TsMessage::FilesOp`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FilesOpMessage {
+    pub call_id: String,
+    #[serde(flatten)]
+    pub op: FilesOp,
+}
+
+/// One `ctx.files` write.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum FilesOp {
+    /// Store bytes (base64) as a new file.
+    Store {
+        name: String,
+        #[serde(default)]
+        content_type: Option<String>,
+        data_base64: String,
+        /// Readable by anyone, signed in or not.
+        #[serde(default)]
+        public: bool,
+    },
+    /// Delete a stored file.
+    Delete { file_id: String },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignShardTicketMessage {
     pub call_id: String,
@@ -1185,7 +1219,7 @@ pub enum FnType {
 /// re-runs in particular have to carry the FULL identity captured
 /// at subscribe time, not a stripped-down subset, or role-gated
 /// policies see empty roles on re-run and silently deny.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AuthInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,

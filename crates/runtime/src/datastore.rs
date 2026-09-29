@@ -2640,6 +2640,101 @@ pub(crate) fn workflow_filter(
 }
 
 // ---------------------------------------------------------------------------
+// ctx.files writes from functions
+// ---------------------------------------------------------------------------
+
+/// Largest file `ctx.files.store` accepts. The bytes cross the runner pipe
+/// as base64 in one frame (capped at 64 MiB), so this stays well under it.
+/// `PYLON_MAX_UPLOAD_BYTES` lowers it further.
+pub(crate) const FILES_STORE_MAX_BYTES: usize = 25 * 1024 * 1024;
+
+/// Run one `ctx.files` write against `storage`. A stored file is owned by
+/// the calling user (and tenant); a call with no user makes a system-owned
+/// file that only a signed URL, an unscoped admin, or `public` can read.
+pub(crate) fn run_files_op(
+    storage: &dyn pylon_storage::files::FileStorage,
+    op: &pylon_functions::protocol::FilesOp,
+    auth: &pylon_functions::protocol::AuthInfo,
+    max_bytes: usize,
+) -> Result<serde_json::Value, (String, String)> {
+    use base64::Engine as _;
+    use pylon_functions::protocol::FilesOp;
+    let bad = |code: &str, msg: String| (code.to_string(), msg);
+    match op {
+        FilesOp::Store {
+            name,
+            content_type,
+            data_base64,
+            public,
+        } => {
+            let name = name.trim();
+            if name.is_empty() || name.len() > 255 || name.contains(['/', '\\', '\0']) {
+                return Err(bad(
+                    "INVALID_FILE_NAME",
+                    "name must be 1-255 characters with no path separators".into(),
+                ));
+            }
+            // Reject before decoding: base64 is 4 bytes per 3.
+            if data_base64.len() / 4 * 3 > max_bytes + 3 {
+                return Err(bad(
+                    "FILE_TOO_LARGE",
+                    format!("ctx.files.store accepts at most {max_bytes} bytes"),
+                ));
+            }
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(data_base64)
+                .map_err(|e| {
+                    bad(
+                        "INVALID_FILE_DATA",
+                        format!("data is not valid base64: {e}"),
+                    )
+                })?;
+            if bytes.len() > max_bytes {
+                return Err(bad(
+                    "FILE_TOO_LARGE",
+                    format!("ctx.files.store accepts at most {max_bytes} bytes"),
+                ));
+            }
+            let content_type = content_type
+                .as_deref()
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+                .unwrap_or("application/octet-stream");
+            let stored = storage
+                .store(name, &bytes, content_type)
+                .map_err(|e| bad(&e.code, e.message))?;
+            let owner = pylon_storage::files::FileOwner {
+                user_id: auth.user_id.clone().unwrap_or_default(),
+                tenant_id: auth.tenant_id.clone(),
+                public: *public,
+            };
+            if let Err(e) = storage.record_owner(&stored.id, &owner) {
+                // An unowned local file would 404 for everyone; undo it.
+                let _ = storage.delete(&stored.id);
+                return Err(bad(&e.code, e.message));
+            }
+            Ok(serde_json::json!({
+                "id": stored.id,
+                "url": stored.url,
+                "size": stored.size,
+            }))
+        }
+        FilesOp::Delete { file_id } => {
+            if file_id.is_empty() || file_id.contains(['/', '?', '\\']) {
+                return Err(bad(
+                    "INVALID_FILE_ID",
+                    "file id must be a bare asset id".into(),
+                ));
+            }
+            let deleted = storage
+                .delete(file_id)
+                .map_err(|e| bad(&e.code, e.message))?;
+            Ok(serde_json::json!({ "deleted": deleted }))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Adapter: FileStorage trait → FileOps
 // ---------------------------------------------------------------------------
 
@@ -2914,6 +3009,104 @@ mod file_ownership_tests {
         let _ = std::fs::remove_dir_all(&dir);
         let storage = LocalFileStorage::new(dir.to_str().unwrap(), "/api/files");
         (Arc::new(storage), dir)
+    }
+
+    fn auth(user: Option<&str>) -> pylon_functions::protocol::AuthInfo {
+        pylon_functions::protocol::AuthInfo {
+            user_id: user.map(str::to_string),
+            tenant_id: Some("org-1".into()),
+            ..Default::default()
+        }
+    }
+
+    fn store_op(name: &str, data: &[u8], public: bool) -> pylon_functions::protocol::FilesOp {
+        use base64::Engine as _;
+        pylon_functions::protocol::FilesOp::Store {
+            name: name.into(),
+            content_type: Some("image/jpeg".into()),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(data),
+            public,
+        }
+    }
+
+    #[test]
+    fn a_function_store_is_owned_by_the_caller_and_deletable() {
+        let (storage, dir) = temp_storage("fn_store");
+        let out = run_files_op(
+            storage.as_ref(),
+            &store_op("race.jpg", b"jpegbytes", false),
+            &auth(Some("u1")),
+            1024,
+        )
+        .unwrap();
+        let id = out["id"].as_str().unwrap().to_string();
+        assert_eq!(out["size"], 9);
+        assert_eq!(storage.get(&id).unwrap(), b"jpegbytes");
+        let owner = storage.owner_of(&id).unwrap().unwrap();
+        assert_eq!(owner.user_id, "u1");
+        assert_eq!(owner.tenant_id.as_deref(), Some("org-1"));
+        assert!(!owner.public);
+
+        let del = pylon_functions::protocol::FilesOp::Delete {
+            file_id: id.clone(),
+        };
+        assert_eq!(
+            run_files_op(storage.as_ref(), &del, &auth(None), 1024).unwrap()["deleted"],
+            true
+        );
+        assert_eq!(
+            run_files_op(storage.as_ref(), &del, &auth(None), 1024).unwrap()["deleted"],
+            false
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_system_store_has_no_user_owner() {
+        let (storage, dir) = temp_storage("fn_store_system");
+        let out = run_files_op(
+            storage.as_ref(),
+            &store_op("a.bin", b"x", true),
+            &auth(None),
+            1024,
+        )
+        .unwrap();
+        let owner = storage
+            .owner_of(out["id"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(owner.user_id, "");
+        assert!(owner.public);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn function_store_rejects_bad_input() {
+        let (storage, dir) = temp_storage("fn_store_bad");
+        let err = |op: pylon_functions::protocol::FilesOp| {
+            run_files_op(storage.as_ref(), &op, &auth(Some("u1")), 4)
+                .unwrap_err()
+                .0
+        };
+        assert_eq!(err(store_op("big.bin", b"12345", false)), "FILE_TOO_LARGE");
+        assert_eq!(err(store_op("../x", b"1", false)), "INVALID_FILE_NAME");
+        assert_eq!(err(store_op("", b"1", false)), "INVALID_FILE_NAME");
+        assert_eq!(
+            err(pylon_functions::protocol::FilesOp::Store {
+                name: "a".into(),
+                content_type: None,
+                data_base64: "not base64!".into(),
+                public: false,
+            }),
+            "INVALID_FILE_DATA"
+        );
+        assert_eq!(
+            err(pylon_functions::protocol::FilesOp::Delete {
+                file_id: "a/b".into()
+            }),
+            "INVALID_FILE_ID"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -6148,6 +6341,13 @@ pub fn try_spawn_functions(
                 ));
             }
             Ok(crate::file_urls::signed_path(file_id, ttl_secs))
+        }));
+        // `ctx.files.store` / `ctx.files.delete` — through the configured
+        // storage backend, the same one `/api/files` uses.
+        runner.set_files_op_hook(Box::new(|op, auth| {
+            let storage = pylon_storage::files::select_from_env();
+            let max = FILES_STORE_MAX_BYTES.min(crate::server::upload_max_bytes());
+            run_files_op(storage.as_ref(), op, auth, max)
         }));
         // `ctx.shards.ticket` — same pattern: the runtime owns the secret.
         runner.set_shard_ticket_signer(Box::new(

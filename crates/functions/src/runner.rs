@@ -186,6 +186,15 @@ pub type NestedCallHook = Box<NestedCallHookFn>;
 pub type FileUrlSigner =
     Box<dyn Fn(&str, Option<u64>) -> Result<String, (String, String)> + Send + Sync>;
 
+/// Callback for `ctx.files.store` / `ctx.files.delete`. Takes the op and the
+/// calling user's auth; returns the JSON result or an error pair. Installed
+/// by the runtime, which owns the storage backend.
+pub type FilesOpHook = Box<
+    dyn Fn(&crate::protocol::FilesOp, &AuthInfo) -> Result<serde_json::Value, (String, String)>
+        + Send
+        + Sync,
+>;
+
 /// Callback for `ctx.shards.ticket(...)`. Takes the request and the calling
 /// user's id, returns the signed ticket (or an error pair). Installed by the
 /// runtime, which owns the ticket secret.
@@ -452,6 +461,7 @@ pub struct FnRunner {
     /// `ctx.runMutation`), and concurrent calls must not serialize here.
     nested_call_hook: Mutex<Option<Arc<NestedCallHookFn>>>,
     file_url_signer: Mutex<Option<FileUrlSigner>>,
+    files_op_hook: Mutex<Option<FilesOpHook>>,
     shard_ticket_signer: Mutex<Option<ShardTicketSigner>>,
     /// An `Arc` so a call runs after the lock is released: a hook that
     /// panics must not poison it for every later `ctx.shards` call.
@@ -525,6 +535,7 @@ impl FnRunner {
             cancel_schedule_hook: Mutex::new(None),
             nested_call_hook: Mutex::new(None),
             file_url_signer: Mutex::new(None),
+            files_op_hook: Mutex::new(None),
             shard_ticket_signer: Mutex::new(None),
             shard_op_hook: Mutex::new(None),
             email_hook: Mutex::new(None),
@@ -649,6 +660,10 @@ impl FnRunner {
     /// Install the hook backing `ctx.shards.create/stop/get/list`.
     pub fn set_shard_op_hook(&self, hook: ShardOpHook) {
         *self.shard_op_hook.lock().unwrap() = Some(std::sync::Arc::from(hook));
+    }
+
+    pub fn set_files_op_hook(&self, hook: FilesOpHook) {
+        *self.files_op_hook.lock().unwrap() = Some(hook);
     }
 
     pub fn set_file_url_signer(&self, hook: FileUrlSigner) {
@@ -1585,6 +1600,9 @@ impl FnRunner {
         // `Schedule` arm sees the new value.
         let mut caller_is_admin = auth.is_admin;
         let caller_user_id = auth.user_id.clone();
+        // The caller's identity for host hooks that act on its behalf
+        // (`ctx.files.store` records it as the file's owner).
+        let auth_for_hooks = auth.clone();
         let caller_tenant_id = auth.tenant_id.clone();
         let caller_is_guest = auth.is_guest;
         // Per-function `timeout` override wins over the global call timeout, so a
@@ -1895,6 +1913,37 @@ impl FnRunner {
                             "FILES_SIGNING_NOT_CONFIGURED",
                             "this host does not support signed file URLs",
                         ),
+                    };
+                    self.send(&reply)?;
+                }
+
+                TsMessage::FilesOp(req) if req.call_id == call_id => {
+                    let reply = if fn_type != FnType::Action {
+                        DbResultMessage::err(
+                            call_id.clone(),
+                            "FILES_WRITE_NOT_ALLOWED",
+                            "ctx.files.store and ctx.files.delete run only in actions: a file write cannot roll back with a query or mutation",
+                        )
+                    } else {
+                        let auth_now = AuthInfo {
+                            is_admin: caller_is_admin,
+                            ..auth_for_hooks.clone()
+                        };
+                        let result = {
+                            let hook = self.files_op_hook.lock().unwrap();
+                            hook.as_ref().map(|cb| cb(&req.op, &auth_now))
+                        };
+                        match result {
+                            Some(Ok(v)) => DbResultMessage::ok(call_id.clone(), v),
+                            Some(Err((code, msg))) => {
+                                DbResultMessage::err(call_id.clone(), &code, &msg)
+                            }
+                            None => DbResultMessage::err(
+                                call_id.clone(),
+                                "FILES_NOT_CONFIGURED",
+                                "this host does not support file storage from functions",
+                            ),
+                        }
                     };
                     self.send(&reply)?;
                 }

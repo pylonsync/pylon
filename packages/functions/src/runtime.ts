@@ -22,6 +22,8 @@ import type {
   EmailOptions,
   EmailSender,
   Files,
+  ActionFiles,
+  StoredFile,
   Shards,
   ShardInfo,
   ShardTransfer,
@@ -638,6 +640,41 @@ function buildFiles(callId: string): Files {
       }) as Promise<string>;
     },
   };
+}
+
+/** `ctx.files` in an action: {@link buildFiles} plus store and delete. */
+function buildActionFiles(callId: string): ActionFiles {
+  return {
+    ...buildFiles(callId),
+    async store(data, opts) {
+      return rpc(callId, {
+        type: "files_op",
+        op: "store",
+        name: opts.name,
+        content_type: opts.contentType ?? null,
+        public: opts.public ?? false,
+        data_base64: toBase64(data),
+      }) as Promise<StoredFile>;
+    },
+    async delete(fileId) {
+      return rpc(callId, {
+        type: "files_op",
+        op: "delete",
+        file_id: fileId,
+      }) as Promise<{ deleted: boolean }>;
+    },
+  };
+}
+
+/** Base64 of bytes, or of a string's UTF-8 encoding. */
+function toBase64(data: Uint8Array | ArrayBuffer | string): string {
+  const bytes =
+    typeof data === "string"
+      ? new TextEncoder().encode(data)
+      : data instanceof ArrayBuffer
+        ? new Uint8Array(data)
+        : data;
+  return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64");
 }
 
 export function buildSsrFnCaller(
@@ -1340,7 +1377,7 @@ function buildActionCtx(
       (err as any).code = code;
       return err;
     },
-    files: buildFiles(callId),
+    files: buildActionFiles(callId),
     shards: buildShards(callId),
     // Actions have no ctx.db; read membership via the built-in internal query.
     requireMember: makeRequireMember(auth.userId, (entity, filter) =>
@@ -1532,7 +1569,10 @@ async function handleCall(msg: CallMessage): Promise<void> {
         requireMember: makeRequireMember(auth.userId, (entity, filter) =>
           reader.query(entity, { ...filter, $limit: 1 }),
         ),
-        files: buildFiles(msg.call_id),
+        // Typed as read-only `Files`; `store`/`delete` still exist at runtime
+        // so a call from a query or mutation gets the host's
+        // FILES_WRITE_NOT_ALLOWED instead of a TypeError.
+        files: buildActionFiles(msg.call_id),
         shards: buildShards(msg.call_id),
       };
       break;
@@ -1558,7 +1598,10 @@ async function handleCall(msg: CallMessage): Promise<void> {
         requireMember: makeRequireMember(auth.userId, (entity, filter) =>
           writer.query(entity, { ...filter, $limit: 1 }),
         ),
-        files: buildFiles(msg.call_id),
+        // Typed as read-only `Files`; `store`/`delete` still exist at runtime
+        // so a call from a query or mutation gets the host's
+        // FILES_WRITE_NOT_ALLOWED instead of a TypeError.
+        files: buildActionFiles(msg.call_id),
         shards: buildShards(msg.call_id),
       };
       break;
