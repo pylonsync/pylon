@@ -98,6 +98,22 @@ pylon deploy --target manifest     #            just manifest + client bindings
 
 `pylon deploy` (no flag) runs the hosted deploy. The other targets write IaaS config files to `./deploy/`.
 
+### What the hosted deploy uploads
+
+`pylon deploy` uploads the project directory, at most 50 MB, minus:
+
+- whatever `.gitignore` and `.pylonignore` files in the project ignore. Both use gitignore syntax, including nested files, `**`, and `!` negation. Put paths you commit but do not ship (videos, design files, agent worktrees) in `.pylonignore`. Rules above the project directory and your global git excludes do not apply.
+- always, whatever the ignore files say: `.git`, `node_modules`, `.pylon`, build output next to its manifest (`target` beside `Cargo.toml`; `dist`, `build`, `.next`, `.turbo`, `.vercel`, `.cache` beside `package.json`), `.env` and every `.env.*` except `*.example`, and `.DS_Store` / `Thumbs.db`.
+
+`pylon.manifest.json` and the app's shard modules ship even when ignored.
+
+```
+# .pylonignore
+video/
+.claude/worktrees/
+design/**/*.psd
+```
+
 ## Secrets
 
 ```bash

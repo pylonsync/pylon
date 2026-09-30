@@ -13,9 +13,9 @@
 //!    `pylon projects use`) → global default → interactive picker
 //!    (TTY only).
 //! 3. Build a gzipped tar of the project source. Skips `.git`,
-//!    `node_modules`, `.pylon`, `target`, common artifact dirs, and
-//!    anything in `.gitignore`. Hard 50MB cap — projects bigger than
-//!    that should be using the GitHub-push path.
+//!    `node_modules`, `.pylon`, `target`, common artifact dirs, `.env*`,
+//!    and anything `.gitignore` or `.pylonignore` ignores. Hard 50MB
+//!    cap — projects bigger than that should use the GitHub-push path.
 //! 4. POST the tarball to `/api/fn/deployProjectFromCliUpload` with
 //!    `multipart/form-data; boundary=...` carrying `projectSlug` +
 //!    the tarball bytes. (See pylon-cloud function for the exact
@@ -626,8 +626,7 @@ fn build_tarball(root: &Path, forced: &[PathBuf]) -> io::Result<Vec<u8>> {
     {
         let gz = GzEncoder::new(&mut buf, Compression::default());
         let mut tar = tar::Builder::new(gz);
-        let gitignore = load_gitignore(root);
-        walk_into_tar(&mut tar, root, root, &gitignore, forced)?;
+        walk_into_tar(&mut tar, root, &[root.to_path_buf()], forced)?;
         append_forced(&mut tar, root, forced)?;
         tar.into_inner()?.finish()?;
     }
@@ -893,8 +892,6 @@ fn build_workspace_tarball(ws: &WorkspaceDeploy, forced: &[PathBuf]) -> io::Resu
     {
         let gz = GzEncoder::new(&mut buf, Compression::default());
         let mut tar = tar::Builder::new(gz);
-        let gitignore = load_gitignore(&ws.root);
-
         let root_pkg = rewrite_root_workspaces(&ws.root, &ws.member_dirs)?;
         let mut header = tar::Header::new_gnu();
         header.set_size(root_pkg.len() as u64);
@@ -902,9 +899,7 @@ fn build_workspace_tarball(ws: &WorkspaceDeploy, forced: &[PathBuf]) -> io::Resu
         header.set_cksum();
         tar.append_data(&mut header, "package.json", root_pkg.as_slice())?;
 
-        for dir in &ws.member_dirs {
-            walk_into_tar(&mut tar, &ws.root, dir, &gitignore, forced)?;
-        }
+        walk_into_tar(&mut tar, &ws.root, &ws.member_dirs, forced)?;
         append_forced(&mut tar, &ws.root, forced)?;
         tar.into_inner()?.finish()?;
     }
@@ -928,116 +923,104 @@ fn rewrite_root_workspaces(root: &Path, members: &[PathBuf]) -> io::Result<Vec<u
     Ok(out)
 }
 
+/// Add the files under each of `dirs` (inside `root`) to `tar`, at their
+/// paths relative to `root`.
+///
+/// Skipped: whatever `.gitignore` and `.pylonignore` files from `root` down
+/// ignore (full gitignore syntax: nested files, negation, `**`), then, with
+/// no ignore rule able to bring them back, `.git`, `node_modules`, `.pylon`,
+/// build output beside its manifest, `.env` and `.env.*` (except
+/// `*.example`), and OS clutter. Rules above `root` and the global git
+/// excludes do not apply. `pylon.manifest.json` in a walked directory ships
+/// even when ignored. `forced` files are appended by `append_forced`.
 fn walk_into_tar<W: Write>(
     tar: &mut tar::Builder<W>,
     root: &Path,
-    dir: &Path,
-    gitignore: &[String],
+    dirs: &[PathBuf],
     forced: &[PathBuf],
 ) -> io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
+    let mut walk = ignore::WalkBuilder::new(root);
+    walk.hidden(false)
+        .parents(false)
+        .ignore(false)
+        .git_ignore(true)
+        .git_global(false)
+        .git_exclude(false)
+        .require_git(false)
+        .follow_links(false)
+        .add_custom_ignore_filename(".pylonignore");
+    let wanted: Vec<PathBuf> = dirs.to_vec();
+    let root_owned = root.to_path_buf();
+    walk.filter_entry(move |entry| {
         let path = entry.path();
-        let file_name = entry.file_name();
-        let name = file_name.to_string_lossy();
-        let ft = entry.file_type()?;
-
-        if ft.is_dir() {
-            if EXCLUDE_DIRS_ANYWHERE.iter().any(|d| *d == name) {
-                continue;
-            }
-            if is_build_output(dir, &name) {
-                continue;
-            }
-            if matches_gitignore(&path, root, gitignore) {
-                continue;
-            }
-            walk_into_tar(tar, root, &path, gitignore, forced)?;
-        } else if ft.is_file() {
-            if EXCLUDE_FILES.iter().any(|f| *f == name) {
-                continue;
-            }
-            // Appended by append_forced. Canonicalize only files whose name
-            // matches one, not every file in the tree.
-            if forced
-                .iter()
-                .any(|f| f.file_name() == Some(file_name.as_os_str()))
-                && path.canonicalize().is_ok_and(|p| forced.contains(&p))
-            {
-                continue;
-            }
-            if name.starts_with(".env.") && !name.ends_with(".example") {
-                // .env.local, .env.production, etc — never upload.
-                continue;
-            }
-            // pylon.manifest.json ships EVEN when gitignored (it near-
-            // universally is — it's generated output). The cloud build
-            // reads manifest-derived features (fonts, SSR route metadata)
-            // from it; without it a bundle builds fine and silently loses
-            // them. The builder can also re-derive it, but the local copy
-            // matches what the developer just ran, so prefer shipping it.
-            if name == "pylon.manifest.json" {
-                tar.append_path_with_name(&path, path.strip_prefix(root).unwrap_or(&path))?;
-                continue;
-            }
-            if matches_gitignore(&path, root, gitignore) {
-                continue;
-            }
-            let rel = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
-            tar.append_path_with_name(&path, &rel)?;
-        }
-        // Symlinks intentionally skipped — they'd be brittle in the
-        // cloud's flatten/build step and unlikely to appear in real
-        // Pylon project trees.
-    }
-    Ok(())
-}
-
-/// Minimal .gitignore reader — supports literal file/dir names and
-/// glob-suffix patterns like `*.log`. Full pathspec semantics live
-/// in git itself; we cover the 90% case that lets a developer's
-/// existing .gitignore filter the upload tarball.
-fn load_gitignore(root: &Path) -> Vec<String> {
-    let path = root.join(".gitignore");
-    let Ok(file) = File::open(&path) else {
-        return Vec::new();
-    };
-    io::BufReader::new(file)
-        .lines()
-        .filter_map(|l| l.ok())
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .collect()
-}
-
-fn matches_gitignore(path: &Path, root: &Path, patterns: &[String]) -> bool {
-    let Ok(rel) = path.strip_prefix(root) else {
-        return false;
-    };
-    let rel_str = rel.to_string_lossy().replace('\\', "/");
-    let file_name = path
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
-    for pat in patterns {
-        let pat = pat.trim_start_matches('/');
-        if pat == rel_str || pat == file_name {
+        if path == root_owned {
             return true;
         }
-        // *.ext glob
-        if let Some(suffix) = pat.strip_prefix("*.") {
-            if file_name.ends_with(&format!(".{suffix}")) {
-                return true;
+        // Only the requested dirs, and the directories leading to them.
+        if !wanted
+            .iter()
+            .any(|d| path.starts_with(d) || d.starts_with(path))
+        {
+            return false;
+        }
+        if entry.file_type().is_some_and(|t| t.is_dir()) {
+            let name = entry.file_name().to_string_lossy();
+            if EXCLUDE_DIRS_ANYWHERE.iter().any(|d| *d == name) {
+                return false;
+            }
+            if let Some(parent) = path.parent() {
+                if is_build_output(parent, &name) {
+                    return false;
+                }
             }
         }
-        // dir/ trailing slash → match anywhere under that dir
-        if let Some(dir) = pat.strip_suffix('/') {
-            if rel_str.starts_with(&format!("{dir}/")) || rel_str == dir {
-                return true;
-            }
+        true
+    });
+    let mut added: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    for entry in walk.build() {
+        let entry = entry.map_err(|e| io::Error::other(e.to_string()))?;
+        // Symlinks are skipped: brittle in the cloud's build step.
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        if !dirs.iter().any(|d| path.starts_with(d)) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy();
+        if EXCLUDE_FILES.iter().any(|f| *f == name)
+            || (name.starts_with(".env.") && !name.ends_with(".example"))
+        {
+            continue;
+        }
+        // Appended by append_forced. Canonicalize only files whose name
+        // matches one, not every file in the tree.
+        if forced
+            .iter()
+            .any(|f| f.file_name() == Some(entry.file_name()))
+            && path.canonicalize().is_ok_and(|p| forced.contains(&p))
+        {
+            continue;
+        }
+        let rel = path.strip_prefix(root).unwrap_or(path).to_path_buf();
+        tar.append_path_with_name(path, &rel)?;
+        added.insert(rel);
+    }
+    // pylon.manifest.json ships even when ignored (it near-universally is:
+    // it is generated). The cloud build reads manifest-derived features
+    // (fonts, SSR route metadata) from it; the local copy matches what the
+    // developer just ran.
+    for dir in dirs {
+        let manifest = dir.join("pylon.manifest.json");
+        let rel = manifest
+            .strip_prefix(root)
+            .unwrap_or(&manifest)
+            .to_path_buf();
+        if manifest.is_file() && !added.contains(&rel) {
+            tar.append_path_with_name(&manifest, &rel)?;
         }
     }
-    false
+    Ok(())
 }
 
 /// Count entries inside a gzipped tar, for the "N files" status line.
@@ -1689,6 +1672,75 @@ mod tests {
             "other gitignored files must stay excluded: {names:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tarball_follows_gitignore_and_pylonignore_but_never_ships_env() {
+        let outer = std::env::temp_dir().join(format!("pylon-tar-ignore-{}", std::process::id()));
+        let dir = outer.join("app");
+        let w = |rel: &str, body: &str| {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        // A rule above the project root does not apply.
+        std::fs::create_dir_all(&outer).unwrap();
+        std::fs::write(outer.join(".gitignore"), "app.ts\n").unwrap();
+        w("app.ts", "export {};");
+        w("functions/lookup.ts", "export {};");
+        w(".gitignore", "*.log\n.env*\n!.env.example\nlogs/**\n");
+        w(
+            ".pylonignore",
+            ".claude/worktrees/\nvideo/\n!video/keep.txt\n",
+        );
+        w("functions/.gitignore", "scratch.ts\n");
+        w("functions/scratch.ts", "x");
+        w("debug.log", "x");
+        w("logs/a/b.txt", "x");
+        w(".claude/worktrees/agent/app.ts", "x");
+        w(".claude/settings.json", "{}");
+        w("video/clip.mp4", "x");
+        w("video/keep.txt", "x");
+        w(".env", "SECRET=1");
+        w(".env.production", "SECRET=1");
+        w(".env.example", "SECRET=");
+        w(".pylon/dev.db", "x");
+        // A negation cannot bring back a hard exclusion.
+        w("sub/.gitignore", "!.env\n");
+        w("sub/.env", "SECRET=1");
+
+        let names = tar_entry_names(&build_tarball(&dir, &[]).unwrap());
+        for present in [
+            "app.ts",
+            "functions/lookup.ts",
+            ".gitignore",
+            ".pylonignore",
+            "functions/.gitignore",
+            ".claude/settings.json",
+            ".env.example",
+        ] {
+            assert!(
+                names.iter().any(|n| n == present),
+                "{present} missing: {names:?}"
+            );
+        }
+        for absent in [
+            "functions/scratch.ts",
+            "debug.log",
+            "logs/a/b.txt",
+            ".claude/worktrees/agent/app.ts",
+            "video/clip.mp4",
+            ".env",
+            ".env.production",
+            ".pylon/dev.db",
+            "sub/.env",
+        ] {
+            assert!(
+                !names.iter().any(|n| n == absent),
+                "{absent} shipped: {names:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&outer);
     }
 
     #[test]

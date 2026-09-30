@@ -49,6 +49,8 @@ rpassword = "7"
 notify = "6.1.1"
 tar = "0.4"
 flate2 = "1.0"
+# .gitignore / .pylonignore rules for the `pylon deploy` upload.
+ignore = "0.4"
 # `pylon bench shard`: headless shard clients. The runtime already links
 # tokio and tungstenite; rustls with webpki roots reaches wss:// apps.
 tokio = { workspace = true }
