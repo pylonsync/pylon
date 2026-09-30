@@ -122,12 +122,31 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
             // Shard crates compile before the clock starts: a cold build
             // can take longer than the whole health budget. `pylon dev`
             // rebuilds them too, which is then a no-op.
-            if manifest.shards.iter().any(|s| s.crate_dir.is_some()) {
+            // From the current app.ts, not the saved manifest: a crate moved
+            // or removed since the last codegen would otherwise fail here
+            // before `pylon dev` regenerates it.
+            let current = if std::path::Path::new("app.ts").is_file() {
+                match crate::bun::run_bun_codegen("app.ts", false)
+                    .map_err(|d| d.message.clone())
+                    .and_then(|json| {
+                        serde_json::from_str::<pylon_kernel::AppManifest>(&json)
+                            .map_err(|e| format!("the manifest from app.ts does not parse: {e}"))
+                    }) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        output::print_error(&format!("Codegen failed: {e}"));
+                        return ExitCode::Error;
+                    }
+                }
+            } else {
+                manifest.clone()
+            };
+            if current.shards.iter().any(|s| s.crate_dir.is_some()) {
                 if !json_mode {
                     println!("→ Building shard crates…");
                 }
                 if let Err(e) =
-                    super::shards::build_all(&manifest, std::path::Path::new("."), json_mode)
+                    super::shards::build_all(&current, std::path::Path::new("."), json_mode)
                 {
                     output::print_error(&format!("Shard build failed: {e}"));
                     return ExitCode::Error;
