@@ -145,10 +145,9 @@ fn run_tail(args: &[String], json_mode: bool) -> ExitCode {
         match fetch_chunk(&creds, &project_id, cursor.as_deref()) {
             Ok(TailResponse::Ok { rows, cursor: next }) => {
                 printed_unavailable = false;
-                // In one-shot mode, show the tail of the buffer (the
-                // user almost always wants "the last N", not "the first
-                // N since boot"). The server returns chronological asc,
-                // so slice from the back.
+                let rows = chronological(rows);
+                // In one-shot mode, show the last N rows, not the first N
+                // since boot.
                 let to_print: &[LogRow] = if let Some(n) = limit.filter(|_| one_shot) {
                     let start = rows.len().saturating_sub(n);
                     &rows[start..]
@@ -201,6 +200,15 @@ fn run_tail(args: &[String], json_mode: bool) -> ExitCode {
     }
 }
 
+/// `rows` oldest first. The machine's log ring returns them newest first;
+/// sorting here keeps `--limit` and the printed order right whichever order
+/// the server uses. Timestamps are fixed-width ISO-8601, so they sort as
+/// strings.
+fn chronological(mut rows: Vec<LogRow>) -> Vec<LogRow> {
+    rows.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+    rows
+}
+
 fn fetch_chunk(
     creds: &Credentials,
     project_id: &str,
@@ -250,4 +258,33 @@ fn resolve_project_id(creds: &Credentials, slug: &str) -> Result<String, String>
     let proj: ProjectIdResponse = post_json(creds, "/api/fn/getProjectForCli", &Args { slug })
         .map_err(|e| format!("Could not resolve project \"{slug}\": {e}"))?;
     Ok(proj.id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{chronological, LogRow};
+
+    fn row(ts: &str) -> LogRow {
+        serde_json::from_value(serde_json::json!({ "timestamp": ts })).unwrap()
+    }
+
+    #[test]
+    fn newest_first_rows_come_out_oldest_first() {
+        let rows = chronological(vec![
+            row("2026-09-30T00:49:02.000Z"),
+            row("2026-09-30T00:49:01.000Z"),
+            row("2026-09-29T20:12:00.000Z"),
+        ]);
+        let ts: Vec<_> = rows.iter().map(|r| r.timestamp.as_str()).collect();
+        assert_eq!(
+            ts,
+            [
+                "2026-09-29T20:12:00.000Z",
+                "2026-09-30T00:49:01.000Z",
+                "2026-09-30T00:49:02.000Z"
+            ]
+        );
+        // `--limit 1` slices from the back: the newest row.
+        assert_eq!(rows[rows.len() - 1].timestamp, "2026-09-30T00:49:02.000Z");
+    }
 }
