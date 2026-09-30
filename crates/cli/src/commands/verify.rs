@@ -125,6 +125,13 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
             // From the current app.ts, not the saved manifest: a crate moved
             // or removed since the last codegen would otherwise fail here
             // before `pylon dev` regenerates it.
+            // The environment `pylon dev` gives codegen: .env files (walking
+            // up from here) and NODE_ENV=development unless set. The child
+            // dev inherits it. Single-threaded here: nothing has spawned yet.
+            super::dev::load_env_files();
+            if std::env::var_os("NODE_ENV").is_none() {
+                std::env::set_var("NODE_ENV", "development");
+            }
             let current = if std::path::Path::new("app.ts").is_file() {
                 match crate::bun::run_bun_codegen("app.ts", false)
                     .map_err(|d| d.message.clone())
