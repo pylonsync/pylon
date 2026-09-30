@@ -556,7 +556,8 @@ fn print_usage() {
   policy test <expr>        Dry-run a policy expression (--auth k=v --row json)
   update [--dry-run]        Bump every @pylonsync/* dependency to the latest release
   upgrade [--check]         Update the pylon binary itself to the latest release
-  verify [--url <base>]     Boot (or target) the app and verify routes + assets serve"
+  verify [--url <base>] [--timeout <secs>]
+                            Boot (or target) the app and verify routes + assets serve"
     );
     println!("  version                   Show version");
     println!();

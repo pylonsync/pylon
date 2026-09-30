@@ -15,8 +15,10 @@
 //!      no styles.
 //!
 //! Modes:
-//!   pylon verify                    boot this project on a free port, verify, tear down
+//!   pylon verify                    build shard crates, boot this project on a free
+//!                                   port, verify, tear down
 //!   pylon verify --url https://...  verify an already-running (e.g. deployed) app
+//!   --timeout <secs>                how long /health may take (default 120)
 //!   pylon deploy --verify           deploy, wait for the flip, then verify the live URL
 //!
 //! Output is a per-check table (or `--json`), exit 0 only when nothing
@@ -30,7 +32,9 @@ use pylon_kernel::ExitCode;
 use crate::manifest::load_manifest;
 use crate::output;
 
-const HEALTH_TIMEOUT_SECS: u64 = 60;
+/// How long `/health` may take to answer. `pylon verify` builds shard crates
+/// before it starts the clock; `--timeout <secs>` overrides this.
+const HEALTH_TIMEOUT_SECS: u64 = 120;
 const REQUEST_TIMEOUT_SECS: u64 = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -81,13 +85,23 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         }
     };
     let route_paths: Vec<String> = manifest.routes.iter().map(|r| r.path.clone()).collect();
+    let health_timeout = args
+        .windows(2)
+        .find(|w| w[0] == "--timeout")
+        .and_then(|w| w[1].parse::<u64>().ok())
+        .or_else(|| {
+            args.iter()
+                .find_map(|a| a.strip_prefix("--timeout=").and_then(|v| v.parse().ok()))
+        })
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(HEALTH_TIMEOUT_SECS));
 
     // Source lint first: it needs no server, and it is the only thing that
     // sees this class of defect at all (see find_use_promise_all).
     let source_checks = lint_sources(std::path::Path::new("app"));
 
     let mut report = match url {
-        Some(base) => verify_target(&base, &route_paths),
+        Some(base) => verify_target_with_timeout(&base, &route_paths, health_timeout, &mut || None),
         None => {
             // Boot THIS project on a free port with the binary we're
             // running as, verify against it, then tear the child down.
@@ -105,14 +119,44 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
                     return ExitCode::Error;
                 }
             };
+            // Shard crates compile before the clock starts: a cold build
+            // can take longer than the whole health budget. `pylon dev`
+            // rebuilds them too, which is then a no-op.
+            if manifest.shards.iter().any(|s| s.crate_dir.is_some()) {
+                if !json_mode {
+                    println!("→ Building shard crates…");
+                }
+                if let Err(e) =
+                    super::shards::build_all(&manifest, std::path::Path::new("."), json_mode)
+                {
+                    output::print_error(&format!("Shard build failed: {e}"));
+                    return ExitCode::Error;
+                }
+            }
             if !json_mode {
                 println!("→ Booting app on port {port} for verification…");
             }
+            // The server's output, for when it does not come up.
+            let log_path = std::env::temp_dir().join(format!("pylon-verify-{port}.log"));
+            let log = match std::fs::File::create(&log_path) {
+                Ok(f) => f,
+                Err(e) => {
+                    output::print_error(&format!("Could not create {}: {e}", log_path.display()));
+                    return ExitCode::Error;
+                }
+            };
+            let log_err = match log.try_clone() {
+                Ok(f) => f,
+                Err(e) => {
+                    output::print_error(&format!("Could not create {}: {e}", log_path.display()));
+                    return ExitCode::Error;
+                }
+            };
             let mut child = match std::process::Command::new(&exe)
                 .arg("dev")
                 .env("PYLON_PORT", port.to_string())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
+                .stdout(log)
+                .stderr(log_err)
                 .spawn()
             {
                 Ok(c) => c,
@@ -122,9 +166,28 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
                 }
             };
             let base = format!("http://127.0.0.1:{port}");
-            let report = verify_target(&base, &route_paths);
+            let log_note = log_path.display().to_string();
+            let mut exited = || match child.try_wait() {
+                Ok(Some(status)) => Some(format!("pylon dev exited ({status}); see {log_note}")),
+                _ => None,
+            };
+            let mut report =
+                verify_target_with_timeout(&base, &route_paths, health_timeout, &mut exited);
             let _ = child.kill();
             let _ = child.wait();
+            if let Some(health) = report
+                .checks
+                .iter_mut()
+                .find(|c| c.name == "/health" && c.status == CheckStatus::Fail)
+            {
+                if !health.detail.contains(&log_note) {
+                    health
+                        .detail
+                        .push_str(&format!("; server output: {log_note}"));
+                }
+            } else {
+                let _ = std::fs::remove_file(&log_path);
+            }
             report
         }
     };
@@ -150,13 +213,18 @@ pub fn verify_target(base_url: &str, route_paths: &[String]) -> VerifyReport {
         base_url,
         route_paths,
         Duration::from_secs(HEALTH_TIMEOUT_SECS),
+        &mut || None,
     )
 }
 
+/// [`verify_target`] with the `/health` budget, and `stopped`: `Some(why)`
+/// once the server it waits for can no longer come up (a child that
+/// exited), so the wait ends at once instead of at the deadline.
 fn verify_target_with_timeout(
     base_url: &str,
     route_paths: &[String],
     health_timeout: Duration,
+    stopped: &mut dyn FnMut() -> Option<String>,
 ) -> VerifyReport {
     let base = base_url.trim_end_matches('/');
     let agent = ureq::AgentBuilder::new()
@@ -165,7 +233,7 @@ fn verify_target_with_timeout(
     let mut checks: Vec<Check> = Vec::new();
 
     // 1. Health — wait for it (the app may still be booting/flipping).
-    let health_ok = wait_for_health(&agent, base, health_timeout, &mut checks);
+    let health_ok = wait_for_health(&agent, base, health_timeout, stopped, &mut checks);
     if !health_ok {
         return VerifyReport {
             base_url: base.to_string(),
@@ -276,11 +344,20 @@ fn wait_for_health(
     agent: &ureq::Agent,
     base: &str,
     timeout: Duration,
+    stopped: &mut dyn FnMut() -> Option<String>,
     checks: &mut Vec<Check>,
 ) -> bool {
     let url = format!("{base}/health");
     let deadline = std::time::Instant::now() + timeout;
     loop {
+        if let Some(why) = stopped() {
+            checks.push(Check {
+                name: "/health".into(),
+                status: CheckStatus::Fail,
+                detail: format!("the app stopped before answering: {why}"),
+            });
+            return false;
+        }
         match agent.get(&url).call() {
             Ok(resp) if resp.status() == 200 => {
                 checks.push(Check {
@@ -404,9 +481,29 @@ mod tests {
             "http://127.0.0.1:1",
             &["/".to_string(), "/d/:id".to_string()],
             Duration::from_millis(300),
+            &mut || None,
         );
         assert!(report.failed());
         assert_eq!(report.checks.len(), 1); // health only
+    }
+
+    #[test]
+    fn a_server_that_stops_ends_the_health_wait_at_once() {
+        let started = std::time::Instant::now();
+        let report = verify_target_with_timeout(
+            "http://127.0.0.1:1",
+            &["/".to_string()],
+            Duration::from_secs(60),
+            &mut || Some("pylon dev exited (exit status: 1)".into()),
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(report.checks.len(), 1);
+        assert_eq!(report.checks[0].status, CheckStatus::Fail);
+        assert!(
+            report.checks[0].detail.contains("exited"),
+            "{}",
+            report.checks[0].detail
+        );
     }
 }
 
