@@ -15,7 +15,7 @@ This skill is a starting point, not the ceiling. When the user asks something th
 
 - **Full docs index + concept map:** <https://docs.pylonsync.com/llms.txt> — fetch this first for a condensed overview of every doc page with links.
 - **Docs site:** <https://docs.pylonsync.com/> — human docs covering Get started, Core concepts, Auth, Plugins, Clients, Cloud, Operations, and Compare-vs-X pages.
-- **Source of truth for APIs:** <https://github.com/pylonsync/pylon/tree/main/packages> — the actual `@pylonsync/sdk`, `@pylonsync/functions`, `@pylonsync/react`, `@pylonsync/react-native`, `@pylonsync/next`, and the Swift SDK at `packages/swift/`. When in doubt about a method name or signature, read the source, not your training data.
+- **Source of truth for APIs:** <https://github.com/pylonsync/pylon/tree/main/packages> — the actual `@pylonsync/sdk`, `@pylonsync/functions`, `@pylonsync/react`, `@pylonsync/react-native`, `@pylonsync/next`, the Swift SDK at `packages/swift/`, and the C# / Unity SDK at `packages/csharp/`. When in doubt about a method name or signature, read the source, not your training data.
 - **Working example apps:** <https://github.com/pylonsync/pylon/tree/main/examples> — full apps covering CRM, ERP, chat, 3D, dashboards, plus `examples/swift-todo` for the iOS/macOS SDK.
 - **Stack0 Cloud:** <https://cloud.stack0.dev> — managed Pylon. Same binary, same APIs, no infra to run.
 - **This skill file (latest):** <https://www.pylonsync.com/pylon-skill.md> — re-fetch if the user reports the skill is out of date.
@@ -27,6 +27,7 @@ This skill is a starting point, not the ceiling. When the user asks something th
 Use this skill whenever:
 - The user's project has a `pylon.manifest.json`, `app.ts` importing from `@pylonsync/*`, or a `functions/` directory next to an `app.ts`.
 - The user's Swift project imports `PylonClient`, `PylonSync`, `PylonRealtime`, or `PylonSwiftUI`.
+- The user's Unity or C# project uses `Pylon.PylonClient` or `Pylon.Realtime.ShardConnection`.
 - The user says "Pylon", "Pylonsync", "realtime backend", or asks to build a live-syncing feature.
 - The user runs `pylon dev`, `pylon init`, `pylon deploy`, `pylon codegen`, or another `pylon` CLI command.
 - The user mentions Stack0 Cloud, `cloud.stack0.dev`, or `pylon deploy --target cloud`.
@@ -1199,6 +1200,7 @@ Built-ins, declared in `manifest.plugins`:
 - `@pylonsync/sync` — sync engine standalone (Vue, Svelte, Solid, vanilla)
 - `@pylonsync/loro` — Loro CRDT integration for collaborative editing
 - **Swift SDK** at `packages/swift/` — `PylonClient`, `PylonSync`, `PylonRealtime`, `PylonSwiftUI`. iOS 16+, macOS 13+, tvOS 16+, watchOS 9+, Linux. Codegen via `pylon codegen client --target swift`.
+- **C# / Unity SDK** at `packages/csharp/` (UPM package `com.pylonsync.pylon`, install from `https://github.com/pylonsync/pylon.git?path=/packages/csharp#v<version>`) — `PylonClient` (guest/magic-code/password sign-in, functions, entities) and `ShardConnection` (shard wire v2, JSON + MessagePack, replication, transfers), plus `Predictor`, `ShardClock`, `EntityInterpolator`. No reflection, IL2CPP-safe; values are `PylonValue`, typed calls take an `IPylonConverter<T>` (`JsonUtilityConverter<T>` in Unity). Create clients on Unity's main thread and events run there. No WebGL, no offline sync engine.
 
 ### Stack0 Cloud
 Managed Pylon at `cloud.stack0.dev`. Same binary, same APIs.

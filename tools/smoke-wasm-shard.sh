@@ -7,7 +7,8 @@
 # 1. `pylon shards build` compiles the example's crate to shards/arena.wasm.
 # 2. `pylon start app.ts` boots from source; packages/react's
 #    shard-wasm.e2e.test.ts joins as two guests over /shard on the main port,
-#    moves, gets a rejection, and has a stolen ticket refused.
+#    moves, gets a rejection, and has a stolen ticket refused. The C#
+#    client's live tests (packages/csharp) run when `dotnet` is installed.
 #    packages/realtime's shard-data.e2e.test.ts has the zone load a
 #    character, grant an item through a mutation once per key, write x
 #    back, and take a GM's heal after a commit, on SQLite.
@@ -99,6 +100,16 @@ grep -q "compiled $KINDS kind(s)" "$TMP/source.log" || {
 	exit 1
 }
 e2e
+echo "→ the C# client: a guest joins the arena and moves, frontier entities replicate, a zone transfer"
+if command -v dotnet >/dev/null 2>&1; then
+	(cd "$ROOT/packages/csharp" && PYLON_TEST_URL="http://localhost:$PORT" \
+		dotnet test "Tests~/Pylon.Tests" --filter "FullyQualifiedName~LiveArena")
+elif [[ -n "${PYLON_SMOKE_REQUIRE_DOTNET:-}" ]]; then
+	echo "::error::dotnet is not installed" >&2
+	exit 1
+else
+	echo "  skipped: dotnet is not installed"
+fi
 echo "→ data on SQLite: a zone loads, grants once, writes, takes a heal after a commit"
 (cd "$ROOT/packages/realtime" && PYLON_SHARD_DATA_E2E="localhost:$PORT" \
 	PYLON_SHARD_ADMIN_TOKEN="$ADMIN_TOKEN" bun test src/shard-data.e2e.test.ts)

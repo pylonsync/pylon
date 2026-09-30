@@ -216,13 +216,15 @@ public struct ListEnvelope<T: Decodable>: Decodable {
     }
 }
 
-/// Session issued by any auth exchange (`/api/auth/verify`,
-/// `/api/auth/password/*`, OAuth). The server's key is `token` on every
-/// session-issuing route.
+/// Session issued by any auth exchange (`/api/auth/guest`,
+/// `/api/auth/magic/verify`, `/api/auth/password/*`, `/api/auth/refresh`,
+/// OAuth). The server's key is `token` on every session-issuing route.
 public struct SessionResponse: Sendable, Codable {
     public var token: String
     public var user_id: String?
     public var expires_at: Double?
+    /// True for a guest session (`/api/auth/guest`).
+    public var guest: Bool?
 
     /// Historical alias — earlier SDK versions (incorrectly) modeled the
     /// server key as `session_token`.

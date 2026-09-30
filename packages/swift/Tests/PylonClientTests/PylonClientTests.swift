@@ -14,8 +14,11 @@ final class PylonClientTests: XCTestCase {
     func testMagicCodeFlowStoresToken() async throws {
         let transport = MockTransport()
         transport.setHandler { req in
-            if req.url?.path == "/api/auth/session" { return (200, Data("{}".utf8)) }
-            if req.url?.path == "/api/auth/verify" {
+            // The routes are /api/auth/magic/send and /api/auth/magic/verify.
+            // POST /api/auth/session is the dev-only session mint, and
+            // /api/auth/verify does not exist.
+            if req.url?.path == "/api/auth/magic/send" { return (200, Data("{\"sent\":true}".utf8)) }
+            if req.url?.path == "/api/auth/magic/verify" {
                 let body: [String: Any] = ["token": "tok_abc", "user_id": "u1", "expires_at": 1785864905]
                 return try jsonResponse(body)
             }
@@ -28,6 +31,32 @@ final class PylonClientTests: XCTestCase {
         let resp = try await client.verifyMagicCode(email: "alice@example.com", code: "123456")
         XCTAssertEqual(resp.token, "tok_abc")
         XCTAssertEqual(storage.get(StorageKeys.token()), "tok_abc")
+    }
+
+    func testGuestSignInStoresTokenAndRefreshReplacesIt() async throws {
+        let transport = MockTransport()
+        transport.setHandler { req in
+            if req.url?.path == "/api/auth/guest", req.httpMethod == "POST" {
+                let body: [String: Any] = ["token": "tok_guest", "user_id": "guest_1", "guest": true]
+                return try jsonResponse(body)
+            }
+            if req.url?.path == "/api/auth/refresh", req.httpMethod == "POST" {
+                XCTAssertEqual(req.value(forHTTPHeaderField: "Authorization"), "Bearer tok_guest")
+                let body: [String: Any] = ["token": "tok_next", "user_id": "guest_1", "expires_at": 1785864905]
+                return try jsonResponse(body)
+            }
+            XCTFail("Unexpected path: \(req.url?.path ?? "")")
+            return (404, Data())
+        }
+        let storage = MemoryStorage()
+        let client = makeClient(transport: transport, storage: storage)
+        let guest = try await client.signInAsGuest()
+        XCTAssertEqual(guest.guest, true)
+        XCTAssertEqual(guest.user_id, "guest_1")
+        XCTAssertEqual(storage.get(StorageKeys.token()), "tok_guest")
+        let next = try await client.refreshSession()
+        XCTAssertEqual(next.token, "tok_next")
+        XCTAssertEqual(storage.get(StorageKeys.token()), "tok_next")
     }
 
     func testPasswordLoginHitsLoginRouteAndStoresToken() async throws {

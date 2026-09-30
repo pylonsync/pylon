@@ -1,0 +1,126 @@
+---
+title: C# and Unity SDK
+description: "A C# client for Unity and .NET: sign-in, functions, entities, and realtime shards with replication, prediction, and interpolation."
+---
+
+The C# SDK uses the same routes and wire format as the TypeScript and Swift clients. It has two parts:
+
+- `Runtime/`: plain .NET Standard 2.1 with no Unity references and no reflection. It runs under IL2CPP and in any .NET app.
+- `Unity/`: token storage in PlayerPrefs and a converter that uses `JsonUtility`.
+
+The SDK does not include the offline sync engine. A game uses shards and functions.
+
+## Types
+
+| Type | What it does |
+| --- | --- |
+| `PylonClient` | Signs in (guest, magic code, password), refreshes sessions, calls functions, and reads and writes entities. |
+| `ShardConnection` | Connects to a shard over WebSocket. Decodes snapshots, applies replication frames, and sends inputs. Reconnects and follows transfers. |
+| `EntityTable` | Holds the entities a replicating shard sent this player. |
+| `Predictor<TState, TInput>` | Applies inputs that the shard did not acknowledge yet on top of the server's state. |
+| `ShardClock` | Estimates the shard's current tick from frame arrival times. |
+| `EntityInterpolator` | Places entities between the two samples around a render tick. |
+| `PylonValue` | A JSON or MessagePack value. |
+
+## Platforms
+
+| Target | Support |
+| --- | --- |
+| Unity 2021.3 or later | Windows, macOS, Linux, iOS, Android (Mono and IL2CPP) |
+| WebGL | Not supported: WebGL has no `System.Net.WebSockets` |
+| .NET | Any runtime for .NET Standard 2.1 (.NET Core 3.0 or later, .NET 5 or later) |
+
+## Install
+
+In Unity, open **Window > Package Manager**. Click **+**, then **Install package from git URL**, and enter:
+
+```
+https://github.com/pylonsync/pylon.git?path=/packages/csharp#v0.22.12
+```
+
+Any release tag from `v0.22.12` on works.
+
+## Sign in and call a function
+
+```csharp
+using Pylon;
+using Pylon.Unity;
+
+var client = new PylonClient(new PylonClientOptions(new Uri("http://localhost:4321"))
+{
+    Storage = new PlayerPrefsStorage(),
+});
+
+await client.SignInAsGuestAsync();
+var join = await client.CallFnAsync("joinArena", PylonValue.Object(("arena", "arena-main")));
+```
+
+A sign-in method stores the token. Later requests send it as `Authorization: Bearer`. Every method throws `PylonException`. For an HTTP error, the exception has the status, the server's error code, and the message.
+
+The client also has these methods:
+
+- `StartMagicCodeAsync` and `VerifyMagicCodeAsync`
+- `SignInWithPasswordAsync` and `RegisterWithPasswordAsync`
+- `RefreshSessionAsync` and `StartSessionAutoRefresh`
+- `ListAsync`, `ListCursorAsync`, `GetAsync`, `CreateAsync`, `UpdateAsync`, and `DeleteAsync`
+- `AggregateAsync` and `SearchAsync`
+- `RequestAsync`, for any other route
+
+## Your own types
+
+Function arguments, results, and snapshots are `PylonValue`. A missing key reads as `PylonValue.Null`, so `snapshot["players"][0]["x"]` does not throw.
+
+To use your own types, give an `IPylonConverter<T>`. The SDK calls the converter and does not use reflection. For a `[Serializable]` class, use `JsonUtilityConverter<T>.Instance`.
+
+```csharp
+var move = PylonConverter.Create<Vector2>(
+    v => PylonValue.Object(("x", v.x), ("y", v.y)),
+    p => new Vector2(p["x"].AsFloat(), p["y"].AsFloat()));
+```
+
+## Join a shard
+
+```csharp
+using Pylon.Realtime;
+
+var shard = new ShardConnection(join["shardId"].AsString(), new ShardConnectionOptions
+{
+    BaseUrl = client.BaseUrl,
+    SubscriberId = join["subscriberId"].AsString(),
+    Ticket = join["ticket"].AsString(),
+    IdleTimeout = TimeSpan.FromSeconds(5),
+});
+shard.Snapshot += s => Draw(s.State!);
+shard.Connect();
+
+shard.Send(PylonValue.Object(("move_to", PylonValue.Object(("x", 120), ("y", 64)))));
+```
+
+- `Send` returns the input's sequence number. A frame's `Ack` is the highest sequence number the shard processed.
+- For a MessagePack shard, inputs go as MessagePack. For all other shards, inputs go as JSON.
+- A replicating shard fills `shard.Entities`. The `Replication` event gives the spawned, updated, and despawned ids.
+- When the server moves the player to another shard, `Transferred` runs. The connection then goes to the new shard.
+- The server can refuse a ticket, or the ticket can expire. The connection then stops, unless `TicketProvider` gives a new ticket.
+- `IdleTimeout` reconnects when no frame arrives. Use it only for tick-driven shards.
+
+## Threads
+
+The SDK runs callbacks on the `SynchronizationContext` of the thread that made the client or connection. In Unity, make them on the main thread. Events then run on the main thread, and you can change GameObjects in them. Dispose the connection and the client in `OnDestroy`.
+
+## Sample
+
+The package has an **Arena** sample. It signs in as a guest, calls `joinArena`, joins the arena shard, and moves your player. To run it:
+
+1. Run `pylon dev` in `examples/shard-arena`.
+2. Import the sample from **Package Manager > Pylon > Samples**.
+3. Open the scene and press Play.
+
+## Tests
+
+The tests run with the .NET SDK. Unity includes one at `Unity.app/Contents/Resources/Scripting/DotNetSdk`.
+
+```
+dotnet test packages/csharp/Tests~/Pylon.Tests
+```
+
+The TypeScript, Swift, and C# clients check the same fixture files: `packages/realtime/src/replication.fixtures.json` and `packages/realtime/src/wire.fixtures.json`. The Rust encoders write these files, so a change to the wire format fails all three clients until each one matches.

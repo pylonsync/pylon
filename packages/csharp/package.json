@@ -1,0 +1,23 @@
+{
+  "name": "com.pylonsync.pylon",
+  "version": "0.22.11",
+  "displayName": "Pylon",
+  "description": "C# client for Pylon apps: sign-in, server functions, entities, and realtime shards (snapshots, entity replication, prediction, interpolation).",
+  "unity": "2021.3",
+  "private": true,
+  "license": "MIT",
+  "author": {
+    "name": "Stack0",
+    "url": "https://github.com/pylonsync/pylon"
+  },
+  "documentationUrl": "https://github.com/pylonsync/pylon/tree/main/packages/csharp#readme",
+  "changelogUrl": "https://github.com/pylonsync/pylon/tree/main/packages/csharp/CHANGELOG.md",
+  "keywords": ["pylon", "multiplayer", "realtime", "networking", "backend"],
+  "samples": [
+    {
+      "displayName": "Arena",
+      "description": "Signs in as a guest, calls a function, and moves a player in the shard-arena example's arena.",
+      "path": "Samples~/Arena"
+    }
+  ]
+}

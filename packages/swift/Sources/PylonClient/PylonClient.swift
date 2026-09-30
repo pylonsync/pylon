@@ -74,15 +74,33 @@ public actor PylonClient {
 
     // MARK: - Auth endpoints
 
-    /// Begin magic-code sign-in. Server emails the code; caller follows up
-    /// with `verifyMagicCode`.
-    public func startMagicCode(email: String) async throws {
-        let _: EmptyResponse = try await request(.post, "/api/auth/session", body: StartMagicCodeRequest(email: email))
+    /// Start a guest session (`POST /api/auth/guest`). Token is stored
+    /// automatically. Functions with `auth: "guest"` accept it.
+    public func signInAsGuest() async throws -> SessionResponse {
+        let resp: SessionResponse = try await request(.post, "/api/auth/guest", body: EmptyBody())
+        setSession(token: resp.token)
+        return resp
     }
 
-    /// Exchange a magic code for a session token. Token is stored automatically.
+    /// Begin magic-code sign-in (`POST /api/auth/magic/send`). The server
+    /// emails the code; follow up with `verifyMagicCode`.
+    public func startMagicCode(email: String) async throws {
+        let _: EmptyResponse = try await request(.post, "/api/auth/magic/send", body: StartMagicCodeRequest(email: email))
+    }
+
+    /// Exchange a magic code for a session (`POST /api/auth/magic/verify`).
+    /// Token is stored automatically.
     public func verifyMagicCode(email: String, code: String) async throws -> SessionResponse {
-        let resp: SessionResponse = try await request(.post, "/api/auth/verify", body: VerifyMagicCodeRequest(email: email, code: code))
+        let resp: SessionResponse = try await request(.post, "/api/auth/magic/verify", body: VerifyMagicCodeRequest(email: email, code: code))
+        setSession(token: resp.token)
+        return resp
+    }
+
+    /// Swap the stored token for a new one with a fresh expiry
+    /// (`POST /api/auth/refresh`); the old token stops working. Throws a
+    /// 401 `SESSION_EXPIRED` when the stored token is no longer valid.
+    public func refreshSession() async throws -> SessionResponse {
+        let resp: SessionResponse = try await request(.post, "/api/auth/refresh")
         setSession(token: resp.token)
         return resp
     }

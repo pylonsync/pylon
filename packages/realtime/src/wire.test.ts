@@ -87,3 +87,45 @@ test("ack batches stay within the datagram size", () => {
   const big = encodeDatagramAckBatches(Array.from({ length: 1300 }, (_, i) => [i % 100, 1] as [number, number]), 1_000_000);
   expect(big.length).toBe(Math.ceil(1300 / MAX_ACKS_PER_MESSAGE));
 });
+
+import wireFixtures from "./wire.fixtures.json";
+
+function hexBytes(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+describe("the Rust encoders' frames and inputs (wire.fixtures.json)", () => {
+  test("frames parse and decode to what the server encoded", () => {
+    expect(wireFixtures.version).toBe(2);
+    expect(wireFixtures.headerLength).toBe(SHARD_HEADER_LEN);
+    for (const [i, f] of wireFixtures.frames.entries()) {
+      const bytes = hexBytes(f.frame);
+      const parsed = parseShardFrame(bytes.buffer as ArrayBuffer);
+      expect(parsed.kind, `frame ${i}`).toBe(f.kind);
+      expect(parsed.codec).toBe(f.codec);
+      expect(parsed.tick).toBe(f.tick);
+      expect(parsed.ack).toBe(f.ack);
+      expect(decodeShardPayload(parsed.codec, parsed.payload), `frame ${i}`).toEqual(f.payload);
+      if (parsed.kind === ShardFrameKind.InputRejected) {
+        const r = decodeShardRejection(parsed.codec, parsed.payload);
+        const p = f.payload as { client_seq: number | null; code: string; message: string };
+        expect(r).toEqual({ clientSeq: p.client_seq, code: p.code, message: p.message });
+      }
+    }
+  });
+
+  test("inputs encode to the bytes the server decodes", () => {
+    for (const c of wireFixtures.inputs) {
+      const packed = encodeShardInput(ShardCodec.MessagePack, c.input, c.client_seq) as Uint8Array;
+      // JSON.parse cannot tell 64.0 from 64, so a whole-number float packs
+      // as an integer here (the server reads either into an f32). Compare
+      // the decoded values; the C# client, which keeps number kinds,
+      // matches the bytes exactly.
+      expect(msgpackDecode(packed)).toEqual(msgpackDecode(hexBytes(c.msgpack)));
+      const text = encodeShardInput(ShardCodec.Json, c.input, c.client_seq) as string;
+      expect(JSON.parse(text)).toEqual(JSON.parse(c.json));
+    }
+  });
+});

@@ -1,0 +1,199 @@
+#nullable enable
+using System;
+using System.Collections.Generic;
+using Pylon;
+using Pylon.Realtime;
+using Pylon.Unity;
+using UnityEngine;
+
+namespace Pylon.Samples.Arena
+{
+    /// <summary>
+    /// Signs in as a guest, calls the <c>joinArena</c> function for a shard
+    /// ticket, joins the arena shard, and moves this player: in a circle,
+    /// or to where you click when the legacy input manager is on. Every
+    /// player in the arena is a sphere.
+    ///
+    /// Run the server first: <c>pylon dev</c> in examples/shard-arena of
+    /// the Pylon repo, then press Play.
+    /// </summary>
+    public sealed class ArenaSample : MonoBehaviour
+    {
+        [Tooltip("The app's origin: pylon dev prints it.")]
+        public string serverUrl = "http://localhost:4321";
+
+        [Tooltip("Which arena to join (a shard per arena).")]
+        public string arena = "arena-main";
+
+        [Tooltip("World units per arena unit. The arena is 800 by 500.")]
+        public float scale = 0.01f;
+
+        /// <summary>What the sample is doing, for the on-screen label.</summary>
+        public string Status { get; private set; } = "starting";
+
+        public string? SubscriberId { get; private set; }
+
+        /// <summary>This player's position in arena units, once the shard has it.</summary>
+        public Vector2? MyPosition { get; private set; }
+
+        public int SnapshotsReceived { get; private set; }
+
+        /// <summary>Move inputs the shard has acknowledged.</summary>
+        public int MovesAcked { get; private set; }
+
+        public string? LastError { get; private set; }
+
+        PylonClient? _client;
+        ShardConnection? _shard;
+        readonly Dictionary<string, GameObject> _dots = new Dictionary<string, GameObject>();
+        ulong _lastMoveSeq;
+        float _nextMove;
+        float _nextJoin;
+        float _angle;
+
+        async void Start()
+        {
+            SetUpScene();
+            try
+            {
+                _client = new PylonClient(new PylonClientOptions(new Uri(serverUrl))
+                {
+                    Storage = new PlayerPrefsStorage(),
+                });
+                Status = "signing in";
+                var session = await _client.SignInAsGuestAsync();
+                SubscriberId = session.UserId;
+
+                Status = "calling joinArena";
+                var join = await _client.CallFnAsync("joinArena", PylonValue.Object(("arena", arena)));
+
+                // Created on the main thread, so every event below runs there.
+                _shard = new ShardConnection(join["shardId"].AsString(), new ShardConnectionOptions
+                {
+                    BaseUrl = _client.BaseUrl,
+                    SubscriberId = join["subscriberId"].AsString(),
+                    Ticket = join["ticket"].AsString(),
+                    TickRate = 20,
+                    IdleTimeout = TimeSpan.FromSeconds(5),
+                });
+                _shard.Opened += () => Status = "connected";
+                _shard.StateChanged += (state, reason) => Status = reason == null ? state.ToString() : $"{state}: {reason}";
+                _shard.Snapshot += OnSnapshot;
+                _shard.InputRejected += r => LastError = $"input {r.ClientSeq} refused: {r.Code} {r.Message}";
+                _shard.Error += e => LastError = e.Message;
+                Status = "connecting";
+                _shard.Connect();
+            }
+            catch (PylonException e)
+            {
+                Status = "failed";
+                LastError = e.Message;
+                Debug.LogError($"[Pylon arena] {e.Message}");
+            }
+        }
+
+        void OnSnapshot(ShardSnapshot snapshot)
+        {
+            SnapshotsReceived++;
+            if (_lastMoveSeq > 0 && snapshot.Ack >= _lastMoveSeq)
+            {
+                MovesAcked++;
+                _lastMoveSeq = 0;
+            }
+            var seen = new HashSet<string>();
+            foreach (var p in snapshot.State!["players"].Items)
+            {
+                var id = p["id"].AsString();
+                seen.Add(id);
+                var pos = new Vector2(p["x"].AsFloat(), p["y"].AsFloat());
+                if (!_dots.TryGetValue(id, out var dot))
+                {
+                    dot = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+                    dot.name = id == SubscriberId ? "You" : id;
+                    dot.transform.localScale = Vector3.one * 0.3f;
+                    var hue = p["hue"].AsFloat() / 360f;
+                    dot.GetComponent<Renderer>().material.color =
+                        id == SubscriberId ? Color.green : Color.HSVToRGB(hue, 0.7f, 0.9f);
+                    _dots[id] = dot;
+                }
+                dot.transform.position = ToWorld(pos);
+                if (id == SubscriberId) MyPosition = pos;
+            }
+            foreach (var id in new List<string>(_dots.Keys))
+            {
+                if (seen.Contains(id)) continue;
+                Destroy(_dots[id]);
+                _dots.Remove(id);
+            }
+        }
+
+        void Update()
+        {
+            if (_shard == null || !_shard.Connected) return;
+            // The arena drops a player who sends nothing for a minute.
+            if (Time.time >= _nextJoin)
+            {
+                _shard.Send("join");
+                _nextJoin = Time.time + 20;
+            }
+#if ENABLE_LEGACY_INPUT_MANAGER
+            if (Input.GetMouseButtonDown(0) && Camera.main != null)
+            {
+                var ray = Camera.main.ScreenPointToRay(Input.mousePosition);
+                if (new Plane(Vector3.up, Vector3.zero).Raycast(ray, out var d))
+                {
+                    var hit = ray.GetPoint(d);
+                    MoveTo(new Vector2(hit.x / scale, hit.z / scale));
+                    _nextMove = Time.time + 5;
+                }
+            }
+#endif
+            if (Time.time >= _nextMove)
+            {
+                _angle += 0.9f;
+                MoveTo(new Vector2(400 + 180 * Mathf.Cos(_angle), 250 + 150 * Mathf.Sin(_angle)));
+                _nextMove = Time.time + 1.5f;
+            }
+        }
+
+        void MoveTo(Vector2 target)
+        {
+            var seq = _shard!.Send(PylonValue.Object(("move_to", PylonValue.Object(("x", target.x), ("y", target.y)))));
+            if (seq > 0) _lastMoveSeq = seq;
+        }
+
+        Vector3 ToWorld(Vector2 p) => new Vector3(p.x * scale, 0.15f, p.y * scale);
+
+        void SetUpScene()
+        {
+            var ground = GameObject.CreatePrimitive(PrimitiveType.Plane);
+            ground.name = "Arena floor";
+            // A plane is 10 by 10 units.
+            ground.transform.localScale = new Vector3(800 * scale / 10, 1, 500 * scale / 10);
+            ground.transform.position = new Vector3(400 * scale, 0, 250 * scale);
+            var cam = Camera.main;
+            if (cam != null)
+            {
+                cam.transform.position = new Vector3(400 * scale, 7, -1.5f);
+                cam.transform.LookAt(new Vector3(400 * scale, 0, 250 * scale));
+            }
+        }
+
+        void OnGUI()
+        {
+            GUILayout.BeginArea(new Rect(10, 10, 520, 160), GUI.skin.box);
+            GUILayout.Label($"Pylon arena: {Status}");
+            GUILayout.Label($"You: {SubscriberId ?? "-"}  at {(MyPosition.HasValue ? MyPosition.Value.ToString("F0") : "-")}");
+            if (_shard != null)
+                GUILayout.Label($"Tick {_shard.Tick}  ack {_shard.Ack}  rtt {(_shard.RttMs.HasValue ? _shard.RttMs.Value.ToString("F0") + " ms" : "-")}  players {_dots.Count}");
+            if (LastError != null) GUILayout.Label($"Error: {LastError}");
+            GUILayout.EndArea();
+        }
+
+        void OnDestroy()
+        {
+            _shard?.Dispose();
+            _client?.Dispose();
+        }
+    }
+}

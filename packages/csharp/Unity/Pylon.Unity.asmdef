@@ -1,0 +1,16 @@
+{
+    "name": "Pylon.Unity",
+    "rootNamespace": "Pylon.Unity",
+    "references": [
+        "Pylon"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

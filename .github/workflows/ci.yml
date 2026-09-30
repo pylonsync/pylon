@@ -25,6 +25,7 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       ts: ${{ steps.filter.outputs.ts }}
       swift: ${{ steps.filter.outputs.swift }}
+      csharp: ${{ steps.filter.outputs.csharp }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -51,6 +52,10 @@ jobs:
             swift:
               - 'packages/swift/**'
               - 'crates/cli/src/swift_codegen.rs'
+              - '.github/workflows/ci.yml'
+            csharp:
+              - 'packages/csharp/**'
+              - 'packages/realtime/src/*.fixtures.json'
               - '.github/workflows/ci.yml'
 
   fmt:
@@ -469,6 +474,29 @@ jobs:
       - name: swift test
         run: swift test --parallel
 
+  # The C# client: codecs, the client against a mock transport, the shard
+  # connection against an in-process WebSocket server, and the replication
+  # and wire fixtures the Rust encoders write. The live tests run in
+  # wasm-shard-smoke against a real server.
+  csharp:
+    name: csharp tests (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.csharp == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      # The core as a .NET Standard 2.1 library with Unity's C# version and
+      # warnings as errors: it must compile where Unity compiles it.
+      - run: dotnet build "packages/csharp/Tests~/Pylon.Core"
+      - run: dotnet test "packages/csharp/Tests~/Pylon.Tests"
+
   # examples/shard-arena: shard logic in Rust compiled to WebAssembly, run
   # by the stock binary from source and from a `pylon build` artifact, with
   # two TS clients over /shard on the main port.
@@ -491,9 +519,14 @@ jobs:
         run: bun install --frozen-lockfile && bun run build
       - name: Install xmlsec1 + libxml2
         run: sudo apt-get update && sudo apt-get install -y libxml2-dev libxmlsec1-dev libxmlsec1-openssl
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
       - run: bun install --frozen-lockfile
       - run: cargo build -p pylon-cli
       - run: bash tools/smoke-wasm-shard.sh target/debug/pylon
+        env:
+          PYLON_SMOKE_REQUIRE_DOTNET: "1"
 
   # Shards across machines: two pylon processes on one Postgres running
   # examples/shard-arena (placement, proxied connections, fly-replay, and
@@ -566,6 +599,7 @@ jobs:
       - shard-cluster-smoke
       - audit
       - swift
+      - csharp
     if: always()
     runs-on: ubuntu-latest
     steps:

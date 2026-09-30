@@ -116,6 +116,7 @@
               "clients/react-native",
               "clients/next",
               "clients/swift",
+              "clients/csharp",
               "clients/sync",
               "clients/loro"
             ]
