@@ -88,9 +88,15 @@ fn run_loop<S: SimState>(weak: Weak<Shard<S>>, interval: Duration, event_driven:
             }
             next_tick += interval;
         } else {
+            let started = Instant::now();
+            let woke_late = started.saturating_duration_since(next_tick);
             shard.run_tick();
+            let lag = Lag {
+                woke_late,
+                tick_took: started.elapsed(),
+            };
             next_tick += interval;
-            catch_up(&shard, &mut next_tick, interval);
+            catch_up(&shard, &mut next_tick, interval, lag);
         }
 
         drop(shard);
@@ -103,10 +109,19 @@ fn run_loop<S: SimState>(weak: Weak<Shard<S>>, interval: Duration, event_driven:
     }
 }
 
+/// Where the time went before a catch-up: how late the loop woke for the
+/// tick, and how long that tick ran. Logged with an overrun.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Lag {
+    pub woke_late: Duration,
+    pub tick_took: Duration,
+}
+
 /// When ticks are overdue, run up to `max_catch_up_ticks` of them back to
 /// back (each with the same fixed `dt`, so simulated time keeps pace with
-/// wall time), then skip the rest and count them as an overrun.
-fn catch_up<S: SimState>(shard: &Shard<S>, next_tick: &mut Instant, interval: Duration) {
+/// wall time), then skip the rest and count them as an overrun. A shard
+/// that stopped has no ticks left to skip.
+fn catch_up<S: SimState>(shard: &Shard<S>, next_tick: &mut Instant, interval: Duration, lag: Lag) {
     let max = shard.config().max_catch_up_ticks;
     let mut ran = 0;
     while *next_tick <= Instant::now() && ran < max && shard.is_running() {
@@ -114,11 +129,14 @@ fn catch_up<S: SimState>(shard: &Shard<S>, next_tick: &mut Instant, interval: Du
         *next_tick += interval;
         ran += 1;
     }
+    if !shard.is_running() {
+        return;
+    }
     let now = Instant::now();
     if *next_tick <= now {
         let behind = now.duration_since(*next_tick).as_nanos() / interval.as_nanos().max(1) + 1;
         *next_tick += interval * behind as u32;
-        shard.record_overrun(behind as u64);
+        shard.record_overrun(behind as u64, lag);
     }
 }
 
@@ -233,7 +251,7 @@ mod tests {
         // Two ticks overdue, plus the one due now: all three run.
         let shard = Shard::new("a", Noop, config.clone());
         let mut next = Instant::now() - interval * 2;
-        catch_up(&shard, &mut next, interval);
+        catch_up(&shard, &mut next, interval, Lag::default());
         assert_eq!(shard.tick_number(), 3);
         assert_eq!(shard.overrun_ticks(), 0);
         assert!(next > Instant::now());
@@ -241,10 +259,27 @@ mod tests {
         // Ten overdue: five run, the rest are skipped and counted.
         let shard = Shard::new("b", Noop, config);
         let mut next = Instant::now() - interval * 10;
-        catch_up(&shard, &mut next, interval);
+        catch_up(&shard, &mut next, interval, Lag::default());
         assert_eq!(shard.tick_number(), 5);
         assert!(shard.overrun_ticks() >= 5, "{}", shard.overrun_ticks());
         assert!(next > Instant::now());
+    }
+
+    #[test]
+    fn a_stopped_shard_counts_no_overrun() {
+        let config = ShardConfig {
+            tick_rate_hz: 20,
+            max_catch_up_ticks: 5,
+            idle_ticks_before_shutdown: 0,
+            ..Default::default()
+        };
+        let interval = Duration::from_millis(50);
+        let shard = Shard::new("stopped", Noop, config);
+        shard.stop();
+        let mut next = Instant::now() - interval * 10;
+        catch_up(&shard, &mut next, interval, Lag::default());
+        assert_eq!(shard.tick_number(), 0);
+        assert_eq!(shard.overrun_ticks(), 0);
     }
 
     /// Position integrates velocity over dt; inputs set the velocity.

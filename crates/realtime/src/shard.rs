@@ -598,11 +598,14 @@ impl<S: SimState> Shard<S> {
         self.overrun_ticks.load(Ordering::Relaxed)
     }
 
-    pub(crate) fn record_overrun(&self, skipped: u64) {
+    pub(crate) fn record_overrun(&self, skipped: u64, lag: crate::tick::Lag) {
         let total = self.overrun_ticks.fetch_add(skipped, Ordering::Relaxed) + skipped;
         tracing::warn!(
-            "[realtime] shard {} fell behind and skipped {skipped} tick(s) ({total} so far)",
-            self.id
+            "[realtime] shard {} fell behind and skipped {skipped} tick(s) ({total} so far): \
+             the loop woke {} ms late and the tick took {} ms",
+            self.id,
+            lag.woke_late.as_millis(),
+            lag.tick_took.as_millis()
         );
     }
 
