@@ -664,3 +664,56 @@ fn a_studio_sign_in_does_not_sign_anyone_in_to_the_app() {
         "app sign-out ended Studio: {still}"
     );
 }
+
+#[test]
+fn studio_logout_also_ends_an_operator_session_left_in_the_app_cookie() {
+    let rt = test_runtime();
+    let port = start_server(Arc::clone(&rt));
+    let (created, body) = http(
+        port,
+        "POST",
+        "/admin/operators",
+        Some(ADMIN_TOKEN),
+        Some(&json!({"username": "ops3", "password": "correct-horse-battery"}).to_string()),
+    );
+    assert_eq!(created, 201, "{body}");
+    let op_id = serde_json::from_str::<Value>(&body).unwrap()["userId"]
+        .as_str()
+        .expect("operator userId in the create response")
+        .to_string();
+    // An operator session in the app cookie, as an older version made them.
+    let (_, minted) = http(
+        port,
+        "POST",
+        "/api/auth/session",
+        None,
+        Some(&json!({ "user_id": op_id }).to_string()),
+    );
+    let legacy = serde_json::from_str::<Value>(&minted).unwrap()["token"]
+        .as_str()
+        .expect("token")
+        .to_string();
+    let (_, _, set_cookie) = post_form(
+        port,
+        "/studio/login",
+        "username=ops3&password=correct-horse-battery",
+    );
+    let studio_pair = set_cookie.split(';').next().unwrap().to_string();
+    let app_name = studio_pair
+        .split_once('=')
+        .unwrap()
+        .0
+        .trim_end_matches("_studio")
+        .to_string();
+    let both = format!("Cookie: {studio_pair}; {app_name}={legacy}\r\n");
+    http_with(port, "GET", "/studio/logout", None, None, &both);
+
+    // The old app-cookie session no longer opens Studio.
+    let legacy_only = format!("Cookie: {app_name}={legacy}\r\nX-Pylon-Studio: 1\r\n");
+    let (_, after) = http_with(port, "GET", "/api/auth/session", None, None, &legacy_only);
+    let v: Value = serde_json::from_str(&after).unwrap();
+    assert!(
+        v["session"]["user_id"].is_null(),
+        "legacy operator session survived: {after}"
+    );
+}

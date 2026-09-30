@@ -9266,34 +9266,50 @@ fn start_server(
             // An operator's Studio cookie ends by itself, leaving any app
             // session alone. An app admin who opened Studio with the app's
             // session signs out of that session, as before.
-            let cleared = match pylon_auth::extract_session_cookie(&cookies, &studio_name) {
+            let app_token = pylon_auth::extract_session_cookie(&cookies, &cookie_config.name);
+            let mut cleared: Vec<String> = Vec::new();
+            match pylon_auth::extract_session_cookie(&cookies, &studio_name) {
                 Some(token) => {
                     session_store.revoke(&token);
-                    cookie_config.clear_value_for(&studio_name)
+                    cleared.push(cookie_config.clear_value_for(&studio_name));
+                    // An operator session an older version put in the app
+                    // cookie would sign the operator back in to Studio; end
+                    // it too. A real app user's session stays.
+                    if let Some(app) = app_token.as_deref() {
+                        let is_operator = session_store.get(app).is_some_and(|s| {
+                            pylon_auth::operator::is_operator_user_id(&s.user_id)
+                                && pylon_auth::operator::find_by_user_id(
+                                    &account_store,
+                                    &s.user_id,
+                                )
+                                .is_some()
+                        });
+                        if is_operator {
+                            session_store.revoke(app);
+                            cleared.push(cookie_config.clear_value());
+                        }
+                    }
                 }
                 None => {
-                    if let Some(token) =
-                        pylon_auth::extract_session_cookie(&cookies, &cookie_config.name)
-                    {
-                        session_store.revoke(&token);
+                    if let Some(token) = app_token.as_deref() {
+                        session_store.revoke(token);
                     }
-                    cookie_config.clear_value()
+                    cleared.push(cookie_config.clear_value());
                 }
-            };
+            }
             let target = rt
                 .studio_config()
                 .login_url
                 .clone()
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "/studio".to_string());
-            let response = with_security_headers(
-                Response::from_string("")
-                    .with_status_code(303u16)
-                    .with_header(
-                        Header::from_bytes("Location", target.as_bytes().to_vec()).unwrap(),
-                    )
-                    .with_header(Header::from_bytes("Set-Cookie", cleared).unwrap()),
-            );
+            let response = Response::from_string("")
+                .with_status_code(303u16)
+                .with_header(Header::from_bytes("Location", target.as_bytes().to_vec()).unwrap());
+            let response = cleared.into_iter().fold(response, |r, c| {
+                r.with_header(Header::from_bytes("Set-Cookie", c).unwrap())
+            });
+            let response = with_security_headers(response);
             let _ = request.respond(response);
             mt.record_request("GET", 303);
             return;
