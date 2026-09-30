@@ -1016,7 +1016,10 @@ fn walk_into_tar<W: Write>(
             .strip_prefix(root)
             .unwrap_or(&manifest)
             .to_path_buf();
-        if manifest.is_file() && !added.contains(&rel) {
+        // The path itself must be a regular file: a symlink could point at
+        // `.env` or outside the project.
+        let regular = std::fs::symlink_metadata(&manifest).is_ok_and(|m| m.file_type().is_file());
+        if regular && !added.contains(&rel) {
             tar.append_path_with_name(&manifest, &rel)?;
         }
     }
@@ -1741,6 +1744,23 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&outer);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tarball_does_not_follow_a_symlinked_manifest() {
+        let dir = std::env::temp_dir().join(format!("pylon-tar-symlink-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("app.ts"), "export {};").unwrap();
+        std::fs::write(dir.join(".env"), "SECRET=1").unwrap();
+        std::os::unix::fs::symlink(dir.join(".env"), dir.join("pylon.manifest.json")).unwrap();
+        let names = tar_entry_names(&build_tarball(&dir, &[]).unwrap());
+        assert!(
+            !names.iter().any(|n| n == "pylon.manifest.json"),
+            "{names:?}"
+        );
+        assert!(!names.iter().any(|n| n == ".env"), "{names:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
