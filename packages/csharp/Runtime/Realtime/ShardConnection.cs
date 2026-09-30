@@ -252,44 +252,50 @@ namespace Pylon.Realtime
         /// <summary>
         /// Send an input as <c>{ input, client_seq }</c>: MessagePack for a
         /// MessagePack shard, JSON otherwise. Returns its sequence number,
-        /// which later frames acknowledge, or 0 when the connection is not
-        /// open (then nothing is sent; do not predict it).
+        /// which later frames acknowledge, or 0 when nothing was sent (the
+        /// connection is not open, or <see cref="ShardConnectionOptions.MaxFrameBytes"/>
+        /// of inputs wait for a socket that stopped draining). Do not
+        /// predict an input that returned 0.
         /// </summary>
         public ulong Send(PylonValue input)
         {
-            Link? link;
-            ulong seq;
-            string? text;
-            byte[]? binary;
+            string? failure = null;
+            ulong seq = 0;
             lock (_gate)
             {
-                link = _link;
+                var link = _link;
                 if (link == null || _state != ShardConnectionState.Connected)
                 {
-                    link = null;
-                    seq = 0;
-                    text = null;
-                    binary = null;
+                    failure = "Cannot send: the shard connection is not open";
                 }
                 else
                 {
-                    seq = ++_clientSeq;
-                    ShardWire.EncodeInput(_codec, input, seq, out text, out binary);
-                    _sentAt[seq] = ShardClock.Now();
-                    if (_sentAt.Count > 1024)
+                    ShardWire.EncodeInput(_codec, input, _clientSeq + 1, out var text, out var binary);
+                    // Numbered and queued under one lock, so inputs reach the
+                    // socket in sequence order: the server's ack is the highest
+                    // sequence it processed.
+                    if (link.Enqueue(text != null ? Encoding.UTF8.GetBytes(text) : binary!, text != null))
                     {
-                        using var e = _sentAt.Keys.GetEnumerator();
-                        e.MoveNext();
-                        _sentAt.Remove(e.Current);
+                        seq = ++_clientSeq;
+                        _sentAt[seq] = ShardClock.Now();
+                        if (_sentAt.Count > 1024)
+                        {
+                            using var e = _sentAt.Keys.GetEnumerator();
+                            e.MoveNext();
+                            _sentAt.Remove(e.Current);
+                        }
+                    }
+                    else
+                    {
+                        failure = $"Cannot send: {_options.MaxFrameBytes} bytes of inputs are waiting for the socket";
                     }
                 }
             }
-            if (link == null)
+            if (failure != null)
             {
-                RaiseError(new InvalidOperationException("Cannot send: the shard connection is not open"));
+                RaiseError(new InvalidOperationException(failure));
                 return 0;
             }
-            link.Enqueue(text != null ? Encoding.UTF8.GetBytes(text) : binary!, text != null);
             return seq;
         }
 
@@ -793,16 +799,17 @@ namespace Pylon.Realtime
                 _maxQueuedBytes = maxQueuedBytes;
             }
 
-            public void Enqueue(byte[] bytes, bool text)
+            /// <summary>False when the queue is full: the socket stopped draining.</summary>
+            public bool Enqueue(byte[] bytes, bool text)
             {
                 lock (_queue)
                 {
-                    // A socket that stopped draining: drop the input rather than grow without bound.
-                    if (_queuedBytes + bytes.Length > _maxQueuedBytes) return;
+                    if (_queuedBytes + bytes.Length > _maxQueuedBytes) return false;
                     _queue.Enqueue((bytes, text));
                     _queuedBytes += bytes.Length;
                 }
                 _signal.Release();
+                return true;
             }
 
             public void StartSending(CancellationToken ct, Action<Exception> onError)

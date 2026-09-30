@@ -366,6 +366,50 @@ namespace Pylon.Tests
         }
 
         [Fact]
+        public void AFullSendQueueRefusesTheInput()
+        {
+            using var link = new ShardConnection.Link(new ClientWebSocket(), 10);
+            Assert.True(link.Enqueue(new byte[8], true));
+            Assert.False(link.Enqueue(new byte[8], true));
+        }
+
+        [Fact]
+        public async Task InputsFromManyThreadsReachTheServerInSequenceOrder()
+        {
+            using var server = new FakeShardServer();
+            var seqs = new BlockingCollection<ulong>();
+            server.OnConnection = async (ctx, ws) =>
+            {
+                await ws.SendAsync(ShardWire.Frame(1, 0, 1, 0, Json("{}")), WebSocketMessageType.Binary, true, default);
+                while (true)
+                {
+                    var msg = await FakeShardServer.Receive(ws);
+                    seqs.Add(PylonValue.Parse(msg.Text!)["client_seq"].AsULong());
+                }
+            };
+            var opened = new TaskCompletionSource<bool>();
+            using var c = new ShardConnection("arena-1", new ShardConnectionOptions
+            {
+                WsUrl = server.Url("arena-1"),
+                SubscriberId = "p1",
+                Dispatcher = PylonDispatcher.Inline,
+            });
+            c.Snapshot += _ => opened.TrySetResult(true);
+            c.Connect();
+            Assert.True(await Task.WhenAny(opened.Task, Task.Delay(10000)) == opened.Task);
+            const int threads = 8, each = 200;
+            var sent = new ConcurrentBag<ulong>();
+            await Task.WhenAll(Enumerable.Range(0, threads).Select(_ => Task.Run(() =>
+            {
+                for (var i = 0; i < each; i++) sent.Add(c.Send(PylonValue.Object(("n", i))));
+            })));
+            Assert.DoesNotContain(0UL, sent);
+            var got = new List<ulong>();
+            for (var i = 0; i < threads * each; i++) got.Add(Take(seqs));
+            Assert.Equal(Enumerable.Range(1, threads * each).Select(x => (ulong)x), got);
+        }
+
+        [Fact]
         public async Task EventsStopAfterDispose()
         {
             using var server = new FakeShardServer();
