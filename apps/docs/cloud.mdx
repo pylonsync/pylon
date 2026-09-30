@@ -73,7 +73,7 @@ Full checklist: [Deploying to Vercel](/operations/vercel).
 - **OAuth:** bring your own Google, GitHub, or other OAuth credentials.
 - **WebSocket, SSE, and shard ports:** exposed automatically. Clients connect to the public URL.
 - **File storage:** stored in Amazon S3, sized by your plan.
-- **Studio:** every project has the inspector available at `https://your-app.stack0.app/studio`.
+- **Studio:** every project has the inspector available at `https://your-app.stack0.app/studio`. A Studio operator's session lives in its own cookie and counts only on Studio and the admin API. On the app's pages, functions, auth routes, and sync the browser is signed out unless it also has an app session, and signing out of either leaves the other alone.
 - **Logs and metrics:** request logs, function traces, and latency and error charts in the dashboard.
 - **On-demand backups:** Fly volume snapshots from the project's **Backups** tab. Pro and Team plans store backups longer.
 

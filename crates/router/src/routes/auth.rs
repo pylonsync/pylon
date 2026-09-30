@@ -607,6 +607,32 @@ fn pwned_password_error(password: &str) -> Option<(u16, String)> {
     }
 }
 
+/// `403 OPERATOR_SESSION` for a Studio operator (an `op_` id with no row
+/// in the app's User entity): an operator runs the deployment and must not
+/// create, own, or switch into the app's orgs. The runtime already treats
+/// operator sessions as signed out outside Studio; this holds for Studio's
+/// own calls too.
+fn refuse_operator_session(ctx: &RouterContext, user_id: &str) -> Option<(u16, String)> {
+    if !pylon_auth::operator::is_operator_user_id(user_id) {
+        return None;
+    }
+    let has_user_row = ctx
+        .store
+        .get_by_id(&ctx.store.manifest().auth.user.entity, user_id)
+        .ok()
+        .flatten()
+        .is_some();
+    (!has_user_row).then(|| {
+        (
+            403,
+            json_error(
+                "OPERATOR_SESSION",
+                "A Studio operator session cannot create or select organizations",
+            ),
+        )
+    })
+}
+
 /// The link an invite email carries. `PYLON_INVITE_URL` points it at the
 /// app's own accept page: `{token}` in it is replaced with the invite
 /// token (otherwise `token=` is appended as a query parameter), and a path
@@ -1472,6 +1498,9 @@ pub(crate) fn handle(
             Some(id) => id,
             None => return Some((401, json_error("UNAUTHENTICATED", "anonymous session"))),
         };
+        if let Some(refused) = refuse_operator_session(ctx, user_id) {
+            return Some(refused);
+        }
         let data: serde_json::Value = match serde_json::from_str(body) {
             Ok(v) => v,
             Err(e) => {
@@ -4359,6 +4388,9 @@ pub(crate) fn handle(
             ));
         }
         if method == HttpMethod::Post {
+            if let Some(refused) = refuse_operator_session(ctx, &user_id) {
+                return Some(refused);
+            }
             // A federated app mirrors orgs from its IdP; creating one here
             // would make a tenant the IdP knows nothing about.
             if let Some(fed) = ctx.orgs.federation() {

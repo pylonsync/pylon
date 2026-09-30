@@ -90,7 +90,8 @@ export type ApiOptions = RequestInit;
  * Fetch wrapper that parses the standard Pylon error envelope into an
  * ApiError. Returns the parsed JSON body, or `null` for empty 2xx responses.
  *
- * Auth rides entirely on the app's session cookie (`credentials: "include"`).
+ * Auth rides on cookies (`credentials: "include"`): the Studio operator
+ * cookie, or the app's session cookie for an app admin.
  * Studio holds no credential of its own: it used to keep a `PYLON_ADMIN_TOKEN`
  * in localStorage and send it as a Bearer header, which put a long-lived
  * shared superuser secret somewhere any XSS on this origin could read it.
@@ -101,6 +102,9 @@ export async function api<T = unknown>(
 ): Promise<T> {
 	const headers: Record<string, string> = {
 		"Content-Type": "application/json",
+		// Marks the call as Studio's, so the server uses the Studio operator
+		// session (its own cookie) instead of treating the caller as signed out.
+		"X-Pylon-Studio": "1",
 		...((opts.headers as Record<string, string>) ?? {}),
 	};
 

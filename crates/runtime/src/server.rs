@@ -3835,8 +3835,10 @@ fn start_server(
         let accounts = Arc::clone(&account_store);
         let orgs_for_ws = Arc::clone(&orgs);
         Arc::new(move |ctx: &mut pylon_auth::AuthContext| {
+            // The sync socket belongs to the app: an operator session is no
+            // one there (see drop_operator_identity).
+            drop_operator_identity(&accounts, ctx);
             lift_admin(&rt, ctx);
-            lift_operator(&accounts, ctx);
             pylon_auth::org::enrich_active_org_role(&orgs_for_ws, ctx);
         })
     };
@@ -4087,7 +4089,8 @@ fn start_server(
                 .with_ssr(Arc::new(ssr_routes), fn_ops_arc)
                 .with_session(Arc::clone(&session_store), Arc::clone(&cookie_config))
                 .with_orgs(Arc::clone(&orgs))
-                .with_runtime(Arc::clone(&runtime)),
+                .with_runtime(Arc::clone(&runtime))
+                .with_accounts(Arc::clone(&account_store)),
         )
     };
     if frontend_config.is_active() {
@@ -5987,16 +5990,32 @@ fn start_server(
                 let val = h.value.as_str();
                 val.strip_prefix("Bearer ").map(|t| t.to_string())
             });
-        let cookie_token: Option<String> = if bearer_token.is_some() {
-            None
-        } else {
+        // Studio's own requests (its pages, the admin API, and API calls the
+        // Studio page marks) read the operator cookie first; every other
+        // request reads only the app's session cookie.
+        let studio_request = is_studio_request(
+            &url,
             request
                 .headers()
                 .iter()
+                .any(|h| h.field.as_str().as_str().eq_ignore_ascii_case(STUDIO_HEADER)),
+        );
+        let cookie_token: Option<String> = if bearer_token.is_some() {
+            None
+        } else {
+            let cookies = request
+                .headers()
+                .iter()
                 .find(|h| h.field.as_str() == "Cookie" || h.field.as_str() == "cookie")
-                .and_then(|h| {
-                    pylon_auth::extract_session_cookie(h.value.as_str(), &cookie_config.name)
-                })
+                .map(|h| h.value.as_str().to_string());
+            cookies.as_deref().and_then(|c| {
+                let studio = studio_request
+                    .then(|| {
+                        pylon_auth::extract_session_cookie(c, &studio_cookie_name(&cookie_config))
+                    })
+                    .flatten();
+                studio.or_else(|| pylon_auth::extract_session_cookie(c, &cookie_config.name))
+            })
         };
         let auth_token: Option<String> = bearer_token.or(cookie_token);
         // Token dispatcher (in priority order):
@@ -6123,6 +6142,12 @@ fn start_server(
         // (`crate::frontend::resolve_request_auth`) via `lift_admin` so both
         // paths resolve `is_admin` identically — see the helper's doc for the
         // two designation paths + the API-key exclusion.
+        // An operator session is for running the deployment through Studio.
+        // On the app's own routes it is no one: it must not reach app
+        // functions or auth routes as a user (or, lifted, as an admin).
+        if !studio_request {
+            drop_operator_identity(&account_store, &mut auth_ctx);
+        }
         lift_admin(&runtime, &mut auth_ctx);
         // Operators own no row in the app's User entity, so lift_admin can't
         // see them. Same ordering rationale: before org-role enrichment.
@@ -9091,7 +9116,11 @@ fn start_server(
                             .with_header(
                                 Header::from_bytes(
                                     "Set-Cookie",
-                                    cookie_config.set_value(&session.token),
+                                    cookie_config.set_value_for(
+                                        &studio_cookie_name(&cookie_config),
+                                        &session.token,
+                                        None,
+                                    ),
                                 )
                                 .unwrap(),
                             ),
@@ -9197,7 +9226,11 @@ fn start_server(
                             .with_header(
                                 Header::from_bytes(
                                     "Set-Cookie",
-                                    cookie_config.set_value(&session.token),
+                                    cookie_config.set_value_for(
+                                        &studio_cookie_name(&cookie_config),
+                                        &session.token,
+                                        None,
+                                    ),
                                 )
                                 .unwrap(),
                             ),
@@ -9223,16 +9256,30 @@ fn start_server(
             return;
         }
         if url == "/studio/logout" && (method == Method::Get || method == Method::Post) {
-            let session_cookie_value = request
+            let cookies = request
                 .headers()
                 .iter()
                 .find(|h| h.field.as_str() == "Cookie" || h.field.as_str() == "cookie")
-                .and_then(|h| {
-                    pylon_auth::extract_session_cookie(h.value.as_str(), &cookie_config.name)
-                });
-            if let Some(token) = session_cookie_value.as_deref() {
-                session_store.revoke(token);
-            }
+                .map(|h| h.value.as_str().to_string())
+                .unwrap_or_default();
+            let studio_name = studio_cookie_name(&cookie_config);
+            // An operator's Studio cookie ends by itself, leaving any app
+            // session alone. An app admin who opened Studio with the app's
+            // session signs out of that session, as before.
+            let cleared = match pylon_auth::extract_session_cookie(&cookies, &studio_name) {
+                Some(token) => {
+                    session_store.revoke(&token);
+                    cookie_config.clear_value_for(&studio_name)
+                }
+                None => {
+                    if let Some(token) =
+                        pylon_auth::extract_session_cookie(&cookies, &cookie_config.name)
+                    {
+                        session_store.revoke(&token);
+                    }
+                    cookie_config.clear_value()
+                }
+            };
             let target = rt
                 .studio_config()
                 .login_url
@@ -9245,9 +9292,7 @@ fn start_server(
                     .with_header(
                         Header::from_bytes("Location", target.as_bytes().to_vec()).unwrap(),
                     )
-                    .with_header(
-                        Header::from_bytes("Set-Cookie", cookie_config.clear_value()).unwrap(),
-                    ),
+                    .with_header(Header::from_bytes("Set-Cookie", cleared).unwrap()),
             );
             let _ = request.respond(response);
             mt.record_request("GET", 303);
@@ -9985,11 +10030,16 @@ fn verify_admin_or_metrics_auth(
     // `auth.user.adminField` OR the PYLON_ADMIN_EMAILS allowlist
     // (the same two paths the main dispatcher uses for
     // `ctx.is_admin`).
+    // `/admin/*` is Studio's: the operator cookie first, then the app's.
     let cookie_token = request
         .headers()
         .iter()
         .find(|h| h.field.as_str() == "Cookie" || h.field.as_str() == "cookie")
-        .and_then(|h| pylon_auth::extract_session_cookie(h.value.as_str(), &cookie_config.name));
+        .and_then(|h| {
+            let cookies = h.value.as_str();
+            pylon_auth::extract_session_cookie(cookies, &studio_cookie_name(cookie_config))
+                .or_else(|| pylon_auth::extract_session_cookie(cookies, &cookie_config.name))
+        });
     // Also accept a session presented as a bearer token. The main dispatcher
     // resolves both, and a caller holding a session shouldn't be admin on one
     // transport and anonymous on the other.
@@ -10176,6 +10226,50 @@ fn html_escape(s: &str) -> String {
 /// exact bug once made the runtime swallow app routes like `/studios` and
 /// `/studio-tour`. The prefix must be `/studio/` with the slash, or the whole
 /// string `/studio`.
+/// Header the Studio page sets on its API calls, so the server knows the
+/// call is Studio's and may use the operator session.
+pub(crate) const STUDIO_HEADER: &str = "x-pylon-studio";
+
+/// Cookie that carries a Studio operator's session. Separate from the app's
+/// session cookie, so signing in to Studio does not sign anyone in to the
+/// app, and signing out of the app does not end the Studio session.
+pub(crate) fn studio_cookie_name(cookie: &pylon_auth::CookieConfig) -> String {
+    format!("{}_studio", cookie.name)
+}
+
+/// Whether a request is Studio's: a Studio page or endpoint (`/studio`,
+/// `/studio/...`), the admin API (`/admin/...`, `/api/admin/...`), or an API
+/// call carrying [`STUDIO_HEADER`]. Only these may act as an operator.
+pub(crate) fn is_studio_request(url: &str, has_studio_header: bool) -> bool {
+    let path = url.split('?').next().unwrap_or(url);
+    has_studio_header
+        || path == "/studio"
+        || path.starts_with("/studio/")
+        || path.starts_with("/admin/")
+        || path.starts_with("/api/admin/")
+}
+
+/// Make an operator session anonymous. Operators own no row in the app's
+/// User entity; on the app's routes their session must not act as a user.
+pub(crate) fn drop_operator_identity(
+    accounts: &pylon_auth::AccountStore,
+    auth_ctx: &mut pylon_auth::AuthContext,
+) {
+    if auth_ctx.is_api_key_auth() {
+        return;
+    }
+    let Some(uid) = auth_ctx.user_id.as_deref() else {
+        return;
+    };
+    // The prefix check keeps app users off the store lookup; the lookup keeps
+    // an app whose own ids start with `op_` from losing its users.
+    if pylon_auth::operator::is_operator_user_id(uid)
+        && pylon_auth::operator::find_by_user_id(accounts, uid).is_some()
+    {
+        *auth_ctx = pylon_auth::AuthContext::anonymous();
+    }
+}
+
 fn is_studio_shell_path(url: &str) -> bool {
     let path = url.split('?').next().unwrap_or(url);
     if path == "/studio" || path == "/studio/" {

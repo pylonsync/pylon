@@ -127,6 +127,10 @@ pub struct FrontendConfig {
     /// HTTP handler applies, so SSR pages see the same `auth.is_admin`. None →
     /// SSR `is_admin` reflects only what the session carries (never admin).
     pub runtime: Option<std::sync::Arc<crate::Runtime>>,
+    /// Account store — lets the SSR auth resolver recognize a Studio
+    /// operator's session and render the page signed out (see
+    /// `crate::server::drop_operator_identity`).
+    pub accounts: Option<std::sync::Arc<pylon_auth::AccountStore>>,
 }
 
 impl std::fmt::Debug for FrontendConfig {
@@ -182,6 +186,7 @@ impl FrontendConfig {
             cookie_config: None,
             orgs: None,
             runtime: None,
+            accounts: None,
         }
     }
 
@@ -225,6 +230,13 @@ impl FrontendConfig {
     /// keeping SSR `auth.is_admin` in parity with the API/sync paths.
     pub fn with_runtime(mut self, runtime: std::sync::Arc<crate::Runtime>) -> Self {
         self.runtime = Some(runtime);
+        self
+    }
+
+    /// Attach the account store so SSR renders a Studio operator's session
+    /// signed out, as the API routes treat it.
+    pub fn with_accounts(mut self, accounts: std::sync::Arc<pylon_auth::AccountStore>) -> Self {
+        self.accounts = Some(accounts);
         self
     }
 
@@ -4928,6 +4940,10 @@ fn resolve_request_auth(
     };
     let token = cookies.get(&cookie_cfg.name);
     let mut ctx = store.resolve(token.map(|s| s.as_str()));
+    // A Studio operator is no one on the app's pages.
+    if let Some(accounts) = cfg.accounts.as_ref() {
+        crate::server::drop_operator_identity(accounts, &mut ctx);
+    }
     // Mirror the main HTTP request handler EXACTLY, in the same order:
     //
     //   1. Per-user admin-lift (`auth.user.adminField` + `PYLON_ADMIN_EMAILS`).

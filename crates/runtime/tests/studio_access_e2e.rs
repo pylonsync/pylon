@@ -105,6 +105,9 @@ fn start_server(rt: Arc<Runtime>) -> u16 {
             // Keep the email allowlist out of it — these tests exercise the
             // adminField path, and an inherited value would silently promote.
             std::env::remove_var("PYLON_ADMIN_EMAILS");
+            // Every test here signs in from 127.0.0.1 through one shared
+            // limiter; the default 5 per minute is about abuse, not these.
+            std::env::set_var("PYLON_AUTH_LOGIN_IP_PER_MIN", "1000");
         }
     });
     let rt2 = Arc::clone(&rt);
@@ -154,9 +157,21 @@ fn http(
     auth: Option<&str>,
     body: Option<&str>,
 ) -> (u16, String) {
+    http_with(port, method, path, auth, body, "")
+}
+
+/// [`http`] with extra raw header lines (each ending in `\r\n`).
+fn http_with(
+    port: u16,
+    method: &str,
+    path: &str,
+    auth: Option<&str>,
+    body: Option<&str>,
+    extra_headers: &str,
+) -> (u16, String) {
     let body_str = body.unwrap_or("");
     let mut hdrs = format!(
-        "Host: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+        "Host: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{extra_headers}",
         body_str.len()
     );
     if let Some(t) = auth {
@@ -440,13 +455,26 @@ fn an_operator_session_opens_studio_and_can_read_data() {
     assert_eq!(studio, 200, "operator was refused Studio");
     assert!(is_studio_bundle(&page));
 
-    let (me, me_body) = http(port, "GET", "/api/auth/session", Some(&token), None);
+    // Studio's API calls carry X-Pylon-Studio: there the operator is admin.
+    let (me, me_body) = http_with(
+        port,
+        "GET",
+        "/api/auth/session",
+        Some(&token),
+        None,
+        "X-Pylon-Studio: 1\r\n",
+    );
     assert_eq!(me, 200);
     let v: Value = serde_json::from_str(&me_body).unwrap();
     assert_eq!(
         v["session"]["is_admin"], true,
-        "operator session must resolve as admin for the API layer: {me_body}"
+        "operator session must resolve as admin for Studio's API calls: {me_body}"
     );
+    // On the app's own routes the same session is no one.
+    let (_, app_body) = http(port, "GET", "/api/auth/session", Some(&token), None);
+    let v: Value = serde_json::from_str(&app_body).unwrap();
+    assert!(v["session"]["user_id"].is_null(), "{app_body}");
+    assert_eq!(v["session"]["is_admin"], false, "{app_body}");
 
     let (entities, _) = http(port, "GET", "/admin/entities", Some(&token), None);
     assert_eq!(entities, 200, "operator could not read /admin/entities");
@@ -571,5 +599,68 @@ fn extensions_bundle_follows_the_same_gate() {
     assert_ne!(
         token_auth, 200,
         "the admin token must not fetch the extensions bundle either"
+    );
+}
+
+#[test]
+fn a_studio_sign_in_does_not_sign_anyone_in_to_the_app() {
+    let rt = test_runtime();
+    let port = start_server(Arc::clone(&rt));
+    let (created, body) = http(
+        port,
+        "POST",
+        "/admin/operators",
+        Some(ADMIN_TOKEN),
+        Some(&json!({"username": "ops2", "password": "correct-horse-battery"}).to_string()),
+    );
+    assert_eq!(created, 201, "{body}");
+    let (_, _, set_cookie) = post_form(
+        port,
+        "/studio/login",
+        "username=ops2&password=correct-horse-battery",
+    );
+    let pair = set_cookie.split(';').next().unwrap_or("").to_string();
+    let (name, _) = pair.split_once('=').expect("a cookie");
+    assert!(
+        name.ends_with("_studio"),
+        "Studio used the app cookie: {set_cookie}"
+    );
+    let cookie = format!("Cookie: {pair}\r\n");
+
+    // App routes: signed out.
+    let (_, app) = http_with(port, "GET", "/api/auth/session", None, None, &cookie);
+    let v: Value = serde_json::from_str(&app).unwrap();
+    assert!(v["session"]["user_id"].is_null(), "{app}");
+
+    // Studio's own calls: the operator, as admin.
+    let studio_call = format!("{cookie}X-Pylon-Studio: 1\r\n");
+    let (_, studio) = http_with(port, "GET", "/api/auth/session", None, None, &studio_call);
+    let v: Value = serde_json::from_str(&studio).unwrap();
+    assert_eq!(v["session"]["is_admin"], true, "{studio}");
+    let (entities, _) = http_with(port, "GET", "/admin/entities", None, None, &cookie);
+    assert_eq!(
+        entities, 200,
+        "the admin API is Studio's and takes the Studio cookie"
+    );
+
+    // Even from Studio, an operator cannot create an org.
+    let (status, org) = http_with(
+        port,
+        "POST",
+        "/api/auth/orgs",
+        None,
+        Some(r#"{"name":"Ops Org"}"#),
+        &studio_call,
+    );
+    assert_eq!(status, 403, "{org}");
+    assert!(org.contains("OPERATOR_SESSION"), "{org}");
+
+    // The app's sign-out (no Studio header) does not end the Studio session.
+    http_with(port, "DELETE", "/api/auth/session", None, None, &cookie);
+    let (_, still) = http_with(port, "GET", "/api/auth/session", None, None, &studio_call);
+    let v: Value = serde_json::from_str(&still).unwrap();
+    assert_eq!(
+        v["session"]["is_admin"], true,
+        "app sign-out ended Studio: {still}"
     );
 }
