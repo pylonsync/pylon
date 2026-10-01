@@ -115,6 +115,8 @@ fn the_fixture_file_matches_the_server() {
     // and serde_json's default parser does not read every one back exactly.
     let on_disk = std::fs::read_to_string(&path)
         .expect("no fixture file; run with PYLON_WRITE_FIXTURES=1 to write it");
+    // A Windows checkout may turn the file's line ends into CRLF.
+    let on_disk = on_disk.replace("\r\n", "\n");
     assert!(
         on_disk == serde_json::to_string_pretty(&now).unwrap() + "\n",
         "the rewind fixtures are out of date; run with PYLON_WRITE_FIXTURES=1"
