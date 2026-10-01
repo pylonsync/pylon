@@ -485,7 +485,11 @@ namespace Pylon.Tests
                     lock (Requests) Requests.Add(ctx.Request);
                     try
                     {
-                        var ws = (await ctx.AcceptWebSocketAsync(Subprotocol)).WebSocket;
+                        // "*" echoes the first subprotocol the client asked for.
+                        var sp = Subprotocol == "*"
+                            ? ctx.Request.Headers["Sec-WebSocket-Protocol"]?.Split(',')[0].Trim()
+                            : Subprotocol;
+                        var ws = (await ctx.AcceptWebSocketAsync(sp)).WebSocket;
                         await OnConnection(ctx, ws);
                     }
                     catch (Exception)

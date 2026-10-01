@@ -29,6 +29,13 @@ namespace Pylon.Tests
         public Action? BeforePull;
         public int Pulls;
         public readonly HashSet<string> Hidden = new HashSet<string>();
+        /// <summary>Rows only this bearer token may see (any other caller does not see them).</summary>
+        public readonly Dictionary<string, string> OwnerToken = new Dictionary<string, string>();
+        /// <summary>Runs before the cursor route answers.</summary>
+        public Action? BeforeCursor;
+
+        bool Visible(string id, string? token) =>
+            !Hidden.Contains(id) && (!OwnerToken.TryGetValue(id, out var owner) || owner == token);
 
         public void Seed(string entity, string id, string kind, PylonValue? data = null)
         {
@@ -54,6 +61,8 @@ namespace Pylon.Tests
         public Task<PylonHttpResponse> SendAsync(PylonHttpRequest request, CancellationToken cancellationToken)
         {
             var path = request.Url.AbsolutePath;
+            request.Headers.TryGetValue("Authorization", out var auth);
+            var token = auth?.StartsWith("Bearer ") == true ? auth.Substring(7) : null;
             var query = request.Url.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries)
                 .Select(p => p.Split('=', 2)).ToDictionary(p => p[0], p => p.Length > 1 ? p[1] : "");
             if (path == "/api/sync/pull")
@@ -70,7 +79,7 @@ namespace Pylon.Tests
                     var since = ulong.Parse(query["since"]);
                     if (since > 0 && since < Retained)
                         return Task.FromResult(Json(410, "{\"error\":{\"code\":\"RESYNC_REQUIRED\",\"message\":\"x\"}}"));
-                    var changes = _log.Where(c => c["seq"].AsULong() > since && !Hidden.Contains(c["row_id"].AsString()))
+                    var changes = _log.Where(c => c["seq"].AsULong() > since && Visible(c["row_id"].AsString(), token))
                         .Take(PageSize).ToList();
                     var last = changes.Count > 0 ? changes[^1]["seq"].AsULong() : Seq;
                     var more = _log.Any(c => c["seq"].AsULong() > last);
@@ -81,11 +90,12 @@ namespace Pylon.Tests
             }
             if (path.StartsWith("/api/entities/") && path.EndsWith("/cursor"))
             {
+                BeforeCursor?.Invoke();
                 var entity = path.Split('/')[3];
                 lock (_gate)
                 {
                     var rows = _rows.TryGetValue(entity, out var t)
-                        ? t.Values.Where(r => !Hidden.Contains(r["id"].AsString())).ToList()
+                        ? t.Values.Where(r => Visible(r["id"].AsString(), token)).ToList()
                         : new List<PylonValue>();
                     var body = PylonValue.Object(("data", PylonValue.Array(rows)), ("next_cursor", PylonValue.Null), ("has_more", false));
                     return Task.FromResult(Json(200, body.ToJson()));
@@ -263,6 +273,127 @@ namespace Pylon.Tests
 
             var top = new LiveQuery(sync, "Player", new LiveQueryOptions { OrderBy = "score", Limit = 1, Filter = r => r["score"].AsInt() > 4 });
             Assert.Equal(new[] { "a" }, top.Select(new[] { sync.Row("Player", "a")!, sync.Row("Player", "c")! }).Select(r => r["id"].AsString()));
+            client.Dispose();
+        }
+
+        static PylonValue Change(ulong seq, string id, string kind, PylonValue? data = null) =>
+            PylonValue.Object(("seq", seq), ("entity", "Note"), ("row_id", id), ("kind", kind),
+                ("data", data ?? PylonValue.Null), ("timestamp", ""));
+
+        /// <summary>A client whose HTTP goes to the fake sync server and whose live socket goes to a local WebSocket server.</summary>
+        static (PylonClient Client, FakeSyncServer Sync, FakeShardServer Ws) Wired()
+        {
+            var sync = new FakeSyncServer();
+            var ws = new FakeShardServer { Subprotocol = "*" };
+            var client = new PylonClient(new PylonClientOptions(new Uri("http://localhost:4321"))
+            {
+                Transport = sync,
+                Dispatcher = PylonDispatcher.Inline,
+            });
+            client.Options.Live.WsUrl = ws.Url("x");
+            client.Options.Live.ReconnectBaseDelay = TimeSpan.FromMilliseconds(20);
+            client.SetSession("tok-a");
+            return (client, sync, ws);
+        }
+
+        static void Until(Func<bool> done, string what)
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (!done())
+            {
+                Assert.True(DateTime.UtcNow < deadline, $"timed out waiting for {what}");
+                Thread.Sleep(5);
+            }
+        }
+
+        [Fact]
+        public void AFrameTheSocketSendsBeforeTheFirstPullDoesNotSkipTheSnapshot()
+        {
+            var (client, sync, ws) = Wired();
+            using var _ = ws;
+            sync.Seed("Note", "n1", "insert", Data("one"));
+            sync.Seed("Note", "n2", "insert", Data("two"));
+            sync.Seed("Note", "n3", "insert", Data("three"));
+            // The socket's first message is seq 3, before any pull has run.
+            ws.OnConnection = async (ctx, socket) =>
+            {
+                await socket.SendAsync(Encoding.UTF8.GetBytes(Change(3, "n3", "insert", Data("three")).ToJson()),
+                    System.Net.WebSockets.WebSocketMessageType.Text, true, default);
+                await FakeShardServer.Receive(socket);
+            };
+            using var q = client.Live("Note");
+            Until(() => q.Synced, "the first pull");
+            Assert.Equal(new[] { "n1", "n2", "n3" }, q.Rows.Select(r => r["id"].AsString()));
+            client.Dispose();
+        }
+
+        [Fact]
+        public void AFailedPullIsRetriedWhileTheSocketStaysOpen()
+        {
+            var (client, sync, ws) = Wired();
+            using var _ = ws;
+            sync.Seed("Note", "n1", "insert", Data("one"));
+            sync.FailNextPull = 503;
+            var connections = 0;
+            ws.OnConnection = async (ctx, socket) =>
+            {
+                Interlocked.Increment(ref connections);
+                await FakeShardServer.Receive(socket);
+            };
+            using var q = client.Live("Note");
+            Until(() => q.Get("n1") != null, "the retried pull");
+            Assert.Equal(1, Volatile.Read(ref connections));
+            client.Dispose();
+        }
+
+        [Fact]
+        public void ANewSessionStartsOverAndReconnectsWithTheNewToken()
+        {
+            var (client, sync, ws) = Wired();
+            using var _ = ws;
+            sync.Seed("Note", "a1", "insert", Data("alice's"));
+            sync.OwnerToken["a1"] = "tok-a";
+            ws.OnConnection = async (ctx, socket) => await FakeShardServer.Receive(socket);
+            using var q = client.Live("Note");
+            Until(() => q.Get("a1") != null, "alice's row");
+            client.SetSession("tok-b");
+            Until(() => q.Rows.Count == 0, "the reset");
+            Until(() => ws.Requests.Count >= 2, "the reconnect");
+            Assert.Contains("bearer.tok-b", ws.Requests[^1].Headers["Sec-WebSocket-Protocol"]);
+            Until(() => q.Synced, "the pull under the new token");
+            Assert.Null(q.Get("a1"));
+            client.Dispose();
+        }
+
+        [Fact]
+        public void AnOlderResultNeverReplacesANewerOne()
+        {
+            var (client, sync, _) = Make();
+            var q = sync.Attach("Note", new LiveQueryOptions());
+            q.Deliver(new[] { PylonValue.Object(("id", "n1"), ("title", "new")) }, true, 2);
+            q.Deliver(new[] { PylonValue.Object(("id", "n1"), ("title", "old")) }, true, 1);
+            Assert.Equal("new", q.Get("n1")!["title"].AsString());
+            client.Dispose();
+        }
+
+        [Fact]
+        public async Task ASweepThatAChangeInvalidatesRunsAgain()
+        {
+            var (client, sync, server) = Make();
+            server.Seed("Note", "n1", "insert", Data("one"));
+            server.Seed("Note", "n2", "insert", Data("two"));
+            var q = sync.Attach("Note", new LiveQueryOptions());
+            await sync.PullAsync();
+            // n1 was revoked while the socket was down; during the first sweep a change to n2 lands.
+            server.Hidden.Add("n1");
+            server.BeforeCursor = () =>
+            {
+                server.BeforeCursor = null;
+                sync.OnText(Change(3, "n2", "update", Data("two-v2")).ToJson());
+            };
+            await sync.ReconcileForTestAsync();
+            Assert.False(sync.HasRow("Note", "n1"));
+            Assert.Equal("two-v2", sync.Row("Note", "n2")!["title"].AsString());
             client.Dispose();
         }
 

@@ -56,6 +56,7 @@ namespace Pylon
     public sealed class LiveQuery : IDisposable
     {
         readonly LiveSync _sync;
+        long _revision;
         Dictionary<string, PylonValue> _byId = new Dictionary<string, PylonValue>(StringComparer.Ordinal);
 
         public string Entity { get; }
@@ -80,9 +81,17 @@ namespace Pylon
         /// <summary>The row with this id, if it is in the result.</summary>
         public PylonValue? Get(string id) => _byId.TryGetValue(id, out var row) ? row : null;
 
-        /// <summary>Runs on the dispatcher with a result computed on the network thread.</summary>
-        internal void Deliver(IReadOnlyList<PylonValue> rows, bool synced)
+        /// <summary>
+        /// Runs on the dispatcher with a result computed on the network thread.
+        /// A result older than one already shown (a lower revision) is dropped.
+        /// </summary>
+        internal void Deliver(IReadOnlyList<PylonValue> rows, bool synced, long revision = long.MaxValue)
         {
+            if (revision != long.MaxValue)
+            {
+                if (revision < _revision) return;
+                _revision = revision;
+            }
             var next = new Dictionary<string, PylonValue>(rows.Count, StringComparer.Ordinal);
             foreach (var r in rows) next[r["id"].AsStringOr("") ?? ""] = r;
             var added = new List<string>();

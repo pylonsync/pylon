@@ -51,6 +51,7 @@ namespace Pylon
         readonly Random _random = new Random();
 
         ulong _cursor;
+        long _revision;
         bool _synced;
         int _epoch;
         int _consecutive410;
@@ -90,6 +91,34 @@ namespace Pylon
         internal bool Connected
         {
             get { lock (_gate) return _socket?.State == WebSocketState.Open; }
+        }
+
+        /// <summary>
+        /// The client's token changed (sign-in, sign-out, refresh to another
+        /// identity). The visible set may differ: start over, and reconnect so
+        /// the socket carries the new token.
+        /// </summary>
+        internal void OnTokenChanged()
+        {
+            ClientWebSocket? socket;
+            lock (_gate)
+            {
+                if (_run == null) return;
+                if (string.Equals(_client.Token, _syncToken, StringComparison.Ordinal)) return;
+                ResetLocked();
+                // The reconnect carries this token, and the next pull must not reset again.
+                _syncToken = _client.Token;
+                socket = _socket;
+            }
+            NotifyAll();
+            try
+            {
+                socket?.Abort();
+            }
+            catch (Exception)
+            {
+                // Already closed.
+            }
         }
 
         /// <summary>Drop the live socket without a close frame, as a lost network does.</summary>
@@ -198,20 +227,23 @@ namespace Pylon
                     if (!string.IsNullOrEmpty(credential)) socket.Options.AddSubProtocol("bearer." + Uri.EscapeDataString(credential));
                     await socket.ConnectAsync(url, ct).ConfigureAwait(false);
                     opened = true;
-                    lock (_gate) _socket = socket;
+                    lock (_gate)
+                    {
+                        _socket = socket;
+                        // Hold live frames from the first one: until the catch-up
+                        // pull lands, a frame must not move the cursor past rows
+                        // the pull has not delivered.
+                        _hold ??= new List<PylonValue>();
+                    }
                     var reconnect = Interlocked.Increment(ref _connects) > 1;
-                    using var pinging = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                    _ = PingAsync(socket, pinging.Token);
+                    using var connection = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    _ = PingAsync(socket, connection.Token);
                     // Changes broadcast between the last pull and this open are
                     // in the log: pull them. After a reconnect, also drop rows the
                     // server stopped returning (a revocation sent while away).
-                    _ = Task.Run(async () =>
-                    {
-                        if (await PullSafeAsync(ct).ConfigureAwait(false) && reconnect)
-                            await ReconcileAsync(ct).ConfigureAwait(false);
-                    });
+                    _ = Task.Run(() => CatchUpAsync(reconnect, connection.Token));
                     await ReceiveAsync(socket, ct).ConfigureAwait(false);
-                    pinging.Cancel();
+                    connection.Cancel();
                     lock (_gate)
                     {
                         if (ReferenceEquals(_socket, socket)) _socket = null;
@@ -240,6 +272,28 @@ namespace Pylon
                 }
                 // Catch up before the next connect attempt.
                 await PullSafeAsync(ct).ConfigureAwait(false);
+            }
+        }
+
+        /// <summary>Pull until one succeeds (backing off between tries), then reconcile after a reconnect.</summary>
+        async Task CatchUpAsync(bool reconnect, CancellationToken ct)
+        {
+            for (var attempt = 0; !ct.IsCancellationRequested; attempt++)
+            {
+                if (await PullSafeAsync(ct).ConfigureAwait(false))
+                {
+                    if (reconnect) await ReconcileAsync(ct).ConfigureAwait(false);
+                    return;
+                }
+                var delay = Math.Min(30_000, _options.ReconnectBaseDelay.TotalMilliseconds * Math.Pow(2, Math.Min(attempt, 10)));
+                try
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(delay), ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
             }
         }
 
@@ -432,7 +486,8 @@ namespace Pylon
             {
                 since = _cursor;
                 epoch = _epoch;
-                _hold = new List<PylonValue>();
+                // Keep a hold the socket opened: its frames wait for this pull.
+                _hold ??= new List<PylonValue>();
             }
             var startedFromZero = since == 0;
             var touched = new HashSet<string>(StringComparer.Ordinal);
@@ -480,11 +535,7 @@ namespace Pylon
             catch (PylonException e) when (e.Kind == PylonErrorKind.Http && e.Status == 410)
             {
                 int attempt;
-                lock (_gate)
-                {
-                    _hold = null;
-                    attempt = _consecutive410++;
-                }
+                lock (_gate) attempt = _consecutive410++;
                 if (attempt == 0)
                 {
                     // The cursor is from another server lifetime or fell off the
@@ -510,11 +561,18 @@ namespace Pylon
             }
             finally
             {
-                // A failed pull drops the held frames: the next pull fetches them from the log.
-                lock (_gate) _hold = null;
+                lock (_gate)
+                {
+                    // A failed pull keeps holding (frames still must not move the
+                    // cursor) but drops what it held: the retry fetches those
+                    // changes from the log.
+                    if (_hold != null && _hold.Count > 0) _hold = new List<PylonValue>();
+                }
                 if (touched.Count > 0) Notify(touched);
             }
         }
+
+        internal Task ReconcileForTestAsync() => ReconcileAsync(CancellationToken.None);
 
         /// <summary>Remove local rows of live entities that the server no longer returns.</summary>
         async Task ReconcileAsync(CancellationToken ct)
@@ -529,6 +587,19 @@ namespace Pylon
                 }
             }
             foreach (var entity in entities)
+            {
+                for (var tries = 0; tries < 5 && !ct.IsCancellationRequested; tries++)
+                {
+                    if (await ReconcileEntityAsync(entity, ct).ConfigureAwait(false)) break;
+                    // A change landed during the fetch: the fetched set is stale. Fetch again.
+                    await Task.Delay(TimeSpan.FromMilliseconds(100 * (tries + 1)), ct).ConfigureAwait(false);
+                }
+            }
+        }
+
+        /// <summary>One entity's sweep. False when a change landed during the fetch (try again).</summary>
+        async Task<bool> ReconcileEntityAsync(string entity, CancellationToken ct)
+        {
             {
                 ulong cursorBefore;
                 int epoch;
@@ -553,7 +624,7 @@ namespace Pylon
                         }
                         after = page.HasMore ? page.NextCursor : null;
                         // A table this large is out of scope for a sweep; keep what is there.
-                        if (++pages > 200) return;
+                        if (++pages > 200) return true;
                     } while (after != null);
                 }
                 catch (PylonException e) when (e.Kind == PylonErrorKind.Http && (e.Status == 404 || e.Status == 403))
@@ -563,14 +634,14 @@ namespace Pylon
                 catch (Exception e) when (!(e is OperationCanceledException))
                 {
                     _client.Dispatcher.Post(() => _client.RaiseLiveError(e));
-                    continue;
+                    return true;
                 }
                 var touched = false;
                 lock (_gate)
                 {
-                    // A change applied during the fetch makes the fetched set stale; the next sweep runs later.
-                    if (epoch != _epoch || _cursor != cursorBefore) continue;
-                    if (!_tables.TryGetValue(entity, out var table)) continue;
+                    if (epoch != _epoch) return true;
+                    if (_cursor != cursorBefore) return false;
+                    if (!_tables.TryGetValue(entity, out var table)) return true;
                     foreach (var id in new List<string>(table.Keys))
                     {
                         if (dropAll || !server.Contains(id))
@@ -581,6 +652,7 @@ namespace Pylon
                     }
                 }
                 if (touched) Notify(new HashSet<string> { entity });
+                return true;
             }
         }
 
@@ -660,7 +732,8 @@ namespace Pylon
             _tombstones.Clear();
             _cursor = 0;
             _synced = false;
-            _hold = null;
+            // An active hold stays (empty): the pull after a reset owns it.
+            if (_hold != null) _hold = new List<PylonValue>();
             _epoch++;
         }
 
@@ -680,7 +753,7 @@ namespace Pylon
         void Notify(HashSet<string> entities)
         {
             if (entities.Count == 0) return;
-            var deliveries = new List<(LiveQuery Query, List<PylonValue> Rows, bool Synced)>();
+            var deliveries = new List<(LiveQuery Query, List<PylonValue> Rows, bool Synced, long Revision)>();
             lock (_gate)
             {
                 foreach (var q in _queries)
@@ -689,17 +762,19 @@ namespace Pylon
                     var rows = _tables.TryGetValue(q.Entity, out var table)
                         ? q.Select(table.Values)
                         : new List<PylonValue>();
-                    deliveries.Add((q, rows, _synced));
+                    // Numbered under the lock: a result taken later has a higher
+                    // number, whichever thread posts first.
+                    deliveries.Add((q, rows, _synced, ++_revision));
                 }
             }
             foreach (var d in deliveries)
             {
-                var (q, rows, synced) = d;
+                var (q, rows, synced, revision) = d;
                 _client.Dispatcher.Post(() =>
                 {
                     bool live;
                     lock (_gate) live = _queries.Contains(q);
-                    if (live) q.Deliver(rows, synced);
+                    if (live) q.Deliver(rows, synced, revision);
                 });
             }
         }

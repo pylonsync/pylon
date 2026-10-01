@@ -93,9 +93,14 @@ namespace Pylon
         {
             if (string.IsNullOrEmpty(token)) throw PylonException.InvalidArgument("token is empty");
             Storage.Set(_tokenKey, token);
+            _live?.OnTokenChanged();
         }
 
-        public void ClearSession() => Storage.Remove(_tokenKey);
+        public void ClearSession()
+        {
+            Storage.Remove(_tokenKey);
+            _live?.OnTokenChanged();
+        }
 
         // ---- auth ----
 
