@@ -10,7 +10,9 @@
 //! one subscriber's frame and a client table applies it. Reported: bytes
 //! per second for that client, the time to build all 300 frames, and how
 //! far the client's positions are from the server's (world units), with
-//! and without a byte budget.
+//! and without a byte budget, and with lag compensation's history (every
+//! subscriber's view kept for 10 ticks: the worst case, each one sees all
+//! 300 players).
 
 use std::time::Instant;
 
@@ -27,7 +29,9 @@ impl Rng {
     }
 }
 
-fn run(name: &str, precision: f32, budget: usize) {
+/// `view`: interest radius; each subscriber gets only the players within
+/// it (None: every player).
+fn run(name: &str, precision: f32, budget: usize, history: u32, view: Option<f32>) {
     const PLAYERS: u64 = 300;
     const TICKS: u64 = 400;
     const HZ: f64 = 20.0;
@@ -44,6 +48,7 @@ fn run(name: &str, precision: f32, budget: usize) {
         plane: Plane::XY,
     };
     let mut rep = Replicator::new();
+    rep.set_history_ticks(history);
     let mut table = ReplicaTable::new();
     let mut bytes = 0u64;
     let mut build = std::time::Duration::ZERO;
@@ -59,6 +64,23 @@ fn run(name: &str, precision: f32, budget: usize) {
             store.set_pos(id, [x, y, 0.0]);
         }
         rep.begin_tick(&store);
+        // Each subscriber's visible ids, as interest management gives them
+        // (sorted); not part of the frame build time.
+        let visible: Vec<Vec<u64>> = match view {
+            None => Vec::new(),
+            Some(r) => (0..PLAYERS)
+                .map(|sub| {
+                    let p = store.get(sub).unwrap().pos;
+                    store
+                        .iter()
+                        .filter(|(_, e)| {
+                            (e.pos[0] - p[0]).powi(2) + (e.pos[1] - p[1]).powi(2) <= r * r
+                        })
+                        .map(|(id, _)| id)
+                        .collect()
+                })
+                .collect(),
+        };
         let start = Instant::now();
         let mut ours = Vec::new();
         // Every subscriber's frame, as the shard builds them each tick.
@@ -70,7 +92,7 @@ fn run(name: &str, precision: f32, budget: usize) {
                 tick,
                 FrameInput {
                     key: sub,
-                    visible: None,
+                    visible: visible.get(sub as usize).map(|v| v.as_slice()),
                     area: Some(pylon_realtime::InterestArea {
                         x: p[0],
                         y: p[1],
@@ -90,7 +112,8 @@ fn run(name: &str, precision: f32, budget: usize) {
         if tick > 20 {
             bytes += ours.len() as u64 + 18; // plus the v2 frame header
             for (id, e) in store.iter() {
-                let got = table.pos(id).unwrap();
+                // With interest, only what subscriber 0 sees.
+                let Some(got) = table.pos(id) else { continue };
                 let (dx, dy) = (got[0] - e.pos[0], got[1] - e.pos[1]);
                 errors.push((dx * dx + dy * dy).sqrt());
             }
@@ -110,8 +133,12 @@ fn run(name: &str, precision: f32, budget: usize) {
 
 fn main() {
     println!("replication, 300 players in one 60 x 60 area, all moving, 20 Hz:");
-    run("precision 0.01, no budget", 0.01, 0);
-    run("precision 0.05, no budget", 0.05, 0);
-    run("precision 0.01, 900 B/tick", 0.01, 900);
-    run("precision 0.05, 900 B/tick", 0.05, 900);
+    run("precision 0.01, no budget", 0.01, 0, 0, None);
+    run("precision 0.05, no budget", 0.05, 0, 0, None);
+    run("precision 0.01, 900 B/tick", 0.01, 900, 0, None);
+    run("precision 0.05, 900 B/tick", 0.05, 900, 0, None);
+    run("0.01, no budget, history 10", 0.01, 0, 10, None);
+    run("0.05, 900 B/tick, history 10", 0.05, 900, 10, None);
+    run("view 20, 900 B/tick", 0.05, 900, 0, Some(20.0));
+    run("view 20, 900 B/tick, history 10", 0.05, 900, 10, Some(20.0));
 }

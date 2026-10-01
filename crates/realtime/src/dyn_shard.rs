@@ -152,8 +152,15 @@ impl<S: SimState> DynShard for Shard<S> {
                 },
             )?;
         let client_seq = envelope.client_seq;
-        Shard::push_input_authorized(self, subscriber_id, envelope.input, client_seq, auth)
-            .map_err(|e| rejection_for(client_seq, &e))
+        Shard::push_input_authorized_at(
+            self,
+            subscriber_id,
+            envelope.input,
+            client_seq,
+            envelope.view_tick,
+            auth,
+        )
+        .map_err(|e| rejection_for(client_seq, &e))
     }
 
     fn push_input_json(

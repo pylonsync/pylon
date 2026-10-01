@@ -851,6 +851,123 @@ fn apply_all(q: &pylon_realtime::OutboundQueue, table: &mut pylon_realtime::Repl
     full
 }
 
+fn range(params: Value) -> Arc<Shard<WasmSim>> {
+    let k = WasmShardKind::compile(
+        "range",
+        &guest_wasm("range"),
+        config(SnapshotFormat::Json),
+        WasmLimits::default(),
+    )
+    .unwrap();
+    let sim = k.instantiate("r1", &params).unwrap();
+    Shard::new("r1", sim, k.config().clone())
+}
+
+/// Apply the queued frames; return the messages of the inputs refused.
+fn frames_and_refusals(
+    q: &pylon_realtime::OutboundQueue,
+    table: &mut pylon_realtime::ReplicaTable,
+) -> Vec<String> {
+    let mut refused = Vec::new();
+    while let Some(f) = q.pop() {
+        match f.kind {
+            FrameKind::Replication => {
+                table.apply(&f.bytes).unwrap();
+            }
+            FrameKind::InputRejected => {
+                let v: Value = serde_json::from_slice(&f.bytes).unwrap();
+                refused.push(v["message"].as_str().unwrap_or_default().to_string());
+            }
+            _ => {}
+        }
+    }
+    refused
+}
+
+#[test]
+fn a_wasm_shard_checks_a_shot_against_what_the_shooter_drew() {
+    // The target moves 2 units a tick: frames for ticks 1-20 put it at x = 2 * tick.
+    let s = range(json!({ "history": 10 }));
+    let q = join(&s, "p1");
+    let mut table = pylon_realtime::ReplicaTable::new();
+    for _ in 0..20 {
+        s.run_tick();
+        assert!(frames_and_refusals(&q, &mut table).is_empty());
+    }
+    // The client drew tick 18 (its interpolation delay behind) and aimed at
+    // the target there, x = 36. With its view tick, the shot hits.
+    send(
+        &s,
+        "p1",
+        json!({ "input": { "shoot": [36.0, 0.0] }, "client_seq": 1, "view_tick": 18.0 }),
+    )
+    .unwrap();
+    // Halfway between ticks 18 and 19: x = 37.
+    send(
+        &s,
+        "p1",
+        json!({ "input": { "shoot": [37.0, 0.0] }, "client_seq": 2, "view_tick": 18.5 }),
+    )
+    .unwrap();
+    // Without a view tick, the shard checks where the target is now (x = 40).
+    send(
+        &s,
+        "p1",
+        json!({ "input": { "shoot": [36.0, 0.0] }, "client_seq": 3 }),
+    )
+    .unwrap();
+    // A view tick further back than the history is clamped to it (tick 10,
+    // x = 20): aiming at tick 2 (x = 4) misses.
+    send(
+        &s,
+        "p1",
+        json!({ "input": { "shoot": [4.0, 0.0] }, "client_seq": 4, "view_tick": 2.0 }),
+    )
+    .unwrap();
+    s.run_tick();
+    let refused = frames_and_refusals(&q, &mut table);
+    assert_eq!(refused.len(), 2, "{refused:?}");
+    assert!(refused.iter().all(|m| m.starts_with("miss")), "{refused:?}");
+}
+
+#[test]
+fn a_wasm_shard_without_history_ignores_view_ticks() {
+    let s = range(json!({ "history": 0 }));
+    let q = join(&s, "p1");
+    let mut table = pylon_realtime::ReplicaTable::new();
+    for _ in 0..20 {
+        s.run_tick();
+        frames_and_refusals(&q, &mut table);
+    }
+    send(
+        &s,
+        "p1",
+        json!({ "input": { "shoot": [36.0, 0.0] }, "client_seq": 1, "view_tick": 18.0 }),
+    )
+    .unwrap();
+    s.run_tick();
+    let refused = frames_and_refusals(&q, &mut table);
+    assert_eq!(refused.len(), 1, "{refused:?}");
+}
+
+#[test]
+fn a_module_importing_something_the_host_lacks_is_refused() {
+    // The host provides pylon.log, pylon.view_position, and pylon.view_near.
+    let module = wat::parse_str(
+        r#"(module (import "pylon" "view_everything" (func)) (memory (export "memory") 1))"#,
+    )
+    .unwrap();
+    let err = WasmShardKind::compile(
+        "bad",
+        &module,
+        config(SnapshotFormat::Json),
+        WasmLimits::default(),
+    )
+    .err()
+    .unwrap();
+    assert!(err.contains("pylon.view_everything"), "{err}");
+}
+
 #[test]
 fn a_wasm_shard_replicates_its_store_with_interest_and_stealth() {
     let s = field(json!({ "units": 40, "radius": 12.0 }));

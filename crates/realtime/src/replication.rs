@@ -41,9 +41,11 @@
 //! again on the stream.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
 use pylon_replication::datagram::{encode_entry_into, DatagramBuilder};
 use pylon_replication::frame::{encode_update_body_into, quantize3, ComponentChange, FrameBuilder};
+use pylon_replication::view::{self, ViewHistory};
 use pylon_replication::{EntityId, Replicated};
 
 use crate::interest::{EntityPos, InterestArea};
@@ -258,6 +260,90 @@ pub struct Replicator {
     /// Candidates in priority order, when the budget must choose: see
     /// `rank_key`.
     order: Vec<u128>,
+    /// Ticks of each subscription's view to keep; 0 = off (see
+    /// [`Replicator::set_history_ticks`]).
+    history_ticks: u32,
+    /// What each subscription was sent, when history is on. Shared with
+    /// the [`crate::Rewind`] an input gets; recording copies one only while
+    /// such a view is alive, which it is not while frames are built.
+    views: HashMap<u64, Arc<ViewHistory>>,
+    /// What the frame being built sends, for its subscription's view.
+    sends: Sends,
+}
+
+/// What one frame sends, for the subscription's [`ViewHistory`]. Empty and
+/// unused when history is off.
+#[derive(Debug, Default)]
+struct Sends {
+    on: bool,
+    spawned: Vec<view::Sent>,
+    updated: Vec<view::Sent>,
+    despawned: Vec<EntityId>,
+}
+
+impl Sends {
+    fn begin(&mut self, on: bool) {
+        self.on = on;
+        self.spawned.clear();
+        self.updated.clear();
+        self.despawned.clear();
+    }
+
+    fn spawn(&mut self, id: EntityId, q: [i64; 3]) {
+        if self.on {
+            self.spawned.push(view::Sent {
+                id,
+                q,
+                components_changed: false,
+            });
+        }
+    }
+
+    fn update(&mut self, id: EntityId, q: [i64; 3], components_changed: bool) {
+        if self.on {
+            self.updated.push(view::Sent {
+                id,
+                q,
+                components_changed,
+            });
+        }
+    }
+
+    fn despawn(&mut self, id: EntityId) {
+        if self.on {
+            self.despawned.push(id);
+        }
+    }
+
+    /// Record the frame in the subscription's view.
+    fn record(
+        &self,
+        views: &mut HashMap<u64, Arc<ViewHistory>>,
+        key: u64,
+        history_ticks: u32,
+        tick: u64,
+        precision: f32,
+        full: bool,
+    ) {
+        if !self.on {
+            return;
+        }
+        let keep = history_ticks as u64;
+        let v = views
+            .entry(key)
+            .or_insert_with(|| Arc::new(ViewHistory::new(keep)));
+        if v.keep_ticks() != keep {
+            *v = Arc::new(ViewHistory::new(keep));
+        }
+        Arc::make_mut(v).record(
+            tick,
+            precision,
+            full,
+            &self.spawned,
+            &self.updated,
+            &self.despawned,
+        );
+    }
 }
 
 /// What every subscriber's frame needs from one entity this tick. Built
@@ -305,6 +391,8 @@ struct Candidate {
     /// Where the entity's entry is in the new baseline.
     slot: usize,
     chosen: bool,
+    /// The update changes components.
+    components: bool,
 }
 
 impl Replicator {
@@ -315,6 +403,31 @@ impl Replicator {
     /// Drop baselines of subscriptions `keep` rejects.
     pub fn retain(&mut self, mut keep: impl FnMut(u64) -> bool) {
         self.baselines.retain(|k, _| keep(*k));
+        let baselines = &self.baselines;
+        self.views.retain(|k, _| baselines.contains_key(k));
+    }
+
+    /// Keep what each subscription is sent for `ticks` ticks, for
+    /// [`view`](Self::view). 0 turns it off and forgets the views.
+    pub fn set_history_ticks(&mut self, ticks: u32) {
+        self.history_ticks = ticks;
+        if ticks == 0 {
+            self.views.clear();
+        }
+    }
+
+    /// What subscription `key` was sent over the last history ticks (see
+    /// [`set_history_ticks`](Self::set_history_ticks)), placed the way its client
+    /// interpolates: where it drew each entity at an earlier tick. None when
+    /// history is off or the subscription has had no frame.
+    pub fn view(&self, key: u64) -> Option<&ViewHistory> {
+        self.views.get(&key).map(|v| &**v)
+    }
+
+    /// [`view`](Self::view), shared: for a [`crate::Rewind`] that outlives
+    /// the replicator's lock.
+    pub fn view_shared(&self, key: u64) -> Option<Arc<ViewHistory>> {
+        self.views.get(&key).cloned()
     }
 
     /// Call once per tick before `frame`.
@@ -388,6 +501,9 @@ impl Replicator {
             bodies,
             next,
             order,
+            views,
+            sends,
+            history_ticks,
             ..
         } = self;
         let visible: &[EntityId] = input.visible.unwrap_or(all_ids);
@@ -409,6 +525,7 @@ impl Replicator {
         base.dropped = input.dropped;
         base.precision = precision;
         let mut frame = FrameBuilder::new(full, precision);
+        sends.begin(*history_ticks > 0);
         if full {
             base.entities.clear();
         }
@@ -436,11 +553,13 @@ impl Replicator {
                 (Some(v), Some(h)) if h < v => {
                     had.next();
                     frame.despawn(h);
+                    sends.despawn(h);
                     continue;
                 }
                 (None, Some(h)) => {
                     had.next();
                     frame.despawn(h);
+                    sends.despawn(h);
                     continue;
                 }
                 (Some(v), Some(h)) if h == v => {
@@ -458,6 +577,7 @@ impl Replicator {
                 // Not in the store (a view can name an id it no longer has).
                 if sent.is_some() {
                     frame.despawn(id);
+                    sends.despawn(id);
                 }
                 continue;
             }
@@ -467,6 +587,7 @@ impl Replicator {
                     // The id names a new entity: nothing of the old one
                     // may linger, so it spawns again with its full state.
                     frame.despawn(id);
+                    sends.despawn(id);
                     None
                 }
                 other => other,
@@ -483,6 +604,7 @@ impl Replicator {
                         .collect::<Vec<_>>()
                         .into_iter(),
                 );
+                sends.spawn(id, t.q);
                 next.push((
                     id,
                     Sent {
@@ -537,6 +659,7 @@ impl Replicator {
                         seq,
                         slot: next.len(),
                         chosen: true,
+                        components: !changes.is_empty(),
                     });
                 }
             }
@@ -580,8 +703,10 @@ impl Replicator {
             }
             sent.seq = c.seq;
             sent.tick = tick;
+            sends.update(c.id, sent.q, c.components);
         }
         std::mem::swap(&mut base.entities, next);
+        sends.record(views, input.key, *history_ticks, tick, precision, full);
         FrameOutput {
             bytes: frame.finish(),
             delta_of: (!full).then_some(input.dropped),
@@ -605,6 +730,9 @@ impl Replicator {
             candidates,
             bodies,
             order,
+            views,
+            sends,
+            history_ticks,
             ..
         } = self;
         let visible: &[EntityId] = input.visible.unwrap_or(all_ids);
@@ -625,6 +753,7 @@ impl Replicator {
         base.dropped = input.dropped;
         base.precision = precision;
         let mut frame = FrameBuilder::new(full, precision);
+        sends.begin(*history_ticks > 0);
         let mut stream_has_changes = full;
         let old = std::mem::take(&mut base.entities);
         let old = if full {
@@ -678,12 +807,14 @@ impl Replicator {
                 (Some(v), Some(h)) if h < v => {
                     had.next();
                     frame.despawn(h);
+                    sends.despawn(h);
                     stream_has_changes = true;
                     continue;
                 }
                 (None, Some(h)) => {
                     had.next();
                     frame.despawn(h);
+                    sends.despawn(h);
                     stream_has_changes = true;
                     continue;
                 }
@@ -701,6 +832,7 @@ impl Replicator {
             if !found {
                 if sent.is_some() {
                     frame.despawn(id);
+                    sends.despawn(id);
                     stream_has_changes = true;
                 }
                 continue;
@@ -714,12 +846,14 @@ impl Replicator {
                         || sent.unacked.len() >= MAX_UNACKED_PER_ENTITY =>
                 {
                     frame.despawn(id);
+                    sends.despawn(id);
                     None
                 }
                 other => other,
             };
             let Some(mut sent) = sent else {
                 let s = spawn(&mut frame, &t);
+                sends.spawn(id, t.q);
                 stream_has_changes = true;
                 entities.push((id, s));
                 continue;
@@ -756,7 +890,9 @@ impl Replicator {
                         // again on the stream.
                         bodies.truncate(start);
                         frame.despawn(id);
+                        sends.despawn(id);
                         let s = spawn(&mut frame, &t);
+                        sends.spawn(id, t.q);
                         stream_has_changes = true;
                         entities.push((id, s));
                         continue;
@@ -777,6 +913,7 @@ impl Replicator {
                         seq,
                         slot: entities.len(),
                         chosen: true,
+                        components: !changes.is_empty(),
                     });
                 }
             }
@@ -841,6 +978,7 @@ impl Replicator {
             held.push((c.id, sent.spawn_tick));
             sent.unacked.push((*number, c.seq, c.delta));
             sent.sent_tick = tick;
+            sends.update(c.id, c.delta, c.components);
         }
         if packed.is_empty() && !full {
             // Nothing new in datagrams: one empty datagram still carries
@@ -872,6 +1010,7 @@ impl Replicator {
             base.sent.pop_front();
         }
         base.entities = entities;
+        sends.record(views, input.key, *history_ticks, tick, precision, full);
         let bytes = if stream_has_changes {
             frame.finish()
         } else {
@@ -1280,5 +1419,134 @@ mod tests {
                 .unwrap();
         }
         assert_matches(&table, &store, &[1], 1.0);
+    }
+
+    /// At each frame's tick, the view places every entity where the
+    /// subscriber's table has it: what it was sent, not the store.
+    fn assert_view_matches_table(
+        rep: &Replicator,
+        key: u64,
+        table: &ReplicaTable,
+        tick: u64,
+        precision: f32,
+    ) {
+        let view = rep.view(key).expect("history is on");
+        for (id, e) in &table.entities {
+            let want = e.q.map(|v| v as f64 * precision as f64);
+            assert_eq!(
+                view.position_at(*id, tick as f64),
+                Some(want),
+                "entity {id} at tick {tick}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_view_rewinds_a_deferred_update_to_what_the_subscriber_was_sent() {
+        let config = ReplicationConfig {
+            precision: 0.1,
+            max_bytes_per_tick: 30,
+            plane: Plane::XY,
+        };
+        let mut store = Replicated::new();
+        for id in 0..40u64 {
+            store.spawn(id, [id as f32 * 10.0, 0.0, 0.0]);
+        }
+        let mut rep = Replicator::new();
+        rep.set_history_ticks(20);
+        let mut table = ReplicaTable::new();
+        let area = Some(InterestArea {
+            x: 0.0,
+            y: 0.0,
+            radius: 50.0,
+        });
+        let mut deferred_seen = false;
+        for tick in 1..30u64 {
+            for id in 0..40u64 {
+                store.set_pos(id, [id as f32 * 10.0 + tick as f32, 0.0, 0.0]);
+            }
+            rep.begin_tick(&store);
+            let mut i = input(1, None);
+            i.area = area;
+            table
+                .apply(&rep.frame(&store, &config, tick, i).bytes)
+                .unwrap();
+            assert_view_matches_table(&rep, 1, &table, tick, config.precision);
+            // The budget holds back far entities: their view lags the store.
+            let far = rep.view(1).unwrap().position_at(39, tick as f64).unwrap();
+            if (far[0] - store.get(39).unwrap().pos[0] as f64).abs() > 0.5 {
+                deferred_seen = true;
+            }
+        }
+        assert!(deferred_seen, "the budget never deferred entity 39");
+        // A tick between two frames is placed between their positions.
+        let v = rep.view(1).unwrap();
+        let a = v.position_at(0, 20.0).unwrap()[0];
+        let b = v.position_at(0, 21.0).unwrap()[0];
+        let mid = v.position_at(0, 20.5).unwrap()[0];
+        assert!((mid - (a + b) / 2.0).abs() < 1e-9, "{a} {mid} {b}");
+    }
+
+    #[test]
+    fn the_view_follows_datagram_updates_spawns_and_despawns() {
+        let config = ReplicationConfig {
+            precision: 0.01,
+            max_bytes_per_tick: 0,
+            plane: Plane::XY,
+        };
+        let mut store = Replicated::new();
+        store.spawn(1, [0.0, 0.0, 0.0]);
+        store.spawn(2, [5.0, 0.0, 0.0]);
+        let mut rep = Replicator::new();
+        rep.set_history_ticks(10);
+        let mut table = ReplicaTable::new();
+        let dg = DatagramInput {
+            max_size: 1200,
+            input_ack: 0,
+        };
+        for tick in 1..15u64 {
+            store.set_pos(1, [tick as f32, 0.0, 0.0]);
+            if tick == 6 {
+                store.despawn(2);
+            }
+            rep.begin_tick(&store);
+            let mut i = input(7, None);
+            i.datagram = Some(dg);
+            let out = rep.frame(&store, &config, tick, i);
+            if !out.bytes.is_empty() {
+                table.apply_stream(&out.bytes, tick).unwrap();
+            }
+            for d in &out.datagrams {
+                table.apply_datagram(d).unwrap();
+            }
+            assert_view_matches_table(&rep, 7, &table, tick, config.precision);
+        }
+        let v = rep.view(7).unwrap();
+        // Positions are q times the precision, in f64, as the clients compute.
+        let p = config.precision as f64;
+        assert_eq!(v.position_at(2, 5.5), Some([500.0 * p, 0.0, 0.0]));
+        assert_eq!(v.position_at(2, 6.0), None, "despawned at tick 6");
+        let at = v.position_at(1, 9.5).unwrap()[0];
+        assert_eq!(at, 900.0 * p + (1000.0 * p - 900.0 * p) * 0.5);
+    }
+
+    #[test]
+    fn history_off_keeps_no_view_and_turning_it_off_forgets_them() {
+        let config = ReplicationConfig::default();
+        let mut store = Replicated::new();
+        store.spawn(1, [1.0, 2.0, 3.0]);
+        let mut rep = Replicator::new();
+        rep.begin_tick(&store);
+        rep.frame(&store, &config, 1, input(1, None));
+        assert!(rep.view(1).is_none());
+        rep.set_history_ticks(5);
+        rep.frame(&store, &config, 2, input(1, None));
+        assert!(rep.view(1).is_some());
+        // A subscription that leaves takes its view along.
+        rep.retain(|_| false);
+        assert!(rep.view(1).is_none());
+        rep.frame(&store, &config, 3, input(2, None));
+        rep.set_history_ticks(0);
+        assert!(rep.view(2).is_none());
     }
 }

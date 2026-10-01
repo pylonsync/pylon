@@ -147,7 +147,12 @@ export interface ShardClient<TSnapshot = unknown, TInput = unknown> {
    * acknowledge, or 0 when the connection is not open (the input is not
    * sent, and `onError` hears why).
    */
-  send: (input: TInput) => number;
+  /**
+   * `viewTick`: the tick (fractional) the client was drawing when the
+   * player acted, for a shard with lag compensation. `connectShardGame`
+   * sets it from the last `frame`.
+   */
+  send: (input: TInput, viewTick?: number) => number;
   close: () => void;
   readonly connected: boolean;
   /** The transport of the open (or last) connection, or null before one opened. */
@@ -1041,13 +1046,13 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
     onClose(fn) {
       closeHandlers.push(fn);
     },
-    send(input: TInput): number {
+    send(input: TInput, viewTick?: number): number {
       if (!link || !connected || !link.open) {
         dispatchError(new Error("Cannot send: shard connection is not open"));
         return 0;
       }
       clientSeq += 1;
-      link.send(encodeShardInput(codec, input, clientSeq));
+      link.send(encodeShardInput(codec, input, clientSeq, viewTick));
       sentAt.set(clientSeq, now());
       if (sentAt.size > MAX_TIMED) sentAt.delete(sentAt.keys().next().value as number);
       return clientSeq;

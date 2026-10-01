@@ -12,6 +12,7 @@ use crate::outbound::{OutboundConfig, OutboundQueue};
 use crate::replication::{
     entity_positions, DatagramInput, FrameInput, ReplicatedRef, ReplicationConfig, Replicator,
 };
+use crate::rewind::{clamp_view_tick, LagCompensation, Rewind};
 use crate::snapshot::EncodeSnapshot;
 use crate::stats::{Phases, ShardStats, StatsRecorder, TickSample};
 use crate::subscriber::{Subscriber, SubscriberId};
@@ -231,6 +232,30 @@ pub trait SimState: Send + 'static {
     fn replication_config(&self) -> ReplicationConfig {
         ReplicationConfig::default()
     }
+
+    /// Lag compensation (see [`crate::rewind`]): keep what each subscriber
+    /// was sent, and give [`apply_input_at`](Self::apply_input_at) a view of
+    /// what it drew. Called once per tick while `replicated` returns a
+    /// store. Default: off.
+    fn lag_compensation(&self) -> Option<LagCompensation> {
+        None
+    }
+
+    /// [`apply_input`](Self::apply_input), with what the subscriber drew when
+    /// it acted. `view` is set when lag compensation is on and the input
+    /// carried a view tick: check an aimed action against
+    /// [`Rewind::position_at`] or [`Rewind::entities_near`]. Default: calls
+    /// `apply_input`.
+    fn apply_input_at(
+        &mut self,
+        subscriber_id: &SubscriberId,
+        input: Self::Input,
+        now: Instant,
+        view: Option<&Rewind>,
+    ) -> Result<(), Self::Error> {
+        let _ = view;
+        self.apply_input(subscriber_id, input, now)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -398,6 +423,8 @@ struct PendingInput<I> {
     /// The client's sequence number, echoed back as the subscriber's ack
     /// (see [`crate::wire`]).
     seq: Option<u64>,
+    /// The tick the client was drawing when it sent the input, unclamped.
+    view_tick: Option<f64>,
     received_at: Instant,
 }
 
@@ -1121,6 +1148,19 @@ impl<S: SimState> Shard<S> {
         input: S::Input,
         client_seq: Option<u64>,
     ) -> Result<u64, ShardError> {
+        self.push_input_at(subscriber_id, input, client_seq, None)
+    }
+
+    /// [`push_input`](Self::push_input) with the tick the client was drawing
+    /// (see [`crate::rewind`]). **Unauthenticated**, like `push_input`.
+    #[doc(hidden)]
+    pub fn push_input_at(
+        &self,
+        subscriber_id: SubscriberId,
+        input: S::Input,
+        client_seq: Option<u64>,
+        view_tick: Option<f64>,
+    ) -> Result<u64, ShardError> {
         if !self.is_running() {
             return Err(ShardError::Stopped);
         }
@@ -1202,6 +1242,7 @@ impl<S: SimState> Shard<S> {
                 generation,
                 input,
                 seq: client_seq,
+                view_tick,
                 received_at: now,
             });
         }
@@ -1232,6 +1273,19 @@ impl<S: SimState> Shard<S> {
         client_seq: Option<u64>,
         auth: &ShardAuth,
     ) -> Result<u64, ShardError> {
+        self.push_input_authorized_at(subscriber_id, input, client_seq, None, auth)
+    }
+
+    /// [`push_input_authorized`](Self::push_input_authorized) with the tick
+    /// the client was drawing (see [`crate::rewind`]).
+    pub fn push_input_authorized_at(
+        &self,
+        subscriber_id: SubscriberId,
+        input: S::Input,
+        client_seq: Option<u64>,
+        view_tick: Option<f64>,
+        auth: &ShardAuth,
+    ) -> Result<u64, ShardError> {
         // Confirm the id is actually attached to this shard. A missing
         // subscriber means either the client disconnected between opening
         // a channel and sending their input, or the caller is forging.
@@ -1254,7 +1308,7 @@ impl<S: SimState> Shard<S> {
                 return Err(ShardError::Unauthorized(reason));
             }
         }
-        self.push_input(subscriber_id, input, client_seq)
+        self.push_input_at(subscriber_id, input, client_seq, view_tick)
     }
 
     // -----------------------------------------------------------------------
@@ -1553,6 +1607,23 @@ impl<S: SimState> Shard<S> {
             let generations = self.generations.lock().unwrap();
             let mut acks = self.acks.lock().unwrap();
             let recorder = self.input_recorder.lock().unwrap();
+            // Lag compensation: each input's view of what its subscriber was
+            // sent. The replicator is locked after the state, as in
+            // `replication_frames`, and released before it runs.
+            let lag = if state.replicated().is_some() {
+                state.lag_compensation()
+            } else {
+                None
+            };
+            let mut replicator = self.replicator.lock().unwrap();
+            replicator.set_history_ticks(lag.map_or(0, |l| l.history_ticks));
+            // The nominal tick, not this tick's measured one: the round-trip
+            // bound is in ticks of the shard's rate.
+            let tick_ms = if self.config.tick_rate_hz > 0 {
+                1000.0 / self.config.tick_rate_hz as f64
+            } else {
+                dt.as_secs_f64() * 1000.0
+            };
             for pending in drained {
                 if let Some(record) = &*recorder {
                     record(tick_number, &pending.subscriber_id, &pending.input);
@@ -1564,9 +1635,29 @@ impl<S: SimState> Shard<S> {
                         *ack = (*ack).max(seq);
                     }
                 }
-                if let Err(e) =
-                    state.apply_input(&pending.subscriber_id, pending.input, pending.received_at)
-                {
+                let view = match (lag, pending.view_tick) {
+                    (Some(lag), Some(view_tick)) => {
+                        // The newest connection under the id: its frames are
+                        // what the client drew.
+                        let sub = subs.iter().rev().find(|s| s.id() == &pending.subscriber_id);
+                        let rtt = sub.and_then(|s| s.queue()).and_then(|q| q.rtt());
+                        // The newest frames went out for the previous tick.
+                        clamp_view_tick(view_tick, tick_number - 1, &lag, rtt, tick_ms).map(|t| {
+                            Rewind::new(
+                                t,
+                                tick_number as f64,
+                                sub.and_then(|s| replicator.view_shared(s.instance())),
+                            )
+                        })
+                    }
+                    _ => None,
+                };
+                if let Err(e) = state.apply_input_at(
+                    &pending.subscriber_id,
+                    pending.input,
+                    pending.received_at,
+                    view.as_ref(),
+                ) {
                     tracing::warn!("[realtime] apply_input error in shard {}: {e}", self.id);
                     failed.push((
                         pending.subscriber_id,
@@ -1578,6 +1669,7 @@ impl<S: SimState> Shard<S> {
                     ));
                 }
             }
+            drop(replicator);
             drop(acks);
             drop(generations);
             drop(recorder);

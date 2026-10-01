@@ -86,6 +86,14 @@
 //! | --- | --- |
 //! | `pylon_replication() -> i32` | `0` off. `1` on, output: precision (f32), byte budget (u32), flags (u8: bit 0 x/z plane, bit 1 full dump), then a `pylon_replication` change log. The first call sends a full dump; later calls send the changes since the previous call. |
 //!
+//! Optional exports for lag compensation. A module exports both or
+//! neither; `export_shard!` exports both.
+//!
+//! | Export | Meaning |
+//! | --- | --- |
+//! | `pylon_lag_compensation() -> i32` | `0` off. `1` on, output: history ticks (u32), max view delay in ms (u32). The host reads it once, after `pylon_init` or `pylon_restore`. |
+//! | `pylon_apply_input_at(sid_ptr, sid_len, in_ptr, in_len, view_tick: f64, now_tick: f64) -> status` | As `pylon_apply_input`, for an input that carried a view tick; `view_tick` is clamped, and `now_tick` is the tick the input applies on. During this call the module may call `pylon.view_position` and `pylon.view_near`. |
+//!
 //! Optional exports for saved state. A module exports both or neither.
 //!
 //! | Export | Meaning |
@@ -128,8 +136,15 @@
 //! Status `0` is success. Status `1` is an error or a refusal, with a UTF-8
 //! message in the output. A trap stops the shard.
 //!
-//! The one import is `pylon.log(level: i32, ptr, len)`, levels `0` debug to
-//! `3` error. The host refuses a module with any other import.
+//! The imports:
+//!
+//! | Import | Meaning |
+//! | --- | --- |
+//! | `pylon.log(level: i32, ptr, len)` | A log line, levels `0` debug to `3` error. |
+//! | `pylon.view_position(id: i64, out_ptr) -> i32` | During `pylon_apply_input_at`: `1` and three f64 (x, y, z) at `out_ptr` for where the subscriber drew entity `id` at the view tick; `0` when it did not draw it. |
+//! | `pylon.view_near(x: f64, y: f64, z: f64, radius: f64, out_ptr, cap) -> i32` | During `pylon_apply_input_at`: how many entities the subscriber drew within `radius` of the point at the view tick, and up to `cap` of them at `out_ptr`, 32 bytes each (id u64, x, y, z f64), in id order. |
+//!
+//! All little-endian. The host refuses a module with any other import.
 
 use std::cell::UnsafeCell;
 use std::time::Duration;
@@ -193,6 +208,22 @@ pub trait Shard: Sized + 'static {
     /// Apply one input. Called on the tick, in arrival order. An error goes
     /// back to the sender as an `apply_failed` rejection.
     fn apply_input(&mut self, subscriber: &str, input: Self::Input) -> Result<(), String>;
+
+    /// [`apply_input`](Self::apply_input), with what the subscriber drew when
+    /// it acted (lag compensation, see [`Shard::lag_compensation`]): check
+    /// an aimed action against [`Rewind::position_at`] or
+    /// [`Rewind::entities_near`]. Called in place of `apply_input` when lag
+    /// compensation is on and the input carried a view tick. Default: calls
+    /// `apply_input`.
+    fn apply_input_at(
+        &mut self,
+        subscriber: &str,
+        input: Self::Input,
+        rewind: &Rewind,
+    ) -> Result<(), String> {
+        let _ = rewind;
+        self.apply_input(subscriber, input)
+    }
 
     /// Advance time by `dt`: the shard's fixed step, or the measured time
     /// for an event-driven shard.
@@ -276,6 +307,16 @@ pub trait Shard: Sized + 'static {
     /// Settings for the replication frames.
     fn replication_config(&self) -> ReplicationConfig {
         ReplicationConfig::default()
+    }
+
+    /// Lag compensation for a replicating shard. The host keeps what it sent
+    /// each subscriber over the last `history_ticks` ticks; an input that
+    /// carries the tick its client was drawing then reaches
+    /// [`apply_input_at`](Self::apply_input_at) with a [`Rewind`] of that
+    /// picture. The host reads this once, when the shard starts. Default:
+    /// off.
+    fn lag_compensation(&self) -> Option<LagCompensation> {
+        None
     }
 
     // -- Saved state (optional) -------------------------------------------
@@ -464,6 +505,174 @@ impl Default for ReplicationConfig {
             max_bytes_per_tick: 0,
             y_up: false,
         }
+    }
+}
+
+/// Lag compensation settings (see [`Shard::lag_compensation`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LagCompensation {
+    /// Ticks of what each subscriber was sent to keep: how far back a
+    /// [`Rewind`] reaches. 10 ticks at 20 Hz is 500 ms.
+    pub history_ticks: u32,
+    /// How far behind the shard a client may draw beyond its round trip:
+    /// its interpolation delay plus jitter. The host clamps view ticks
+    /// older than the round trip plus this. Default 250 ms.
+    pub max_view_delay_ms: u32,
+}
+
+impl LagCompensation {
+    /// Keep `history_ticks` ticks, with the default view delay allowance.
+    pub fn new(history_ticks: u32) -> Self {
+        Self {
+            history_ticks,
+            max_view_delay_ms: 250,
+        }
+    }
+}
+
+/// What a subscriber drew at the tick it acted on: where the host's frames
+/// to that subscriber, interpolated as its client interpolates them, placed
+/// each entity then. Given to [`Shard::apply_input_at`].
+#[derive(Debug, Clone)]
+pub struct Rewind {
+    tick: f64,
+    now_tick: f64,
+    /// Fixed positions for a test; None asks the host.
+    fixed: Option<std::collections::BTreeMap<EntityId, [f64; 3]>>,
+}
+
+impl Rewind {
+    /// A rewind with fixed positions, for testing game code outside the
+    /// host: the subscriber drew them at `tick`, and the input applies on
+    /// `now_tick`.
+    pub fn with_positions(
+        tick: f64,
+        now_tick: f64,
+        positions: impl IntoIterator<Item = (EntityId, [f64; 3])>,
+    ) -> Self {
+        Self {
+            tick,
+            now_tick,
+            fixed: Some(positions.into_iter().collect()),
+        }
+    }
+
+    /// The tick (fractional) the subscriber was drawing, clamped by the
+    /// host.
+    pub fn tick(&self) -> f64 {
+        self.tick
+    }
+
+    /// The tick the input applies on: the one the simulation advances to
+    /// next.
+    pub fn now_tick(&self) -> f64 {
+        self.now_tick
+    }
+
+    /// How many ticks (fractional) the subscriber's picture was behind the
+    /// shard: for a projectile, how far to advance it to catch up.
+    pub fn ticks_behind(&self) -> f64 {
+        self.now_tick - self.tick
+    }
+
+    /// Where the subscriber drew `id`, or None when it did not draw it
+    /// (out of its view, not spawned yet, or gone).
+    pub fn position_at(&self, id: EntityId) -> Option<[f64; 3]> {
+        if let Some(fixed) = &self.fixed {
+            return fixed.get(&id).copied();
+        }
+        host_rewind::position(id)
+    }
+
+    /// The entities the subscriber drew within `radius` of `center` (3D
+    /// distance), with their positions then, in id order. Narrow a cone or
+    /// a swing arc from these.
+    pub fn entities_near(&self, center: [f64; 3], radius: f64) -> Vec<(EntityId, [f64; 3])> {
+        if let Some(fixed) = &self.fixed {
+            let r2 = radius * radius;
+            return fixed
+                .iter()
+                .filter(|(_, p)| {
+                    let d = [p[0] - center[0], p[1] - center[1], p[2] - center[2]];
+                    d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= r2
+                })
+                .map(|(id, p)| (*id, *p))
+                .collect();
+        }
+        host_rewind::near(center, radius)
+    }
+}
+
+/// The host's answers for the input being applied (`pylon.view_position`
+/// and `pylon.view_near`). A module that never calls them does not import
+/// them.
+mod host_rewind {
+    use super::EntityId;
+
+    #[cfg(target_family = "wasm")]
+    #[link(wasm_import_module = "pylon")]
+    extern "C" {
+        fn view_position(id: i64, out: *mut f64) -> i32;
+        fn view_near(cx: f64, cy: f64, cz: f64, radius: f64, out: *mut u8, cap: i32) -> i32;
+    }
+
+    #[cfg(target_family = "wasm")]
+    pub fn position(id: EntityId) -> Option<[f64; 3]> {
+        let mut out = [0f64; 3];
+        // SAFETY: the host writes three f64 at `out` when it returns 1.
+        let found = unsafe { view_position(id as i64, out.as_mut_ptr()) };
+        (found == 1).then_some(out)
+    }
+
+    #[cfg(target_family = "wasm")]
+    pub fn near(center: [f64; 3], radius: f64) -> Vec<(EntityId, [f64; 3])> {
+        const ENTRY: usize = 32;
+        let mut cap = 64usize;
+        loop {
+            let mut buf = vec![0u8; cap * ENTRY];
+            // SAFETY: the host writes at most `cap` entries of 32 bytes at
+            // `buf` and returns how many there are in all.
+            let n = unsafe {
+                view_near(
+                    center[0],
+                    center[1],
+                    center[2],
+                    radius,
+                    buf.as_mut_ptr(),
+                    cap as i32,
+                )
+            };
+            if n < 0 {
+                return Vec::new();
+            }
+            let n = n as usize;
+            if n > cap {
+                cap = n;
+                continue;
+            }
+            return buf[..n * ENTRY]
+                .as_chunks::<ENTRY>()
+                .0
+                .iter()
+                .map(|e| {
+                    let f = |i: usize| f64::from_le_bytes(e[i..i + 8].try_into().unwrap());
+                    (
+                        u64::from_le_bytes(e[..8].try_into().unwrap()),
+                        [f(8), f(16), f(24)],
+                    )
+                })
+                .collect();
+        }
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn position(_id: EntityId) -> Option<[f64; 3]> {
+        None
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn near(_center: [f64; 3], _radius: f64) -> Vec<(EntityId, [f64; 3])> {
+        Vec::new()
     }
 }
 
@@ -668,6 +877,21 @@ macro_rules! export_shard {
             #[no_mangle]
             pub extern "C" fn pylon_replication() -> i32 {
                 RUNTIME.replication()
+            }
+            #[no_mangle]
+            pub extern "C" fn pylon_lag_compensation() -> i32 {
+                RUNTIME.lag_compensation()
+            }
+            #[no_mangle]
+            pub extern "C" fn pylon_apply_input_at(
+                sp: i32,
+                sl: i32,
+                ip: i32,
+                il: i32,
+                view_tick: f64,
+                now_tick: f64,
+            ) -> i32 {
+                RUNTIME.apply_input_at(sp, sl, ip, il, view_tick, now_tick)
             }
             #[no_mangle]
             pub extern "C" fn pylon_save() -> i32 {
@@ -1028,6 +1252,45 @@ pub mod __rt {
                 Ok(()) => OK,
                 Err(e) => fail(&mut s.output, e),
             }
+        }
+
+        pub fn apply_input_at(
+            &self,
+            sp: i32,
+            sl: i32,
+            ip: i32,
+            il: i32,
+            view_tick: f64,
+            now_tick: f64,
+        ) -> i32 {
+            let s = self.state();
+            // SAFETY: host-written arguments in the scratch buffer.
+            let (sid, input) = unsafe { (arg_str(sp, sl), arg(ip, il)) };
+            let input: T::Input = match s.codec.decode(input) {
+                Ok(v) => v,
+                Err(e) => return fail(&mut s.output, format!("invalid input: {e}")),
+            };
+            let rewind = crate::Rewind {
+                tick: view_tick,
+                now_tick,
+                fixed: None,
+            };
+            match shard(&mut s.shard).apply_input_at(sid, input, &rewind) {
+                Ok(()) => OK,
+                Err(e) => fail(&mut s.output, e),
+            }
+        }
+
+        pub fn lag_compensation(&self) -> i32 {
+            let s = self.state();
+            let Some(lag) = shard(&mut s.shard).lag_compensation() else {
+                return 0;
+            };
+            s.output.clear();
+            s.output.extend_from_slice(&lag.history_ticks.to_le_bytes());
+            s.output
+                .extend_from_slice(&lag.max_view_delay_ms.to_le_bytes());
+            1
         }
 
         pub fn tick(&self, dt_nanos: i64) {

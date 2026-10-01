@@ -47,9 +47,13 @@ impl ShardInput for RawInput {
         shard: SnapshotFormat,
         bytes: &[u8],
     ) -> Result<InputEnvelope<Self>, String> {
-        let (range, client_seq) = split_envelope(wire, bytes)?;
-        let input = convert(wire, shard, &bytes[range])?;
-        Ok(InputEnvelope { input, client_seq })
+        let split = split_envelope(wire, bytes)?;
+        let input = convert(wire, shard, &bytes[split.input])?;
+        Ok(InputEnvelope {
+            input,
+            client_seq: split.client_seq,
+            view_tick: split.view_tick,
+        })
     }
 
     fn decode_json(body: &str, shard: SnapshotFormat) -> Result<Self, String> {
@@ -130,12 +134,17 @@ fn convert(wire: SnapshotFormat, shard: SnapshotFormat, bytes: &[u8]) -> Result<
     }
 }
 
-/// Find the `input` value inside an envelope without decoding it. Returns
-/// its byte range and the envelope's `client_seq`.
-fn split_envelope(
-    wire: SnapshotFormat,
-    bytes: &[u8],
-) -> Result<(Range<usize>, Option<u64>), String> {
+/// An envelope with its `input` left undecoded.
+struct Split {
+    /// The `input` value's bytes.
+    input: Range<usize>,
+    client_seq: Option<u64>,
+    view_tick: Option<f64>,
+}
+
+/// Find the `input` value inside an envelope without decoding it, and read
+/// the envelope's `client_seq` and `view_tick`.
+fn split_envelope(wire: SnapshotFormat, bytes: &[u8]) -> Result<Split, String> {
     match wire {
         SnapshotFormat::Json | SnapshotFormat::JsonCompact => split_json(bytes),
         SnapshotFormat::MessagePack => {
@@ -155,23 +164,29 @@ fn split_envelope(
     }
 }
 
-fn split_json(bytes: &[u8]) -> Result<(Range<usize>, Option<u64>), String> {
+fn split_json(bytes: &[u8]) -> Result<Split, String> {
     #[derive(Deserialize)]
     struct Envelope<'a> {
         #[serde(borrow)]
         input: &'a serde_json::value::RawValue,
         #[serde(default)]
         client_seq: Option<u64>,
+        #[serde(default)]
+        view_tick: Option<f64>,
     }
     let env: Envelope = serde_json::from_slice(bytes).map_err(|e| format!("json: {e}"))?;
     let raw = env.input.get().as_bytes();
     // `raw` borrows from `bytes`, so its offset is the pointer difference.
     let start = raw.as_ptr() as usize - bytes.as_ptr() as usize;
-    Ok((start..start + raw.len(), env.client_seq))
+    Ok(Split {
+        input: start..start + raw.len(),
+        client_seq: env.client_seq,
+        view_tick: env.view_tick,
+    })
 }
 
 #[cfg(feature = "msgpack")]
-fn split_msgpack(bytes: &[u8]) -> Result<(Range<usize>, Option<u64>), String> {
+fn split_msgpack(bytes: &[u8]) -> Result<Split, String> {
     use serde::de::IgnoredAny;
 
     let err = |e: &dyn std::fmt::Display| format!("msgpack: {e}");
@@ -179,6 +194,7 @@ fn split_msgpack(bytes: &[u8]) -> Result<(Range<usize>, Option<u64>), String> {
     let len = rmp::decode::read_map_len(&mut rd).map_err(|e| err(&e))?;
     let mut input = None;
     let mut client_seq = None;
+    let mut view_tick = None;
     for _ in 0..len {
         let key_len = rmp::decode::read_str_len(&mut rd).map_err(|e| err(&e))? as usize;
         if rd.len() < key_len {
@@ -197,6 +213,10 @@ fn split_msgpack(bytes: &[u8]) -> Result<(Range<usize>, Option<u64>), String> {
                 client_seq = Option::<u64>::deserialize(&mut rmp_serde::Deserializer::new(&mut rd))
                     .map_err(|e| err(&e))?;
             }
+            b"view_tick" => {
+                view_tick = Option::<f64>::deserialize(&mut rmp_serde::Deserializer::new(&mut rd))
+                    .map_err(|e| err(&e))?;
+            }
             _ => {
                 IgnoredAny::deserialize(&mut rmp_serde::Deserializer::new(&mut rd))
                     .map_err(|e| err(&e))?;
@@ -204,7 +224,11 @@ fn split_msgpack(bytes: &[u8]) -> Result<(Range<usize>, Option<u64>), String> {
         }
     }
     let input = input.ok_or_else(|| "msgpack: missing field `input`".to_string())?;
-    Ok((input, client_seq))
+    Ok(Split {
+        input,
+        client_seq,
+        view_tick,
+    })
 }
 
 #[cfg(test)]

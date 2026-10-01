@@ -17,7 +17,7 @@
 //! gets the newest snapshots.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -106,6 +106,9 @@ pub struct OutboundQueue {
     /// Datagram acks from the client, for the shard to take on its next
     /// tick: (datagram number, the client's stream tick then).
     datagram_acks: Mutex<Vec<(u64, u64)>>,
+    /// The connection's round trip in microseconds, as the transport
+    /// measures it; 0 until it has.
+    rtt_us: AtomicU64,
     state: Mutex<State>,
     ready: Condvar,
     closed: AtomicBool,
@@ -123,6 +126,7 @@ impl OutboundQueue {
             },
             datagram_max: AtomicUsize::new(0),
             datagram_acks: Mutex::new(Vec::new()),
+            rtt_us: AtomicU64::new(0),
             state: Mutex::new(State {
                 frames: VecDeque::new(),
                 full_since: None,
@@ -171,6 +175,36 @@ impl OutboundQueue {
     /// The acks received since the last call.
     pub fn take_datagram_acks(&self) -> Vec<(u64, u64)> {
         std::mem::take(&mut *self.datagram_acks.lock().unwrap())
+    }
+
+    /// Set the connection's round trip from an estimate the transport
+    /// already smooths (QUIC's).
+    pub fn set_rtt(&self, rtt: Duration) {
+        self.rtt_us.store(
+            rtt.as_micros().clamp(1, u64::MAX as u128) as u64,
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Add one round-trip sample (a ping's pong): the estimate moves an
+    /// eighth of the way to it, as TCP's smoothed round trip does.
+    pub fn record_rtt_sample(&self, rtt: Duration) {
+        let sample = rtt.as_micros().clamp(1, u64::MAX as u128) as u64;
+        let old = self.rtt_us.load(Ordering::Relaxed);
+        let next = if old == 0 {
+            sample
+        } else {
+            (old as i128 + (sample as i128 - old as i128) / 8).max(1) as u64
+        };
+        self.rtt_us.store(next, Ordering::Relaxed);
+    }
+
+    /// The connection's round trip, once the transport has measured it.
+    pub fn rtt(&self) -> Option<Duration> {
+        match self.rtt_us.load(Ordering::Relaxed) {
+            0 => None,
+            us => Some(Duration::from_micros(us)),
+        }
     }
 
     pub fn len(&self) -> usize {

@@ -82,6 +82,7 @@ namespace Pylon.Realtime
         readonly int _maxSamples;
         double _lastTick = -1;
         double _floor = double.NegativeInfinity;
+        double _drawn = -1;
 
         /// <param name="snapDistance">A move longer than this (world units) between two samples is a teleport.</param>
         /// <param name="holdWhenQuiet">
@@ -111,6 +112,14 @@ namespace Pylon.Realtime
         /// <summary>The newest tick recorded, or -1.</summary>
         public double LatestTick => _lastTick;
 
+        /// <summary>
+        /// The render tick the last <see cref="Update"/> placed entities at
+        /// (after raising it to what an earlier update drew), or -1 before the
+        /// first update. This is the tick the player saw: the view tick for
+        /// lag compensation.
+        /// </summary>
+        public double DrawnTick => _drawn;
+
         /// <summary>Forget everything. The next update removes every entity.</summary>
         public void Clear()
         {
@@ -118,6 +127,7 @@ namespace Pylon.Realtime
             _ended.Clear();
             _lastTick = -1;
             _floor = double.NegativeInfinity;
+            _drawn = -1;
         }
 
         /// <summary>Record the table after a frame for <paramref name="tick"/> applied, with the summary it returned.</summary>
@@ -172,6 +182,7 @@ namespace Pylon.Realtime
             Entered.Clear();
             Left.Clear();
             renderTick = Math.Max(renderTick, _floor);
+            _drawn = renderTick;
             _floor = Math.Min(renderTick, _lastTick);
             var gone = new List<ulong>();
             foreach (var kv in _lives)

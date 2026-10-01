@@ -191,12 +191,17 @@ pub struct InputRejection {
     pub message: String,
 }
 
-/// A client input with its optional sequence number.
+/// A client input with its optional sequence number and view tick.
 #[derive(Debug, Clone, Deserialize)]
 pub struct InputEnvelope<I> {
     pub input: I,
     #[serde(default)]
     pub client_seq: Option<u64>,
+    /// The tick (fractional) the client was drawing when the player acted,
+    /// for lag compensation. The shard clamps it (see
+    /// [`crate::rewind::LagCompensation`]).
+    #[serde(default)]
+    pub view_tick: Option<f64>,
 }
 
 /// Decode an input envelope in `format`.
@@ -221,10 +226,15 @@ pub fn decode_input_envelope<I: DeserializeOwned>(
         SnapshotFormat::Bincode => {
             #[cfg(feature = "bincode")]
             {
-                // Bincode has no field names: the envelope is (input, client_seq).
+                // Bincode has no field names: the envelope is (input,
+                // client_seq), with no view tick.
                 let (input, client_seq): (I, Option<u64>) =
                     bincode::deserialize(bytes).map_err(|e| format!("bincode: {e}"))?;
-                Ok(InputEnvelope { input, client_seq })
+                Ok(InputEnvelope {
+                    input,
+                    client_seq,
+                    view_tick: None,
+                })
             }
             #[cfg(not(feature = "bincode"))]
             {

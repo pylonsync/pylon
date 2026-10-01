@@ -73,6 +73,17 @@ const manifest = buildManifest({
       maxSubscribers: 1000,
       idleShutdownSecs: 0,
     }),
+    // A shooting range with lag compensation (functions/joinRange.ts). For
+    // `pylon bench shard --join joinRange --aim 1`.
+    shard({
+      name: "range",
+      wasm: "shards/range.wasm",
+      crate: "shards/range",
+      tickRate: 20,
+      maxInstances: 4,
+      maxSubscribers: 1000,
+      idleShutdownSecs: 0,
+    }),
     // Zones that players move between with their state (functions/moveZone.ts).
     shard({
       name: "zone",

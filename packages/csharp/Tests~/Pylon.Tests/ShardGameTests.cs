@@ -155,7 +155,11 @@ namespace Pylon.Tests
             var s2 = game.Send(new Move { Dx = 1 });
             var s3 = game.Send(new Move { Dx = 1 });
             Assert.Equal(new ulong[] { 1, 2, 3 }, new[] { s1, s2, s3 });
-            Assert.True(PylonValue.Parse("{\"input\":{\"dx\":1},\"client_seq\":1}").Equals(PylonValue.Parse(Take(ws.Received))));
+            // Each input carries the tick the last frame drew, for lag compensation.
+            var sent = PylonValue.Parse(Take(ws.Received));
+            Assert.Equal(1L, sent["input"]["dx"].AsLong());
+            Assert.Equal(1UL, sent["client_seq"].AsULong());
+            Assert.Equal(renderTick, sent["view_tick"].AsDouble());
             var clamp = new TestFrame();
             clamp.Update.Add((1, TestFrame.P(0), TestFrame.P(1.5), null));
             await Deliver(ws, 11, 2, clamp);

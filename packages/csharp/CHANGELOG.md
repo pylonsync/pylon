@@ -14,6 +14,7 @@
   - Auto uses WebSockets when the session does not open or datagrams stop arriving.
   - `Plugins/` holds the plugin (`crates/shard-client-ffi`) for macOS, Windows x86_64, Linux x86_64, iOS, and Android arm64-v8a and armeabi-v7a.
 - The Arena sample has a `transport` field and shows the transport it connected over.
+- Lag compensation (#49): `ShardGame.Send` stamps each input with `view_tick`, the tick the last `Frame` drew (`EntityInterpolator.DrawnTick`). `ShardConnection.Send(input, viewTick)` sends one directly. A parity test replays the server's rewind fixtures and matches every position exactly.
 
 ## 0.22.12
 

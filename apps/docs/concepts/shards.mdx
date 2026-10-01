@@ -286,6 +286,8 @@ requestAnimationFrame(frame);
   has not processed. Refused inputs drop out, and a reconnect clears it.
 - **Round trip.** `game.rttMs` is the smoothed time from an input to the
   frame that acknowledges it.
+- **View tick.** `game.send` stamps each input with the tick the last
+  `frame` drew, for a shard with [lag compensation](#lag-compensation).
 - **Reconnects** get a full frame. The entities it lacks leave.
 
 `game.latest` is the newest table, not interpolated. `connectShard` is the
@@ -362,6 +364,110 @@ on. Acks go in datagrams no larger than the session allows. Before the server cl
 `6`, JSON `{ code, reason }`), because a browser's `closed` does not get
 the code from a server close; the client closes the session when it
 reads it.
+
+### Lag compensation
+
+A client draws other players in the past: its interpolation delay (100 ms
+by default) plus the time frames take to reach it. Without lag
+compensation, the shard checks an aimed hit against where the target is
+when the input arrives, and players must lead every shot by their own ping.
+
+With lag compensation, the shard checks the hit against what the shooter
+drew:
+
+1. `connectShardGame` (TypeScript) and `ShardGame` (C#) stamp each input
+   with `view_tick`: the tick the last `frame` drew.
+2. The shard keeps what it sent each subscriber for `history_ticks` ticks.
+   This is what the client drew, including updates the byte budget
+   deferred and only the entities interest management sent.
+3. The shard clamps the view tick and calls `apply_input_at` with a
+   `Rewind`, which places each entity where that subscriber drew it then.
+   The clients interpolate the same way, so positions match exactly.
+
+```rust shards/range/src/lib.rs
+use pylon_shard_guest::{LagCompensation, Rewind, Shard};
+
+impl Shard for Range {
+    // ...
+
+    // Keep 10 ticks: 500 ms at 20 Hz.
+    fn lag_compensation(&self) -> Option<LagCompensation> {
+        Some(LagCompensation::new(10))
+    }
+
+    // An input with a view tick comes here.
+    fn apply_input_at(&mut self, sid: &str, input: Input, rewind: &Rewind) -> Result<(), String> {
+        match input {
+            // A hitscan shot: the first target on the line, as the shooter saw it.
+            Input::Shoot { aim } => {
+                let shooter = self.position_of(sid)?;
+                let hit = rewind
+                    .entities_near(shooter, RANGE)
+                    .into_iter()
+                    .filter(|(id, p)| *id != self.entity_of(sid) && on_line(shooter, aim, *p, HIT_RADIUS))
+                    .min_by(|a, b| dist(shooter, a.1).total_cmp(&dist(shooter, b.1)));
+                if let Some((target, _)) = hit {
+                    self.damage(target, 25);
+                }
+                Ok(())
+            }
+            // A projectile: spawn it where it is now on the shooter's
+            // screen, then advance it to the present. The tick loop moves
+            // it from there.
+            Input::Throw { dir } => {
+                let start = self.position_of(sid)?;
+                let flown = rewind.ticks_behind() * TICK_SECS * SPEAR_SPEED;
+                self.spawn_spear(add(start, scale(dir, flown)), dir);
+                Ok(())
+            }
+        }
+    }
+
+    // Inputs without a view tick (and every input with history off).
+    fn apply_input(&mut self, sid: &str, input: Input) -> Result<(), String> {
+        // ... check against the current positions.
+        Ok(())
+    }
+}
+```
+
+- `rewind.position_at(id)` gives where the subscriber drew one entity, or
+  `None` when it did not draw it. `rewind.entities_near(center, radius)`
+  gives every entity it drew within the radius; narrow a cone or a swing
+  arc from those.
+- `rewind.tick()` is the clamped view tick, and `rewind.ticks_behind()` is
+  how far the shooter's picture was behind the shard.
+- The shard clamps the view tick so a client cannot shoot further into the
+  past than its connection explains. The tick is never after the newest
+  tick sent. It is never before the newest tick minus `history_ticks`. Once
+  the connection's round trip is known (from WebSocket pings, or QUIC on
+  WebTransport), it is never before the round trip plus `max_view_delay_ms`
+  (default 250 ms).
+- An input without a view tick goes to `apply_input`. So does every input
+  when `lag_compensation` returns `None`.
+- In a test outside the server, build a `Rewind` with
+  `Rewind::with_positions(view_tick, now_tick, positions)`.
+- A native Rust shard implements `SimState::lag_compensation` and
+  `SimState::apply_input_at`, which gets `Option<&Rewind>`.
+- The rewind interpolates as the default client options do: `holdWhenQuiet`
+  on and no `snapDistance`.
+
+Lag compensation costs memory and time per subscriber. In
+`crates/realtime/benches/replication_bench.rs`, building the frames for 300
+players took about 0.8 ms more per tick with a view radius of 20, and about
+3.4 ms more when every player sees all 300.
+
+To measure it, `examples/shard-arena` has a shooting range
+(`functions/joinRange.ts`). Bots aim at the target where they draw it, over
+WebTransport with 50 ms of delay and 2% packet loss each way:
+
+```bash
+pylon bench shard --join joinRange --join-args '{"history":10}' --bots 20 --rate 5 \
+  --transport webtransport --net-delay 50 --net-loss 2 \
+  --aim 1 --input '{"shoot":["$aim:x","$aim:y"]}'
+```
+
+With `"history":10`, 99.8% of the shots hit. With `"history":0`, none hit.
 
 ## Declare the shard kind
 
@@ -836,6 +942,15 @@ pylon bench shard --join joinArena --bots 300 --duration 30 --rate 10 \
 - `--transport webtransport` connects over WebTransport, from the URL and
   hashes at `/_pylon/shard/webtransport`. `--drop-datagrams <percent>`
   drops that share of the datagrams each bot receives, to test loss.
+- `--net-delay <ms>` and `--net-loss <percent>` (with WebTransport) send
+  every packet through a local UDP proxy that delays and drops packets each
+  way.
+- `--aim <entity>` makes each bot draw entities like a client
+  (`--interp-delay`, default 100 ms, behind the shard's tick at
+  `--tick-rate`, default 20). In an input template, the strings
+  `"$aim:x"`, `"$aim:y"`, and `"$aim:z"` become where the bot draws the
+  entity, and the input carries its view tick. The report counts the
+  aimed shots the shard refused.
 
 The report gives:
 

@@ -123,5 +123,39 @@ namespace Pylon.Tests
                 Assert.Null(binary);
             }
         }
-    }
+    
+        /// <summary>
+        /// The server's lag compensation (pylon-replication's ViewHistory)
+        /// places each entity where this interpolator does, for the frames it
+        /// sent: crates/realtime/tests/rewind_fixtures.rs writes the frames
+        /// and the server's positions.
+        /// </summary>
+        [Fact]
+        public void TheInterpolatorDrawsWhatTheServersRewindSaysItDrew()
+        {
+            var fixtures = Fixtures.Load("rewind.fixtures.json");
+            var table = new EntityTable();
+            var interp = new EntityInterpolator();
+            foreach (var f in fixtures["frames"].Items)
+            {
+                var summary = table.Apply(Hex.Bytes(f["frame"].AsString()));
+                interp.Record(table, summary, f["tick"].AsDouble());
+            }
+            var queries = fixtures["queries"].Items.ToList();
+            Assert.True(queries.Count > 40);
+            foreach (var q in queries)
+            {
+                interp.Update(q["tick"].AsDouble());
+                var want = q["positions"].Items.ToDictionary(
+                    p => p[0].AsULong(),
+                    p => (p[1].AsDouble(), p[2].AsDouble(), p[3].AsDouble()));
+                Assert.Equal(want.Keys.OrderBy(k => k), interp.Entities.Keys.OrderBy(k => k));
+                foreach (var kv in want)
+                {
+                    var e = interp.Entities[kv.Key];
+                    Assert.Equal(kv.Value, (e.X, e.Y, e.Z));
+                }
+            }
+        }
+}
 }

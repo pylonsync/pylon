@@ -151,6 +151,15 @@
       "idleShutdownSecs": 0
     },
     {
+      "name": "range",
+      "wasm": "shards/range.wasm",
+      "crate": "shards/range",
+      "tickRate": 20,
+      "maxInstances": 4,
+      "maxSubscribers": 1000,
+      "idleShutdownSecs": 0
+    },
+    {
       "name": "zone",
       "wasm": "shards/zone.wasm",
       "crate": "shards/zone",

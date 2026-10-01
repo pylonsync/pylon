@@ -23,8 +23,10 @@ use std::collections::BTreeMap;
 pub mod datagram;
 pub mod frame;
 pub mod varint;
+pub mod view;
 
 pub use frame::{DecodeError, FrameSummary, ReplicaEntity, ReplicaTable};
+pub use view::ViewHistory;
 
 /// A stable entity id, chosen by the simulation.
 pub type EntityId = u64;

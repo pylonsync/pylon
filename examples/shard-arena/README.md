@@ -13,6 +13,8 @@ the module; there is no custom server build.
   `functions/moveZone.ts` moves the caller to another zone with its state
   (`ctx.shards.transfer`). `tools/smoke-shard-cluster.sh` moves a player
   between zones on two machines.
+- `shards/range/src/lib.rs` is a shooting range with lag compensation (see
+  below).
 
 ## Run
 
@@ -50,5 +52,23 @@ pylon bench shard --join joinFrontier --join-args '{"frontier":"crowd","size":40
 pylon bench shard --join joinArena --bots 300 --input '"join"' \
   --input '{"move_to":{"x":"$rand:0:800","y":"$rand:0:500"}}'
 ```
+
+## Lag compensation
+
+`range` (`shards/range/src/lib.rs`, `functions/joinRange.ts`) is a shooting
+range: one target circles the middle at 8 units/s, and a shot hits within
+0.5 units of it. With `history` set, the shard checks a shot against where
+the shooter's client drew the target. Start the server with
+`PYLON_WEBTRANSPORT_PORT=4324`, then let bots aim with 50 ms of delay and 2%
+loss each way:
+
+```bash
+pylon bench shard --join joinRange --join-args '{"history":10}' --bots 20 --rate 5 \
+  --transport webtransport --net-delay 50 --net-loss 2 \
+  --aim 1 --input '{"shoot":["$aim:x","$aim:y"]}'
+```
+
+The report's `aimed shots` line gives the hits. Run it again with
+`'{"history":0}'` to compare.
 
 See [Realtime shards](https://pylonsync.com/docs/concepts/shards).

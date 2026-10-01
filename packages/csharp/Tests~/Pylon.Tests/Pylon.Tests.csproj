@@ -15,6 +15,7 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="../../../realtime/src/replication.fixtures.json" Link="fixtures/replication.fixtures.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../../realtime/src/rewind.fixtures.json" Link="fixtures/rewind.fixtures.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../../sync/conformance/*.json" LinkBase="fixtures/conformance" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../../realtime/src/wire.fixtures.json" Link="fixtures/wire.fixtures.json" CopyToOutputDirectory="PreserveNewest" Condition="Exists('../../../realtime/src/wire.fixtures.json')" />
   </ItemGroup>

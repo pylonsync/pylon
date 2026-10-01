@@ -260,6 +260,9 @@ void Update()
   estimated tick (default 100 ms), and fills `Entered` and `Left`.
 - Every predictor made by `Predict` records each input `Send` sends,
   drops inputs the shard refuses, and resets when the connection reopens.
+- `Send` stamps each input with the tick the last `Frame` drew
+  (`view_tick`), so a shard with lag compensation checks aimed actions
+  against what the player saw.
 - `Latest` is the newest table, not interpolated. `Tick`, `Ack`, `RttMs`,
   `Connected`, and the connection's events are on the game.
 

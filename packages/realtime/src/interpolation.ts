@@ -90,6 +90,7 @@ export class EntityInterpolator {
   /** The newest tick the last `update` drew; a render tick never goes
    *  below it. */
   private floor = -Infinity;
+  private drawn = -1;
   /** Lives that ended, oldest first, so `record` can drop them when
    *  `update` does not run (a hidden tab keeps receiving frames). */
   private ended: Array<{ id: number; life: Life }> = [];
@@ -105,12 +106,22 @@ export class EntityInterpolator {
     return this.lastTick;
   }
 
+  /**
+   * The render tick the last `update` placed entities at (after raising it
+   * to what an earlier update drew), or -1 before the first update. This is
+   * the tick the player saw: the view tick for lag compensation.
+   */
+  get drawnTick(): number {
+    return this.drawn;
+  }
+
   /** Forget everything. The next `update` removes every entity. */
   clear(): void {
     this.lives.clear();
     this.ended = [];
     this.lastTick = -1;
     this.floor = -Infinity;
+    this.drawn = -1;
   }
 
   /**
@@ -165,6 +176,7 @@ export class EntityInterpolator {
     this.entered.length = 0;
     this.left.length = 0;
     renderTick = Math.max(renderTick, this.floor);
+    this.drawn = renderTick;
     // What this update draws is at most the newest tick recorded.
     this.floor = Math.min(renderTick, this.lastTick);
     for (const [id, lives] of this.lives) {

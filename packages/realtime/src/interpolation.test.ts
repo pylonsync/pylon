@@ -21,6 +21,20 @@ function harness(options?: InterpolationOptions) {
 }
 
 describe("EntityInterpolator", () => {
+  test("drawnTick is the tick an update placed entities at, never going back", () => {
+    const h = harness();
+    expect(h.interp.drawnTick).toBe(-1);
+    h.frame(1, { full: true, spawn: [{ id: 1, pos: [0, 0, 0] }] });
+    h.frame(9, { update: [{ id: 1, from: [0, 0, 0], pos: [8, 0, 0] }] });
+    h.at(5.5);
+    expect(h.interp.drawnTick).toBe(5.5);
+    // An earlier render tick is raised to what was drawn.
+    h.at(3);
+    expect(h.interp.drawnTick).toBe(5.5);
+    h.interp.clear();
+    expect(h.interp.drawnTick).toBe(-1);
+  });
+
   test("draws an entity between the samples around the render tick", () => {
     const h = harness();
     h.frame(1, { full: true, spawn: [{ id: 1, pos: [0, 0, 0] }] });

@@ -18,12 +18,13 @@
 //! bot, and input rejections. `--report <file>` writes a JSON report that
 //! `pylon bench merge` combines, so bots can run from several machines.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use pylon_kernel::ExitCode;
+use pylon_realtime::replicated_store::view::{self, ViewHistory};
 use pylon_realtime::wire::{self, InputRejection};
 use serde::{Deserialize, Serialize};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -83,6 +84,19 @@ Options:
   --drop-datagrams <p> Drop this percent of received datagrams before the
                        bot sees them (tests loss handling; real network
                        loss needs a lossy link)
+  --net-delay <ms>     With --transport webtransport: send every packet
+                       through a local UDP proxy that delays it this long,
+                       each way
+  --net-loss <p>       With --transport webtransport: the proxy drops this
+                       percent of packets, each way
+  --aim <entity>       Aim at this entity: bots draw entities like a client
+                       (--interp-delay behind the shard's tick) and the
+                       strings \"$aim:x\", \"$aim:y\", \"$aim:z\" in an input
+                       become where it is drawn; inputs carry their view
+                       tick (lag compensation). The report counts the shots
+                       the shard refused
+  --interp-delay <ms>  How far behind the shard bots draw (default 100)
+  --tick-rate <hz>     The shard's tick rate, for the bots' clock (default 20)
   --report <file>      Write a JSON report for `pylon bench merge`
   --json               Print the report as JSON";
 
@@ -120,6 +134,16 @@ pub struct BenchConfig {
     pub transport: Transport,
     /// Percent of received datagrams a bot drops (see `--drop-datagrams`).
     pub drop_datagrams: f64,
+    /// Delay added to every packet each way by the UDP proxy (`--net-delay`).
+    pub net_delay: Duration,
+    /// Percent of packets the UDP proxy drops each way (`--net-loss`).
+    pub net_loss: f64,
+    /// The entity bots aim at (`--aim`).
+    pub aim: Option<u64>,
+    /// How far behind the shard bots draw (`--interp-delay`).
+    pub interp_delay: Duration,
+    /// The shard's tick rate (`--tick-rate`).
+    pub tick_rate: f64,
 }
 
 impl BenchConfig {
@@ -137,6 +161,11 @@ impl BenchConfig {
         let mut report = None;
         let mut transport = Transport::WebSocket;
         let mut drop_datagrams = 0.0f64;
+        let mut net_delay = 0.0f64;
+        let mut net_loss = 0.0f64;
+        let mut aim = None;
+        let mut interp_delay = 100.0f64;
+        let mut tick_rate = 20.0f64;
         let mut i = 0;
         let value = |i: usize, flag: &str| -> Result<String, String> {
             args.get(i + 1)
@@ -193,6 +222,27 @@ impl BenchConfig {
                         return Err("--drop-datagrams is a percent, at most 100".into());
                     }
                 }
+                "--net-delay" => net_delay = number(value(i, flag)?, flag)?,
+                "--net-loss" => {
+                    net_loss = number(value(i, flag)?, flag)?;
+                    if net_loss > 100.0 {
+                        return Err("--net-loss is a percent, at most 100".into());
+                    }
+                }
+                "--aim" => {
+                    let raw = value(i, flag)?;
+                    aim = Some(
+                        raw.parse::<u64>()
+                            .map_err(|_| format!("--aim must be an entity id, got {raw}"))?,
+                    );
+                }
+                "--interp-delay" => interp_delay = number(value(i, flag)?, flag)?,
+                "--tick-rate" => {
+                    tick_rate = number(value(i, flag)?, flag)?;
+                    if tick_rate == 0.0 {
+                        return Err("--tick-rate must be above 0".into());
+                    }
+                }
                 "--json" => {
                     i += 1;
                     continue;
@@ -221,6 +271,12 @@ impl BenchConfig {
         if rate > 0.0 && inputs.is_empty() {
             return Err("--rate needs at least one --input template (or pass --rate 0)".into());
         }
+        if (net_delay > 0.0 || net_loss > 0.0) && transport != Transport::WebTransport {
+            return Err("--net-delay and --net-loss need --transport webtransport".into());
+        }
+        if net_delay > 10_000.0 {
+            return Err("--net-delay must be at most 10000 ms".into());
+        }
         Ok(Self {
             url,
             bots,
@@ -235,6 +291,11 @@ impl BenchConfig {
             report,
             transport,
             drop_datagrams,
+            net_delay: Duration::from_secs_f64(net_delay / 1000.0),
+            net_loss,
+            aim,
+            interp_delay: Duration::from_secs_f64(interp_delay / 1000.0),
+            tick_rate,
         })
     }
 
@@ -458,6 +519,11 @@ pub struct Report {
     #[serde(default)]
     pub inputs_unacked_dropped: u64,
     pub rejections: BTreeMap<String, u64>,
+    /// With `--aim`: aimed inputs the shard acked, and those it refused.
+    #[serde(default)]
+    pub aimed_hits: u64,
+    #[serde(default)]
+    pub aimed_refused: u64,
     pub decode_errors: u64,
     /// Snapshot interval seen by a bot, microseconds.
     pub snapshot_interval_us: Histogram,
@@ -514,6 +580,12 @@ impl Report {
                 "rejections",
             )?;
         }
+        add(&mut next.aimed_hits, other.aimed_hits, "aimed_hits")?;
+        add(
+            &mut next.aimed_refused,
+            other.aimed_refused,
+            "aimed_refused",
+        )?;
         add(
             &mut next.decode_errors,
             other.decode_errors,
@@ -543,6 +615,8 @@ impl Report {
             "bots_acked": self.bots_acked,
             "inputs_unacked_dropped": self.inputs_unacked_dropped,
             "rejections": self.rejections,
+            "aimed_hits": self.aimed_hits,
+            "aimed_refused": self.aimed_refused,
             "decode_errors": self.decode_errors,
             "tick_rate_hz": {
                 "p50": ms(&self.tick_rate_mhz, 0.5),
@@ -628,6 +702,15 @@ impl Report {
                 .map(|(k, v)| format!("{k} {v}"))
                 .collect();
             println!("  rejections         {}", list.join(", "));
+        }
+        let aimed = self.aimed_hits + self.aimed_refused;
+        if aimed > 0 {
+            println!(
+                "  aimed shots        {aimed}: {} hit ({:.1}%), {} refused",
+                self.aimed_hits,
+                self.aimed_hits as f64 * 100.0 / aimed as f64,
+                self.aimed_refused
+            );
         }
         if self.decode_errors > 0 {
             println!("  decode errors      {}", self.decode_errors);
@@ -719,6 +802,187 @@ fn fetch_wt_endpoint(config: &BenchConfig) -> Result<WtEndpoint, String> {
     Ok(WtEndpoint { url, hashes })
 }
 
+/// A UDP relay in front of the WebTransport endpoint that delays and drops
+/// packets each way (`--net-delay`, `--net-loss`): real loss and latency for
+/// QUIC, on its stream and its datagrams. Returns the endpoint URL to use.
+async fn start_net_proxy(wt: &WtEndpoint, delay: Duration, loss: f64) -> Result<String, String> {
+    use std::net::SocketAddr;
+    use tokio::net::UdpSocket;
+
+    let rest = wt
+        .url
+        .strip_prefix("https://")
+        .ok_or_else(|| format!("webtransport endpoint {} is not https", wt.url))?;
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
+    };
+    let server: SocketAddr = {
+        let addrs: Vec<SocketAddr> = tokio::net::lookup_host(authority)
+            .await
+            .map_err(|e| format!("net proxy: resolve {authority}: {e}"))?
+            .collect();
+        // The proxy listens on 127.0.0.1, so prefer the server's IPv4 address.
+        addrs
+            .iter()
+            .find(|a| a.is_ipv4())
+            .or(addrs.first())
+            .copied()
+            .ok_or_else(|| format!("net proxy: {authority} has no address"))?
+    };
+    let front = Arc::new(
+        UdpSocket::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| format!("net proxy: {e}"))?,
+    );
+    let port = front
+        .local_addr()
+        .map_err(|e| format!("net proxy: {e}"))?
+        .port();
+    let drop = move || loss > 0.0 && rand::random::<f64>() * 100.0 < loss;
+    // One upstream socket per bot, so the server tells the bots apart.
+    let upstreams: Arc<tokio::sync::Mutex<HashMap<SocketAddr, Arc<UdpSocket>>>> = Arc::default();
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 65_536];
+        loop {
+            let Ok((n, client)) = front.recv_from(&mut buf).await else {
+                return;
+            };
+            let up = {
+                let mut map = upstreams.lock().await;
+                match map.get(&client) {
+                    Some(up) => Arc::clone(up),
+                    None => {
+                        let bind = if server.is_ipv4() {
+                            "0.0.0.0:0"
+                        } else {
+                            "[::]:0"
+                        };
+                        let Ok(up) = UdpSocket::bind(bind).await else {
+                            continue;
+                        };
+                        if up.connect(server).await.is_err() {
+                            continue;
+                        }
+                        let up = Arc::new(up);
+                        map.insert(client, Arc::clone(&up));
+                        // The server's packets back to this bot.
+                        let (up_rx, front_tx) = (Arc::clone(&up), Arc::clone(&front));
+                        tokio::spawn(async move {
+                            let mut buf = vec![0u8; 65_536];
+                            while let Ok(n) = up_rx.recv(&mut buf).await {
+                                if drop() {
+                                    continue;
+                                }
+                                let (packet, front_tx) = (buf[..n].to_vec(), Arc::clone(&front_tx));
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(delay).await;
+                                    let _ = front_tx.send_to(&packet, client).await;
+                                });
+                            }
+                        });
+                        up
+                    }
+                }
+            };
+            if drop() {
+                continue;
+            }
+            let packet = buf[..n].to_vec();
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                let _ = up.send(&packet).await;
+            });
+        }
+    });
+    Ok(format!("https://127.0.0.1:{port}{path}"))
+}
+
+/// The bot's estimate of the shard's current tick, as the clients' clock
+/// makes it: each frame's arrival less its tick's time; the earliest of the
+/// recent ones is the least delayed.
+struct BotClock {
+    tick_ms: f64,
+    samples: VecDeque<f64>,
+}
+
+impl BotClock {
+    fn new(tick_rate: f64) -> Self {
+        Self {
+            tick_ms: 1000.0 / tick_rate,
+            samples: VecDeque::new(),
+        }
+    }
+
+    fn observe(&mut self, tick: u64, at_ms: f64) {
+        self.samples.push_back(at_ms - tick as f64 * self.tick_ms);
+        if self.samples.len() > 64 {
+            self.samples.pop_front();
+        }
+    }
+
+    /// The shard's tick (fractional) at `now_ms`, or None before a frame.
+    fn server_tick(&self, now_ms: f64) -> Option<f64> {
+        let offset = self.samples.iter().copied().fold(f64::INFINITY, f64::min);
+        offset.is_finite().then(|| (now_ms - offset) / self.tick_ms)
+    }
+}
+
+/// Record what a frame or datagram changed in the bot's view of the
+/// entities, as a client's interpolator records it.
+fn record_view(
+    view: &mut ViewHistory,
+    table: &pylon_realtime::ReplicaTable,
+    tick: u64,
+    full: bool,
+    spawned: &[u64],
+    updated: &[u64],
+    despawned: &[u64],
+) {
+    let sent = |ids: &[u64]| -> Vec<view::Sent> {
+        ids.iter()
+            .filter_map(|id| {
+                table.entities.get(id).map(|e| view::Sent {
+                    id: *id,
+                    q: e.q,
+                    components_changed: false,
+                })
+            })
+            .collect()
+    };
+    // A late datagram counts at the newest tick, as a client applies it.
+    let tick = view.last_tick().map_or(tick, |last| tick.max(last));
+    view.record(
+        tick,
+        table.precision,
+        full,
+        &sent(spawned),
+        &sent(updated),
+        despawned,
+    );
+}
+
+/// Replace `"$aim:x"`, `"$aim:y"`, and `"$aim:z"` in an input with the aimed
+/// position.
+fn fill_aim(value: &mut serde_json::Value, at: [f64; 3]) {
+    match value {
+        serde_json::Value::String(s) => {
+            let axis = match s.as_str() {
+                "$aim:x" => Some(0),
+                "$aim:y" => Some(1),
+                "$aim:z" => Some(2),
+                _ => None,
+            };
+            if let Some(i) = axis {
+                *value = serde_json::json!(at[i]);
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(|v| fill_aim(v, at)),
+        serde_json::Value::Object(map) => map.values_mut().for_each(|v| fill_aim(v, at)),
+        _ => {}
+    }
+}
+
 async fn run_bots(config: Arc<BenchConfig>) -> Report {
     let report = Arc::new(Mutex::new(Report {
         runs: vec![RunInfo {
@@ -736,7 +1000,20 @@ async fn run_bots(config: Arc<BenchConfig>) -> Report {
         Transport::WebTransport => {
             let c = Arc::clone(&config);
             match tokio::task::spawn_blocking(move || fetch_wt_endpoint(&c)).await {
-                Ok(Ok(e)) => Some(Arc::new(e)),
+                Ok(Ok(mut e)) => {
+                    if config.net_delay > Duration::ZERO || config.net_loss > 0.0 {
+                        match start_net_proxy(&e, config.net_delay, config.net_loss).await {
+                            Ok(url) => e.url = url,
+                            Err(why) => {
+                                let mut r = report.lock().unwrap();
+                                r.failed = config.bots as u64;
+                                r.errors.insert(why, config.bots as u64);
+                                return r.clone();
+                            }
+                        }
+                    }
+                    Some(Arc::new(e))
+                }
                 Ok(Err(why)) => {
                     let mut r = report.lock().unwrap();
                     r.failed = config.bots as u64;
@@ -866,6 +1143,8 @@ struct BotStats {
     inputs_acked: u64,
     inputs_unacked_dropped: u64,
     rejections: BTreeMap<String, u64>,
+    aimed_hits: u64,
+    aimed_refused: u64,
     decode_errors: u64,
     snapshot_interval_us: Histogram,
     ack_latency_us: Histogram,
@@ -890,6 +1169,8 @@ impl BotStats {
         for (k, v) in self.rejections {
             *r.rejections.entry(k).or_insert(0) += v;
         }
+        r.aimed_hits += self.aimed_hits;
+        r.aimed_refused += self.aimed_refused;
         r.decode_errors += self.decode_errors;
         r.moves += self.moves;
         // A bot's own counts cannot overflow the run's total.
@@ -959,6 +1240,11 @@ async fn run_bot(
     // shard (and with the ticket) it names.
     let mut first = true;
     let mut drop_rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(!(bot as u64));
+    // With --aim: each aimed input's outcome so far (true once acked). A
+    // refused input is acked too, and its rejection can come after the ack.
+    let mut aimed: BTreeMap<u64, bool> = BTreeMap::new();
+    let clock_epoch = Instant::now();
+    let ms = |t: Instant| t.duration_since(clock_epoch).as_secs_f64() * 1000.0;
     'connection: loop {
         let link = tokio::time::timeout(Duration::from_secs(15), Link::open(config, &join, wt))
             .await
@@ -981,6 +1267,9 @@ async fn run_bot(
         let mut last_frame: Option<Instant> = None;
         let mut last_tick: u64 = 0;
         let mut replica = pylon_realtime::ReplicaTable::new();
+        // What the bot draws (with --aim): its view and clock start over.
+        let mut view = ViewHistory::new(64);
+        let mut clock = BotClock::new(config.tick_rate);
 
         loop {
             // What arrived, reduced to what the bot measures: a state update
@@ -996,10 +1285,34 @@ async fn run_bot(
                         None => std::future::pending::<()>().await,
                     }
                 } => {
+                    // Aim where the target is drawn now; no shot while it is
+                    // not drawn.
+                    let aim = match config.aim {
+                        None => None,
+                        Some(target) => {
+                            let render = clock.server_tick(ms(Instant::now())).map(|t| {
+                                t - config.interp_delay.as_secs_f64() * config.tick_rate
+                            });
+                            match render.and_then(|r| view.position_at(target, r).map(|p| (r, p))) {
+                                Some(aim) => Some(aim),
+                                None => continue,
+                            }
+                        }
+                    };
                     let template = &config.inputs[(seq as usize) % config.inputs.len()];
                     seq += 1;
-                    let input = expand_template(template, bot, &join.sid, &mut rng);
-                    let envelope = serde_json::json!({ "input": input, "client_seq": seq });
+                    let mut input = expand_template(template, bot, &join.sid, &mut rng);
+                    let envelope = match aim {
+                        Some((view_tick, at)) => {
+                            fill_aim(&mut input, at);
+                            aimed.insert(seq, false);
+                            while aimed.len() > 4096 {
+                                aimed.pop_first();
+                            }
+                            serde_json::json!({ "input": input, "client_seq": seq, "view_tick": view_tick })
+                        }
+                        None => serde_json::json!({ "input": input, "client_seq": seq }),
+                    };
                     // Timestamp before the send: time spent sending into a slow
                     // connection is part of the latency.
                     let sent_at = Instant::now();
@@ -1043,6 +1356,18 @@ async fn run_bot(
                         Ok(summary) => {
                             link.send_acks(&[(summary.frame, replica.stream_tick)]);
                             stats.frames += 1;
+                            if config.aim.is_some() {
+                                clock.observe(summary.tick, ms(now));
+                                record_view(
+                                    &mut view,
+                                    &replica,
+                                    summary.tick,
+                                    false,
+                                    &[],
+                                    &summary.updated,
+                                    &[],
+                                );
+                            }
                             (summary.tick, summary.ack)
                         }
                         Err(_) => {
@@ -1068,7 +1393,24 @@ async fn run_bot(
                             let decoded = if frame.kind == wire::kind::REPLICATION {
                                 // Apply it like a client: a frame that does not
                                 // apply to this bot's table is a decode error.
-                                replica.apply_stream(frame.payload, frame.tick).is_ok()
+                                match replica.apply_stream(frame.payload, frame.tick) {
+                                    Ok(summary) => {
+                                        if config.aim.is_some() {
+                                            clock.observe(frame.tick, ms(now));
+                                            record_view(
+                                                &mut view,
+                                                &replica,
+                                                frame.tick,
+                                                summary.full,
+                                                &summary.spawned,
+                                                &summary.updated,
+                                                &summary.despawned,
+                                            );
+                                        }
+                                        true
+                                    }
+                                    Err(_) => false,
+                                }
                             } else {
                                 decode_payload::<serde::de::IgnoredAny>(frame.codec, frame.payload)
                                     .is_some()
@@ -1087,6 +1429,12 @@ async fn run_bot(
                                         if let Some(i) = pending.iter().position(|(s, _)| *s == seq)
                                         {
                                             pending.remove(i);
+                                        }
+                                        if let Some(acked) = aimed.remove(&seq) {
+                                            if acked {
+                                                stats.aimed_hits -= 1;
+                                            }
+                                            stats.aimed_refused += 1;
                                         }
                                     }
                                     *stats.rejections.entry(r.code).or_insert(0) += 1;
@@ -1138,6 +1486,12 @@ async fn run_bot(
                 }
                 pending.pop_front();
                 stats.inputs_acked += 1;
+                if let Some(acked) = aimed.get_mut(&s) {
+                    if !*acked {
+                        *acked = true;
+                        stats.aimed_hits += 1;
+                    }
+                }
                 stats
                     .ack_latency_us
                     .record(now.duration_since(sent).as_micros() as u64);
@@ -1647,6 +2001,73 @@ mod tests {
         assert_eq!(v["move_to"]["y"], 5);
         assert_eq!(v["who"], serde_json::json!([7, "bot-7"]));
         assert_eq!(v["keep"], "text");
+    }
+
+    #[test]
+    fn aim_and_net_flags_parse_and_check() {
+        let c = BenchConfig::parse(&[
+            "--join",
+            "joinRange",
+            "--transport",
+            "webtransport",
+            "--net-delay",
+            "50",
+            "--net-loss",
+            "2",
+            "--aim",
+            "1",
+            "--interp-delay",
+            "120",
+            "--tick-rate",
+            "30",
+            "--input",
+            "{}",
+        ])
+        .unwrap();
+        assert_eq!(c.net_delay, Duration::from_millis(50));
+        assert_eq!(c.net_loss, 2.0);
+        assert_eq!(c.aim, Some(1));
+        assert_eq!(c.interp_delay, Duration::from_millis(120));
+        assert_eq!(c.tick_rate, 30.0);
+        // The proxy is for QUIC: a WebSocket run refuses it.
+        assert!(
+            BenchConfig::parse(&["--join", "j", "--net-delay", "50", "--input", "{}"])
+                .unwrap_err()
+                .contains("webtransport")
+        );
+        assert!(BenchConfig::parse(&["--join", "j", "--aim", "x", "--input", "{}"]).is_err());
+        assert!(BenchConfig::parse(&[
+            "--join",
+            "j",
+            "--transport",
+            "webtransport",
+            "--net-loss",
+            "101",
+            "--input",
+            "{}"
+        ])
+        .is_err());
+        assert!(BenchConfig::parse(&["--join", "j", "--tick-rate", "0", "--input", "{}"]).is_err());
+    }
+
+    #[test]
+    fn aim_placeholders_become_the_aimed_position() {
+        let mut v = serde_json::json!({ "shoot": ["$aim:x", "$aim:y"], "at": { "z": "$aim:z" }, "keep": "$aim:w" });
+        fill_aim(&mut v, [1.5, -2.0, 3.25]);
+        assert_eq!(
+            v,
+            serde_json::json!({ "shoot": [1.5, -2.0], "at": { "z": 3.25 }, "keep": "$aim:w" })
+        );
+    }
+
+    #[test]
+    fn the_bot_clock_takes_the_least_delayed_frame() {
+        let mut c = BotClock::new(20.0);
+        assert_eq!(c.server_tick(0.0), None);
+        // Tick 10 arrived at 520 ms (20 ms late), tick 11 at 600 ms (50 ms late).
+        c.observe(10, 520.0);
+        c.observe(11, 600.0);
+        assert_eq!(c.server_tick(620.0), Some(12.0));
     }
 
     #[test]

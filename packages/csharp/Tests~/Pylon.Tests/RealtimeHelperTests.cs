@@ -230,6 +230,35 @@ namespace Pylon.Tests
         static double[] P(double x = 0, double y = 0, double z = 0) => TestFrame.P(x, y, z);
 
         [Fact]
+        public void DrawnTickIsTheTickAnUpdatePlacedEntitiesAtNeverGoingBack()
+        {
+            var h = new Harness();
+            Assert.Equal(-1, h.Interp.DrawnTick);
+            h.Frame(1, Full((1, P(), null)));
+            h.Frame(9, Move(1, P(), P(8)));
+            h.At(5.5);
+            Assert.Equal(5.5, h.Interp.DrawnTick);
+            // An earlier render tick is raised to what was drawn.
+            h.At(3);
+            Assert.Equal(5.5, h.Interp.DrawnTick);
+            h.Interp.Clear();
+            Assert.Equal(-1, h.Interp.DrawnTick);
+        }
+
+        [Fact]
+        public void AnInputEnvelopeCarriesAViewTickOnlyWhenGiven()
+        {
+            ShardWire.EncodeInput(null, PylonValue.Object(("dx", 1)), 3, out var plain, out _);
+            Assert.Equal("{\"input\":{\"dx\":1},\"client_seq\":3}", plain);
+            ShardWire.EncodeInput(null, PylonValue.Object(("dx", 1)), 4, 17.25, out var stamped, out _);
+            Assert.Equal(17.25, PylonValue.Parse(stamped!)["view_tick"].AsDouble());
+            ShardWire.EncodeInput(null, PylonValue.Object(("dx", 1)), 5, double.NaN, out var nan, out _);
+            Assert.True(PylonValue.Parse(nan!)["view_tick"].IsNull);
+            ShardWire.EncodeInput((byte)ShardCodec.MessagePack, PylonValue.Object(("dx", 1)), 6, 2.5, out _, out var packed);
+            Assert.Equal(2.5, MessagePack.Decode(packed!)["view_tick"].AsDouble());
+        }
+
+        [Fact]
         public void DrawsBetweenTheSamplesAroundTheRenderTick()
         {
             var h = new Harness();

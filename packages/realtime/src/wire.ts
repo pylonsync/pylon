@@ -151,8 +151,14 @@ export function encodeShardInput(
   codec: number | null,
   input: unknown,
   clientSeq: number,
+  viewTick?: number,
 ): string | Uint8Array {
-  const envelope = { input, client_seq: clientSeq };
+  const envelope: { input: unknown; client_seq: number; view_tick?: number } = {
+    input,
+    client_seq: clientSeq,
+  };
+  // The tick the client was drawing, for a shard with lag compensation.
+  if (viewTick !== undefined && Number.isFinite(viewTick)) envelope.view_tick = viewTick;
   if (codec === ShardCodec.MessagePack) return msgpackEncode(envelope);
   return JSON.stringify(envelope);
 }

@@ -44,8 +44,11 @@ pub use crate::ip_limit::IpConnGuard;
 const MIN_DATAGRAM: usize = 128;
 const MAX_DATAGRAM: usize = 65_507;
 
-/// The server sends a ping this often.
-const PING_INTERVAL: Duration = Duration::from_secs(20);
+/// The server sends a ping this often. Its pong gives the connection's
+/// round trip (lag compensation bounds view ticks with it).
+const PING_INTERVAL: Duration = Duration::from_secs(2);
+/// A pong later than this is not a round trip worth recording.
+const MAX_RTT_SAMPLE: Duration = Duration::from_secs(10);
 /// A connection that sends nothing (not even a pong) for this long is
 /// closed. Covers clients that vanished without closing the socket.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -645,6 +648,8 @@ async fn run_connection(
     }
     let writer_queue = Arc::clone(&queue);
     let writer_shard = Arc::clone(&shard);
+    // Pings carry the time they were sent, in microseconds since this.
+    let epoch = std::time::Instant::now();
     let codec = wire::codec_byte(shard.snapshot_format());
     let mut writer = tokio::spawn(async move {
         let mut ping = tokio::time::interval(PING_INTERVAL);
@@ -704,7 +709,8 @@ async fn run_connection(
             tokio::select! {
                 _ = wake.notified() => {}
                 _ = ping.tick() => {
-                    if let Err(e) = sink.send(Message::Ping(Vec::new())).await {
+                    let sent = epoch.elapsed().as_micros() as u64;
+                    if let Err(e) = sink.send(Message::Ping(sent.to_le_bytes().to_vec())).await {
                         return format!("ws write: {e}");
                     }
                 }
@@ -824,7 +830,17 @@ async fn run_connection(
                 .await;
             }
             Message::Close(_) => break ConnectionEnd::ClientClosed,
-            // tungstenite answers pings itself; pongs only prove liveness.
+            // A pong to one of the writer's pings: the round trip.
+            Message::Pong(payload) => {
+                if let Ok(sent) = <[u8; 8]>::try_from(payload.as_slice()) {
+                    let now = epoch.elapsed();
+                    let sent = Duration::from_micros(u64::from_le_bytes(sent));
+                    if let Some(rtt) = now.checked_sub(sent).filter(|r| *r <= MAX_RTT_SAMPLE) {
+                        queue.record_rtt_sample(rtt);
+                    }
+                }
+            }
+            // tungstenite answers pings itself.
             _ => {}
         }
     };

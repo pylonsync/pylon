@@ -186,9 +186,19 @@ namespace Pylon.Realtime
         /// the first frame the codec is unknown and JSON goes, which every
         /// shard accepts.
         /// </summary>
-        public static void EncodeInput(byte? codec, PylonValue input, ulong clientSeq, out string? text, out byte[]? binary)
+        public static void EncodeInput(byte? codec, PylonValue input, ulong clientSeq, out string? text, out byte[]? binary) =>
+            EncodeInput(codec, input, clientSeq, null, out text, out binary);
+
+        /// <summary>
+        /// Encode an input envelope with the tick (fractional) the client was
+        /// drawing when the player acted, for a shard with lag compensation:
+        /// <c>{ input, client_seq, view_tick }</c>.
+        /// </summary>
+        public static void EncodeInput(byte? codec, PylonValue input, ulong clientSeq, double? viewTick, out string? text, out byte[]? binary)
         {
-            var envelope = PylonValue.Object(("input", input ?? PylonValue.Null), ("client_seq", clientSeq));
+            var envelope = viewTick is double v && !double.IsNaN(v) && !double.IsInfinity(v)
+                ? PylonValue.Object(("input", input ?? PylonValue.Null), ("client_seq", clientSeq), ("view_tick", v))
+                : PylonValue.Object(("input", input ?? PylonValue.Null), ("client_seq", clientSeq));
             if (codec == (byte)ShardCodec.MessagePack)
             {
                 text = null;

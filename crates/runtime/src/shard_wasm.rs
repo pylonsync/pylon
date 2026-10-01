@@ -31,9 +31,9 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 use pylon_realtime::{
-    EntityId, EntityPos, InterestArea, InterestConfig, Plane, RawInput, RawSnapshot, Replicated,
-    ReplicatedRef, ReplicationConfig, Shard, ShardAuth, ShardConfig, ShardRegistry, SimState,
-    SnapshotFormat, SubscriberId, Visibility,
+    EntityId, EntityPos, InterestArea, InterestConfig, LagCompensation, Plane, RawInput,
+    RawSnapshot, Replicated, ReplicatedRef, ReplicationConfig, Rewind, Shard, ShardAuth,
+    ShardConfig, ShardRegistry, SimState, SnapshotFormat, SubscriberId, Visibility,
 };
 use serde::{Deserialize, Serialize};
 
@@ -216,6 +216,10 @@ const MAX_DATA_OUTPUT: usize = 8 * 1024 * 1024;
 
 /// Saved-state exports: both or neither (see pylon-shard-guest).
 const SAVE_EXPORTS: &[&str] = &["pylon_save", "pylon_restore"];
+/// Optional: lag compensation. Both or neither.
+const LAG_EXPORTS: &[&str] = &["pylon_lag_compensation", "pylon_apply_input_at"];
+/// What a module may import (see pylon-shard-guest's ABI docs).
+const ALLOWED_IMPORTS: &[&str] = &["log", "view_position", "view_near"];
 /// Optional: messages between shards. Both or neither.
 const MESSAGE_EXPORTS: &[&str] = &["pylon_outbox", "pylon_on_message"];
 /// Optional: calling the app's functions. Both or neither.
@@ -238,7 +242,8 @@ const INTEREST_EXPORTS: &[&str] = &[
 
 impl WasmShardKind {
     /// Compile and check a module. Fails on a codec other than JSON or
-    /// MessagePack, an import other than `pylon.log`, or a missing export.
+    /// MessagePack, an import the host does not provide, or a missing
+    /// export.
     pub fn compile(
         name: &str,
         wasm: &[u8],
@@ -250,10 +255,10 @@ impl WasmShardKind {
         let module = Module::from_binary(engine, wasm)
             .map_err(|e| format!("shard \"{name}\": invalid WebAssembly module: {e:#}"))?;
         for import in module.imports() {
-            if (import.module(), import.name()) != ("pylon", "log") {
+            if import.module() != "pylon" || !ALLOWED_IMPORTS.contains(&import.name()) {
                 return Err(format!(
-                    "shard \"{name}\": the module imports {}.{}; a shard module may import only pylon.log \
-                     (build for wasm32-unknown-unknown, not WASI)",
+                    "shard \"{name}\": the module imports {}.{}; a shard module may import only pylon.log, \
+                     pylon.view_position, and pylon.view_near (build for wasm32-unknown-unknown, not WASI)",
                     import.module(),
                     import.name()
                 ));
@@ -273,6 +278,7 @@ impl WasmShardKind {
         }
         for group in [
             INTEREST_EXPORTS,
+            LAG_EXPORTS,
             SAVE_EXPORTS,
             TRANSFER_EXPORTS,
             MESSAGE_EXPORTS,
@@ -294,6 +300,8 @@ impl WasmShardKind {
         let mut linker = Linker::new(engine);
         linker
             .func_wrap("pylon", "log", guest_log)
+            .and_then(|l| l.func_wrap("pylon", "view_position", guest_view_position))
+            .and_then(|l| l.func_wrap("pylon", "view_near", guest_view_near))
             .map_err(|e| format!("shard \"{name}\": {e:#}"))?;
         Ok(Self {
             name: name.to_string(),
@@ -404,6 +412,7 @@ impl WasmShardKind {
                 // The start function runs inside `instantiate`.
                 call_started: Some(thread_cpu_time()),
                 lease: self.lease.get().cloned(),
+                rewind: None,
             },
         );
         store.limiter(|s| &mut s.limits);
@@ -512,6 +521,17 @@ impl WasmShardKind {
             } else {
                 None
             },
+            lag: if instance
+                .get_export(&mut store, "pylon_lag_compensation")
+                .is_some()
+            {
+                Some(LagExports {
+                    config: func!("pylon_lag_compensation"),
+                    apply_at: func!("pylon_apply_input_at"),
+                })
+            } else {
+                None
+            },
             interest: if instance.get_export(&mut store, "pylon_interest").is_some() {
                 Some(InterestExports {
                     config: func!("pylon_interest"),
@@ -566,10 +586,33 @@ impl WasmShardKind {
             STATUS_ERR => return Err(format!("{export} refused: {}", inner.output_text()?)),
             other => return Err(format!("{export} returned status {other}")),
         }
+        // Lag compensation is read once, now the state exists.
+        let lag = match inner.exports.lag.clone() {
+            None => None,
+            Some(l) => match inner.call(&l.config, ())? {
+                0 => None,
+                1 => {
+                    let out = inner.output_at_most(8)?;
+                    let word = |i: usize| {
+                        out.get(i..i + 4)
+                            .map(|b| u32::from_le_bytes(b.try_into().expect("four bytes")))
+                    };
+                    match (word(0), word(4)) {
+                        (Some(history_ticks), Some(max_view_delay_ms)) => Some(LagCompensation {
+                            history_ticks,
+                            max_view_delay_ms,
+                        }),
+                        _ => return Err("pylon_lag_compensation wrote fewer than 8 bytes".into()),
+                    }
+                }
+                other => return Err(format!("pylon_lag_compensation returned {other}")),
+            },
+        };
         Ok(WasmSim {
             inner: RefCell::new(inner),
             mirror: RefCell::new(Replicated::new()),
             replication: std::cell::Cell::new(None),
+            lag,
             limits: self.limits.clone(),
         })
     }
@@ -605,6 +648,9 @@ struct HostState {
     call_started: Option<Duration>,
     /// The machine's lease in a cluster.
     lease: Option<Arc<LeaseClock>>,
+    /// What the subscriber drew, during `pylon_apply_input_at`; the
+    /// `view_*` imports answer from it.
+    rewind: Option<Rewind>,
 }
 
 impl HostState {
@@ -651,6 +697,66 @@ impl LogBudget {
             false
         }
     }
+}
+
+/// `pylon.view_position(id, out_ptr) -> found`: where the subscriber drew
+/// entity `id` at its view tick, as three f64 at `out_ptr`.
+fn guest_view_position(mut caller: Caller<'_, HostState>, id: i64, out: i32) -> i32 {
+    let Some(pos) = caller
+        .data()
+        .rewind
+        .as_ref()
+        .and_then(|r| r.position_at(id as u64))
+    else {
+        return 0;
+    };
+    let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) else {
+        return 0;
+    };
+    let mut bytes = [0u8; 24];
+    for (i, v) in pos.iter().enumerate() {
+        bytes[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
+    }
+    match memory.write(&mut caller, out as u32 as usize, &bytes) {
+        Ok(()) => 1,
+        Err(_) => 0,
+    }
+}
+
+/// `pylon.view_near(x, y, z, radius, out_ptr, cap) -> count`: the entities
+/// the subscriber drew within `radius` of the point at its view tick; up to
+/// `cap` of them at `out_ptr`, 32 bytes each (id, x, y, z).
+fn guest_view_near(
+    mut caller: Caller<'_, HostState>,
+    x: f64,
+    y: f64,
+    z: f64,
+    radius: f64,
+    out: i32,
+    cap: i32,
+) -> i32 {
+    let near = match caller.data().rewind.as_ref() {
+        Some(r) if radius.is_finite() && radius >= 0.0 => r.entities_near([x, y, z], radius),
+        _ => return 0,
+    };
+    let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) else {
+        return 0;
+    };
+    let take = near.len().min(cap.max(0) as usize);
+    let mut bytes = Vec::with_capacity(take * 32);
+    for (id, p) in &near[..take] {
+        bytes.extend_from_slice(&id.to_le_bytes());
+        for v in p {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    if memory
+        .write(&mut caller, out as u32 as usize, &bytes)
+        .is_err()
+    {
+        return -1;
+    }
+    near.len().min(i32::MAX as usize) as i32
 }
 
 fn guest_log(mut caller: Caller<'_, HostState>, level: i32, ptr: i32, len: i32) {
@@ -769,6 +875,13 @@ struct Exports {
     messages: Option<MessageExports>,
     calls: Option<CallExports>,
     writes: Option<TypedFunc<(), i32>>,
+    lag: Option<LagExports>,
+}
+
+#[derive(Clone)]
+struct LagExports {
+    config: TypedFunc<(), i32>,
+    apply_at: TypedFunc<(i32, i32, i32, i32, f64, f64), i32>,
 }
 
 #[derive(Clone)]
@@ -1022,6 +1135,8 @@ pub struct WasmSim {
     /// The module's last replication settings; None when it does not
     /// replicate.
     replication: std::cell::Cell<Option<ReplicationConfig>>,
+    /// The module's lag compensation, read when it started.
+    lag: Option<LagCompensation>,
     limits: WasmLimits,
 }
 
@@ -1581,6 +1696,41 @@ impl SimState for WasmSim {
 
     fn replication_config(&self) -> ReplicationConfig {
         self.replication.get().unwrap_or_default()
+    }
+
+    fn lag_compensation(&self) -> Option<LagCompensation> {
+        self.lag
+    }
+
+    fn apply_input_at(
+        &mut self,
+        subscriber_id: &SubscriberId,
+        input: RawInput,
+        now: Instant,
+        rewind: Option<&Rewind>,
+    ) -> Result<(), String> {
+        let inner = self.inner.get_mut();
+        let (Some(rewind), Some(lag)) = (rewind, inner.exports.lag.clone()) else {
+            return self.apply_input(subscriber_id, input, now);
+        };
+        inner.enter_tick();
+        inner.broadcast = None;
+        let args = inner.write_args(&[subscriber_id.as_str().as_bytes(), input.bytes()])?;
+        inner.store.data_mut().rewind = Some(rewind.clone());
+        let status = inner.call(
+            &lag.apply_at,
+            (
+                args[0].0,
+                args[0].1,
+                args[1].0,
+                args[1].1,
+                rewind.tick(),
+                rewind.now_tick(),
+            ),
+        );
+        // Only during the call: the imports answer nothing outside it.
+        inner.store.data_mut().rewind = None;
+        inner.status(status?, "pylon_apply_input_at")
     }
 }
 

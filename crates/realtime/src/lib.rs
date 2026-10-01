@@ -47,6 +47,7 @@ pub mod raw;
 pub mod registry;
 pub mod replay;
 pub mod replication;
+pub mod rewind;
 pub mod shard;
 pub mod snapshot;
 pub mod stats;
@@ -73,6 +74,7 @@ pub use raw::{RawInput, RawSnapshot};
 pub use registry::ShardRegistry;
 pub use replay::{replay, replay_to, ReplayEntry, ReplayLog};
 pub use replication::{Plane, ReplicatedRef, ReplicationConfig, Replicator};
+pub use rewind::{LagCompensation, Rewind};
 pub use shard::{
     CallResult, Shard, ShardAuth, ShardConfig, ShardError, ShardMessage, SimState,
     MAX_QUEUED_CALL_RESULTS, MAX_QUEUED_MESSAGES,

@@ -77,8 +77,11 @@ export interface ShardGame<TInput = unknown> {
    * frame.
    */
   frame(now?: number): number;
-  /** Send an input; every predictor made by `predict` records it. Returns
-   *  its sequence number, or 0 when it was not sent. */
+  /**
+   * Send an input; every predictor made by `predict` records it. The input
+   * carries the tick the last `frame` drew, for a shard with lag
+   * compensation. Returns its sequence number, or 0 when it was not sent.
+   */
   send(input: TInput): number;
   /**
    * A predictor that records every input `send` sends, forgets inputs the
@@ -160,7 +163,8 @@ export function connectShardGame<TInput = unknown>(
       return renderTick;
     },
     send(input) {
-      const seq = connection.send(input);
+      const drawn = interpolator.drawnTick;
+      const seq = connection.send(input, drawn >= 0 ? drawn : undefined);
       for (const p of predictors) p.push(seq, input);
       return seq;
     },

@@ -140,6 +140,7 @@ void Update()
 
 - A predictor from `Predict` records each sent input, drops refused inputs, and resets when the connection reopens.
 - `Send` returns 0 when it did not send. Do not predict that input.
+- `Send` stamps each input with the tick the last `Frame` drew, for a shard with [lag compensation](/concepts/shards#lag-compensation).
 
 ## WebTransport
 

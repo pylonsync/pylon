@@ -383,7 +383,15 @@ namespace Pylon.Realtime
         /// of inputs wait for a socket that stopped draining). Do not
         /// predict an input that returned 0.
         /// </summary>
-        public ulong Send(PylonValue input)
+        public ulong Send(PylonValue input) => Send(input, (double?)null);
+
+        /// <summary>
+        /// <see cref="Send(PylonValue)"/> with the tick (fractional) the client
+        /// was drawing when the player acted, for a shard with lag
+        /// compensation. <see cref="ShardGame{TInput}"/> sets it from the last
+        /// <c>Frame</c>.
+        /// </summary>
+        public ulong Send(PylonValue input, double? viewTick)
         {
             string? failure = null;
             ulong seq = 0;
@@ -396,7 +404,7 @@ namespace Pylon.Realtime
                 }
                 else
                 {
-                    ShardWire.EncodeInput(_codec, input, _clientSeq + 1, out var text, out var binary);
+                    ShardWire.EncodeInput(_codec, input, _clientSeq + 1, viewTick, out var text, out var binary);
                     // Numbered and queued under one lock, so inputs reach the
                     // server in sequence order: its ack is the highest
                     // sequence it processed.

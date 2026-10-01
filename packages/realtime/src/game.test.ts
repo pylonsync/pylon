@@ -100,7 +100,8 @@ test("a render loop draws entities between frames, and prediction follows acks",
   const s2 = game.send({ dx: 1 });
   const s3 = game.send({ dx: 1 });
   expect([s1, s2, s3]).toEqual([1, 2, 3]);
-  expect(JSON.parse(ws.sent[0])).toEqual({ input: { dx: 1 }, client_seq: 1 });
+  // Each input carries the tick the last frame drew, for lag compensation.
+  expect(JSON.parse(ws.sent[0])).toEqual({ input: { dx: 1 }, client_seq: 1, view_tick: renderTick });
   deliver(11, 2, { update: [{ id: 1, from: [0, 0, 0], pos: [1.5, 0, 0] }] });
   expect(predicted).toBeCloseTo(2.5);
   expect(game.ack).toBe(2);
@@ -133,5 +134,15 @@ test("a render loop draws entities between frames, and prediction follows acks",
   game.frame(13 * 50 + 20 + 100);
   expect(game.entities.has(2)).toBe(false);
   expect(game.left).toEqual([2]);
+  game.close();
+});
+
+test("an input sent before the first frame carries no view tick", () => {
+  const game = connectShardGame<{ dx: number }>("zone-nv", { subscriberId: "p1", baseUrl: "h", now: () => 0 });
+  const ws = sockets[sockets.length - 1];
+  ws.open();
+  ws.deliver(replicationFrame(1, 0, { full: true, spawn: [{ id: 1, pos: [0, 0, 0] }] }));
+  expect(game.send({ dx: 1 })).toBe(1);
+  expect(JSON.parse(ws.sent[0])).toEqual({ input: { dx: 1 }, client_seq: 1 });
   game.close();
 });

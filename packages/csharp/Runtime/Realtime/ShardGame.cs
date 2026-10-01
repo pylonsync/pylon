@@ -171,7 +171,9 @@ namespace Pylon.Realtime
         /// </summary>
         public ulong Send(TInput input)
         {
-            var seq = Connection.Send(_inputs.ToValue(input));
+            // The tick the last Frame drew, for a shard with lag compensation.
+            var drawn = _interpolator.DrawnTick;
+            var seq = Connection.Send(_inputs.ToValue(input), drawn >= 0 ? drawn : (double?)null);
             foreach (var p in _predictors) p.Push(seq, input);
             return seq;
         }
