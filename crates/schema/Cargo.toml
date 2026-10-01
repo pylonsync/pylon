@@ -14,5 +14,5 @@ version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-pylon-kernel = { path = "../core", version = "0.22.13" }  # x-release-please-version
+pylon-kernel = { path = "../core", version = "0.22.14" }  # x-release-please-version
 
