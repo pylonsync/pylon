@@ -9,7 +9,9 @@
 #    shard-wasm.e2e.test.ts joins as two guests over /shard on the main port,
 #    moves, gets a rejection, and has a stolen ticket refused. The C#
 #    client's live tests (packages/csharp) run when `dotnet` is installed,
-#    and at the end its live queries run against examples/todo-app.
+#    over WebSockets and over WebTransport through the native plugin (2%
+#    packet loss included), and at the end its live queries run against
+#    examples/todo-app.
 #    packages/realtime's shard-data.e2e.test.ts has the zone load a
 #    character, grant an item through a mutation once per key, write x
 #    back, and take a GM's heal after a commit, on SQLite.
@@ -59,6 +61,7 @@ serve() {
 	(cd "$dir" && PYLON_DB_PATH="$TMP/$log.db" PYLON_CORS_ORIGIN="http://localhost:$PORT" \
 		PYLON_ADMIN_TOKEN="$ADMIN_TOKEN" \
 		PYLON_SHARD_WS_MAX_PER_IP=0 PYLON_SHARD_SAVE_SECS=1 \
+		PYLON_WEBTRANSPORT_PORT="$((PORT + 10))" \
 		exec "$PYLON" start "$target" --port "$PORT") >>"$TMP/$log.log" 2>&1 &
 	SERVER_PID=$!
 	for _ in $(seq 1 120); do
@@ -101,10 +104,10 @@ grep -q "compiled $KINDS kind(s)" "$TMP/source.log" || {
 	exit 1
 }
 e2e
-echo "→ the C# client: a guest joins the arena and moves, frontier entities replicate, a zone transfer"
+echo "→ the C# client: a guest joins the arena and moves, frontier entities replicate, a zone transfer, WebTransport"
 if command -v dotnet >/dev/null 2>&1; then
-	(cd "$ROOT/packages/csharp" && PYLON_TEST_URL="http://localhost:$PORT" \
-		dotnet test "Tests~/Pylon.Tests" --filter "FullyQualifiedName~LiveArena")
+	(cd "$ROOT/packages/csharp" && PYLON_TEST_URL="http://localhost:$PORT" PYLON_REQUIRE_PLUGIN=1 \
+		dotnet test "Tests~/Pylon.Tests" --filter "FullyQualifiedName~LiveArena|FullyQualifiedName~LiveWebTransport|FullyQualifiedName~NativePlugin")
 elif [[ -n "${PYLON_SMOKE_REQUIRE_DOTNET:-}" ]]; then
 	echo "::error::dotnet is not installed" >&2
 	exit 1

@@ -17,7 +17,8 @@ namespace Pylon.Samples.Arena
     /// as soon as an input is sent, and each snapshot's ack corrects it.
     ///
     /// Run the server first: <c>pylon dev</c> in examples/shard-arena of
-    /// the Pylon repo, then press Play.
+    /// the Pylon repo, then press Play. With <c>PYLON_WEBTRANSPORT_PORT</c>
+    /// set on the server, the sample connects over WebTransport.
     /// </summary>
     public sealed class ArenaSample : MonoBehaviour
     {
@@ -29,6 +30,9 @@ namespace Pylon.Samples.Arena
 
         [Tooltip("World units per arena unit. The arena is 800 by 500.")]
         public float scale = 0.01f;
+
+        [Tooltip("Auto: WebTransport when the plugin and the app support it, else a WebSocket.")]
+        public ShardTransport transport = ShardTransport.Auto;
 
         /// <summary>What the sample is doing, for the on-screen label.</summary>
         public string Status { get; private set; } = "starting";
@@ -44,6 +48,9 @@ namespace Pylon.Samples.Arena
         public int MovesAcked { get; private set; }
 
         public string? LastError { get; private set; }
+
+        /// <summary>The transport of the open connection (null before it opens).</summary>
+        public ShardTransport? ConnectedOver => _game?.Connection.Transport;
 
         /// <summary>The target the predictor shows for this player, in arena units.</summary>
         public Vector2? PredictedTarget { get; private set; }
@@ -82,13 +89,14 @@ namespace Pylon.Samples.Arena
                     Ticket = join["ticket"].AsString(),
                     TickRate = 20,
                     IdleTimeout = TimeSpan.FromSeconds(5),
+                    Transport = transport,
                 }, PylonConverter.Value);
                 // The predicted target: a move_to sets it, anything else keeps it.
                 _target = _game.Predict<Vector2?>((target, input) =>
                     input["move_to"].IsNull
                         ? target
                         : new Vector2(input["move_to"]["x"].AsFloat(), input["move_to"]["y"].AsFloat()));
-                _game.Opened += () => Status = "connected";
+                _game.Opened += () => Status = $"connected over {_game.Connection.Transport}";
                 _game.StateChanged += (state, reason) => Status = reason == null ? state.ToString() : $"{state}: {reason}";
                 _game.Connection.Snapshot += OnSnapshot;
                 _game.InputRejected += r => LastError = $"input {r.ClientSeq} refused: {r.Code} {r.Message}";

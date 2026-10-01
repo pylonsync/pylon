@@ -5,16 +5,18 @@ the same routes and wire format as the TypeScript and Swift clients:
 
 - `PylonClient`: guest, magic-code, and password sign-in, session refresh,
   token storage, server functions, and entity reads and writes.
-- `ShardConnection`: realtime shards over WebSocket (wire protocol v2). It
-  decodes JSON and MessagePack snapshots, applies entity replication
-  frames, sends inputs, and follows reconnects and transfers.
+- `ShardConnection`: realtime shards over WebSocket (wire protocol v2), or
+  over WebTransport through a native plugin. It decodes JSON and
+  MessagePack snapshots, applies entity replication frames, sends inputs,
+  and follows reconnects and transfers.
 - `Predictor`, `ShardClock`, and `EntityInterpolator`: client-side
   prediction, a server-tick estimate, and entity interpolation for render
   loops.
 
 The core (`Runtime/`) is plain .NET Standard 2.1 with no Unity references
 and no reflection. It runs under IL2CPP and in any .NET app. `Unity/` adds
-PlayerPrefs token storage and a `JsonUtility` converter.
+PlayerPrefs token storage and a `JsonUtility` converter. `Plugins/` holds
+the WebTransport plugin for each platform (see [WebTransport](#webtransport)).
 
 ## Install
 
@@ -171,6 +173,53 @@ ulong seq = shard.Send(PylonValue.Object(("move_to", PylonValue.Object(("x", 120
   send them as `bearer.` and `ticket.` subprotocols instead, set
   `Credentials = ShardCredentialTransport.Subprotocols`.
 
+## WebTransport
+
+Over a WebSocket, one lost TCP packet holds back every frame behind it.
+Over WebTransport (QUIC), entity updates travel as datagrams, so a lost
+packet delays only its own update. Set `Transport`:
+
+```csharp
+var shard = new ShardConnection(shardId, new ShardConnectionOptions
+{
+    BaseUrl = client.BaseUrl,
+    SubscriberId = subscriberId,
+    Ticket = ticket,
+    Transport = ShardTransport.Auto,
+});
+```
+
+- `WebSocket`: the default for `ShardConnection`.
+- `WebTransport`: WebTransport only. It stops with an error when the
+  plugin is missing or the app does not serve WebTransport.
+- `Auto`: the default for `ShardGame`. It uses WebTransport when it opens.
+  Otherwise it uses a WebSocket, and keeps using WebSockets on that
+  connection. The fallback happens when:
+  - the plugin is missing
+  - the app does not serve WebTransport
+  - UDP is blocked
+  - the session does not open within `WebTransportTimeout` (3 s)
+  - datagrams stop arriving
+
+The app serves WebTransport when `PYLON_WEBTRANSPORT_PORT` is set on the
+server (a UDP port). The client reads the endpoint and its certificate
+hashes from `/_pylon/shard/webtransport`. To read them from another URL,
+set `WebTransportInfoUrl`. `shard.Transport` tells which transport the
+open connection uses.
+
+The plugin (`crates/shard-client-ffi`, a Rust WebTransport client with a
+C ABI) ships in `Plugins/` for these platforms:
+
+| Platform | File |
+| --- | --- |
+| macOS (arm64, x86_64) | `macOS/libpylon_shard_client.dylib` |
+| Windows x86_64 | `Windows/x86_64/pylon_shard_client.dll` |
+| Linux x86_64 (glibc 2.31 or later) | `Linux/x86_64/libpylon_shard_client.so` |
+| iOS (device, simulator) | `iOS/pylon_shard_client.xcframework` |
+| Android arm64-v8a, armeabi-v7a | `Android/<abi>/libpylon_shard_client.so` |
+
+Outside Unity, copy the file for your platform next to your executable.
+
 ## Threads
 
 Callbacks run on the `SynchronizationContext` of the thread that created
@@ -224,7 +273,8 @@ signs in as a guest, calls `joinArena`, joins the arena shard, and moves
 your player. To run it:
 
 1. Start the server: `pylon dev` in `examples/shard-arena` of this repo.
-2. Open the scene and press Play.
+   To use WebTransport, start it with `PYLON_WEBTRANSPORT_PORT=4324`.
+2. Open the scene and press Play. The label shows the transport.
 
 ## Tests
 

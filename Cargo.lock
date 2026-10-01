@@ -3432,6 +3432,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pylon-shard-client-ffi"
+version = "1.0.0"
+dependencies = [
+ "rustls",
+ "tokio",
+ "webpki-roots 0.26.11",
+ "wtransport",
+]
+
+[[package]]
 name = "pylon-shard-guest"
 version = "0.22.12"
 dependencies = [

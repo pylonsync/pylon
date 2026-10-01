@@ -94,19 +94,21 @@ namespace Pylon.Tests
             // is the one that appears after the join.
             var before = new System.Collections.Generic.HashSet<ulong>(Take(updates, _ => true).Entities.Entities.Keys);
             shard.Send("join");
-            ulong mine = 0;
+            // Entity ids start at 0, so "none yet" is null.
+            ulong? mine = null;
             Take(updates, u =>
             {
                 foreach (var id in u.Entities.Entities.Keys)
                 {
-                    if (!before.Contains(id)) mine = id;
+                    // Ids only grow: this player, the newest, has the highest new one.
+                    if (!before.Contains(id) && (mine == null || id > mine)) mine = id;
                 }
-                return mine != 0;
+                return mine.HasValue;
             });
-            var e = shard.Entities.Get(mine)!;
+            var e = shard.Entities.Get(mine!.Value)!;
             var start = (e.X, e.Y);
             shard.Send(PylonValue.Object(("move_to", PylonValue.Object(("x", 10.0), ("y", 10.0)))));
-            Take(updates, u => u.Entities.Get(mine) is { } now && (now.X, now.Y) != start);
+            Take(updates, u => u.Entities.Get(mine.Value) is { } now && (now.X, now.Y) != start);
         }
 
         [LiveFact(Env)]

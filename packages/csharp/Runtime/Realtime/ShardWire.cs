@@ -202,6 +202,192 @@ namespace Pylon.Realtime
         }
     }
 
+    /// <summary>
+    /// WebTransport framing (wire version 3 in Rust): the same v2 frames
+    /// travel on one bidirectional stream, each after a 4-byte big-endian
+    /// length, and entity updates travel as datagrams.
+    /// </summary>
+    public static class ShardWebTransport
+    {
+        /// <summary>Type bytes of the client's stream messages.</summary>
+        public const byte MessageInput = 0;
+        public const byte MessageAcks = 1;
+        public const byte MessageJsonInput = 2;
+
+        /// <summary>Acks one message may carry (the server refuses more).</summary>
+        public const int MaxAcksPerMessage = 512;
+
+        /// <summary>Session close codes the server uses.</summary>
+        public const uint CloseNormal = 0;
+        /// <summary>Refused: bad credentials, an unknown shard.</summary>
+        public const uint ClosePolicy = 1;
+        public const uint CloseProtocol = 2;
+        /// <summary>Try again: the client was too slow, or the server was busy.</summary>
+        public const uint CloseAgain = 3;
+
+        /// <summary>A stream message: a 4-byte big-endian length, then the bytes.</summary>
+        public static byte[] LengthPrefixed(byte[] bytes)
+        {
+            var out_ = new byte[4 + bytes.Length];
+            out_[0] = (byte)(bytes.Length >> 24);
+            out_[1] = (byte)(bytes.Length >> 16);
+            out_[2] = (byte)(bytes.Length >> 8);
+            out_[3] = (byte)bytes.Length;
+            Buffer.BlockCopy(bytes, 0, out_, 4, bytes.Length);
+            return out_;
+        }
+
+        /// <summary>The first stream message: who connects to which shard.</summary>
+        public static byte[] Hello(string shard, string sid, string? ticket, string? token)
+        {
+            var fields = new System.Collections.Generic.List<(string, PylonValue)> { ("shard", shard), ("sid", sid) };
+            if (!string.IsNullOrEmpty(ticket)) fields.Add(("ticket", ticket));
+            if (!string.IsNullOrEmpty(token)) fields.Add(("token", token));
+            return LengthPrefixed(Encoding.UTF8.GetBytes(PylonValue.Object(fields.ToArray()).ToJson()));
+        }
+
+        /// <summary>An input as a stream message: the type byte (JSON or the shard's codec), then the envelope.</summary>
+        public static byte[] Input(byte[] envelope, bool json)
+        {
+            var msg = new byte[1 + envelope.Length];
+            msg[0] = json ? MessageJsonInput : MessageInput;
+            Buffer.BlockCopy(envelope, 0, msg, 1, envelope.Length);
+            return LengthPrefixed(msg);
+        }
+
+        static void Varint(System.Collections.Generic.List<byte> out_, ulong v)
+        {
+            while (v >= 0x80)
+            {
+                out_.Add((byte)(v | 0x80));
+                v >>= 7;
+            }
+            out_.Add((byte)v);
+        }
+
+        static int VarintLength(ulong v)
+        {
+            var n = 1;
+            while (v >= 0x80)
+            {
+                v >>= 7;
+                n++;
+            }
+            return n;
+        }
+
+        /// <summary>
+        /// Datagram acks: the type byte, a varint count, then per ack the
+        /// datagram's frame number and the table's stream tick when it applied, both varints.
+        /// </summary>
+        public static byte[] DatagramAcks(System.Collections.Generic.IReadOnlyList<(ulong Frame, ulong Applied)> acks)
+        {
+            var out_ = new System.Collections.Generic.List<byte> { MessageAcks };
+            Varint(out_, (ulong)acks.Count);
+            foreach (var (frame, applied) in acks)
+            {
+                Varint(out_, frame);
+                Varint(out_, applied);
+            }
+            return out_.ToArray();
+        }
+
+        /// <summary><see cref="DatagramAcks"/> split into messages of at most <paramref name="maxBytes"/> bytes and <see cref="MaxAcksPerMessage"/> acks.</summary>
+        public static System.Collections.Generic.List<byte[]> DatagramAckBatches(
+            System.Collections.Generic.IReadOnlyList<(ulong Frame, ulong Applied)> acks, int maxBytes)
+        {
+            var out_ = new System.Collections.Generic.List<byte[]>();
+            var start = 0;
+            // The type byte plus the count, which is below 2^14 (two varint bytes).
+            var size = 3;
+            for (var i = 0; i < acks.Count; i++)
+            {
+                var n = VarintLength(acks[i].Frame) + VarintLength(acks[i].Applied);
+                if (i > start && (size + n > maxBytes || i - start == MaxAcksPerMessage))
+                {
+                    out_.Add(DatagramAcks(Slice(acks, start, i)));
+                    start = i;
+                    size = 3;
+                }
+                size += n;
+            }
+            if (start < acks.Count) out_.Add(DatagramAcks(Slice(acks, start, acks.Count)));
+            return out_;
+        }
+
+        static System.Collections.Generic.List<(ulong, ulong)> Slice(
+            System.Collections.Generic.IReadOnlyList<(ulong Frame, ulong Applied)> acks, int from, int to)
+        {
+            var l = new System.Collections.Generic.List<(ulong, ulong)>(to - from);
+            for (var i = from; i < to; i++) l.Add(acks[i]);
+            return l;
+        }
+
+        /// <summary>The body of <c>GET /_pylon/shard/webtransport</c>: the URL and the certificate hashes to pin.</summary>
+        public static (string Url, byte[][] CertHashes) DecodeInfo(PylonValue body)
+        {
+            var url = body["url"].AsStringOr(null) ?? throw PylonException.Decoding("WebTransport info without a url");
+            var list = new System.Collections.Generic.List<byte[]>();
+            foreach (var h in body["certHashes"].Items)
+            {
+                var b64 = h.AsStringOr(null) ?? throw PylonException.Decoding("a WebTransport certificate hash is not a string");
+                byte[] bytes;
+                try
+                {
+                    bytes = Convert.FromBase64String(b64);
+                }
+                catch (FormatException)
+                {
+                    throw PylonException.Decoding("a WebTransport certificate hash is not base64");
+                }
+                if (bytes.Length != 32) throw PylonException.Decoding($"a {bytes.Length}-byte certificate hash");
+                list.Add(bytes);
+            }
+            return (url, list.ToArray());
+        }
+    }
+
+    /// <summary>Splits a WebTransport stream's bytes into its length-prefixed frames. Chunks can end anywhere.</summary>
+    public sealed class StreamFrames
+    {
+        /// <summary>A frame larger than this ends the session.</summary>
+        public const int MaxFrame = 64 * 1024 * 1024;
+
+        byte[] _buffer = new byte[64 * 1024];
+        int _length;
+
+        /// <summary>Add a chunk and return the frames it completed.</summary>
+        public System.Collections.Generic.List<byte[]> Push(byte[] chunk, int count)
+        {
+            if (_length + count > _buffer.Length)
+            {
+                var bigger = new byte[Math.Max(_buffer.Length * 2, _length + count)];
+                Buffer.BlockCopy(_buffer, 0, bigger, 0, _length);
+                _buffer = bigger;
+            }
+            Buffer.BlockCopy(chunk, 0, _buffer, _length, count);
+            _length += count;
+            var frames = new System.Collections.Generic.List<byte[]>();
+            var at = 0;
+            while (_length - at >= 4)
+            {
+                var len = (_buffer[at] << 24) | (_buffer[at + 1] << 16) | (_buffer[at + 2] << 8) | _buffer[at + 3];
+                if (len < 0 || len > MaxFrame) throw PylonException.Decoding($"a {(uint)len}-byte stream frame");
+                if (_length - at - 4 < len) break;
+                var frame = new byte[len];
+                Buffer.BlockCopy(_buffer, at + 4, frame, 0, len);
+                frames.Add(frame);
+                at += 4 + len;
+            }
+            if (at > 0)
+            {
+                Buffer.BlockCopy(_buffer, at, _buffer, 0, _length - at);
+                _length -= at;
+            }
+            return frames;
+        }
+    }
+
     /// <summary>Shard tickets (<c>v1.&lt;payload&gt;.&lt;signature&gt;</c>, the payload base64url JSON with <c>exp</c> in Unix seconds).</summary>
     public static class ShardTicket
     {

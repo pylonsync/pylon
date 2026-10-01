@@ -368,7 +368,7 @@ namespace Pylon.Tests
         [Fact]
         public void AFullSendQueueRefusesTheInput()
         {
-            using var link = new ShardConnection.Link(new ClientWebSocket(), 10);
+            using var link = new ShardConnection.WsLink(new ClientWebSocket(), 10);
             Assert.True(link.Enqueue(new byte[8], true));
             Assert.False(link.Enqueue(new byte[8], true));
         }
@@ -466,6 +466,9 @@ namespace Pylon.Tests
             _listener.Start();
             _ = Task.Run(AcceptLoop);
         }
+
+        /// <summary>The app origin: the client connects to /shard on it.</summary>
+        public Uri Base => new Uri($"http://127.0.0.1:{_port}");
 
         public Uri Url(string shard) => new Uri($"ws://127.0.0.1:{_port}/shard?shard={shard}&sid=p1&v=2");
 

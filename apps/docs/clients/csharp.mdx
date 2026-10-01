@@ -141,6 +141,35 @@ void Update()
 - A predictor from `Predict` records each sent input, drops refused inputs, and resets when the connection reopens.
 - `Send` returns 0 when it did not send. Do not predict that input.
 
+## WebTransport
+
+Over WebTransport (QUIC), entity updates travel as datagrams. A lost packet delays only its own update. Over a WebSocket, it holds back every frame behind it.
+
+```csharp
+var shard = new ShardConnection(shardId, new ShardConnectionOptions
+{
+    BaseUrl = client.BaseUrl,
+    SubscriberId = subscriberId,
+    Ticket = ticket,
+    Transport = ShardTransport.Auto,
+});
+```
+
+- `WebSocket` is the default for `ShardConnection`.
+- `WebTransport` uses WebTransport only.
+- `Auto` is the default for `ShardGame`. It uses WebTransport when the session opens, and a WebSocket otherwise.
+- Auto uses a WebSocket when the plugin is missing, the app does not serve WebTransport, UDP is blocked, the session does not open in 3 s, or datagrams stop.
+- The server serves WebTransport when `PYLON_WEBTRANSPORT_PORT` is set.
+- `shard.Transport` gives the transport of the open connection.
+
+The package includes a native WebTransport plugin for each platform in `Plugins/`:
+
+- macOS (arm64 and x86_64)
+- Windows x86_64
+- Linux x86_64
+- iOS (device and simulator)
+- Android arm64-v8a and armeabi-v7a
+
 ## Threads
 
 The SDK runs callbacks on the `SynchronizationContext` of the thread that made the client or connection. In Unity, make them on the main thread. Events then run on the main thread, and you can change GameObjects in them. Dispose the connection and the client in `OnDestroy`.
@@ -149,7 +178,7 @@ The SDK runs callbacks on the `SynchronizationContext` of the thread that made t
 
 The package has an **Arena** sample. It signs in as a guest, calls `joinArena`, joins the arena shard, and moves your player. To run it:
 
-1. Run `pylon dev` in `examples/shard-arena`.
+1. Run `pylon dev` in `examples/shard-arena`. To use WebTransport, set `PYLON_WEBTRANSPORT_PORT=4324`.
 2. Import the sample from **Package Manager > Pylon > Samples**.
 3. Open the scene and press Play.
 

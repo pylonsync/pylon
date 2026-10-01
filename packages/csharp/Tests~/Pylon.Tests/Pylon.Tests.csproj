@@ -18,4 +18,10 @@
     <None Include="../../../sync/conformance/*.json" LinkBase="fixtures/conformance" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../../realtime/src/wire.fixtures.json" Link="fixtures/wire.fixtures.json" CopyToOutputDirectory="PreserveNewest" Condition="Exists('../../../realtime/src/wire.fixtures.json')" />
   </ItemGroup>
+  <!-- The WebTransport plugin for this host, next to the test assembly, where DllImport finds it. -->
+  <ItemGroup>
+    <None Include="../../Plugins/macOS/libpylon_shard_client.dylib" Link="libpylon_shard_client.dylib" CopyToOutputDirectory="PreserveNewest" Condition="$([MSBuild]::IsOSPlatform('OSX')) And Exists('../../Plugins/macOS/libpylon_shard_client.dylib')" />
+    <None Include="../../Plugins/Linux/x86_64/libpylon_shard_client.so" Link="libpylon_shard_client.so" CopyToOutputDirectory="PreserveNewest" Condition="$([MSBuild]::IsOSPlatform('Linux')) And Exists('../../Plugins/Linux/x86_64/libpylon_shard_client.so')" />
+    <None Include="../../Plugins/Windows/x86_64/pylon_shard_client.dll" Link="pylon_shard_client.dll" CopyToOutputDirectory="PreserveNewest" Condition="$([MSBuild]::IsOSPlatform('Windows')) And Exists('../../Plugins/Windows/x86_64/pylon_shard_client.dll')" />
+  </ItemGroup>
 </Project>

@@ -333,8 +333,10 @@ game.connection.transport; // "webtransport" or "websocket"
 - `"websocket"` (the default for `connectShard` and `useShard`).
 - `"webtransport"`: WebTransport or an error.
 
-In a browser without WebTransport, `"auto"` uses a WebSocket. The Swift
-client uses WebSockets.
+In a browser without WebTransport, `"auto"` uses a WebSocket. The C#
+client has the same three choices through a native plugin
+(`ShardTransport`, see [C# and Unity](/clients/csharp#webtransport)). The
+Swift client uses WebSockets.
 `webTransportInfoUrl` sets where the client fetches the URL and hashes,
 when the API is not at `baseUrl`.
 

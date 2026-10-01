@@ -1,0 +1,26 @@
+[package]
+name = "pylon-shard-client-ffi"
+description = "A WebTransport client for Pylon shards with a C ABI, for native plugins (the C# client's WebTransport path)."
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+# The C ABI's version, not the workspace's: the committed plugin binaries
+# report it, and the C# client refuses another major version.
+version = "1.0.0"
+publish = false
+
+[lib]
+name = "pylon_shard_client"
+# cdylib: desktop and Android plugins; staticlib: iOS (linked into the app);
+# rlib: the crate's own tests.
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+wtransport = { workspace = true }
+rustls = { workspace = true }
+webpki-roots = "0.26"
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Net.Http;
 using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
@@ -16,6 +17,26 @@ namespace Pylon.Realtime
         Headers,
         /// <summary><c>bearer.&lt;token&gt;</c> and <c>ticket.&lt;ticket&gt;</c> subprotocols, for hosts that cannot set headers.</summary>
         Subprotocols,
+    }
+
+    /// <summary>Which transport a <see cref="ShardConnection"/> uses.</summary>
+    public enum ShardTransport
+    {
+        /// <summary>A WebSocket (TCP): works everywhere.</summary>
+        WebSocket,
+        /// <summary>
+        /// WebTransport (QUIC) through the native plugin: entity updates
+        /// travel as datagrams, so one lost packet delays one update instead
+        /// of every frame behind it. Needs the plugin and an app that serves
+        /// WebTransport (<c>PYLON_SHARD_WEBTRANSPORT</c>).
+        /// </summary>
+        WebTransport,
+        /// <summary>
+        /// WebTransport when it opens; otherwise a WebSocket, and WebSockets
+        /// from then on (no plugin, UDP blocked, an app without it, a timeout,
+        /// or datagrams that stopped arriving).
+        /// </summary>
+        Auto,
     }
 
     public enum ShardConnectionState
@@ -57,6 +78,21 @@ namespace Pylon.Realtime
         public Func<string, CancellationToken, Task<string>>? TicketProvider { get; set; }
 
         public ShardCredentialTransport Credentials { get; set; } = ShardCredentialTransport.Headers;
+
+        /// <summary>
+        /// WebSocket, WebTransport, or Auto. Unset: WebSocket for a
+        /// <see cref="ShardConnection"/>, Auto for a <see cref="ShardGame{TInput}"/>.
+        /// </summary>
+        public ShardTransport? Transport { get; set; }
+
+        /// <summary>
+        /// Where to read the WebTransport endpoint (its URL and certificate
+        /// hashes). Default: <c>/_pylon/shard/webtransport</c> on the app's origin.
+        /// </summary>
+        public Uri? WebTransportInfoUrl { get; set; }
+
+        /// <summary>How long a WebTransport session may take to open (the endpoint request, the session, its stream). Default 3 s.</summary>
+        public TimeSpan WebTransportTimeout { get; set; } = TimeSpan.FromSeconds(3);
 
         public bool AutoReconnect { get; set; } = true;
         public TimeSpan ReconnectBaseDelay { get; set; } = TimeSpan.FromMilliseconds(500);
@@ -112,10 +148,15 @@ namespace Pylon.Realtime
         }
     }
 
-    /// <summary>One applied replication frame.</summary>
+    /// <summary>
+    /// The table after one or more replication frames. Over WebTransport, one
+    /// update covers every frame and datagram up to a whole tick.
+    /// </summary>
     public sealed class ShardReplicationUpdate
     {
+        /// <summary>The newest tick the table holds (it never goes back within a connection).</summary>
         public ulong Tick { get; }
+        /// <summary>The highest input sequence number the shard processed as of that tick.</summary>
         public ulong Ack { get; }
         public ReplicationSummary Summary { get; }
         /// <summary>The table after the frame. Read it in the handler; it changes with the next frame.</summary>
@@ -130,17 +171,24 @@ namespace Pylon.Realtime
         }
     }
 
-    /// <summary>Why the WebSocket closed.</summary>
+    /// <summary>Why the connection closed.</summary>
     public sealed class ShardCloseInfo
     {
-        /// <summary>The close code, or null when the connection dropped without one.</summary>
+        /// <summary>
+        /// The close code, or null when the connection dropped without one.
+        /// A WebSocket close code (1008: refused), or over WebTransport the
+        /// session's application code (1: refused, 3: try again).
+        /// </summary>
         public int? Code { get; }
         public string Reason { get; }
+        /// <summary>True when the connection was a WebTransport session.</summary>
+        public bool WebTransport { get; }
 
-        internal ShardCloseInfo(int? code, string reason)
+        internal ShardCloseInfo(int? code, string reason, bool webTransport = false)
         {
             Code = code;
             Reason = reason;
+            WebTransport = webTransport;
         }
     }
 
@@ -149,6 +197,9 @@ namespace Pylon.Realtime
     /// frames, sends inputs, and reconnects with backoff. Follows the
     /// server when it moves the subscriber to another shard (a transfer
     /// frame) or the shard to another machine.
+    ///
+    /// Over a WebSocket by default; set <see cref="ShardConnectionOptions.Transport"/>
+    /// for WebTransport through the native plugin.
     ///
     /// Events run on <see cref="ShardConnectionOptions.Dispatcher"/>; in
     /// Unity, create the connection on the main thread and they run there.
@@ -160,6 +211,25 @@ namespace Pylon.Realtime
     public sealed class ShardConnection : IDisposable
     {
         const int PolicyClose = 1008;
+        /// <summary>A WebTransport session with no whole tick for this long has lost its datagrams.</summary>
+        const double StallMs = 5000;
+        /// <summary>Ticks kept waiting at most; more means the datagrams stopped.</summary>
+        const int MaxPendingTicks = 100;
+
+        static readonly HttpClient InfoHttp = new HttpClient();
+
+        /// <summary>Opens WebTransport sessions: the native plugin. Tests set their own before <see cref="Connect"/>.</summary>
+        internal IWebTransportFactory WebTransports = NativeWebTransport.Instance;
+
+        /// <summary>Reads the WebTransport endpoint: (HTTP status, body). Tests set their own before <see cref="Connect"/>.</summary>
+        internal Func<Uri, CancellationToken, Task<(int Status, string Body)>> FetchInfo = DefaultFetchInfo;
+
+        static async Task<(int Status, string Body)> DefaultFetchInfo(Uri url, CancellationToken ct)
+        {
+            using var response = await InfoHttp.GetAsync(url, ct).ConfigureAwait(false);
+            var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            return ((int)response.StatusCode, body);
+        }
 
         readonly ShardConnectionOptions _options;
         readonly PylonDispatcher _dispatcher;
@@ -168,6 +238,7 @@ namespace Pylon.Realtime
         readonly CancellationTokenSource _cts = new CancellationTokenSource();
         readonly Random _random = new Random();
         readonly Func<double> _now;
+        readonly ShardTransport _transport;
 
         string _shardId;
         string? _transferTicket;
@@ -177,6 +248,8 @@ namespace Pylon.Realtime
         int _attempts;
         bool _started;
         bool _disposed;
+        /// <summary>Auto after WebTransport failed to open (or stalled): WebSockets from now on.</summary>
+        bool _webSocketOnly;
         ShardConnectionState _state = ShardConnectionState.Disconnected;
         Link? _link;
         readonly SortedDictionary<ulong, double> _sentAt = new SortedDictionary<ulong, double>();
@@ -187,6 +260,37 @@ namespace Pylon.Realtime
         ulong _lastTick;
         ulong _lastAck;
         double? _rttMs;
+        // The newest tick and ack this link has seen (-1: none yet). Over
+        // WebTransport, stream frames and datagrams can arrive out of order.
+        long _linkTick = -1;
+        ulong _linkAck;
+        // The tick replication handlers last got: they see ticks in order.
+        long _reportedTick = -1;
+        // Over WebTransport: the newest tick the table holds whole, the
+        // datagrams of newer ticks, and the stream frames that wait with them.
+        long _wholeTick = -1;
+        readonly SortedDictionary<ulong, PendingTick> _pending = new SortedDictionary<ulong, PendingTick>();
+        readonly List<(ulong Tick, byte[] Payload)> _pendingStream = new List<(ulong, byte[])>();
+        long _receivedStreamTick = -1;
+        double _lastWholeAt;
+        // Whether this link replicates entities (only then does the server send datagrams every tick).
+        bool _replicating;
+
+        sealed class PendingTick
+        {
+            public readonly ulong Parts;
+            public readonly ulong StreamTick;
+            public readonly ulong Ack;
+            /// <summary>By datagram number (a duplicate replaces itself).</summary>
+            public readonly SortedDictionary<ulong, byte[]> Datagrams = new SortedDictionary<ulong, byte[]>();
+
+            public PendingTick(ulong parts, ulong streamTick, ulong ack)
+            {
+                Parts = parts;
+                StreamTick = streamTick;
+                Ack = ack;
+            }
+        }
 
         public event Action? Opened;
         public event Action<ShardCloseInfo>? Closed;
@@ -199,6 +303,12 @@ namespace Pylon.Realtime
         public event Action<Exception>? Error;
 
         public ShardConnection(string shardId, ShardConnectionOptions options)
+            : this(shardId, options, ShardTransport.WebSocket)
+        {
+        }
+
+        /// <param name="defaultTransport">The transport when <see cref="ShardConnectionOptions.Transport"/> is unset.</param>
+        internal ShardConnection(string shardId, ShardConnectionOptions options, ShardTransport defaultTransport)
         {
             if (string.IsNullOrEmpty(shardId)) throw PylonException.InvalidArgument("shardId is empty");
             _options = options ?? throw new ArgumentNullException(nameof(options));
@@ -209,6 +319,7 @@ namespace Pylon.Realtime
             _dispatcher = options.Dispatcher ?? PylonDispatcher.Capture();
             _clock = new ShardClock(options.TickRate);
             _now = options.Now ?? ShardClock.Now;
+            _transport = options.Transport ?? defaultTransport;
         }
 
         /// <summary>The shard this connection is on (or connecting to). Changes after a transfer.</summary>
@@ -223,6 +334,9 @@ namespace Pylon.Realtime
         }
 
         public bool Connected => State == ShardConnectionState.Connected;
+
+        /// <summary>The transport of the open link, or of the last one (null before the first).</summary>
+        public ShardTransport? Transport { get; private set; }
 
         /// <summary>The entities a replicating shard sent. Read it on the dispatcher thread.</summary>
         public EntityTable Entities => _entities;
@@ -280,7 +394,7 @@ namespace Pylon.Realtime
                 {
                     ShardWire.EncodeInput(_codec, input, _clientSeq + 1, out var text, out var binary);
                     // Numbered and queued under one lock, so inputs reach the
-                    // socket in sequence order: the server's ack is the highest
+                    // server in sequence order: its ack is the highest
                     // sequence it processed.
                     if (link.Enqueue(text != null ? Encoding.UTF8.GetBytes(text) : binary!, text != null))
                     {
@@ -321,38 +435,76 @@ namespace Pylon.Realtime
                 var ticket = await NextTicketAsync(ct).ConfigureAwait(false);
                 if (ct.IsCancellationRequested || State == ShardConnectionState.Failed) return;
 
-                var socket = new ClientWebSocket();
-                var url = BuildUrl();
-                ConfigureCredentials(socket, ticket);
-                var link = new Link(socket, _options.MaxFrameBytes);
+                Link? link = null;
+                var mode = _transport;
+                bool webSocketOnly;
+                lock (_gate) webSocketOnly = _webSocketOnly;
+                if (mode == ShardTransport.WebTransport || (mode == ShardTransport.Auto && !webSocketOnly))
+                {
+                    try
+                    {
+                        link = await OpenWebTransportAsync(ticket, ct).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        return;
+                    }
+                    catch (WebTransportUnavailable e)
+                    {
+                        if (mode == ShardTransport.Auto)
+                        {
+                            // The WebSocket works where WebTransport does not: no
+                            // plugin, UDP blocked, an app without it. A failed fetch of
+                            // the endpoint info may pass; the rest do not.
+                            if (e.Kind != WebTransportUnavailable.Reason.Transient)
+                            {
+                                lock (_gate) _webSocketOnly = true;
+                            }
+                        }
+                        else
+                        {
+                            RaiseError(PylonException.Transport($"WebTransport to shard {ShardId}: {e.Message}", e));
+                            if (e.Kind == WebTransportUnavailable.Reason.Unsupported)
+                            {
+                                SetState(ShardConnectionState.Failed, e.Message);
+                                return;
+                            }
+                            if (!await BackoffAsync(ct).ConfigureAwait(false)) return;
+                            continue;
+                        }
+                    }
+                }
+
                 ShardCloseInfo close;
+                WsLink? ws = null;
                 try
                 {
-                    await socket.ConnectAsync(url, ct).ConfigureAwait(false);
-                    lock (_gate)
+                    if (link == null)
                     {
-                        _link = link;
-                        _state = ShardConnectionState.Connected;
+                        var socket = new ClientWebSocket();
+                        ConfigureCredentials(socket, ticket);
+                        ws = new WsLink(socket, _options.MaxFrameBytes);
+                        link = ws;
+                        await socket.ConnectAsync(BuildUrl(), ct).ConfigureAwait(false);
                     }
-                    Post(() =>
-                    {
-                        StateChanged?.Invoke(ShardConnectionState.Connected, null);
-                        Opened?.Invoke();
-                    });
-                    link.StartSending(ct, RaiseError);
-                    close = await ReceiveAsync(link, ct).ConfigureAwait(false);
+                    Began(link);
+                    close = ws != null
+                        ? await ReceiveAsync(ws, ct).ConfigureAwait(false)
+                        : await PollAsync((WtLink)link, ct).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
-                    link.Dispose();
+                    link?.Dispose();
                     return;
                 }
                 catch (Exception e)
                 {
                     RaiseError(PylonException.Transport($"shard {ShardId}: {e.Message}", e));
-                    close = new ShardCloseInfo(
-                        socket.CloseStatus.HasValue ? (int?)socket.CloseStatus.Value : null,
-                        socket.CloseStatusDescription ?? "");
+                    close = ws != null
+                        ? new ShardCloseInfo(
+                            ws.Socket.CloseStatus.HasValue ? (int?)ws.Socket.CloseStatus.Value : null,
+                            ws.Socket.CloseStatusDescription ?? "")
+                        : new ShardCloseInfo(null, e.Message, true);
                 }
                 finally
                 {
@@ -361,7 +513,7 @@ namespace Pylon.Realtime
                         if (ReferenceEquals(_link, link)) _link = null;
                     }
                 }
-                link.Dispose();
+                link?.Dispose();
                 if (ct.IsCancellationRequested) return;
                 Post(() => Closed?.Invoke(close));
 
@@ -371,7 +523,8 @@ namespace Pylon.Realtime
                 {
                     transferring = _transferring;
                     _transferring = false;
-                    refused = RefusedForGood(close.Code, close.Reason, _options.TicketProvider != null, _transferTicket != null);
+                    refused = RefusedForGood(close.Code, close.Reason, _options.TicketProvider != null,
+                        _transferTicket != null, close.WebTransport);
                 }
                 // The server closed after a transfer frame: go to the new shard at once.
                 if (transferring) continue;
@@ -384,25 +537,60 @@ namespace Pylon.Realtime
                 }
                 SetState(ShardConnectionState.Disconnected, close.Reason);
                 if (!_options.AutoReconnect) return;
-                TimeSpan delay;
-                lock (_gate)
-                {
-                    _attempts++;
-                    delay = Backoff(_attempts);
-                }
-                try
-                {
-                    await Task.Delay(delay, ct).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    return;
-                }
+                if (!await BackoffAsync(ct).ConfigureAwait(false)) return;
             }
         }
 
-        async Task<ShardCloseInfo> ReceiveAsync(Link link, CancellationToken ct)
+        async Task<bool> BackoffAsync(CancellationToken ct)
         {
+            TimeSpan delay;
+            lock (_gate)
+            {
+                _attempts++;
+                delay = Backoff(_attempts);
+            }
+            try
+            {
+                await Task.Delay(delay, ct).ConfigureAwait(false);
+                return true;
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
+            }
+        }
+
+        /// <summary>A link opened: its frames start over.</summary>
+        void Began(Link link)
+        {
+            lock (_gate)
+            {
+                _link = link;
+                _state = ShardConnectionState.Connected;
+                // Inputs sent on the old connection are never acknowledged on
+                // this one (acks restart with the connection).
+                _sentAt.Clear();
+            }
+            Transport = link is WtLink ? ShardTransport.WebTransport : ShardTransport.WebSocket;
+            Post(() =>
+            {
+                _linkTick = -1;
+                _linkAck = 0;
+                _reportedTick = -1;
+                _wholeTick = -1;
+                _pending.Clear();
+                _pendingStream.Clear();
+                _receivedStreamTick = -1;
+                _lastWholeAt = _now();
+                _replicating = false;
+                StateChanged?.Invoke(ShardConnectionState.Connected, null);
+                Opened?.Invoke();
+            });
+        }
+
+        async Task<ShardCloseInfo> ReceiveAsync(WsLink link, CancellationToken ct)
+        {
+            link.StartSending(ct, RaiseError);
             var socket = link.Socket;
             var buffer = new byte[64 * 1024];
             var message = new MemoryStream();
@@ -470,10 +658,195 @@ namespace Pylon.Realtime
             }
         }
 
+        // ---- WebTransport ----
+
+        sealed class WebTransportUnavailable : Exception
+        {
+            public enum Reason
+            {
+                /// <summary>No plugin on this platform, or the app does not serve WebTransport.</summary>
+                Unsupported,
+                /// <summary>The endpoint info could not be fetched (may pass).</summary>
+                Transient,
+                /// <summary>The session did not open.</summary>
+                Failed,
+            }
+
+            public readonly Reason Kind;
+
+            public WebTransportUnavailable(Reason kind, string message) : base(message)
+            {
+                Kind = kind;
+            }
+        }
+
+        internal Uri WebTransportInfoUrl()
+        {
+            if (_options.WebTransportInfoUrl != null) return _options.WebTransportInfoUrl;
+            const string path = "/_pylon/shard/webtransport";
+            if (_options.BaseUrl == null && _options.WsUrl != null && !_options.WsPort.HasValue)
+            {
+                var w = _options.WsUrl;
+                return new UriBuilder(w.Scheme == "wss" ? "https" : "http", w.Host, w.Port, path).Uri;
+            }
+            var b = new UriBuilder(_options.BaseUrl!) { Path = path, Query = "" };
+            if (_options.BaseUrl!.IsDefaultPort) b.Port = -1;
+            return b.Uri;
+        }
+
+        async Task<WtLink> OpenWebTransportAsync(string? ticket, CancellationToken ct)
+        {
+            var factory = WebTransports;
+            if (!factory.Available)
+                throw new WebTransportUnavailable(WebTransportUnavailable.Reason.Unsupported,
+                    WebTransportNative.Version() is string v
+                        ? $"the WebTransport plugin is version {v}; this client needs {WebTransportNative.AbiMajor}.x"
+                        : "the WebTransport plugin is not loaded on this platform");
+            // One deadline for the whole open: the endpoint request, the session, and its stream.
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            deadline.CancelAfter(_options.WebTransportTimeout);
+            var timeoutMs = _options.WebTransportTimeout.TotalMilliseconds;
+            string url;
+            byte[][] hashes;
+            try
+            {
+                var (status, body) = await FetchInfo(WebTransportInfoUrl(), deadline.Token).ConfigureAwait(false);
+                if (status == 404)
+                    throw new WebTransportUnavailable(WebTransportUnavailable.Reason.Unsupported, "the app does not serve WebTransport");
+                if (status < 200 || status > 299)
+                    throw new WebTransportUnavailable(WebTransportUnavailable.Reason.Transient,
+                        $"fetching the endpoint: HTTP {status}");
+                (url, hashes) = ShardWebTransport.DecodeInfo(PylonValue.Parse(body));
+            }
+            catch (WebTransportUnavailable)
+            {
+                throw;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (OperationCanceledException)
+            {
+                // The deadline: an endpoint that does not answer is treated as a session that did not open.
+                throw new WebTransportUnavailable(WebTransportUnavailable.Reason.Failed,
+                    $"the endpoint did not answer in {timeoutMs:0} ms");
+            }
+            catch (Exception e)
+            {
+                // The app did not answer: the WebSocket may still work, and a later attempt may reach the endpoint.
+                throw new WebTransportUnavailable(WebTransportUnavailable.Reason.Transient, $"fetching the endpoint: {e.Message}");
+            }
+
+            var session = factory.Connect(url, hashes) ??
+                throw new WebTransportUnavailable(WebTransportUnavailable.Reason.Failed, $"the plugin refused the endpoint {url}");
+            try
+            {
+                while (true)
+                {
+                    var state = session.State;
+                    if (state == WebTransportNative.StateOpen) break;
+                    if (state != WebTransportNative.StateConnecting)
+                        throw new WebTransportUnavailable(WebTransportUnavailable.Reason.Failed,
+                            $"the session did not open: {session.Error}");
+                    if (deadline.IsCancellationRequested)
+                    {
+                        session.Close(ShardWebTransport.CloseNormal, "");
+                        ct.ThrowIfCancellationRequested();
+                        throw new WebTransportUnavailable(WebTransportUnavailable.Reason.Failed,
+                            $"the session did not open in {timeoutMs:0} ms");
+                    }
+                    await Task.Delay(5, CancellationToken.None).ConfigureAwait(false);
+                }
+                string shard;
+                lock (_gate) shard = _shardId;
+                session.StreamWrite(ShardWebTransport.Hello(shard, _options.SubscriberId, ticket, _options.Token));
+                return new WtLink(session);
+            }
+            catch
+            {
+                session.Dispose();
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Drain the session's stream bytes and datagrams until it ends. Polls:
+        /// the plugin calls nothing back.
+        /// </summary>
+        async Task<ShardCloseInfo> PollAsync(WtLink link, CancellationToken ct)
+        {
+            using var watchdog = new Timer(_ => Post(() =>
+            {
+                if (ReferenceEquals(CurrentLink, link)) Stalled(link);
+            }), null, 1000, 1000);
+            return await Task.Factory.StartNew(() =>
+            {
+                var frames = new StreamFrames();
+                var chunk = new byte[64 * 1024];
+                var datagram = new byte[65536];
+                var lastActivity = _now();
+                while (!ct.IsCancellationRequested)
+                {
+                    var busy = false;
+                    var state = link.Session.State;
+                    while (true)
+                    {
+                        var n = link.Session.StreamRead(chunk);
+                        if (n <= 0) break;
+                        busy = true;
+                        List<byte[]> complete;
+                        try
+                        {
+                            complete = frames.Push(chunk, (int)n);
+                        }
+                        catch (PylonException e)
+                        {
+                            RaiseError(e);
+                            link.Close();
+                            return new ShardCloseInfo(null, e.Message, true);
+                        }
+                        foreach (var frame in complete) OnFrame(link, frame, _now());
+                    }
+                    while (true)
+                    {
+                        var n = link.Session.RecvDatagram(datagram);
+                        if (n < 0) break;
+                        busy = true;
+                        var copy = new byte[n];
+                        Buffer.BlockCopy(datagram, 0, copy, 0, n);
+                        var at = _now();
+                        Post(() => OnDatagram(link, copy, at));
+                    }
+                    if (busy) lastActivity = _now();
+                    if (state != WebTransportNative.StateOpen && state != WebTransportNative.StateConnecting)
+                    {
+                        // The server's closing frame names the code and reason first;
+                        // else the session's application close; else the error.
+                        if (link.Notice is (uint code, string reason)) return new ShardCloseInfo((int)code, reason, true);
+                        if (link.Session.CloseInfo is (uint c, string r)) return new ShardCloseInfo((int)c, r, true);
+                        return new ShardCloseInfo(null, link.Session.Error, true);
+                    }
+                    if (_options.IdleTimeout is TimeSpan idle && _now() - lastActivity > idle.TotalMilliseconds)
+                    {
+                        link.Close();
+                        return new ShardCloseInfo(null, $"no frame for {idle.TotalSeconds:0.#} s", true);
+                    }
+                    if (!busy) Thread.Sleep(1);
+                }
+                return new ShardCloseInfo(null, "closed", true);
+            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default).ConfigureAwait(false);
+        }
+
+        Link? CurrentLink
+        {
+            get { lock (_gate) return _link; }
+        }
+
         /// <summary>
         /// Runs on the receive thread: the parts of a frame the connection
-        /// loop needs before the socket closes (a transfer, the codec). The
-        /// rest runs on the dispatcher, in order.
+        /// loop needs before the link closes (a transfer, a closing frame, the
+        /// codec). The rest runs on the dispatcher, in order.
         /// </summary>
         internal void OnFrame(Link? link, byte[] data, double at)
         {
@@ -519,11 +892,30 @@ namespace Pylon.Realtime
                     _clock.Reset();
                     _lastTick = 0;
                     _lastAck = 0;
+                    _linkTick = -1;
+                    _linkAck = 0;
                     if (notice.Shard != previous) Transferred?.Invoke(notice.Shard, previous);
                 });
                 return;
             }
-            if (frame.Kind == (byte)ShardFrameKind.Closing) return;
+            if (frame.Kind == (byte)ShardFrameKind.Closing)
+            {
+                // The server is about to close the session: keep why, and close it from this side.
+                if (link != null)
+                {
+                    try
+                    {
+                        var v = ShardWire.DecodePayload(frame.Codec, frame.Payload);
+                        link.Notice = (v["code"].IsNumber ? (uint)v["code"].AsULong() : 0u, v["reason"].AsStringOr("") ?? "");
+                    }
+                    catch (PylonException)
+                    {
+                        link.Notice = (0u, "");
+                    }
+                    link.Close();
+                }
+                return;
+            }
             lock (_gate)
             {
                 // The new shard answered: the provider gives the next tickets.
@@ -538,10 +930,25 @@ namespace Pylon.Realtime
         /// <summary>Runs on the dispatcher.</summary>
         void Apply(Link? link, ShardFrame frame, double at)
         {
-            switch ((ShardFrameKind)frame.Kind)
+            if (link != null && !ReferenceEquals(link, CurrentLink)) return;
+            var kind = (ShardFrameKind)frame.Kind;
+            // Only the per-tick frames time the clock: a rejection can go out
+            // before its tick's frame is built.
+            if (kind == ShardFrameKind.Replication || kind == ShardFrameKind.Snapshot) ObserveTick(frame.Tick, at);
+            switch (kind)
             {
                 case ShardFrameKind.Replication:
                 {
+                    _replicating = true;
+                    var webTransport = link is WtLink;
+                    if (webTransport && !EntityTable.IsFullFrame(frame.Payload))
+                    {
+                        // It waits with its tick's datagrams (see ApplyWhole).
+                        _pendingStream.Add((frame.Tick, Copy(frame.Payload)));
+                        _receivedStreamTick = Math.Max(_receivedStreamTick, (long)frame.Tick);
+                        if (!Stalled(link!)) ApplyWhole(link!, at);
+                        return;
+                    }
                     ReplicationSummary summary;
                     try
                     {
@@ -552,15 +959,34 @@ namespace Pylon.Realtime
                         // Out of sync with the server. Reconnecting gets a full baseline.
                         Error?.Invoke(e);
                         _entities.Clear();
-                        link?.Abort();
+                        if (link is WsLink ws) ws.Abort();
+                        else link?.Close();
                         return;
                     }
-                    Observe(frame, at);
-                    Replication?.Invoke(new ShardReplicationUpdate(frame.Tick, frame.Ack, summary, _entities));
+                    // A full frame holds everything, so its ack describes the table.
+                    TakeAck(frame.Ack, at);
+                    if (webTransport)
+                    {
+                        // What was built before it describes a table that is gone.
+                        _wholeTick = Math.Max(_wholeTick, (long)frame.Tick);
+                        _lastWholeAt = at;
+                        _receivedStreamTick = Math.Max(_receivedStreamTick, (long)frame.Tick);
+                        var stale = new List<ulong>();
+                        foreach (var t in _pending.Keys)
+                        {
+                            if (t <= frame.Tick) stale.Add(t);
+                        }
+                        foreach (var t in stale) _pending.Remove(t);
+                        _pendingStream.RemoveAll(f => f.Tick <= frame.Tick);
+                    }
+                    ResetBackoff();
+                    Report(summary, frame.Tick);
+                    if (webTransport) ApplyWhole(link!, at);
                     return;
                 }
                 case ShardFrameKind.Snapshot:
                 {
+                    TakeAck(frame.Ack, at);
                     PylonValue? state = null;
                     if (frame.Codec == (byte)ShardCodec.Json || frame.Codec == (byte)ShardCodec.MessagePack)
                     {
@@ -574,7 +1000,7 @@ namespace Pylon.Realtime
                             return;
                         }
                     }
-                    Observe(frame, at);
+                    ResetBackoff();
                     Snapshot?.Invoke(new ShardSnapshot(frame.Tick, frame.Ack, frame.Codec, Copy(frame.Payload), state));
                     return;
                 }
@@ -600,17 +1026,160 @@ namespace Pylon.Realtime
             }
         }
 
-        /// <summary>A snapshot or replication frame applied: the tick, ack, clock, round trip, and backoff.</summary>
-        void Observe(ShardFrame frame, double at)
+        /// <summary>
+        /// A WebTransport datagram: entity updates for one tick. It waits
+        /// until its tick is whole. One for a tick at or before the newest
+        /// whole tick is dropped unacked, as if lost: the server sends its
+        /// changes again. Runs on the dispatcher.
+        /// </summary>
+        void OnDatagram(WtLink link, byte[] datagram, double at)
         {
-            _clock.Observe(frame.Tick, at);
-            _lastTick = frame.Tick;
-            if (frame.Ack > _lastAck) _lastAck = frame.Ack;
+            if (!ReferenceEquals(link, CurrentLink)) return;
+            try
+            {
+                var h = EntityTable.ReadDatagramHeader(new ArraySegment<byte>(datagram));
+                _replicating = true;
+                if ((long)h.Tick <= _wholeTick || h.Parts < 1) return;
+                ObserveTick(h.Tick, at);
+                if (!_pending.TryGetValue(h.Tick, out var p))
+                {
+                    p = new PendingTick(h.Parts, h.StreamTick, h.Ack);
+                    _pending[h.Tick] = p;
+                }
+                p.Datagrams[h.Frame] = datagram;
+                if (!Stalled(link)) ApplyWhole(link, at);
+            }
+            catch (ReplicationException e)
+            {
+                // Not a datagram this client can read: start over with a baseline.
+                Error?.Invoke(e);
+                _entities.Clear();
+                link.Close();
+            }
+        }
+
+        /// <summary>
+        /// Apply everything buffered up to the newest whole tick, oldest tick
+        /// first (each tick's stream frames, then its datagrams), then take
+        /// that tick's ack, tell the handlers once, and ack the datagrams. A
+        /// tick is whole when all its datagrams are here and so are the
+        /// stream frames sent by then. Until then its changes wait, so the
+        /// handlers never see a table newer than the ack they get with it.
+        /// </summary>
+        void ApplyWhole(Link from, double at)
+        {
+            try
+            {
+                ApplyWholeTick(from, at);
+            }
+            catch (ReplicationException e)
+            {
+                // Out of sync with the server. Reconnecting gets a full baseline.
+                Error?.Invoke(e);
+                _entities.Clear();
+                from.Close();
+            }
+        }
+
+        void ApplyWholeTick(Link from, double at)
+        {
+            long whole = -1;
+            foreach (var kv in _pending)
+            {
+                var p = kv.Value;
+                if ((long)kv.Key > whole && (ulong)p.Datagrams.Count == p.Parts && _receivedStreamTick >= (long)p.StreamTick)
+                    whole = (long)kv.Key;
+            }
+            if (whole < 0) return;
+            var ack = _pending[(ulong)whole].Ack;
+            var ticks = new SortedSet<ulong>();
+            foreach (var t in _pending.Keys)
+            {
+                if ((long)t <= whole) ticks.Add(t);
+            }
+            foreach (var f in _pendingStream)
+            {
+                if ((long)f.Tick <= whole) ticks.Add(f.Tick);
+            }
+            var spawned = new HashSet<ulong>();
+            var despawned = new HashSet<ulong>();
+            var updated = new HashSet<ulong>();
+            var acks = new List<(ulong Frame, ulong Applied)>();
+            foreach (var t in ticks)
+            {
+                while (_pendingStream.Count > 0 && _pendingStream[0].Tick == t)
+                {
+                    var f = _pendingStream[0];
+                    _pendingStream.RemoveAt(0);
+                    var s = _entities.Apply(f.Payload, f.Tick);
+                    foreach (var id in s.Despawned)
+                    {
+                        despawned.Add(id);
+                        spawned.Remove(id);
+                        updated.Remove(id);
+                    }
+                    foreach (var id in s.Spawned) spawned.Add(id);
+                    foreach (var id in s.Updated) updated.Add(id);
+                }
+                if (!_pending.TryGetValue(t, out var p)) continue;
+                _pending.Remove(t);
+                foreach (var d in p.Datagrams.Values)
+                {
+                    var s = _entities.ApplyDatagram(d);
+                    foreach (var id in s.Updated) updated.Add(id);
+                    acks.Add((s.Frame, _entities.StreamTick));
+                }
+            }
+            foreach (var id in spawned) updated.Remove(id);
+            _wholeTick = whole;
+            _lastWholeAt = at;
+            TakeAck(ack, at);
+            ResetBackoff();
+            var summary = new ReplicationSummary { Full = false };
+            summary.Spawned.AddRange(spawned);
+            summary.Updated.AddRange(updated);
+            summary.Despawned.AddRange(despawned);
+            Report(summary, (ulong)whole);
+            if (acks.Count > 0) from.Ack(acks);
+        }
+
+        /// <summary>
+        /// Too many ticks without one whole: the datagrams stopped arriving
+        /// (UDP blocked partway, say). Close the session; Auto uses WebSockets
+        /// from then on. Runs on the dispatcher.
+        /// </summary>
+        bool Stalled(Link from)
+        {
+            if (!ReferenceEquals(from, CurrentLink) || !_replicating ||
+                (_now() - _lastWholeAt <= StallMs && _pending.Count <= MaxPendingTicks && _pendingStream.Count <= MaxPendingTicks))
+                return false;
+            Error?.Invoke(new InvalidOperationException($"WebTransport to shard {ShardId}: datagrams stopped arriving"));
+            if (_transport == ShardTransport.Auto)
+            {
+                lock (_gate) _webSocketOnly = true;
+            }
+            from.Close();
+            return true;
+        }
+
+        /// <summary>A per-tick frame or datagram for <paramref name="tick"/> arrived: the first arrival for a tick times the clock.</summary>
+        void ObserveTick(ulong tick, double at)
+        {
+            if ((long)tick > _linkTick)
+            {
+                _clock.Observe(tick, at);
+                _linkTick = (long)tick;
+            }
+            _lastTick = (ulong)_linkTick;
+        }
+
+        /// <summary>The table now holds the shard's state after the inputs up to <paramref name="ack"/>.</summary>
+        void TakeAck(ulong ack, double at)
+        {
+            if (ack > _linkAck) _linkAck = ack;
+            _lastAck = _linkAck;
             lock (_gate)
             {
-                // A frame applied: the connection works, so the next
-                // reconnect starts from the short delay again.
-                _attempts = 0;
                 while (_sentAt.Count > 0)
                 {
                     ulong seq;
@@ -621,12 +1190,24 @@ namespace Pylon.Realtime
                         seq = e.Current.Key;
                         sent = e.Current.Value;
                     }
-                    if (seq > frame.Ack) break;
+                    if (seq > _linkAck) break;
                     var sample = at - sent;
                     _rttMs = _rttMs == null ? sample : _rttMs + (sample - _rttMs) / 8;
                     _sentAt.Remove(seq);
                 }
             }
+        }
+
+        /// <summary>A frame applied: the connection works, so the next reconnect starts from the short delay again.</summary>
+        void ResetBackoff()
+        {
+            lock (_gate) _attempts = 0;
+        }
+
+        void Report(ReplicationSummary summary, ulong tick)
+        {
+            _reportedTick = Math.Max(_reportedTick, (long)tick);
+            Replication?.Invoke(new ShardReplicationUpdate((ulong)_reportedTick, _lastAck, summary, _entities));
         }
 
         static byte[] Copy(ArraySegment<byte> seg)
@@ -730,14 +1311,16 @@ namespace Pylon.Realtime
         }
 
         /// <summary>
-        /// True when the server refused the credentials (close 1008 with an
-        /// "unauthorized" reason) and the next attempt would send the same
-        /// ones. A shard that is not found is worth retrying: a restarted
-        /// machine brings it back.
+        /// True when the server refused the credentials (a WebSocket close
+        /// 1008, or a WebTransport close code 1, with an "unauthorized"
+        /// reason) and the next attempt would send the same ones. A shard that
+        /// is not found is worth retrying: a restarted machine brings it back.
         /// </summary>
-        internal static bool RefusedForGood(int? code, string? reason, bool hasTicketProvider, bool hasTransferTicket)
+        internal static bool RefusedForGood(int? code, string? reason, bool hasTicketProvider, bool hasTransferTicket,
+            bool webTransport = false)
         {
-            if (code != PolicyClose || reason == null || !reason.StartsWith("unauthorized", StringComparison.Ordinal)) return false;
+            var refusal = webTransport ? (int)ShardWebTransport.ClosePolicy : PolicyClose;
+            if (code != refusal || reason == null || !reason.StartsWith("unauthorized", StringComparison.Ordinal)) return false;
             return hasTransferTicket || !hasTicketProvider;
         }
 
@@ -791,8 +1374,28 @@ namespace Pylon.Realtime
             link?.Close();
         }
 
+        /// <summary>An open connection to the shard, over either transport.</summary>
+        internal abstract class Link : IDisposable
+        {
+            /// <summary>What the server said in its closing frame before it closed the session.</summary>
+            public (uint Code, string Reason)? Notice;
+
+            /// <summary>Queue an input envelope (JSON text or the shard's codec). False when the queue is full.</summary>
+            public abstract bool Enqueue(byte[] envelope, bool json);
+
+            /// <summary>Acknowledge datagrams: (datagram number, the table's stream tick). WebTransport only.</summary>
+            public virtual void Ack(List<(ulong Frame, ulong Applied)> acks)
+            {
+            }
+
+            /// <summary>Close (a close frame where the transport has one).</summary>
+            public abstract void Close();
+
+            public abstract void Dispose();
+        }
+
         /// <summary>One WebSocket and its send queue. Sends go out in order, one at a time.</summary>
-        internal sealed class Link : IDisposable
+        internal sealed class WsLink : Link
         {
             public readonly ClientWebSocket Socket;
             readonly Queue<(byte[] Bytes, bool Text)> _queue = new Queue<(byte[], bool)>();
@@ -801,20 +1404,19 @@ namespace Pylon.Realtime
             readonly int _maxQueuedBytes;
             int _queuedBytes;
 
-            public Link(ClientWebSocket socket, int maxQueuedBytes)
+            public WsLink(ClientWebSocket socket, int maxQueuedBytes)
             {
                 Socket = socket;
                 _maxQueuedBytes = maxQueuedBytes;
             }
 
-            /// <summary>False when the queue is full: the socket stopped draining.</summary>
-            public bool Enqueue(byte[] bytes, bool text)
+            public override bool Enqueue(byte[] envelope, bool json)
             {
                 lock (_queue)
                 {
-                    if (_queuedBytes + bytes.Length > _maxQueuedBytes) return false;
-                    _queue.Enqueue((bytes, text));
-                    _queuedBytes += bytes.Length;
+                    if (_queuedBytes + envelope.Length > _maxQueuedBytes) return false;
+                    _queue.Enqueue((envelope, json));
+                    _queuedBytes += envelope.Length;
                 }
                 _signal.Release();
                 return true;
@@ -870,7 +1472,7 @@ namespace Pylon.Realtime
                 }
             }
 
-            public void Close()
+            public override void Close()
             {
                 _ = Task.Run(async () =>
                 {
@@ -894,11 +1496,37 @@ namespace Pylon.Realtime
                 });
             }
 
-            public void Dispose()
+            public override void Dispose()
             {
                 if (!_stop.IsCancellationRequested) _stop.Cancel();
                 Socket.Dispose();
             }
+        }
+
+        /// <summary>A WebTransport session: inputs on its stream, acks as datagrams.</summary>
+        internal sealed class WtLink : Link
+        {
+            public readonly IWebTransportSession Session;
+
+            public WtLink(IWebTransportSession session)
+            {
+                Session = session;
+            }
+
+            public override bool Enqueue(byte[] envelope, bool json) =>
+                Session.StreamWrite(ShardWebTransport.Input(envelope, json));
+
+            public override void Ack(List<(ulong Frame, ulong Applied)> acks)
+            {
+                // A datagram larger than the session allows never arrives.
+                var max = Session.MaxDatagramSize;
+                if (max <= 0) max = 1200;
+                foreach (var message in ShardWebTransport.DatagramAckBatches(acks, max)) Session.SendDatagram(message);
+            }
+
+            public override void Close() => Session.Close(ShardWebTransport.CloseNormal, "");
+
+            public override void Dispose() => Session.Dispose();
         }
     }
 }

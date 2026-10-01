@@ -70,7 +70,8 @@ namespace Pylon.Realtime
             _interpolator = new EntityInterpolator(game.SnapDistance, game.HoldWhenQuiet, game.MaxSamples);
             _delayMs = game.InterpolationDelay.TotalMilliseconds;
             _now = options.Now ?? ShardClock.Now;
-            Connection = new ShardConnection(shardId, options);
+            // WebTransport where the plugin and the app support it, as in the TypeScript client.
+            Connection = new ShardConnection(shardId, options, ShardTransport.Auto);
             Connection.Replication += u => _interpolator.Record(u.Entities, u.Summary, u.Tick);
             Connection.InputRejected += r =>
             {

@@ -495,7 +495,42 @@ jobs:
       # The core as a .NET Standard 2.1 library with Unity's C# version and
       # warnings as errors: it must compile where Unity compiles it.
       - run: dotnet build "packages/csharp/Tests~/Pylon.Core"
+      # The committed WebTransport plugin for this OS must load and work.
       - run: dotnet test "packages/csharp/Tests~/Pylon.Tests"
+        env:
+          PYLON_REQUIRE_PLUGIN: "1"
+
+  # The C# client's WebTransport plugin: its C ABI against a local
+  # WebTransport server, and the committed binaries built from the
+  # current sources (run the "Shard client plugins" workflow to rebuild).
+  shard-plugins:
+    name: shard plugins current
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.csharp == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: The binaries match the sources
+        run: |
+          expected="$(cat crates/shard-client-ffi/plugins.sha256)"
+          actual="$(crates/shard-client-ffi/source-hash.sh)"
+          if [ "$expected" != "$actual" ]; then
+            echo "::error::packages/csharp/Plugins was built from other sources ($expected, now $actual). Run the Shard client plugins workflow."
+            exit 1
+          fi
+          for f in \
+            macOS/libpylon_shard_client.dylib \
+            iOS/pylon_shard_client.xcframework/ios-arm64/pylon_shard_client.framework/pylon_shard_client \
+            iOS/pylon_shard_client.xcframework/ios-arm64-simulator/pylon_shard_client.framework/pylon_shard_client \
+            Android/arm64-v8a/libpylon_shard_client.so \
+            Android/armeabi-v7a/libpylon_shard_client.so \
+            Linux/x86_64/libpylon_shard_client.so \
+            Windows/x86_64/pylon_shard_client.dll; do
+            test -s "packages/csharp/Plugins/$f" || { echo "::error::packages/csharp/Plugins/$f is missing"; exit 1; }
+          done
+      - run: cargo test -p pylon-shard-client-ffi
 
   # examples/shard-arena: shard logic in Rust compiled to WebAssembly, run
   # by the stock binary from source and from a `pylon build` artifact, with
@@ -605,6 +640,7 @@ jobs:
       - audit
       - swift
       - csharp
+      - shard-plugins
     if: always()
     runs-on: ubuntu-latest
     steps:

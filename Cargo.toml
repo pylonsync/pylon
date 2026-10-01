@@ -17,6 +17,7 @@ members = [
   "crates/replication",
   "crates/router",
   "crates/runtime",
+  "crates/shard-client-ffi",
   "crates/schema",
   "crates/shard-guest",
   "crates/staticgen",
@@ -132,3 +133,13 @@ tiny_http = { path = "vendor/tiny_http" }
 
 [workspace.lints.rust]
 unused_crate_dependencies = "warn"
+
+# The native plugins the C# client ships (crates/shard-client-ffi): small
+# binaries, since they live in the repo under packages/csharp/Plugins.
+[profile.plugin]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+opt-level = "s"
+strip = "symbols"
+panic = "unwind"

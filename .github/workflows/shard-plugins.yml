@@ -1,0 +1,125 @@
+name: Shard client plugins
+
+# Builds the C# client's WebTransport plugin (crates/shard-client-ffi) for
+# every platform on its own runner, and commits the binaries to
+# packages/csharp/Plugins with crates/shard-client-ffi/plugins.sha256.
+# Run it after a change to the crate; CI's "shard plugins current" job
+# fails until the binaries match the sources.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  apple:
+    name: macOS and iOS
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin,aarch64-apple-ios,aarch64-apple-ios-sim
+      - run: crates/shard-client-ffi/build-plugins.sh macos ios
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugins-apple
+          path: |
+            packages/csharp/Plugins/macOS/libpylon_shard_client.dylib
+            packages/csharp/Plugins/iOS/pylon_shard_client.xcframework
+
+  linux:
+    name: Linux
+    runs-on: ubuntu-latest
+    # Debian 11 (glibc 2.31), so the library loads on older distributions too.
+    container: rust:1-bullseye
+    steps:
+      - uses: actions/checkout@v4
+      - run: crates/shard-client-ffi/build-plugins.sh linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugins-linux
+          path: packages/csharp/Plugins/Linux/x86_64/libpylon_shard_client.so
+
+  android:
+    name: Android
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+      - run: cargo install cargo-ndk --locked
+      - name: Build
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          crates/shard-client-ffi/build-plugins.sh android
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugins-android
+          path: |
+            packages/csharp/Plugins/Android/arm64-v8a/libpylon_shard_client.so
+            packages/csharp/Plugins/Android/armeabi-v7a/libpylon_shard_client.so
+
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: crates/shard-client-ffi/build-plugins.sh windows
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugins-windows
+          path: packages/csharp/Plugins/Windows/x86_64/pylon_shard_client.dll
+
+  commit:
+    name: Commit the binaries
+    needs: [apple, linux, android, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
+        with:
+          name: plugins-apple
+          path: packages/csharp/Plugins/apple
+      - uses: actions/download-artifact@v4
+        with:
+          name: plugins-linux
+          path: packages/csharp/Plugins/Linux/x86_64
+      - uses: actions/download-artifact@v4
+        with:
+          name: plugins-android
+          path: packages/csharp/Plugins/Android
+      - uses: actions/download-artifact@v4
+        with:
+          name: plugins-windows
+          path: packages/csharp/Plugins/Windows/x86_64
+      - name: Place the Apple binaries
+        run: |
+          cd packages/csharp/Plugins
+          mv apple/macOS/libpylon_shard_client.dylib macOS/libpylon_shard_client.dylib
+          rsync -a --delete apple/iOS/pylon_shard_client.xcframework/ iOS/pylon_shard_client.xcframework/
+          find apple -type f -delete
+          find apple -depth -type d -empty -delete
+      - run: crates/shard-client-ffi/source-hash.sh > crates/shard-client-ffi/plugins.sha256
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/csharp/Plugins crates/shard-client-ffi/plugins.sha256
+          if git diff --cached --quiet; then
+            echo "The plugins are current."
+            exit 0
+          fi
+          git commit -m "csharp: rebuild the WebTransport plugins ($(cut -c1-12 crates/shard-client-ffi/plugins.sha256))"
+          git pull --rebase origin "$GITHUB_REF_NAME"
+          git push origin "HEAD:$GITHUB_REF_NAME"
