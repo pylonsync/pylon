@@ -52,6 +52,8 @@ namespace Pylon
 
         ulong _cursor;
         long _revision;
+        /// <summary>Bumped by every session change; a socket connected under an older one is dropped.</summary>
+        int _session;
         bool _synced;
         int _epoch;
         int _consecutive410;
@@ -59,6 +61,8 @@ namespace Pylon
         string? _syncToken;
         bool _tokenObserved;
         CancellationTokenSource? _run;
+        /// <summary>Cancelled when the current socket's connection ends.</summary>
+        CancellationTokenSource? _connection;
         ClientWebSocket? _socket;
         int _connects;
 
@@ -108,6 +112,7 @@ namespace Pylon
                 ResetLocked();
                 // The reconnect carries this token, and the next pull must not reset again.
                 _syncToken = _client.Token;
+                _session++;
                 socket = _socket;
             }
             NotifyAll();
@@ -222,6 +227,8 @@ namespace Pylon
                 var opened = false;
                 try
                 {
+                    int session;
+                    lock (_gate) session = _session;
                     var (url, credential) = await TargetAsync(ct).ConfigureAwait(false);
                     var socket = new ClientWebSocket();
                     if (!string.IsNullOrEmpty(credential)) socket.Options.AddSubProtocol("bearer." + Uri.EscapeDataString(credential));
@@ -229,6 +236,14 @@ namespace Pylon
                     opened = true;
                     lock (_gate)
                     {
+                        // The session changed while this socket connected: it carries
+                        // the old token. Drop it and connect again at once.
+                        if (session != _session)
+                        {
+                            socket.Abort();
+                            socket.Dispose();
+                            continue;
+                        }
                         _socket = socket;
                         // Hold live frames from the first one: until the catch-up
                         // pull lands, a frame must not move the cursor past rows
@@ -237,13 +252,25 @@ namespace Pylon
                     }
                     var reconnect = Interlocked.Increment(ref _connects) > 1;
                     using var connection = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                    _ = PingAsync(socket, connection.Token);
-                    // Changes broadcast between the last pull and this open are
-                    // in the log: pull them. After a reconnect, also drop rows the
-                    // server stopped returning (a revocation sent while away).
-                    _ = Task.Run(() => CatchUpAsync(reconnect, connection.Token));
-                    await ReceiveAsync(socket, ct).ConfigureAwait(false);
-                    connection.Cancel();
+                    try
+                    {
+                        lock (_gate) _connection = connection;
+                        _ = PingAsync(socket, connection.Token);
+                        // Changes broadcast between the last pull and this open are
+                        // in the log: pull them. After a reconnect, also drop rows the
+                        // server stopped returning (a revocation sent while away).
+                        _ = Task.Run(() => CatchUpAsync(reconnect, connection.Token));
+                        await ReceiveAsync(socket, ct).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        // Every exit stops this connection's ping and catch-up tasks.
+                        connection.Cancel();
+                        lock (_gate)
+                        {
+                            if (ReferenceEquals(_connection, connection)) _connection = null;
+                        }
+                    }
                     lock (_gate)
                     {
                         if (ReferenceEquals(_socket, socket)) _socket = null;
@@ -403,15 +430,21 @@ namespace Pylon
                     return;
                 }
                 case "session-changed":
+                {
                     // The session changed server-side (an org switch, a revoke): the
-                    // visible set may differ. Start over under the current token.
-                    _ = Task.Run(async () =>
+                    // visible set may differ. Start over under the current token,
+                    // retrying the pull for as long as this connection lasts.
+                    CancellationToken ct;
+                    lock (_gate)
                     {
-                        lock (_gate) ResetLocked();
-                        NotifyAll();
-                        await PullSafeAsync(CancellationToken.None).ConfigureAwait(false);
-                    });
+                        ResetLocked();
+                        _hold ??= new List<PylonValue>();
+                        ct = _connection?.Token ?? CancellationToken.None;
+                    }
+                    NotifyAll();
+                    _ = Task.Run(() => CatchUpAsync(false, ct));
                     return;
+                }
             }
         }
 

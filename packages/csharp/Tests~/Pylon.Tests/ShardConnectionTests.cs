@@ -453,6 +453,8 @@ namespace Pylon.Tests
         public Func<HttpListenerContext, WebSocket, Task> OnConnection = (_, _) => Task.CompletedTask;
         public readonly List<HttpListenerRequest> Requests = new List<HttpListenerRequest>();
         public string? Subprotocol;
+        /// <summary>Wait this long before accepting each WebSocket (to race a client against its connect).</summary>
+        public TimeSpan AcceptDelay;
 
         public FakeShardServer()
         {
@@ -485,6 +487,7 @@ namespace Pylon.Tests
                     lock (Requests) Requests.Add(ctx.Request);
                     try
                     {
+                        if (AcceptDelay > TimeSpan.Zero) await Task.Delay(AcceptDelay);
                         // "*" echoes the first subprotocol the client asked for.
                         var sp = Subprotocol == "*"
                             ? ctx.Request.Headers["Sec-WebSocket-Protocol"]?.Split(',')[0].Trim()

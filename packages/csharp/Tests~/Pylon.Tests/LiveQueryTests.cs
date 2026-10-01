@@ -366,6 +366,64 @@ namespace Pylon.Tests
         }
 
         [Fact]
+        public void ASessionChangeDuringTheConnectDropsTheOldSocket()
+        {
+            var (client, sync, ws) = Wired();
+            using var _ = ws;
+            sync.Seed("Note", "a1", "insert", Data("alice's"));
+            sync.OwnerToken["a1"] = "tok-a";
+            ws.AcceptDelay = TimeSpan.FromMilliseconds(300);
+            var oldSocketSent = 0;
+            ws.OnConnection = async (ctx, socket) =>
+            {
+                // On a socket opened with alice's token, push alice's change.
+                if (ctx.Request.Headers["Sec-WebSocket-Protocol"]!.Contains("tok-a"))
+                {
+                    Interlocked.Increment(ref oldSocketSent);
+                    await socket.SendAsync(Encoding.UTF8.GetBytes(Change(9, "a2", "insert", Data("alice again")).ToJson()),
+                        System.Net.WebSockets.WebSocketMessageType.Text, true, default);
+                }
+                await FakeShardServer.Receive(socket);
+            };
+            using var q = client.Live("Note");
+            Thread.Sleep(100); // the first connect is waiting for the accept
+            client.SetSession("tok-b");
+            Until(() => ws.Requests.Count >= 2, "the reconnect with the new token");
+            Until(() => q.Synced, "the pull under the new token");
+            Thread.Sleep(300);
+            Assert.Contains("bearer.tok-b", ws.Requests[^1].Headers["Sec-WebSocket-Protocol"]);
+            Assert.Null(q.Get("a1"));
+            Assert.Null(q.Get("a2"));
+            Assert.False(client.LiveEngine!.HasRow("Note", "a2"));
+            client.Dispose();
+        }
+
+        [Fact]
+        public void ASessionChangedFrameRetriesItsPull()
+        {
+            var (client, sync, ws) = Wired();
+            using var _ = ws;
+            sync.Seed("Note", "n1", "insert", Data("one"));
+            var connections = 0;
+            System.Net.WebSockets.WebSocket? server = null;
+            ws.OnConnection = async (ctx, socket) =>
+            {
+                Interlocked.Increment(ref connections);
+                server = socket;
+                await FakeShardServer.Receive(socket);
+            };
+            using var q = client.Live("Note");
+            Until(() => q.Get("n1") != null, "the first pull");
+            sync.FailNextPull = 503;
+            server!.SendAsync(Encoding.UTF8.GetBytes("{\"type\":\"session-changed\"}"),
+                System.Net.WebSockets.WebSocketMessageType.Text, true, default).Wait();
+            sync.Seed("Note", "n2", "insert", Data("two"));
+            Until(() => q.Get("n1") != null && q.Get("n2") != null, "the retried pull");
+            Assert.Equal(1, Volatile.Read(ref connections));
+            client.Dispose();
+        }
+
+        [Fact]
         public void AnOlderResultNeverReplacesANewerOne()
         {
             var (client, sync, _) = Make();
