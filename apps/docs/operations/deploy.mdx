@@ -202,9 +202,11 @@ This starts on port 4321 with `PYLON_DEV_MODE=true` defaults: Studio at `/studio
 
 - `GET /health` returns 200 with `{"status":"ok","uptime_seconds":N}`
 - `GET /metrics` returns Prometheus text when `Accept: text/plain`
-- `GET /readyz` checks DB connectivity
+- `GET /health/ready` returns 503 with `{"status":"warming"}` until the boot warm-up has rendered one page on every function runner, then 200 with `{"status":"ready"}`
 
-Hook these into your load balancer so it drains unhealthy instances.
+The warm-up renders `/`, or the first page with no parameters. `PYLON_SSR_WARM_TIMEOUT_SECS` (default 120) limits how long it holds `/health/ready` at 503. Set it to `0` to turn the warm-up off.
+
+Use `/health` for liveness and `/health/ready` to decide when an instance gets traffic.
 
 ## Shutdown and rolling deploys
 
@@ -213,7 +215,7 @@ Hook these into your load balancer so it drains unhealthy instances.
 - **SQLite (WAL mode) is crash-consistent.** An abrupt stop does not corrupt the database. The next start recovers the WAL, so there is no unflushed data to lose.
 - **Drain at the load balancer, not in the process.** For a rolling deploy with zero dropped requests, stop routing new traffic to the old instance. Wait out your load balancer's connection-drain (deregistration) delay so in-flight requests finish. Then stop the process.
 
-For a rolling deploy: start the new instance, let the load balancer health check promote it, stop routing traffic to the old one, wait for the drain window, then send `SIGTERM`.
+For a rolling deploy: start the new instance, wait until `/health/ready` returns 200, stop routing traffic to the old one, wait for the drain window, then send `SIGTERM`.
 
 `PYLON_DRAIN_SECS` (default 10s) bounds the drain loop for paths that do invoke the runtime's shutdown, such as a programmatic shutdown. It is not a SIGTERM grace period.
 
