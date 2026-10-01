@@ -11,7 +11,7 @@ cd "$(dirname "$0")/../.."
 files="$(git ls-files -co --exclude-standard crates/shard-client-ffi/Cargo.toml crates/shard-client-ffi/build-plugins.sh crates/shard-client-ffi/src | sort)"
 [ -n "$files" ] || { echo "source-hash.sh: no crate sources found" >&2; exit 1; }
 # The resolved dependency tree, without paths (they differ per machine).
-tree="$(cargo tree --locked --target all -p pylon-shard-client-ffi -e normal --prefix none --format '{p}' | sed 's/ (.*)$//' | sort -u)"
+tree="$(cargo tree --locked --color never --target all -p pylon-shard-client-ffi -e normal --prefix none --format '{p}' | sed 's/ (.*)$//' | sort -u)"
 [ -n "$tree" ] || { echo "source-hash.sh: cargo tree printed nothing" >&2; exit 1; }
 # The plugin profile.
 profile="$(sed -n '/^\[profile.plugin\]/,/^\[/p' Cargo.toml)"
