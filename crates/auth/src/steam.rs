@@ -199,13 +199,20 @@ pub fn verify_ticket(config: &SteamConfig, ticket: &str) -> Result<SteamIdentity
     let body = match agent.get(&url).set("Accept", "application/json").call() {
         Ok(resp) => resp
             .into_string()
-            .map_err(|e| SteamError::Unavailable(format!("read body: {e}")))?,
+            .map_err(|e| SteamError::Unavailable(format!("read body ({:?})", e.kind())))?,
         // Steam answers 403 for a bad key; any status other than 200 is a
         // server-side problem the player cannot fix.
         Err(ureq::Error::Status(code, _)) => {
             return Err(SteamError::Unavailable(format!("HTTP {code}")))
         }
-        Err(e) => return Err(SteamError::Unavailable(e.to_string())),
+        // The transport error's text carries the request URL, which holds
+        // the Web API key and the ticket; keep only its kind.
+        Err(ureq::Error::Transport(t)) => {
+            return Err(SteamError::Unavailable(format!(
+                "transport error ({:?})",
+                t.kind()
+            )))
+        }
     };
     parse_response(&body, config.refuse_banned)
 }
@@ -299,6 +306,29 @@ mod tests {
         assert_ne!(a, b);
         assert!(a.starts_with(&format!("steam-{PLAYER}-")));
         assert!(a.ends_with("@steam.invalid"));
+    }
+
+    #[test]
+    fn an_unreachable_steam_fails_closed_without_leaking_the_key_or_ticket() {
+        // A port nothing listens on.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let config = SteamConfig {
+            web_api_key: "SECRETKEY0123456789".into(),
+            app_id: "480".into(),
+            identity: "pylon".into(),
+            refuse_banned: false,
+            api_base: format!("http://127.0.0.1:{port}"),
+        };
+        let ticket = "14000000deadbeefcafe";
+        let err = verify_ticket(&config, ticket).unwrap_err();
+        let SteamError::Unavailable(message) = &err else {
+            panic!("expected Unavailable, got {err:?}");
+        };
+        assert!(!message.contains("SECRETKEY"), "{message}");
+        assert!(!message.contains(ticket), "{message}");
+        assert!(!err.to_string().contains("SECRETKEY"));
     }
 
     #[test]
