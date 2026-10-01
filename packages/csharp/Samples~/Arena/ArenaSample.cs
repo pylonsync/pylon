@@ -10,9 +10,11 @@ namespace Pylon.Samples.Arena
 {
     /// <summary>
     /// Signs in as a guest, calls the <c>joinArena</c> function for a shard
-    /// ticket, joins the arena shard, and moves this player: in a circle,
-    /// or to where you click when the legacy input manager is on. Every
-    /// player in the arena is a sphere.
+    /// ticket, joins the arena shard through a <see cref="ShardGame{TInput}"/>,
+    /// and moves this player: in a circle, or to where you click when the
+    /// legacy input manager is on. Every player in the arena is a sphere. A
+    /// small cube marks this player's target: the game's predictor moves it
+    /// as soon as an input is sent, and each snapshot's ack corrects it.
     ///
     /// Run the server first: <c>pylon dev</c> in examples/shard-arena of
     /// the Pylon repo, then press Play.
@@ -43,8 +45,13 @@ namespace Pylon.Samples.Arena
 
         public string? LastError { get; private set; }
 
+        /// <summary>The target the predictor shows for this player, in arena units.</summary>
+        public Vector2? PredictedTarget { get; private set; }
+
         PylonClient? _client;
-        ShardConnection? _shard;
+        ShardGame<PylonValue>? _game;
+        Predictor<Vector2?, PylonValue>? _target;
+        GameObject? _targetMarker;
         readonly Dictionary<string, GameObject> _dots = new Dictionary<string, GameObject>();
         ulong _lastMoveSeq;
         float _nextMove;
@@ -68,21 +75,26 @@ namespace Pylon.Samples.Arena
                 var join = await _client.CallFnAsync("joinArena", PylonValue.Object(("arena", arena)));
 
                 // Created on the main thread, so every event below runs there.
-                _shard = new ShardConnection(join["shardId"].AsString(), new ShardConnectionOptions
+                _game = new ShardGame<PylonValue>(join["shardId"].AsString(), new ShardConnectionOptions
                 {
                     BaseUrl = _client.BaseUrl,
                     SubscriberId = join["subscriberId"].AsString(),
                     Ticket = join["ticket"].AsString(),
                     TickRate = 20,
                     IdleTimeout = TimeSpan.FromSeconds(5),
-                });
-                _shard.Opened += () => Status = "connected";
-                _shard.StateChanged += (state, reason) => Status = reason == null ? state.ToString() : $"{state}: {reason}";
-                _shard.Snapshot += OnSnapshot;
-                _shard.InputRejected += r => LastError = $"input {r.ClientSeq} refused: {r.Code} {r.Message}";
-                _shard.Error += e => LastError = e.Message;
+                }, PylonConverter.Value);
+                // The predicted target: a move_to sets it, anything else keeps it.
+                _target = _game.Predict<Vector2?>((target, input) =>
+                    input["move_to"].IsNull
+                        ? target
+                        : new Vector2(input["move_to"]["x"].AsFloat(), input["move_to"]["y"].AsFloat()));
+                _game.Opened += () => Status = "connected";
+                _game.StateChanged += (state, reason) => Status = reason == null ? state.ToString() : $"{state}: {reason}";
+                _game.Connection.Snapshot += OnSnapshot;
+                _game.InputRejected += r => LastError = $"input {r.ClientSeq} refused: {r.Code} {r.Message}";
+                _game.Error += e => LastError = e.Message;
                 Status = "connecting";
-                _shard.Connect();
+                _game.Connect();
             }
             catch (PylonException e)
             {
@@ -117,7 +129,13 @@ namespace Pylon.Samples.Arena
                     _dots[id] = dot;
                 }
                 dot.transform.position = ToWorld(pos);
-                if (id == SubscriberId) MyPosition = pos;
+                if (id == SubscriberId)
+                {
+                    MyPosition = pos;
+                    // The server's target as of this snapshot, plus the moves it has not applied yet.
+                    PredictedTarget = _target!.Reconcile(new Vector2(p["tx"].AsFloat(), p["ty"].AsFloat()), snapshot.Ack);
+                    PlaceTargetMarker();
+                }
             }
             foreach (var id in new List<string>(_dots.Keys))
             {
@@ -129,11 +147,11 @@ namespace Pylon.Samples.Arena
 
         void Update()
         {
-            if (_shard == null || !_shard.Connected) return;
+            if (_game == null || !_game.Connected) return;
             // The arena drops a player who sends nothing for a minute.
             if (Time.time >= _nextJoin)
             {
-                _shard.Send("join");
+                _game.Send("join");
                 _nextJoin = Time.time + 20;
             }
 #if ENABLE_LEGACY_INPUT_MANAGER
@@ -158,8 +176,25 @@ namespace Pylon.Samples.Arena
 
         void MoveTo(Vector2 target)
         {
-            var seq = _shard!.Send(PylonValue.Object(("move_to", PylonValue.Object(("x", target.x), ("y", target.y)))));
-            if (seq > 0) _lastMoveSeq = seq;
+            var seq = _game!.Send(PylonValue.Object(("move_to", PylonValue.Object(("x", target.x), ("y", target.y)))));
+            // 0: not sent, so the predictor did not record it either.
+            if (seq == 0) return;
+            _lastMoveSeq = seq;
+            PredictedTarget = target;
+            PlaceTargetMarker();
+        }
+
+        void PlaceTargetMarker()
+        {
+            if (PredictedTarget == null) return;
+            if (_targetMarker == null)
+            {
+                _targetMarker = GameObject.CreatePrimitive(PrimitiveType.Cube);
+                _targetMarker.name = "Your target";
+                _targetMarker.transform.localScale = Vector3.one * 0.12f;
+                _targetMarker.GetComponent<Renderer>().material.color = Color.yellow;
+            }
+            _targetMarker.transform.position = ToWorld(PredictedTarget.Value);
         }
 
         Vector3 ToWorld(Vector2 p) => new Vector3(p.x * scale, 0.15f, p.y * scale);
@@ -184,15 +219,15 @@ namespace Pylon.Samples.Arena
             GUILayout.BeginArea(new Rect(10, 10, 520, 160), GUI.skin.box);
             GUILayout.Label($"Pylon arena: {Status}");
             GUILayout.Label($"You: {SubscriberId ?? "-"}  at {(MyPosition.HasValue ? MyPosition.Value.ToString("F0") : "-")}");
-            if (_shard != null)
-                GUILayout.Label($"Tick {_shard.Tick}  ack {_shard.Ack}  rtt {(_shard.RttMs.HasValue ? _shard.RttMs.Value.ToString("F0") + " ms" : "-")}  players {_dots.Count}");
+            if (_game != null)
+                GUILayout.Label($"Tick {_game.Tick}  ack {_game.Ack}  rtt {(_game.RttMs.HasValue ? _game.RttMs.Value.ToString("F0") + " ms" : "-")}  players {_dots.Count}");
             if (LastError != null) GUILayout.Label($"Error: {LastError}");
             GUILayout.EndArea();
         }
 
         void OnDestroy()
         {
-            _shard?.Dispose();
+            _game?.Dispose();
             _client?.Dispose();
         }
     }

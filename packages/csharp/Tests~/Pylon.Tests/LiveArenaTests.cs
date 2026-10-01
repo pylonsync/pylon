@@ -90,13 +90,53 @@ namespace Pylon.Tests
             using var shard = Connect(client, frontier, join["subscriberId"].AsString(), join["ticket"].AsString());
             shard.Replication += updates.Add;
             shard.Connect();
-            Take(updates, _ => true);
+            // Other players may already be on the shard: this player's entity
+            // is the one that appears after the join.
+            var before = new System.Collections.Generic.HashSet<ulong>(Take(updates, _ => true).Entities.Entities.Keys);
             shard.Send("join");
-            var seen = Take(updates, u => u.Entities.Count > 0);
-            var e = seen.Entities.Entities.Values.First();
+            ulong mine = 0;
+            Take(updates, u =>
+            {
+                foreach (var id in u.Entities.Entities.Keys)
+                {
+                    if (!before.Contains(id)) mine = id;
+                }
+                return mine != 0;
+            });
+            var e = shard.Entities.Get(mine)!;
             var start = (e.X, e.Y);
             shard.Send(PylonValue.Object(("move_to", PylonValue.Object(("x", 10.0), ("y", 10.0)))));
-            Take(updates, u => u.Entities.Get(e.Id) is { } now && (now.X, now.Y) != start);
+            Take(updates, u => u.Entities.Get(mine) is { } now && (now.X, now.Y) != start);
+        }
+
+        [LiveFact(Env)]
+        public async Task AShardGameInterpolatesFrontierEntities()
+        {
+            using var client = NewClient();
+            await client.SignInAsGuestAsync();
+            const string frontier = "frontier-cs";
+            var join = await client.CallFnAsync("joinFrontier", PylonValue.Object(("frontier", frontier), ("size", 500)));
+            using var game = new ShardGame<PylonValue>(frontier, new ShardConnectionOptions
+            {
+                BaseUrl = client.BaseUrl,
+                SubscriberId = join["subscriberId"].AsString(),
+                Ticket = join["ticket"].AsString(),
+                TickRate = 20,
+                Dispatcher = PylonDispatcher.Inline,
+            }, PylonConverter.Value);
+            var updates = new BlockingCollection<ShardReplicationUpdate>();
+            game.Replication += updates.Add;
+            game.Connect();
+            Take(updates, _ => true);
+            Assert.True(game.Send("join") > 0);
+            Take(updates, u => u.Entities.Count > 0);
+            // A few frames later, the render tick trails the newest tick and the entities are placed.
+            Take(updates, u => u.Tick > game.Tick - 1 && game.Clock.Ready);
+            System.Threading.Thread.Sleep(200);
+            var renderTick = game.Frame();
+            Assert.True(renderTick > 0, $"render tick {renderTick}");
+            Assert.True(renderTick < game.Tick, $"render tick {renderTick} should trail tick {game.Tick}");
+            Assert.NotEmpty(game.Entities);
         }
 
         [LiveFact(Env)]

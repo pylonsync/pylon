@@ -17,7 +17,15 @@ namespace Pylon.Realtime
     /// input closely enough that the replayed state agrees with the
     /// server's, and return a new state instead of changing its argument.
     /// </summary>
-    public sealed class Predictor<TState, TInput>
+    /// <summary>What <see cref="ShardGame{TInput}"/> needs from each predictor, whatever its state type.</summary>
+    internal interface IInputLog<TInput>
+    {
+        void Push(ulong seq, TInput input);
+        void Reject(ulong? seq);
+        void Reset();
+    }
+
+    public sealed class Predictor<TState, TInput> : IInputLog<TInput>
     {
         readonly Func<TState, TInput, TState> _step;
         readonly int _maxPending;

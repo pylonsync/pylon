@@ -17,6 +17,7 @@ The SDK does not include the offline sync engine. A game uses shards and functio
 | `PylonClient` | Signs in (guest, magic code, password), refreshes sessions, calls functions, and reads and writes entities. |
 | `ShardConnection` | Connects to a shard over WebSocket. Decodes snapshots, applies replication frames, and sends inputs. Reconnects and follows transfers. |
 | `EntityTable` | Holds the entities a replicating shard sent this player. |
+| `ShardGame<TInput>` | Joins a connection, the clock, interpolation, and prediction for a render loop. A port of `connectShardGame`. |
 | `Predictor<TState, TInput>` | Applies inputs that the shard did not acknowledge yet on top of the server's state. |
 | `ShardClock` | Estimates the shard's current tick from frame arrival times. |
 | `EntityInterpolator` | Places entities between the two samples around a render tick. |
@@ -102,6 +103,26 @@ shard.Send(PylonValue.Object(("move_to", PylonValue.Object(("x", 120), ("y", 64)
 - When the server moves the player to another shard, `Transferred` runs. The connection then goes to the new shard.
 - The server can refuse a ticket, or the ticket can expire. The connection then stops, unless `TicketProvider` gives a new ticket.
 - `IdleTimeout` reconnects when no frame arrives. Use it only for tick-driven shards.
+
+## A render loop
+
+`ShardGame<TInput>` puts the connection, the clock, interpolation, and prediction together.
+
+```csharp
+var game = new ShardGame<Move>(shardId, options, moveConverter);
+var me = game.Predict<Vector3>((p, input) => Step(p, input));
+game.Connect();
+
+void Update()
+{
+    game.Frame(); // places game.Entities 100 ms behind the shard
+    foreach (var e in game.Entities.Values) Place(e.Id, e.X, e.Y, e.Z);
+    if (game.Send(input) != 0) local = Step(local, input);
+}
+```
+
+- A predictor from `Predict` records each sent input, drops refused inputs, and resets when the connection reopens.
+- `Send` returns 0 when it did not send. Do not predict that input.
 
 ## Threads
 

@@ -68,6 +68,12 @@ namespace Pylon.Realtime
         /// <summary>Where events run. Default: <see cref="PylonDispatcher.Capture"/> (Unity's main thread when created there).</summary>
         public PylonDispatcher? Dispatcher { get; set; }
 
+        /// <summary>
+        /// The clock for frame arrival and input send times, in milliseconds
+        /// (monotonic). Default <see cref="ShardClock.Now"/>. Tests pass their own.
+        /// </summary>
+        public Func<double>? Now { get; set; }
+
         /// <summary>A frame larger than this closes the connection.</summary>
         public int MaxFrameBytes { get; set; } = 64 * 1024 * 1024;
 
@@ -161,6 +167,7 @@ namespace Pylon.Realtime
         readonly string _initialShardId;
         readonly CancellationTokenSource _cts = new CancellationTokenSource();
         readonly Random _random = new Random();
+        readonly Func<double> _now;
 
         string _shardId;
         string? _transferTicket;
@@ -201,6 +208,7 @@ namespace Pylon.Realtime
             _initialShardId = shardId;
             _dispatcher = options.Dispatcher ?? PylonDispatcher.Capture();
             _clock = new ShardClock(options.TickRate);
+            _now = options.Now ?? ShardClock.Now;
         }
 
         /// <summary>The shard this connection is on (or connecting to). Changes after a transfer.</summary>
@@ -277,7 +285,7 @@ namespace Pylon.Realtime
                     if (link.Enqueue(text != null ? Encoding.UTF8.GetBytes(text) : binary!, text != null))
                     {
                         seq = ++_clientSeq;
-                        _sentAt[seq] = ShardClock.Now();
+                        _sentAt[seq] = _now();
                         if (_sentAt.Count > 1024)
                         {
                             using var e = _sentAt.Keys.GetEnumerator();
@@ -458,7 +466,7 @@ namespace Pylon.Realtime
                 var bytes = message.ToArray();
                 message.SetLength(0);
                 // Text messages carry nothing in wire version 2.
-                if (result.MessageType == WebSocketMessageType.Binary) OnFrame(link, bytes, ShardClock.Now());
+                if (result.MessageType == WebSocketMessageType.Binary) OnFrame(link, bytes, _now());
             }
         }
 

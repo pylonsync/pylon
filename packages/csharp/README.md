@@ -143,22 +143,39 @@ callbacks run, pass `Dispatcher = PylonDispatcher.From(...)`.
 Dispose the connection and the client in `OnDestroy`. Otherwise their
 sockets stay open after you leave Play mode.
 
-## Render loop helpers
+## A game's render loop: ShardGame
+
+`ShardGame<TInput>` puts the connection, the clock, interpolation, and
+prediction together, as the TypeScript `connectShardGame` does:
 
 ```csharp
-var interp = new EntityInterpolator();
-shard.Replication += u => interp.Record(u.Entities, u.Summary, u.Tick);
+var game = new ShardGame<Move>(shardId, options, moveConverter);
+var me = game.Predict<Vector3>((p, input) => Step(p, input));
+game.Replication += u =>
+{
+    if (u.Entities.Get(myEntityId) is { } e) local = me.Reconcile(new Vector3((float)e.X, (float)e.Y, (float)e.Z), u.Ack);
+};
+game.Connect();
 
 void Update()
 {
-    var renderTick = shard.Clock.ServerTick(ShardClock.Now()) - 0.1 * 20; // 100 ms behind at 20 Hz
-    interp.Update(renderTick);
-    foreach (var e in interp.Entities.Values) Place(e.Id, e.X, e.Y, e.Z);
+    game.Frame(); // places game.Entities at the render tick
+    foreach (var e in game.Entities.Values) Place(e.Id, e.X, e.Y, e.Z);
+    foreach (var id in game.Left) Remove(id);
+    // 0: not sent (the connection is down), so do not predict it.
+    if (game.Send(input) != 0) local = Step(local, input);
 }
 ```
 
-`Predictor<TState, TInput>` replays unacknowledged inputs on top of the
-server's state (see the TypeScript `Predictor` for the full pattern).
+- `Frame()` draws entities `InterpolationDelay` behind the shard's
+  estimated tick (default 100 ms), and fills `Entered` and `Left`.
+- Every predictor made by `Predict` records each input `Send` sends,
+  drops inputs the shard refuses, and resets when the connection reopens.
+- `Latest` is the newest table, not interpolated. `Tick`, `Ack`, `RttMs`,
+  `Connected`, and the connection's events are on the game.
+
+The parts are also usable alone: `EntityInterpolator`, `Predictor`, and
+`ShardClock`.
 
 ## Sample
 
