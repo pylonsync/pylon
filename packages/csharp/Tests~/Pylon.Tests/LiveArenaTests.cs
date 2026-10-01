@@ -116,23 +116,38 @@ namespace Pylon.Tests
             await client.SignInAsGuestAsync();
             const string frontier = "frontier-cs";
             var join = await client.CallFnAsync("joinFrontier", PylonValue.Object(("frontier", frontier), ("size", 500)));
+            // Events run only when this thread drains the queue, as on Unity's
+            // main thread: Frame and the event handlers never run at once.
+            var queue = new ConcurrentQueue<Action>();
+            void Pump()
+            {
+                while (queue.TryDequeue(out var a)) a();
+            }
             using var game = new ShardGame<PylonValue>(frontier, new ShardConnectionOptions
             {
                 BaseUrl = client.BaseUrl,
                 SubscriberId = join["subscriberId"].AsString(),
                 Ticket = join["ticket"].AsString(),
                 TickRate = 20,
-                Dispatcher = PylonDispatcher.Inline,
+                Dispatcher = PylonDispatcher.From(queue.Enqueue),
             }, PylonConverter.Value);
-            var updates = new BlockingCollection<ShardReplicationUpdate>();
-            game.Replication += updates.Add;
+            var frames = 0;
+            game.Replication += _ => frames++;
             game.Connect();
-            Take(updates, _ => true);
+            void PumpUntil(Func<bool> done)
+            {
+                var deadline = DateTime.UtcNow.AddSeconds(15);
+                while (!done())
+                {
+                    Assert.True(DateTime.UtcNow < deadline, "timed out");
+                    Pump();
+                    System.Threading.Thread.Sleep(5);
+                }
+            }
+            PumpUntil(() => frames > 0);
             Assert.True(game.Send("join") > 0);
-            Take(updates, u => u.Entities.Count > 0);
-            // A few frames later, the render tick trails the newest tick and the entities are placed.
-            Take(updates, u => u.Tick > game.Tick - 1 && game.Clock.Ready);
-            System.Threading.Thread.Sleep(200);
+            PumpUntil(() => game.Latest.Count > 0 && frames > 10);
+            Pump();
             var renderTick = game.Frame();
             Assert.True(renderTick > 0, $"render tick {renderTick}");
             Assert.True(renderTick < game.Tick, $"render tick {renderTick} should trail tick {game.Tick}");
