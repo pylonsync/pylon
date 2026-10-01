@@ -1308,6 +1308,7 @@ fn complete_login(
 /// Returns the resolved/created user_id. Errors map to OAuthError
 /// with the same status codes the original inline branches used,
 /// so the caller's error-response path stays uniform.
+#[cfg(not(target_arch = "wasm32"))]
 fn handle_oauth_user_lookup_or_create(
     ctx: &RouterContext,
     user_entity_name: &str,
