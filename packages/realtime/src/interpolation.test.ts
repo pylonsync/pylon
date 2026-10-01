@@ -31,6 +31,10 @@ describe("EntityInterpolator", () => {
     // An earlier render tick is raised to what was drawn.
     h.at(3);
     expect(h.interp.drawnTick).toBe(5.5);
+    // Frames stopped: past the newest tick received (9), the picture is
+    // tick 9's.
+    h.at(14);
+    expect(h.interp.drawnTick).toBe(9);
     h.interp.clear();
     expect(h.interp.drawnTick).toBe(-1);
   });

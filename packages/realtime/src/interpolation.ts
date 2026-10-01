@@ -107,9 +107,10 @@ export class EntityInterpolator {
   }
 
   /**
-   * The render tick the last `update` placed entities at (after raising it
-   * to what an earlier update drew), or -1 before the first update. This is
-   * the tick the player saw: the view tick for lag compensation.
+   * The tick the last `update` drew: its render tick, raised to what an
+   * earlier update drew and capped at the newest tick received, or -1 before
+   * the first update. This is the tick the player saw: the view tick for lag
+   * compensation.
    */
   get drawnTick(): number {
     return this.drawn;
@@ -176,9 +177,11 @@ export class EntityInterpolator {
     this.entered.length = 0;
     this.left.length = 0;
     renderTick = Math.max(renderTick, this.floor);
-    this.drawn = renderTick;
     // What this update draws is at most the newest tick recorded.
     this.floor = Math.min(renderTick, this.lastTick);
+    // Past the newest tick received, entities hold at their last samples:
+    // the picture is that tick's.
+    this.drawn = this.floor;
     for (const [id, lives] of this.lives) {
       // Lives that ended by the render tick are over.
       while (lives.length > 0 && lives[0].despawnTick !== null && lives[0].despawnTick <= renderTick) {

@@ -241,6 +241,10 @@ namespace Pylon.Tests
             // An earlier render tick is raised to what was drawn.
             h.At(3);
             Assert.Equal(5.5, h.Interp.DrawnTick);
+            // Frames stopped: past the newest tick received (9), the picture
+            // is tick 9's.
+            h.At(14);
+            Assert.Equal(9, h.Interp.DrawnTick);
             h.Interp.Clear();
             Assert.Equal(-1, h.Interp.DrawnTick);
         }

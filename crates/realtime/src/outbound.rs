@@ -17,7 +17,7 @@
 //! gets the newest snapshots.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -106,9 +106,8 @@ pub struct OutboundQueue {
     /// Datagram acks from the client, for the shard to take on its next
     /// tick: (datagram number, the client's stream tick then).
     datagram_acks: Mutex<Vec<(u64, u64)>>,
-    /// The connection's round trip in microseconds, as the transport
-    /// measures it; 0 until it has.
-    rtt_us: AtomicU64,
+    /// The connection's last round-trip samples, in microseconds.
+    rtt_samples: Mutex<VecDeque<u64>>,
     state: Mutex<State>,
     ready: Condvar,
     closed: AtomicBool,
@@ -116,6 +115,9 @@ pub struct OutboundQueue {
     /// on [`OutboundQueue::pop_blocking`] (an async task's waker).
     notifier: Mutex<Option<Notifier>>,
 }
+
+/// Round-trip samples a queue keeps (see [`OutboundQueue::rtt`]).
+const RTT_SAMPLES: usize = 8;
 
 impl OutboundQueue {
     pub fn new(config: OutboundConfig) -> Arc<Self> {
@@ -126,7 +128,7 @@ impl OutboundQueue {
             },
             datagram_max: AtomicUsize::new(0),
             datagram_acks: Mutex::new(Vec::new()),
-            rtt_us: AtomicU64::new(0),
+            rtt_samples: Mutex::new(VecDeque::new()),
             state: Mutex::new(State {
                 frames: VecDeque::new(),
                 full_since: None,
@@ -177,34 +179,28 @@ impl OutboundQueue {
         std::mem::take(&mut *self.datagram_acks.lock().unwrap())
     }
 
-    /// Set the connection's round trip from an estimate the transport
-    /// already smooths (QUIC's).
-    pub fn set_rtt(&self, rtt: Duration) {
-        self.rtt_us.store(
-            rtt.as_micros().clamp(1, u64::MAX as u128) as u64,
-            Ordering::Relaxed,
-        );
-    }
-
-    /// Add one round-trip sample (a ping's pong): the estimate moves an
-    /// eighth of the way to it, as TCP's smoothed round trip does.
-    pub fn record_rtt_sample(&self, rtt: Duration) {
+    /// Add a round-trip sample: a ping's pong, or QUIC's estimate.
+    pub fn record_rtt(&self, rtt: Duration) {
         let sample = rtt.as_micros().clamp(1, u64::MAX as u128) as u64;
-        let old = self.rtt_us.load(Ordering::Relaxed);
-        let next = if old == 0 {
-            sample
-        } else {
-            (old as i128 + (sample as i128 - old as i128) / 8).max(1) as u64
-        };
-        self.rtt_us.store(next, Ordering::Relaxed);
+        let mut samples = self.rtt_samples.lock().unwrap();
+        samples.push_back(sample);
+        while samples.len() > RTT_SAMPLES {
+            samples.pop_front();
+        }
     }
 
-    /// The connection's round trip, once the transport has measured it.
+    /// The connection's round trip: the least of its recent samples, once
+    /// the transport has measured one. The least, because a client can
+    /// only add delay to a sample (holding a pong back), never take it
+    /// away, and lag compensation lets a longer round trip reach further
+    /// back.
     pub fn rtt(&self) -> Option<Duration> {
-        match self.rtt_us.load(Ordering::Relaxed) {
-            0 => None,
-            us => Some(Duration::from_micros(us)),
-        }
+        self.rtt_samples
+            .lock()
+            .unwrap()
+            .iter()
+            .min()
+            .map(|us| Duration::from_micros(*us))
     }
 
     pub fn len(&self) -> usize {
@@ -468,6 +464,22 @@ impl OutboundQueue {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_round_trip_is_the_least_recent_sample() {
+        let q = OutboundQueue::new(OutboundConfig::default());
+        assert_eq!(q.rtt(), None);
+        q.record_rtt(Duration::from_millis(80));
+        q.record_rtt(Duration::from_millis(40));
+        // A held-back pong cannot raise it.
+        q.record_rtt(Duration::from_millis(900));
+        assert_eq!(q.rtt(), Some(Duration::from_millis(40)));
+        // Only the recent samples count.
+        for _ in 0..RTT_SAMPLES {
+            q.record_rtt(Duration::from_millis(60));
+        }
+        assert_eq!(q.rtt(), Some(Duration::from_millis(60)));
+    }
     use super::*;
 
     fn bytes(s: &str) -> Arc<[u8]> {

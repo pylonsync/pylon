@@ -674,7 +674,7 @@ async fn run_session(
                         Err(e) => return read_failed(conn, e).await,
                     };
                     // QUIC's smoothed round trip, for lag compensation.
-                    queue.set_rtt(conn.rtt());
+                    queue.record_rtt(conn.rtt());
                     match bytes.first() {
                         Some(&wire::client::ACKS) => match wire::decode_datagram_acks(&bytes) {
                             Some(acks) => queue.push_datagram_acks(&acks),
@@ -696,7 +696,7 @@ async fn run_session(
                         Ok(d) => d,
                         Err(e) => return ended_by(e),
                     };
-                    queue.set_rtt(conn.rtt());
+                    queue.record_rtt(conn.rtt());
                     // Acks are the only datagrams a client sends; anything
                     // else is ignored, like a corrupt packet.
                     if let Some(acks) = wire::decode_datagram_acks(&datagram) {

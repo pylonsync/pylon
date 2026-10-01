@@ -196,7 +196,7 @@ fn the_round_trip_bounds_how_far_back_a_view_reaches() {
         drain(&q, &mut table);
     }
     // 50 ms round trip + 250 ms allowance = 6 ticks at 50 ms.
-    q.set_rtt(Duration::from_millis(50));
+    q.record_rtt(Duration::from_millis(50));
     send(&s, "p1", Some(15.0));
     s.run_tick();
     assert_eq!(seen.lock().unwrap().pop().unwrap().tick, Some(24.0));

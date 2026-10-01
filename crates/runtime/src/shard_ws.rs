@@ -18,6 +18,7 @@
 //! costs memory, not a thread. Accept stays on one blocking thread with
 //! [`crate::accept_tcp`], which avoids the macOS dual-stack accept panic.
 
+use std::collections::VecDeque;
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -49,6 +50,25 @@ const MAX_DATAGRAM: usize = 65_507;
 const PING_INTERVAL: Duration = Duration::from_secs(2);
 /// A pong later than this is not a round trip worth recording.
 const MAX_RTT_SAMPLE: Duration = Duration::from_secs(10);
+/// Pings a connection remembers for their pongs.
+const OUTSTANDING_PINGS: usize = 8;
+
+/// The round trip a pong gives: its payload must be the send time of a ping
+/// still outstanding, which it then answers (with every older one). An
+/// unsolicited, repeated, or replayed pong gives nothing.
+fn pong_rtt(
+    outstanding: &std::sync::Mutex<VecDeque<u64>>,
+    payload: &[u8],
+    now: Duration,
+) -> Option<Duration> {
+    let sent = u64::from_le_bytes(<[u8; 8]>::try_from(payload).ok()?);
+    let mut pings = outstanding.lock().unwrap();
+    let i = pings.iter().position(|p| *p == sent)?;
+    pings.drain(..=i);
+    drop(pings);
+    now.checked_sub(Duration::from_micros(sent))
+        .filter(|r| *r <= MAX_RTT_SAMPLE)
+}
 /// A connection that sends nothing (not even a pong) for this long is
 /// closed. Covers clients that vanished without closing the socket.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -648,8 +668,11 @@ async fn run_connection(
     }
     let writer_queue = Arc::clone(&queue);
     let writer_shard = Arc::clone(&shard);
-    // Pings carry the time they were sent, in microseconds since this.
+    // Pings carry the time they were sent, in microseconds since this. Only
+    // a pong that answers one still outstanding is a round trip, once.
     let epoch = std::time::Instant::now();
+    let outstanding: Arc<std::sync::Mutex<VecDeque<u64>>> = Arc::default();
+    let writer_pings = Arc::clone(&outstanding);
     let codec = wire::codec_byte(shard.snapshot_format());
     let mut writer = tokio::spawn(async move {
         let mut ping = tokio::time::interval(PING_INTERVAL);
@@ -710,6 +733,13 @@ async fn run_connection(
                 _ = wake.notified() => {}
                 _ = ping.tick() => {
                     let sent = epoch.elapsed().as_micros() as u64;
+                    {
+                        let mut pings = writer_pings.lock().unwrap();
+                        pings.push_back(sent);
+                        while pings.len() > OUTSTANDING_PINGS {
+                            pings.pop_front();
+                        }
+                    }
                     if let Err(e) = sink.send(Message::Ping(sent.to_le_bytes().to_vec())).await {
                         return format!("ws write: {e}");
                     }
@@ -832,12 +862,8 @@ async fn run_connection(
             Message::Close(_) => break ConnectionEnd::ClientClosed,
             // A pong to one of the writer's pings: the round trip.
             Message::Pong(payload) => {
-                if let Ok(sent) = <[u8; 8]>::try_from(payload.as_slice()) {
-                    let now = epoch.elapsed();
-                    let sent = Duration::from_micros(u64::from_le_bytes(sent));
-                    if let Some(rtt) = now.checked_sub(sent).filter(|r| *r <= MAX_RTT_SAMPLE) {
-                        queue.record_rtt_sample(rtt);
-                    }
+                if let Some(rtt) = pong_rtt(&outstanding, &payload, epoch.elapsed()) {
+                    queue.record_rtt(rtt);
                 }
             }
             // tungstenite answers pings itself.
@@ -1011,6 +1037,27 @@ fn url_decode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn only_a_pong_to_an_outstanding_ping_is_a_round_trip() {
+        let pings = std::sync::Mutex::new(VecDeque::from([1_000u64, 2_000, 3_000]));
+        let at = |us: u64| Duration::from_micros(us);
+        // Unsolicited: no ping was sent at 1500 us.
+        assert_eq!(pong_rtt(&pings, &1_500u64.to_le_bytes(), at(9_000)), None);
+        // The ping at 2000 us, answered at 9000 us: it and the older one go.
+        assert_eq!(
+            pong_rtt(&pings, &2_000u64.to_le_bytes(), at(9_000)),
+            Some(at(7_000))
+        );
+        assert_eq!(
+            pings.lock().unwrap().iter().copied().collect::<Vec<_>>(),
+            vec![3_000]
+        );
+        // Replayed: it was answered already.
+        assert_eq!(pong_rtt(&pings, &2_000u64.to_le_bytes(), at(20_000)), None);
+        // Not eight bytes.
+        assert_eq!(pong_rtt(&pings, b"pong", at(9_000)), None);
+    }
     use super::*;
 
     #[test]

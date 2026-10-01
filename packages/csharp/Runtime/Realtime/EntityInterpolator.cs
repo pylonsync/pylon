@@ -113,10 +113,10 @@ namespace Pylon.Realtime
         public double LatestTick => _lastTick;
 
         /// <summary>
-        /// The render tick the last <see cref="Update"/> placed entities at
-        /// (after raising it to what an earlier update drew), or -1 before the
-        /// first update. This is the tick the player saw: the view tick for
-        /// lag compensation.
+        /// The tick the last <see cref="Update"/> drew: its render tick, raised
+        /// to what an earlier update drew and capped at the newest tick
+        /// received, or -1 before the first update. This is the tick the
+        /// player saw: the view tick for lag compensation.
         /// </summary>
         public double DrawnTick => _drawn;
 
@@ -182,8 +182,10 @@ namespace Pylon.Realtime
             Entered.Clear();
             Left.Clear();
             renderTick = Math.Max(renderTick, _floor);
-            _drawn = renderTick;
             _floor = Math.Min(renderTick, _lastTick);
+            // Past the newest tick received, entities hold at their last
+            // samples: the picture is that tick's.
+            _drawn = _floor;
             var gone = new List<ulong>();
             foreach (var kv in _lives)
             {

@@ -517,10 +517,18 @@ impl Replicator {
             unreachable!("set above")
         };
         // A new precision rescales every position the client has.
+        // History just turned on (or changed length) for a subscription that
+        // already has a baseline: a full frame seeds its view, since delta
+        // frames only update entities the view already has.
+        let seed = *history_ticks > 0
+            && views
+                .get(&input.key)
+                .is_none_or(|v| v.keep_ticks() != *history_ticks as u64);
         let full = !base.started
             || input.dropped != base.dropped
             || input.queue_full
-            || base.precision != precision;
+            || base.precision != precision
+            || seed;
         base.started = true;
         base.dropped = input.dropped;
         base.precision = precision;
@@ -745,10 +753,18 @@ impl Replicator {
         let Subscription::Datagram(base) = sub else {
             unreachable!("set above")
         };
+        // History just turned on (or changed length) for a subscription that
+        // already has a baseline: a full frame seeds its view, since delta
+        // frames only update entities the view already has.
+        let seed = *history_ticks > 0
+            && views
+                .get(&input.key)
+                .is_none_or(|v| v.keep_ticks() != *history_ticks as u64);
         let full = !base.started
             || input.dropped != base.dropped
             || input.queue_full
-            || base.precision != precision;
+            || base.precision != precision
+            || seed;
         base.started = true;
         base.dropped = input.dropped;
         base.precision = precision;
@@ -1548,5 +1564,50 @@ mod tests {
         rep.frame(&store, &config, 3, input(2, None));
         rep.set_history_ticks(0);
         assert!(rep.view(2).is_none());
+    }
+
+    #[test]
+    fn turning_history_on_sends_a_full_frame_that_seeds_the_view() {
+        let config = ReplicationConfig::default();
+        let mut store = Replicated::new();
+        store.spawn(1, [1.0, 0.0, 0.0]);
+        store.spawn(2, [2.0, 0.0, 0.0]);
+        let mut rep = Replicator::new();
+        let mut table = ReplicaTable::new();
+        for tick in 1..=3u64 {
+            store.set_pos(1, [tick as f32, 0.0, 0.0]);
+            rep.begin_tick(&store);
+            table
+                .apply(&rep.frame(&store, &config, tick, input(1, None)).bytes)
+                .unwrap();
+        }
+        // History on with a baseline already there: the next frame is full,
+        // and the view has every entity the subscriber has.
+        rep.set_history_ticks(10);
+        store.set_pos(1, [4.0, 0.0, 0.0]);
+        rep.begin_tick(&store);
+        let s = table
+            .apply(&rep.frame(&store, &config, 4, input(1, None)).bytes)
+            .unwrap();
+        assert!(s.full);
+        let v = rep.view(1).unwrap();
+        assert!(v.position_at(1, 4.0).is_some() && v.position_at(2, 4.0).is_some());
+        // Then deltas again; a new history length seeds again.
+        rep.begin_tick(&store);
+        assert!(
+            !table
+                .apply(&rep.frame(&store, &config, 5, input(1, None)).bytes)
+                .unwrap()
+                .full
+        );
+        rep.set_history_ticks(20);
+        rep.begin_tick(&store);
+        assert!(
+            table
+                .apply(&rep.frame(&store, &config, 6, input(1, None)).bytes)
+                .unwrap()
+                .full
+        );
+        assert_eq!(rep.view(1).unwrap().keep_ticks(), 20);
     }
 }
