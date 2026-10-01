@@ -4441,6 +4441,150 @@ pub fn warm_client_bundle(
     }
 }
 
+/// True from boot until the SSR warm-up finishes (see [`warm_ssr`]): while
+/// set and before [`SSR_WARM_DEADLINE`], `/health/ready` answers 503 so a
+/// deploy waits before sending traffic. False by default, so an app that
+/// never starts a warm-up is ready.
+static SSR_WARMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// When the warm-up stops holding readiness, in milliseconds since
+/// [`ssr_epoch`]: whatever is still running then (the client build, a render),
+/// the app counts as ready.
+static SSR_WARM_DEADLINE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn ssr_epoch() -> std::time::Instant {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *EPOCH.get_or_init(std::time::Instant::now)
+}
+
+fn ssr_warm_deadline() -> std::time::Instant {
+    ssr_epoch()
+        + std::time::Duration::from_millis(
+            SSR_WARM_DEADLINE.load(std::sync::atomic::Ordering::Acquire),
+        )
+}
+
+/// False while the SSR warm-up runs, until its deadline.
+pub fn ssr_ready() -> bool {
+    !SSR_WARMING.load(std::sync::atomic::Ordering::Acquire)
+        || std::time::Instant::now() >= ssr_warm_deadline()
+}
+
+/// Mark the SSR warm-up as started, holding readiness for at most `budget`
+/// from now: the client build and the renders share it. Call before the
+/// listener takes requests, so `/health/ready` never reports ready ahead of
+/// it.
+pub fn begin_ssr_warm(budget: std::time::Duration) {
+    let deadline = std::time::Instant::now() + budget;
+    let ms = deadline.saturating_duration_since(ssr_epoch()).as_millis();
+    SSR_WARM_DEADLINE.store(
+        u64::try_from(ms).unwrap_or(u64::MAX),
+        std::sync::atomic::Ordering::Release,
+    );
+    SSR_WARMING.store(true, std::sync::atomic::Ordering::Release);
+}
+
+/// The page the warm-up renders: `/` when it is a page, else the first page
+/// whose path has no parameter.
+pub fn warm_route(routes: &[pylon_kernel::ManifestRoute]) -> Option<&pylon_kernel::ManifestRoute> {
+    let page = |r: &&pylon_kernel::ManifestRoute| {
+        r.component.is_some() && r.kind.as_deref().is_none_or(|k| k == "page")
+    };
+    let fixed = |r: &&pylon_kernel::ManifestRoute| {
+        !r.path
+            .split('/')
+            .any(|s| s.starts_with(':') || s.starts_with('*'))
+    };
+    routes
+        .iter()
+        .filter(page)
+        .find(|r| r.path == "/")
+        .or_else(|| routes.iter().filter(page).find(fixed))
+}
+
+/// Render one page on every Bun runner (each loads the page's modules on its
+/// first render) and then mark SSR ready. Runs on the boot warm thread after
+/// the client bundle is built, within the deadline [`begin_ssr_warm`] set;
+/// past it the app is ready anyway and a slow first request pays the rest.
+pub fn warm_ssr(
+    fn_ops: &std::sync::Arc<dyn pylon_router::FnOps>,
+    routes: &[pylon_kernel::ManifestRoute],
+) {
+    let started = std::time::Instant::now();
+    let deadline = ssr_warm_deadline();
+    let done = |what: String| {
+        SSR_WARMING.store(false, std::sync::atomic::Ordering::Release);
+        tracing::info!("  SSR {what} in {:?}", started.elapsed());
+    };
+    let Some(route) = warm_route(routes) else {
+        return done("ready (no page without parameters to warm)".into());
+    };
+    // The renders run on their own thread so the deadline bounds the wait.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (fn_ops, component, layouts, path) = (
+        fn_ops.clone(),
+        route.component.clone().unwrap_or_default(),
+        route.layouts.clone(),
+        route.path.clone(),
+    );
+    let _ = std::thread::Builder::new()
+        .name("ssr-warm-render".into())
+        .spawn(move || {
+            let _ = tx.send(fn_ops.warm_render(
+                &component,
+                layouts,
+                &path,
+                &path,
+                "localhost",
+                deadline,
+            ));
+        });
+    match rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+        Ok(results) => {
+            let failed: Vec<String> = results
+                .iter()
+                .filter_map(|r| {
+                    r.as_ref()
+                        .err()
+                        .map(|e| format!("{}: {}", e.code, e.message))
+                })
+                .collect();
+            if !failed.is_empty() {
+                tracing::warn!(
+                    "SSR warm-up render of {} failed on {} of {} runner(s): {}",
+                    route.path,
+                    failed.len(),
+                    results.len(),
+                    failed.join("; ")
+                );
+            }
+            done(format!(
+                "warmed {} on {} runner(s)",
+                route.path,
+                results.len() - failed.len()
+            ))
+        }
+        Err(_) => {
+            tracing::warn!(
+                "SSR warm-up render of {} did not finish before its deadline",
+                route.path
+            );
+            done("marked ready before the warm-up finished".into())
+        }
+    }
+}
+
+/// How long the boot warm-up may hold `/health/ready`, counting the client
+/// build and the renders (default 120 s; `PYLON_SSR_WARM_TIMEOUT_SECS`, 0
+/// turns the warm-up off).
+pub fn ssr_warm_budget() -> std::time::Duration {
+    std::env::var("PYLON_SSR_WARM_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(std::time::Duration::from_secs(120))
+}
+
 /// Registry of live-reload SSE senders (one per open dev tab). `trigger_dev_reload`
 /// fans a reload out to them; each `serve_dev_live_reload` connection registers
 /// itself. Reaped lazily: a send to a closed tab errors and is dropped.
@@ -5297,6 +5441,83 @@ mod tests {
         assert!(!is_spa_eligible("/oidc/authorize?client_id=x"));
         assert!(!is_spa_eligible("/oidc/token"));
         assert!(!is_spa_eligible("/oidc/userinfo"));
+    }
+
+    #[test]
+    fn the_warm_up_renders_the_root_page_or_the_first_fixed_page() {
+        let route = |path: &str, kind: Option<&str>| pylon_kernel::ManifestRoute {
+            path: path.into(),
+            mode: "ssr".into(),
+            component: Some(format!("app{path}/page")),
+            kind: kind.map(str::to_string),
+            ..Default::default()
+        };
+        let routes = vec![
+            route("/", Some("not-found")),
+            route("/posts/:id", None),
+            route("/about", None),
+            route("/", None),
+        ];
+        assert_eq!(warm_route(&routes).map(|r| r.path.as_str()), Some("/"));
+        let no_root = vec![
+            route("/posts/:id", None),
+            route("/docs/*rest", None),
+            route("/pricing", None),
+        ];
+        assert_eq!(
+            warm_route(&no_root).map(|r| r.path.as_str()),
+            Some("/pricing")
+        );
+        assert!(warm_route(&[route("/posts/:id", None)]).is_none());
+    }
+
+    /// An FnOps with no functions and no runners.
+    struct NoRunnerOps;
+
+    impl pylon_router::FnOps for NoRunnerOps {
+        fn get_fn(&self, _name: &str) -> Option<pylon_functions::registry::FnDef> {
+            None
+        }
+        fn list_fns(&self) -> Vec<pylon_functions::registry::FnDef> {
+            vec![]
+        }
+        fn call(
+            &self,
+            _fn_name: &str,
+            _args: serde_json::Value,
+            _auth: pylon_functions::protocol::AuthInfo,
+            _on_stream: Option<pylon_functions::runner::StreamCallback>,
+            _request: Option<pylon_functions::protocol::RequestInfo>,
+            _stream_id: Option<String>,
+        ) -> Result<
+            (serde_json::Value, pylon_functions::trace::FnTrace),
+            pylon_functions::runner::FnCallError,
+        > {
+            Err(pylon_functions::runner::FnCallError {
+                code: "NONE".into(),
+                message: "no functions".into(),
+            })
+        }
+        fn recent_traces(&self, _limit: usize) -> Vec<pylon_functions::trace::FnTrace> {
+            vec![]
+        }
+    }
+
+    #[test]
+    fn ready_is_the_default_and_false_while_warming() {
+        assert!(ssr_ready());
+        begin_ssr_warm(std::time::Duration::from_secs(60));
+        assert!(!ssr_ready());
+        // No page to warm: marked ready at once.
+        let ops: std::sync::Arc<dyn pylon_router::FnOps> = std::sync::Arc::new(NoRunnerOps);
+        warm_ssr(&ops, &[]);
+        assert!(ssr_ready());
+        // The deadline ends the hold even if nothing marks it done.
+        begin_ssr_warm(std::time::Duration::from_millis(30));
+        assert!(!ssr_ready());
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert!(ssr_ready());
+        SSR_WARMING.store(false, std::sync::atomic::Ordering::Release);
     }
 
     #[test]

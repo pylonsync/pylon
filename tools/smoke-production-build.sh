@@ -17,6 +17,8 @@
 #   3. The client JS has no optional chaining or `??` left (the target
 #      lowers both).
 #   4. The server writes nothing inside the artifact: data goes next to it.
+#   5. /health/ready answers 200 only after the SSR warm-up rendered / on
+#      every runner, and the first page after it is warm.
 
 set -euo pipefail
 
@@ -226,6 +228,21 @@ for _ in $(seq 1 60); do
 	sleep 1
 done
 curl -fsS "http://localhost:$PORT/health" >/dev/null || fail "server did not become healthy"
+
+echo "→ /health/ready waits for the SSR warm-up"
+for _ in $(seq 1 120); do
+	[[ "$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$PORT/health/ready")" == 200 ]] && break
+	sleep 0.5
+done
+[[ "$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$PORT/health/ready")" == 200 ]] ||
+	fail "/health/ready never answered 200"
+grep -q "SSR warmed / on [1-9][0-9]* runner(s)" "$TMP/server.log" || {
+	cat "$TMP/server.log" >&2
+	fail "the server did not warm / on its runners before /health/ready"
+}
+# Warm: the first page after ready renders without a cold start.
+FIRST="$(curl -fsS -o /dev/null -w '%{time_total}' "http://localhost:$PORT/")" || fail "GET / failed"
+awk -v t="$FIRST" 'BEGIN { exit !(t < 2.0) }' || fail "the first GET / after ready took ${FIRST}s"
 
 BASE="http://localhost:$PORT"
 HTML="$(curl -fsS "$BASE/")" || fail "GET / failed"

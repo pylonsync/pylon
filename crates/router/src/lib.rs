@@ -651,6 +651,40 @@ pub trait FnOps: Send + Sync {
         })
     }
 
+    /// Render `component` once on every Bun runner, anonymously, and discard
+    /// the output: the boot warm-up, so each runner has loaded the page's
+    /// modules before real traffic arrives. Each runner is waited for (it may
+    /// still be starting) until `deadline`. Returns one result per runner.
+    /// Default: one render through `render_route`.
+    fn warm_render(
+        &self,
+        component: &str,
+        layouts: Vec<String>,
+        route_path: &str,
+        url: &str,
+        host: &str,
+        deadline: std::time::Instant,
+    ) -> Vec<Result<(), pylon_functions::runner::FnCallError>> {
+        let _ = deadline;
+        vec![self.render_route(
+            component,
+            layouts,
+            route_path,
+            url,
+            host,
+            serde_json::json!({}),
+            serde_json::json!({}),
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            pylon_functions::protocol::AuthInfo::default(),
+            false,
+            None,
+            false,
+            None,
+            Box::new(|_| {}),
+        )]
+    }
+
     /// Run a `route.ts` form/method handler (#276). Bridges a non-GET HTTP
     /// request to the Bun-side `ssr-form-runtime`, which imports `component`,
     /// picks the handler by `method` (POST/PUT/PATCH/DELETE), runs it with the

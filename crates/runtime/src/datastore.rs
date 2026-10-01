@@ -5747,6 +5747,87 @@ impl pylon_router::FnOps for FnOpsImpl {
         )
     }
 
+    fn warm_render(
+        &self,
+        component: &str,
+        layouts: Vec<String>,
+        route_path: &str,
+        url: &str,
+        host: &str,
+        deadline: std::time::Instant,
+    ) -> Vec<Result<(), FnCallError>> {
+        // Every runner at once: each loads the page's modules on its first
+        // render, and a request may land on any of them. A runner still
+        // starting is waited for, and a failed render is tried again, until
+        // the deadline.
+        const ATTEMPTS: usize = 3;
+        let store: &dyn DataStore = &*self.runtime;
+        std::thread::scope(|scope| {
+            let renders: Vec<_> = self
+                .pool
+                .runners()
+                .iter()
+                .map(|runner| {
+                    let layouts = layouts.clone();
+                    scope.spawn(move || {
+                        let mut last = Err(FnCallError {
+                            code: "WARM_TIMEOUT".into(),
+                            message: "the runner did not answer before the warm-up deadline".into(),
+                        });
+                        let mut attempts = 0;
+                        while attempts < ATTEMPTS {
+                            let left =
+                                deadline.saturating_duration_since(std::time::Instant::now());
+                            if left.is_zero() {
+                                break;
+                            }
+                            let probe = left.min(std::time::Duration::from_millis(500));
+                            if !runner.is_alive() || runner.health_probe(probe).is_err() {
+                                std::thread::sleep(left.min(std::time::Duration::from_millis(100)));
+                                continue;
+                            }
+                            attempts += 1;
+                            last = runner.render_route(
+                                component,
+                                layouts.clone(),
+                                route_path,
+                                url,
+                                host,
+                                serde_json::json!({}),
+                                serde_json::json!({}),
+                                std::collections::HashMap::new(),
+                                std::collections::HashMap::new(),
+                                pylon_functions::protocol::AuthInfo::default(),
+                                false,
+                                None,
+                                false,
+                                store,
+                                None,
+                                Box::new(|_| {}),
+                            );
+                            if last.is_ok() {
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(250));
+                        }
+                        last
+                    })
+                })
+                .collect();
+            renders
+                .into_iter()
+                .map(|r| {
+                    r.join().unwrap_or_else(|_| {
+                        Err(FnCallError {
+                            code: "WARM_PANICKED".into(),
+                            message: "the warm-up render panicked".into(),
+                        })
+                    })
+                })
+                .collect()
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn handle_form(
         &self,

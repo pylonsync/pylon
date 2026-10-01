@@ -4139,6 +4139,15 @@ fn start_server(
             // client bundler must walk the SAME dir or it finds no routes
             // and ships no hydration bundle.
             let warm_app_dir = crate::frontend::derive_app_dir(&frontend_config.ssr_routes);
+            // Render a page on every runner before `/health/ready` says yes,
+            // so a deploy sends no traffic to a cold renderer. Set before the
+            // listener takes a request.
+            let warm_budget = crate::frontend::ssr_warm_budget();
+            let warm_pages = !warm_budget.is_zero();
+            if warm_pages {
+                crate::frontend::begin_ssr_warm(warm_budget);
+            }
+            let warm_routes = frontend_config.ssr_routes.clone();
             let _ = std::thread::Builder::new()
                 .name("ssr-bundle-warm".into())
                 .spawn(move || {
@@ -4154,6 +4163,9 @@ fn start_server(
                         Err(e) => tracing::warn!(
                             "SSR client bundle warm failed (will build lazily on first request): {e}"
                         ),
+                    }
+                    if warm_pages {
+                        crate::frontend::warm_ssr(&fn_ops_warm, &warm_routes);
                     }
                 });
         }
@@ -4454,6 +4466,7 @@ fn start_server(
         let request_started_at = std::time::Instant::now();
         let is_noisy = url == "/health"
             || url == "/health/deep"
+            || url == "/health/ready"
             || url == "/metrics"
             || url.starts_with("/admin/logs/tail");
         if !is_noisy {
@@ -4472,7 +4485,10 @@ fn start_server(
         // and the /health + /metrics probes are skipped so infra paths keep
         // answering on any host. 308 preserves method + body + path + query.
         if let Some(canonical) = canonical_host() {
-            let is_probe = url == "/health" || url == "/health/deep" || url == "/metrics";
+            let is_probe = url == "/health"
+                || url == "/health/deep"
+                || url == "/health/ready"
+                || url == "/metrics";
             let is_ws_upgrade = request.headers().iter().any(|h| {
                 h.field.equiv("Upgrade")
                     && h.value.as_str().eq_ignore_ascii_case("websocket")
@@ -4858,6 +4874,29 @@ fn start_server(
         // offline during respawn — flipping Fly's probe to
         // /health/deep makes the proxy see the thrash and route
         // around the machine until it recovers.
+        // --- Readiness: 503 until the SSR warm-up has rendered a page on
+        // every runner (bounded by PYLON_SSR_WARM_TIMEOUT_SECS). A deploy
+        // waits for it before sending traffic; /health stays the liveness
+        // check and answers at once.
+        if url == "/health/ready" && method == Method::Get {
+            let ready = crate::frontend::ssr_ready();
+            let status = if ready { 200u16 } else { 503u16 };
+            let body = serde_json::json!({
+                "status": if ready { "ready" } else { "warming" },
+                "uptime_secs": start_time.elapsed().as_secs(),
+            })
+            .to_string();
+            let response = with_security_headers(
+                Response::from_string(&body)
+                    .with_status_code(status)
+                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+                    .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap()),
+            );
+            let _ = request.respond(response);
+            mt.record_request("GET", status);
+            return;
+        }
+
         if url == "/health/deep" && method == Method::Get {
             let uptime = start_time.elapsed().as_secs();
             let probe = match fn_ops_ref.as_deref() {
