@@ -1,0 +1,83 @@
+---
+title: Native sign-in (Apple, Google, Steam)
+description: "Sign in a native app or game with the platform account: an Apple or Google ID token, or a Steam session ticket."
+---
+
+A native app gets proof of the player's platform account from the platform SDK. The app sends that proof to Pylon, and Pylon checks it with the platform. Each route then links the account and returns a session, the same as [OAuth](/auth/oauth):
+
+```json
+{ "token": "...", "user_id": "...", "expires_at": 1764000000, "provider": "apple" }
+```
+
+A guest session sent with the request merges into the signed-in user, as with the other sign-in routes.
+
+| Route | Body | Proof |
+| --- | --- | --- |
+| `POST /api/auth/native/apple` | `{ "id_token", "name"? }` | The identity token from Sign in with Apple |
+| `POST /api/auth/native/google` | `{ "id_token" }` | The ID token from Google Sign-In |
+| `POST /api/auth/native/steam` | `{ "ticket" }` | A Steam session ticket, as hex |
+
+A route returns 404 when its provider is not configured.
+
+## Apple and Google
+
+Pylon checks the token's signature against the provider's keys. It also checks the issuer, the expiry, and the audience.
+
+| Variable | Value |
+| --- | --- |
+| `PYLON_APPLE_NATIVE_CLIENT_IDS` | Your app's bundle ids, comma-separated |
+| `PYLON_GOOGLE_NATIVE_CLIENT_IDS` | Your Google OAuth client ids, comma-separated |
+
+Apple gives your app the user's name only on the first sign-in, and never puts it in the token. Send it as `name` on that first request.
+
+An account links to an existing user with the same email address. A Google account with an unverified email is refused.
+
+## Steam
+
+The game gets a ticket from Steam with `ISteamUser::GetAuthTicketForWebApi(identity)`. Pylon checks the ticket with Steam's `ISteamUserAuth/AuthenticateUserTicket` Web API.
+
+| Variable | Value |
+| --- | --- |
+| `PYLON_STEAM_WEB_API_KEY` | Your publisher Web API key |
+| `PYLON_STEAM_APP_ID` | Your game's app id |
+| `PYLON_STEAM_IDENTITY` | The identity string the game passes to `GetAuthTicketForWebApi` |
+| `PYLON_STEAM_REFUSE_BANNED` | `1` to refuse players with a VAC ban or a publisher ban |
+
+Steam refuses a ticket made for another app id or another identity. This means a ticket that a player gave another service cannot sign in to your app.
+
+- **The account** is the player's SteamID64. With Family Sharing, the player signs in as themselves, not as the account that owns the game.
+- **Email:** Steam gives no email address. A Steam account never links to an existing user by email.
+- **The user row:** the first sign-in creates a user with a placeholder address, `steam-<steamid>-<random>@steam.invalid`. This address is not verified and never receives mail. Replace it if you collect a real address.
+- **Errors:**
+  - 401 `INVALID_TICKET`: Steam refused the ticket.
+  - 403 `ACCOUNT_BANNED`: the player is banned and `PYLON_STEAM_REFUSE_BANNED` is on.
+  - 502 `PROVIDER_UNAVAILABLE`: Pylon could not reach Steam. The route fails closed.
+
+### Get the ticket
+
+Steamworks.NET:
+
+```csharp
+using Steamworks;
+
+const string Identity = "my-game-pylon"; // the same value as PYLON_STEAM_IDENTITY
+
+Callback<GetTicketForWebApiResponse_t> onTicket = null;
+onTicket = Callback<GetTicketForWebApiResponse_t>.Create(async response =>
+{
+    if (response.m_eResult != EResult.k_EResultOK) return;
+    var hex = System.BitConverter.ToString(response.m_rgubTicket, 0, response.m_cubTicket).Replace("-", "");
+    await pylon.SignInWithSteamAsync(hex);
+});
+SteamUser.GetAuthTicketForWebApi(Identity);
+```
+
+Facepunch.Steamworks:
+
+```csharp
+var ticket = await SteamUser.GetAuthTicketForWebApiAsync("my-game-pylon");
+var hex = System.BitConverter.ToString(ticket.Data).Replace("-", "");
+await pylon.SignInWithSteamAsync(hex);
+```
+
+The C# client has `SignInWithAppleAsync`, `SignInWithGoogleAsync`, and `SignInWithSteamAsync`. See the [C# and Unity SDK](/clients/csharp).

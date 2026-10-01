@@ -127,6 +127,53 @@ namespace Pylon
         public Task<SessionResponse> RegisterWithPasswordAsync(string email, string password, CancellationToken ct = default) =>
             SignInAsync("/api/auth/password/register", PylonValue.Object(("email", email), ("password", password)), ct);
 
+        /// <summary>
+        /// Sign in with Apple (<c>POST /api/auth/native/apple</c>) using the
+        /// identity token from the platform's Sign in with Apple flow, and
+        /// store the session. Apple gives the name to the app only on the
+        /// first sign-in and never puts it in the token, so pass it then.
+        /// The server must list the app's bundle id in
+        /// <c>PYLON_APPLE_NATIVE_CLIENT_IDS</c>.
+        /// </summary>
+        public Task<SessionResponse> SignInWithAppleAsync(string idToken, string? name = null, CancellationToken ct = default)
+        {
+            RequireValue(idToken, nameof(idToken));
+            var body = string.IsNullOrWhiteSpace(name)
+                ? PylonValue.Object(("id_token", idToken))
+                : PylonValue.Object(("id_token", idToken), ("name", name!.Trim()));
+            return SignInAsync("/api/auth/native/apple", body, ct);
+        }
+
+        /// <summary>
+        /// Sign in with Google (<c>POST /api/auth/native/google</c>) using the
+        /// ID token from Google Sign-In, and store the session. The server
+        /// must list the app's client id in <c>PYLON_GOOGLE_NATIVE_CLIENT_IDS</c>.
+        /// </summary>
+        public Task<SessionResponse> SignInWithGoogleAsync(string idToken, CancellationToken ct = default)
+        {
+            RequireValue(idToken, nameof(idToken));
+            return SignInAsync("/api/auth/native/google", PylonValue.Object(("id_token", idToken)), ct);
+        }
+
+        /// <summary>
+        /// Sign in with Steam (<c>POST /api/auth/native/steam</c>) and store the
+        /// session. <paramref name="ticketHex"/> is the session ticket from
+        /// <c>ISteamUser::GetAuthTicketForWebApi</c>, as hex, made with the
+        /// identity the server has in <c>PYLON_STEAM_IDENTITY</c>. The package
+        /// has no Steamworks dependency: get the ticket with Steamworks.NET or
+        /// Facepunch.Steamworks.
+        /// </summary>
+        public Task<SessionResponse> SignInWithSteamAsync(string ticketHex, CancellationToken ct = default)
+        {
+            RequireValue(ticketHex, nameof(ticketHex));
+            return SignInAsync("/api/auth/native/steam", PylonValue.Object(("ticket", ticketHex.Trim())), ct);
+        }
+
+        static void RequireValue(string value, string name)
+        {
+            if (string.IsNullOrWhiteSpace(value)) throw PylonException.InvalidArgument($"{name} is empty");
+        }
+
         async Task<SessionResponse> SignInAsync(string path, PylonValue body, CancellationToken ct)
         {
             var session = SessionResponse.FromValue(await RequestAsync("POST", path, body, ct).ConfigureAwait(false));

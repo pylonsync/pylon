@@ -6,6 +6,7 @@
 - `ShardGame<TInput>`, a port of the TypeScript `connectShardGame`: the connection, the clock, interpolated entities, and predictors that record inputs, drop refused ones, and reset when the connection reopens (#45).
 - `ShardConnectionOptions.Now` sets the clock for frame arrival and input send times.
 - The Arena sample runs on `ShardGame`.
+- `SignInWithAppleAsync`, `SignInWithGoogleAsync`, and `SignInWithSteamAsync` call the server's native sign-in routes and store the session (#46).
 
 ## 0.22.12
 

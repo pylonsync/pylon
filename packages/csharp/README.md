@@ -63,6 +63,18 @@ Other sign-in methods:
 - `SignInWithPasswordAsync(email, password)`
 - `RegisterWithPasswordAsync(email, password)`
 
+Platform accounts (see the server's [native sign-in docs](https://github.com/pylonsync/pylon/blob/main/apps/docs/auth/native.mdx)):
+
+- `SignInWithAppleAsync(idToken, name)`: the identity token from Sign in with Apple. Pass the name on the first sign-in; Apple sends it only then.
+- `SignInWithGoogleAsync(idToken)`: the ID token from Google Sign-In.
+- `SignInWithSteamAsync(ticketHex)`: a session ticket from `ISteamUser::GetAuthTicketForWebApi`, as hex. The package has no Steamworks dependency:
+
+```csharp
+// Facepunch.Steamworks
+var ticket = await SteamUser.GetAuthTicketForWebApiAsync("my-game-pylon"); // = PYLON_STEAM_IDENTITY
+await client.SignInWithSteamAsync(System.BitConverter.ToString(ticket.Data).Replace("-", ""));
+```
+
 To keep a session alive, call `RefreshSessionAsync()`, or call
 `StartSessionAutoRefresh(expiresAt)` to refresh an hour before the session
 expires.

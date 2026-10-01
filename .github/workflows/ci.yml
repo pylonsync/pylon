@@ -527,6 +527,11 @@ jobs:
       - run: bash tools/smoke-wasm-shard.sh target/debug/pylon
         env:
           PYLON_SMOKE_REQUIRE_DOTNET: "1"
+      # The C# client's Apple, Google, and Steam sign-in against the real
+      # routes (keys the test controls, a fake Steam Web API).
+      - run: cargo test -p pylon-runtime --test native_signin_csharp
+        env:
+          PYLON_REQUIRE_DOTNET: "1"
 
   # Shards across machines: two pylon processes on one Postgres running
   # examples/shard-arena (placement, proxied connections, fly-replay, and

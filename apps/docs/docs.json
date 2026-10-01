@@ -73,6 +73,7 @@
               "auth/magic-codes",
               "auth/password",
               "auth/oauth",
+              "auth/native",
               "auth/sessions",
               "auth/trusted-mint",
               "auth/rbac",

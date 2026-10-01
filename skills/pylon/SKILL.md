@@ -1200,7 +1200,7 @@ Built-ins, declared in `manifest.plugins`:
 - `@pylonsync/sync` — sync engine standalone (Vue, Svelte, Solid, vanilla)
 - `@pylonsync/loro` — Loro CRDT integration for collaborative editing
 - **Swift SDK** at `packages/swift/` — `PylonClient`, `PylonSync`, `PylonRealtime`, `PylonSwiftUI`. iOS 16+, macOS 13+, tvOS 16+, watchOS 9+, Linux. Codegen via `pylon codegen client --target swift`.
-- **C# / Unity SDK** at `packages/csharp/` (UPM package `com.pylonsync.pylon`, install from `https://github.com/pylonsync/pylon.git?path=/packages/csharp#v<version>`) — `PylonClient` (guest/magic-code/password sign-in, functions, entities) and `ShardConnection` (shard wire v2, JSON + MessagePack, replication, transfers), plus `Predictor`, `ShardClock`, `EntityInterpolator`. No reflection, IL2CPP-safe; values are `PylonValue`, typed calls take an `IPylonConverter<T>` (`JsonUtilityConverter<T>` in Unity). Create clients on Unity's main thread and events run there. No WebGL, no offline sync engine.
+- **C# / Unity SDK** at `packages/csharp/` (UPM package `com.pylonsync.pylon`, install from `https://github.com/pylonsync/pylon.git?path=/packages/csharp#v<version>`) — `PylonClient` (guest/magic-code/password/Apple/Google/Steam sign-in, functions, entities) and `ShardConnection` (shard wire v2, JSON + MessagePack, replication, transfers), plus `Predictor`, `ShardClock`, `EntityInterpolator`. No reflection, IL2CPP-safe; values are `PylonValue`, typed calls take an `IPylonConverter<T>` (`JsonUtilityConverter<T>` in Unity). Create clients on Unity's main thread and events run there. No WebGL, no offline sync engine.
 
 ### Stack0 Cloud
 Managed Pylon at `cloud.stack0.dev`. Same binary, same APIs.

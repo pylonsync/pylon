@@ -1104,6 +1104,42 @@ pub(crate) fn complete_login_from_userinfo(
     userinfo: &pylon_auth::UserInfo,
     tokens: &pylon_auth::TokenSet,
 ) -> Result<(String, pylon_auth::Session), OAuthError> {
+    complete_login(ctx, provider, userinfo, tokens, EmailLink::ByEmail)
+}
+
+/// Whether a sign-in may join an existing User row that has the
+/// identity's email address.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EmailLink {
+    /// The provider vouched for the email: join the row with that address.
+    ByEmail,
+    /// The provider gives no email (Steam). `userinfo.email` is a unique
+    /// placeholder; never join by it and never mark it verified. A User
+    /// row is found only through the provider's account link.
+    Never,
+}
+
+/// `complete_login_from_userinfo` for a provider that gives no email:
+/// the account link is the only way back to the user.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn complete_login_without_email(
+    ctx: &RouterContext,
+    provider: &str,
+    userinfo: &pylon_auth::UserInfo,
+    tokens: &pylon_auth::TokenSet,
+) -> Result<(String, pylon_auth::Session), OAuthError> {
+    complete_login(ctx, provider, userinfo, tokens, EmailLink::Never)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn complete_login(
+    ctx: &RouterContext,
+    provider: &str,
+    userinfo: &pylon_auth::UserInfo,
+    tokens: &pylon_auth::TokenSet,
+    email_link: EmailLink,
+) -> Result<(String, pylon_auth::Session), OAuthError> {
     // Canonicalize the provider-supplied email BEFORE any lookup or
     // insert. Different auth paths previously took different casing
     // (password/register lowercased, OAuth used Google's casing
@@ -1193,6 +1229,7 @@ pub(crate) fn complete_login_from_userinfo(
                 userinfo,
                 tokens,
                 &now,
+                email_link,
             )?
         } else {
             // User row exists — refresh the token bundle and
@@ -1215,6 +1252,7 @@ pub(crate) fn complete_login_from_userinfo(
             userinfo,
             tokens,
             &now,
+            email_link,
         )?
     };
     // Federated org mirroring (0.6.2): when this provider is the app's
@@ -1277,8 +1315,14 @@ fn handle_oauth_user_lookup_or_create(
     userinfo: &pylon_auth::UserInfo,
     tokens: &pylon_auth::TokenSet,
     now: &str,
+    email_link: EmailLink,
 ) -> Result<String, OAuthError> {
-    if let Ok(Some(row)) = ctx.store.lookup(user_entity_name, "email", canonical_email) {
+    let by_email = if email_link == EmailLink::ByEmail {
+        ctx.store.lookup(user_entity_name, "email", canonical_email)
+    } else {
+        Ok(None)
+    };
+    if let Ok(Some(row)) = by_email {
         // First-time link of this provider to an existing user
         // (matched by email). Stamp emailVerified opportunistically
         // since the provider just vouched for the address.
@@ -1308,17 +1352,18 @@ fn handle_oauth_user_lookup_or_create(
     // Both fail loudly — a silent failure here is what produced
     // the "session for nonexistent user" bug.
     let display_name = userinfo.name.as_deref().unwrap_or(canonical_email);
+    let mut row = serde_json::json!({
+        "email": canonical_email,
+        "displayName": display_name,
+        "createdAt": now,
+    });
+    // A placeholder address was never verified.
+    if email_link == EmailLink::ByEmail {
+        row["emailVerified"] = serde_json::Value::String(now.to_string());
+    }
     let id = ctx
         .store
-        .insert(
-            user_entity_name,
-            &serde_json::json!({
-                "email": canonical_email,
-                "displayName": display_name,
-                "emailVerified": now,
-                "createdAt": now,
-            }),
-        )
+        .insert(user_entity_name, &row)
         .map_err(|e| OAuthError {
             status: 500,
             code: "USER_CREATE_FAILED",

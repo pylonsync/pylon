@@ -2752,6 +2752,132 @@ pub(crate) fn handle(
         return Some((200, serde_json::json!({"revoked": true}).to_string()));
     }
 
+    // POST /api/auth/native/steam — sign in with a Steam session ticket.
+    //
+    // Body: { "ticket": "<hex>" }, the bytes a game got from
+    // `ISteamUser::GetAuthTicketForWebApi(PYLON_STEAM_IDENTITY)`, as hex.
+    // Steam's AuthenticateUserTicket Web API checks the ticket for this
+    // app id and identity (see pylon_auth::steam). The account is the
+    // player's SteamID64. Steam gives no email, so the account link is the
+    // only way back to the user: no join by email, and a new User row gets
+    // a unique placeholder address under the reserved `.invalid` TLD.
+    //
+    // 404 when Steam sign-in is not configured. 502 when Steam cannot be
+    // reached: the route fails closed.
+    if url == "/api/auth/native/steam" {
+        if method != HttpMethod::Post {
+            return Some((405, json_error("METHOD_NOT_ALLOWED", "POST only")));
+        }
+        let Some(config) = pylon_auth::steam::SteamConfig::from_env() else {
+            return Some((
+                404,
+                json_error(
+                    "PROVIDER_NOT_FOUND",
+                    "Steam sign-in is not configured on this server (PYLON_STEAM_WEB_API_KEY, PYLON_STEAM_APP_ID, PYLON_STEAM_IDENTITY)",
+                ),
+            ));
+        };
+        let rl = pylon_auth::rate_limit::AuthRateLimiter::shared();
+        if let pylon_auth::rate_limit::RateLimitDecision::Deny { retry_after_secs } = rl.check(
+            pylon_auth::rate_limit::AuthBucket::Verify,
+            ctx.peer_ip,
+            None,
+        ) {
+            return Some((
+                429,
+                json_error_with_hint(
+                    "RATE_LIMITED",
+                    "Too many sign-in attempts",
+                    &format!("Try again in {retry_after_secs}s"),
+                ),
+            ));
+        }
+        let data: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => {
+                return Some((
+                    400,
+                    json_error_safe(
+                        "INVALID_JSON",
+                        "Invalid request body",
+                        &format!("Invalid JSON: {e}"),
+                    ),
+                ));
+            }
+        };
+        let ticket = match data.get("ticket").and_then(|v| v.as_str()) {
+            Some(t) if pylon_auth::steam::ticket_is_well_formed(t) => t,
+            Some(_) => {
+                return Some((
+                    400,
+                    json_error("INVALID_TICKET", "ticket must be the session ticket as hex"),
+                ));
+            }
+            None => return Some((400, json_error("MISSING_FIELD", "ticket is required"))),
+        };
+        let steam = match pylon_auth::steam::verify_ticket(&config, ticket) {
+            Ok(id) => id,
+            Err(pylon_auth::steam::SteamError::Unavailable(why)) => {
+                tracing::warn!("[auth] Steam AuthenticateUserTicket unavailable: {why}");
+                return Some((
+                    502,
+                    json_error(
+                        "PROVIDER_UNAVAILABLE",
+                        "Could not reach Steam to check the ticket; try again",
+                    ),
+                ));
+            }
+            Err(pylon_auth::steam::SteamError::Banned) => {
+                return Some((
+                    403,
+                    json_error("ACCOUNT_BANNED", "This Steam account is banned"),
+                ));
+            }
+            Err(err) => {
+                tracing::warn!("[auth] Steam ticket rejected: {err}");
+                return Some((
+                    401,
+                    json_error("INVALID_TICKET", "The Steam ticket was not accepted"),
+                ));
+            }
+        };
+        let userinfo = pylon_auth::UserInfo {
+            provider: "steam".to_string(),
+            provider_account_id: steam.steam_id.clone(),
+            email: pylon_auth::steam::placeholder_email(&steam.steam_id),
+            name: Some(format!("Steam {}", steam.steam_id)),
+            avatar_url: None,
+            orgs: None,
+        };
+        let tokens = pylon_auth::TokenSet {
+            access_token: String::new(),
+            refresh_token: None,
+            id_token: None,
+            expires_at: None,
+            scope: None,
+        };
+        return Some(
+            match crate::complete_login_without_email(ctx, "steam", &userinfo, &tokens) {
+                Ok((user_id, session)) => {
+                    complete_sign_in(ctx, &user_id, "oauth:steam", &[], GuestMerge::Caller);
+                    ctx.maybe_set_session_cookie(&session.token);
+                    (
+                        200,
+                        serde_json::json!({
+                            "token": session.token,
+                            "user_id": user_id,
+                            "expires_at": session.expires_at,
+                            "provider": "steam",
+                            "steam_id": steam.steam_id,
+                        })
+                        .to_string(),
+                    )
+                }
+                Err(err) => (err.status, json_error(err.code, &err.message)),
+            },
+        );
+    }
+
     // POST /api/auth/native/<apple|google> — sign in with an id_token the
     // platform SDK handed a native app (Sign in with Apple, Google
     // Sign-In). The token never went through a back-channel exchange, so
@@ -2782,7 +2908,7 @@ pub(crate) fn handle(
                     404,
                     json_error(
                         "PROVIDER_NOT_FOUND",
-                        "Native sign-in supports \"apple\" and \"google\"",
+                        "Native sign-in supports \"apple\", \"google\", and \"steam\"",
                     ),
                 ));
             }
