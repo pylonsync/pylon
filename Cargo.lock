@@ -3433,7 +3433,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-shard-client-ffi"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "rustls",
  "tokio",

@@ -47,6 +47,7 @@ namespace Pylon.Tests
             Assert.Equal(-1, WebTransportNative.pylon_wt_state(ulong.MaxValue));
             Assert.Equal(-1, WebTransportNative.SendDatagram(ulong.MaxValue, new byte[] { 1 }));
             Assert.Equal(-1L, WebTransportNative.StreamRead(ulong.MaxValue, new byte[8]));
+            Assert.Equal(-1L, WebTransportNative.pylon_wt_stream_queued(ulong.MaxValue));
             WebTransportNative.pylon_wt_free(ulong.MaxValue);
         }
 

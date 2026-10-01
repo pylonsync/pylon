@@ -28,6 +28,7 @@ namespace Pylon.Realtime
         public const int ErrNone = -2;
         public const int ErrBufferTooSmall = -3;
         public const int ErrStreamEnded = -7;
+        public const int ErrFull = -8;
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         static extern ulong pylon_wt_connect(byte[] url, byte[]? hashes, UIntPtr hashCount);
@@ -60,17 +61,28 @@ namespace Pylon.Realtime
         static extern int pylon_wt_error(ulong handle, byte[] buf, UIntPtr cap);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern long pylon_wt_stream_queued(ulong handle);
+
+        [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         public static extern void pylon_wt_free(ulong handle);
 
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         static extern IntPtr pylon_wt_version();
 
-        /// <summary>The plugin ABI major version this client calls (crates/shard-client-ffi).</summary>
+        /// <summary>The plugin ABI this client calls (crates/shard-client-ffi): this major version, and this minor version or later.</summary>
         public const int AbiMajor = 1;
+        public const int AbiMinor = 1;
 
-        /// <summary>True when the plugin is loaded and has <see cref="AbiMajor"/>.</summary>
-        public static bool Compatible(string? version) =>
-            version != null && version.Split('.')[0] == AbiMajor.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        /// <summary>True when the plugin's version is <see cref="AbiMajor"/>.x with x at least <see cref="AbiMinor"/>.</summary>
+        public static bool Compatible(string? version)
+        {
+            if (version == null) return false;
+            var parts = version.Split('.');
+            return parts.Length >= 2 &&
+                   int.TryParse(parts[0], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var major) &&
+                   int.TryParse(parts[1], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var minor) &&
+                   major == AbiMajor && minor >= AbiMinor;
+        }
 
         /// <summary>The plugin's version, or null when it is not loaded on this platform.</summary>
         public static string? Version()
@@ -146,6 +158,8 @@ namespace Pylon.Realtime
         /// <summary>The length of the next datagram copied into <paramref name="buf"/>, or a negative value when none waits.</summary>
         int RecvDatagram(byte[] buf);
         bool StreamWrite(byte[] data);
+        /// <summary>Stream bytes written and not yet sent (the peer's flow control holds them).</summary>
+        long StreamQueued { get; }
         /// <summary>Stream bytes copied into <paramref name="buf"/>: 0 when none wait, negative when the stream ended.</summary>
         long StreamRead(byte[] buf);
         void Close(uint code, string reason);
@@ -192,6 +206,7 @@ namespace Pylon.Realtime
             public bool SendDatagram(byte[] data) => WebTransportNative.SendDatagram(_handle, data) == 0;
             public int RecvDatagram(byte[] buf) => WebTransportNative.RecvDatagram(_handle, buf);
             public bool StreamWrite(byte[] data) => WebTransportNative.StreamWrite(_handle, data) == 0;
+            public long StreamQueued => Math.Max(0, WebTransportNative.pylon_wt_stream_queued(_handle));
             public long StreamRead(byte[] buf) => WebTransportNative.StreamRead(_handle, buf);
             public void Close(uint code, string reason) => WebTransportNative.Close(_handle, code, reason);
             public (uint Code, string Reason)? CloseInfo => WebTransportNative.CloseInfo(_handle);

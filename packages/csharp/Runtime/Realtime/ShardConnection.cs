@@ -252,6 +252,7 @@ namespace Pylon.Realtime
         bool _webSocketOnly;
         ShardConnectionState _state = ShardConnectionState.Disconnected;
         Link? _link;
+        ShardTransport? _linkTransport;
         readonly SortedDictionary<ulong, double> _sentAt = new SortedDictionary<ulong, double>();
 
         // Owned by the dispatcher thread.
@@ -335,8 +336,11 @@ namespace Pylon.Realtime
 
         public bool Connected => State == ShardConnectionState.Connected;
 
-        /// <summary>The transport of the open link, or of the last one (null before the first).</summary>
-        public ShardTransport? Transport { get; private set; }
+        /// <summary>The transport of the open link, or of the last one (null before the first). Set before <see cref="State"/> becomes Connected.</summary>
+        public ShardTransport? Transport
+        {
+            get { lock (_gate) return _linkTransport; }
+        }
 
         /// <summary>The entities a replicating shard sent. Read it on the dispatcher thread.</summary>
         public EntityTable Entities => _entities;
@@ -409,7 +413,7 @@ namespace Pylon.Realtime
                     }
                     else
                     {
-                        failure = $"Cannot send: {_options.MaxFrameBytes} bytes of inputs are waiting for the socket";
+                        failure = $"Cannot send: {_options.MaxFrameBytes} bytes of inputs are waiting to go out";
                     }
                 }
             }
@@ -467,6 +471,11 @@ namespace Pylon.Realtime
                             if (e.Kind == WebTransportUnavailable.Reason.Unsupported)
                             {
                                 SetState(ShardConnectionState.Failed, e.Message);
+                                return;
+                            }
+                            if (!_options.AutoReconnect)
+                            {
+                                SetState(ShardConnectionState.Disconnected, e.Message);
                                 return;
                             }
                             if (!await BackoffAsync(ct).ConfigureAwait(false)) return;
@@ -566,12 +575,12 @@ namespace Pylon.Realtime
             lock (_gate)
             {
                 _link = link;
+                _linkTransport = link is WtLink ? ShardTransport.WebTransport : ShardTransport.WebSocket;
                 _state = ShardConnectionState.Connected;
                 // Inputs sent on the old connection are never acknowledged on
                 // this one (acks restart with the connection).
                 _sentAt.Clear();
             }
-            Transport = link is WtLink ? ShardTransport.WebTransport : ShardTransport.WebSocket;
             Post(() =>
             {
                 _linkTick = -1;
@@ -761,7 +770,7 @@ namespace Pylon.Realtime
                 string shard;
                 lock (_gate) shard = _shardId;
                 session.StreamWrite(ShardWebTransport.Hello(shard, _options.SubscriberId, ticket, _options.Token));
-                return new WtLink(session);
+                return new WtLink(session, _options.MaxFrameBytes);
             }
             catch
             {
@@ -782,7 +791,7 @@ namespace Pylon.Realtime
             }), null, 1000, 1000);
             return await Task.Factory.StartNew(() =>
             {
-                var frames = new StreamFrames();
+                var frames = new StreamFrames(_options.MaxFrameBytes);
                 var chunk = new byte[64 * 1024];
                 var datagram = new byte[65536];
                 var lastActivity = _now();
@@ -1507,14 +1516,21 @@ namespace Pylon.Realtime
         internal sealed class WtLink : Link
         {
             public readonly IWebTransportSession Session;
+            readonly int _maxQueuedBytes;
 
-            public WtLink(IWebTransportSession session)
+            public WtLink(IWebTransportSession session, int maxQueuedBytes)
             {
                 Session = session;
+                _maxQueuedBytes = maxQueuedBytes;
             }
 
-            public override bool Enqueue(byte[] envelope, bool json) =>
-                Session.StreamWrite(ShardWebTransport.Input(envelope, json));
+            public override bool Enqueue(byte[] envelope, bool json)
+            {
+                var message = ShardWebTransport.Input(envelope, json);
+                // As on the WebSocket: a peer that stopped reading gets no more inputs.
+                if (Session.StreamQueued + message.Length > _maxQueuedBytes) return false;
+                return Session.StreamWrite(message);
+            }
 
             public override void Ack(List<(ulong Frame, ulong Applied)> acks)
             {

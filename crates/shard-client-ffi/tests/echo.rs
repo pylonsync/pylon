@@ -273,3 +273,75 @@ fn a_server_that_never_answers_fails_the_session_in_bounded_time() {
     pylon_wt_free(h);
     drop(silent);
 }
+
+/// A server that accepts the stream and never reads it: QUIC flow control
+/// stops the client's writes, so they queue in the plugin.
+fn non_reading_server() -> Server {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let identity = Identity::self_signed(["localhost", "127.0.0.1"]).unwrap();
+    let hash = *identity.certificate_chain().as_slice()[0].hash().as_ref();
+    let config = ServerConfig::builder()
+        .with_bind_default(0)
+        .with_identity(identity)
+        .build();
+    let endpoint = rt.block_on(async { Endpoint::server(config) }).unwrap();
+    let port = endpoint.local_addr().unwrap().port();
+    rt.spawn(async move {
+        loop {
+            let incoming = endpoint.accept().await;
+            tokio::spawn(async move {
+                let Ok(request) = incoming.await else { return };
+                let Ok(conn) = request.accept().await else {
+                    return;
+                };
+                let Ok(streams) = conn.accept_bi().await else {
+                    return;
+                };
+                // Hold the stream and the session open, reading nothing.
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                drop((streams, conn));
+            });
+        }
+    });
+    Server {
+        port,
+        hash,
+        _rt: rt,
+    }
+}
+
+#[test]
+fn writes_to_a_peer_that_stops_reading_queue_up_to_a_limit() {
+    let s = non_reading_server();
+    let h = connect(&format!("https://127.0.0.1:{}/shard", s.port), &[s.hash]);
+    wait_for(h, STATE_OPEN);
+    assert_eq!(pylon_wt_stream_queued(h), 0);
+    let chunk = vec![9u8; 1024 * 1024];
+    let mut accepted = 0u64;
+    let full = loop {
+        let r = unsafe { pylon_wt_stream_write(h, chunk.as_ptr(), chunk.len()) };
+        if r != 0 {
+            break r;
+        }
+        accepted += chunk.len() as u64;
+        assert!(
+            accepted <= MAX_QUEUED + chunk.len() as u64 * 8,
+            "no limit after {accepted} bytes"
+        );
+    };
+    assert_eq!(full, ERR_FULL);
+    // Flow control let some bytes out; the rest wait, within the limit.
+    std::thread::sleep(Duration::from_millis(200));
+    let queued = pylon_wt_stream_queued(h) as u64;
+    assert!(queued > 0 && queued <= MAX_QUEUED, "{queued} queued");
+    assert!(
+        accepted >= MAX_QUEUED - 16 * 1024 * 1024,
+        "only {accepted} accepted"
+    );
+    assert_eq!(pylon_wt_stream_queued(u64::MAX), ERR_UNKNOWN_HANDLE as i64);
+    pylon_wt_free(h);
+}

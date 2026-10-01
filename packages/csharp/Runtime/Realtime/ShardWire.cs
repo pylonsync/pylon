@@ -350,15 +350,24 @@ namespace Pylon.Realtime
     /// <summary>Splits a WebTransport stream's bytes into its length-prefixed frames. Chunks can end anywhere.</summary>
     public sealed class StreamFrames
     {
-        /// <summary>A frame larger than this ends the session.</summary>
+        /// <summary>The default limit: a frame larger than this ends the session.</summary>
         public const int MaxFrame = 64 * 1024 * 1024;
 
+        readonly int _maxFrame;
         byte[] _buffer = new byte[64 * 1024];
         int _length;
+
+        /// <param name="maxFrame">A length prefix over this throws before the frame is buffered.</param>
+        public StreamFrames(int maxFrame = MaxFrame)
+        {
+            _maxFrame = maxFrame;
+        }
 
         /// <summary>Add a chunk and return the frames it completed.</summary>
         public System.Collections.Generic.List<byte[]> Push(byte[] chunk, int count)
         {
+            // The pending frame's prefix is checked before more of it is buffered.
+            if (_length >= 4) CheckLength(Length(0));
             if (_length + count > _buffer.Length)
             {
                 var bigger = new byte[Math.Max(_buffer.Length * 2, _length + count)];
@@ -371,8 +380,8 @@ namespace Pylon.Realtime
             var at = 0;
             while (_length - at >= 4)
             {
-                var len = (_buffer[at] << 24) | (_buffer[at + 1] << 16) | (_buffer[at + 2] << 8) | _buffer[at + 3];
-                if (len < 0 || len > MaxFrame) throw PylonException.Decoding($"a {(uint)len}-byte stream frame");
+                var len = Length(at);
+                CheckLength(len);
                 if (_length - at - 4 < len) break;
                 var frame = new byte[len];
                 Buffer.BlockCopy(_buffer, at + 4, frame, 0, len);
@@ -385,6 +394,13 @@ namespace Pylon.Realtime
                 _length -= at;
             }
             return frames;
+        }
+
+        int Length(int at) => (_buffer[at] << 24) | (_buffer[at + 1] << 16) | (_buffer[at + 2] << 8) | _buffer[at + 3];
+
+        void CheckLength(int len)
+        {
+            if (len < 0 || len > _maxFrame) throw PylonException.Decoding($"a {(uint)len}-byte stream frame, over {_maxFrame} bytes");
         }
     }
 

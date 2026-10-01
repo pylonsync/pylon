@@ -14,8 +14,10 @@
 //! From then on the caller writes the stream with [`pylon_wt_stream_write`],
 //! drains received stream bytes with [`pylon_wt_stream_read`] and received
 //! datagrams with [`pylon_wt_recv_datagram`], and sends datagrams with
-//! [`pylon_wt_send_datagram`]. [`pylon_wt_free`] ends it and releases the
-//! handle. The stream carries the caller's own framing; this crate does
+//! [`pylon_wt_send_datagram`]. [`pylon_wt_stream_queued`] gives the stream
+//! bytes still waiting to go out (a peer that stops reading holds them;
+//! past [`MAX_QUEUED`] writes fail). [`pylon_wt_free`] ends it and releases
+//! the handle. The stream carries the caller's own framing; this crate does
 //! not parse it.
 //!
 //! Every function catches panics and reports them as errors, and checks
@@ -54,6 +56,12 @@ pub const ERR_SEND: i32 = -5;
 pub const ERR_PANIC: i32 = -6;
 /// The stream ended and every received byte has been read.
 pub const ERR_STREAM_ENDED: i32 = -7;
+/// [`MAX_QUEUED`] bytes wait to be written to the stream.
+pub const ERR_FULL: i32 = -8;
+
+/// Stream bytes a session holds that the peer has not taken yet, at most.
+/// A writer should keep its own lower limit with [`pylon_wt_stream_queued`].
+pub const MAX_QUEUED: u64 = 64 * 1024 * 1024;
 
 /// Received stream bytes kept unread at most; past this the session fails
 /// (the caller stopped draining).
@@ -89,6 +97,8 @@ struct Session {
     peer_close: Mutex<Option<(u32, Vec<u8>)>>,
     connection: Mutex<Option<Connection>>,
     outbound: Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>,
+    /// Bytes given to `pylon_wt_stream_write` and not yet written to the stream.
+    queued: Arc<AtomicU64>,
     /// Set to true to stop the session's tasks.
     stop: watch::Sender<bool>,
 }
@@ -182,11 +192,13 @@ async fn run(session: Arc<Session>, url: String, hashes: Vec<[u8; 32]>) {
     *session.outbound.lock().unwrap() = Some(tx);
     session.state.store(STATE_OPEN, Ordering::SeqCst);
 
+    let queued = Arc::clone(&session.queued);
     let writer = async {
         while let Some(bytes) = rx.recv().await {
             if let Err(e) = send.write_all(&bytes).await {
                 return Err(format!("write the stream: {e}"));
             }
+            queued.fetch_sub(bytes.len() as u64, Ordering::SeqCst);
         }
         Ok(())
     };
@@ -312,6 +324,7 @@ pub unsafe extern "C" fn pylon_wt_connect(
             peer_close: Mutex::new(None),
             connection: Mutex::new(None),
             outbound: Mutex::new(None),
+            queued: Arc::new(AtomicU64::new(0)),
             stop,
         });
         sessions().lock().unwrap().insert(handle, Arc::clone(&s));
@@ -408,7 +421,8 @@ pub unsafe extern "C" fn pylon_wt_recv_datagram(handle: u64, buf: *mut u8, cap: 
 }
 
 /// Queue bytes for the stream, in order. 0 on success, [`ERR_NONE`] when
-/// the session is not open.
+/// the session is not open, [`ERR_FULL`] when they would take the queue past
+/// [`MAX_QUEUED`] (the peer stopped reading).
 ///
 /// # Safety
 /// `data` must point to `len` readable bytes.
@@ -426,11 +440,31 @@ pub unsafe extern "C" fn pylon_wt_stream_write(handle: u64, data: *const u8, len
         } else {
             std::slice::from_raw_parts(data, len).to_vec()
         };
-        let tx = s.outbound.lock().unwrap().clone();
-        match tx {
-            Some(tx) if tx.send(bytes).is_ok() => 0,
-            _ => ERR_NONE,
+        let Some(tx) = s.outbound.lock().unwrap().clone() else {
+            return ERR_NONE;
+        };
+        let n = bytes.len() as u64;
+        // Reserve the bytes first: concurrent writers cannot pass the limit together.
+        if s.queued.fetch_add(n, Ordering::SeqCst) + n > MAX_QUEUED {
+            s.queued.fetch_sub(n, Ordering::SeqCst);
+            return ERR_FULL;
         }
+        if tx.send(bytes).is_err() {
+            s.queued.fetch_sub(n, Ordering::SeqCst);
+            return ERR_NONE;
+        }
+        0
+    })
+}
+
+/// Stream bytes queued by [`pylon_wt_stream_write`] and not yet written to
+/// the stream (QUIC flow control holds them while the peer does not read),
+/// or [`ERR_UNKNOWN_HANDLE`].
+#[no_mangle]
+pub extern "C" fn pylon_wt_stream_queued(handle: u64) -> i64 {
+    guard(ERR_PANIC as i64, || match session(handle) {
+        Some(s) => s.queued.load(Ordering::SeqCst).min(i64::MAX as u64) as i64,
+        None => ERR_UNKNOWN_HANDLE as i64,
     })
 }
 

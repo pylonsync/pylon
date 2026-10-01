@@ -514,12 +514,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: The binaries match the sources
         run: |
-          expected="$(cat crates/shard-client-ffi/plugins.sha256)"
           actual="$(crates/shard-client-ffi/source-hash.sh)"
-          if [ "$expected" != "$actual" ]; then
-            echo "::error::packages/csharp/Plugins was built from other sources ($expected, now $actual). Run the Shard client plugins workflow."
-            exit 1
-          fi
+          for group in android ios linux macos windows; do
+            expected="$(awk -v g="$group" '$1 == g { print $2 }' crates/shard-client-ffi/plugins.sha256)"
+            if [ "$expected" != "$actual" ]; then
+              echo "::error::The $group plugin in packages/csharp/Plugins was built from other sources (${expected:-none}, now $actual). Run the Shard client plugins workflow."
+              exit 1
+            fi
+          done
           for f in \
             macOS/libpylon_shard_client.dylib \
             iOS/pylon_shard_client.xcframework/ios-arm64/pylon_shard_client.framework/pylon_shard_client \

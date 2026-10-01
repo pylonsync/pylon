@@ -110,7 +110,10 @@ jobs:
           rsync -a --delete apple/iOS/pylon_shard_client.xcframework/ iOS/pylon_shard_client.xcframework/
           find apple -type f -delete
           find apple -depth -type d -empty -delete
-      - run: crates/shard-client-ffi/source-hash.sh > crates/shard-client-ffi/plugins.sha256
+      - name: Record the source hash for every group
+        run: |
+          hash="$(crates/shard-client-ffi/source-hash.sh)"
+          printf '%s '"$hash"'\n' android ios linux macos windows > crates/shard-client-ffi/plugins.sha256
       - name: Commit
         run: |
           git config user.name "github-actions[bot]"
@@ -120,6 +123,6 @@ jobs:
             echo "The plugins are current."
             exit 0
           fi
-          git commit -m "csharp: rebuild the WebTransport plugins ($(cut -c1-12 crates/shard-client-ffi/plugins.sha256))"
+          git commit -m "csharp: rebuild the WebTransport plugins ($(awk 'NR == 1 { print substr($2, 1, 12) }' crates/shard-client-ffi/plugins.sha256))"
           git pull --rebase origin "$GITHUB_REF_NAME"
           git push origin "HEAD:$GITHUB_REF_NAME"

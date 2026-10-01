@@ -679,6 +679,87 @@ namespace Pylon.Tests
         }
 
         [Fact]
+        public void AForcedWebTransportThatFailsToOpenStopsWithoutAutoReconnect()
+        {
+            _wt.NextReady = "fail";
+            var states = new List<ShardConnectionState>();
+            var client = Make(tweak: o =>
+            {
+                o.Ticket = "t1";
+                o.AutoReconnect = false;
+            });
+            client.StateChanged += (s, _) => states.Add(s);
+            client.Connect();
+            Until("the stop", () => states.Count >= 2 && states.Last() == ShardConnectionState.Disconnected);
+            Settle(100);
+            Assert.Single(_wt.Sessions);
+            Assert.Equal(ShardConnectionState.Disconnected, client.State);
+        }
+
+        [Fact]
+        public void SendReturnsZeroWhenThePeerStopsTakingTheStream()
+        {
+            var errors = new List<string>();
+            var (client, wt, _) = OpenWithBaseline(o => o.MaxFrameBytes = 4096);
+            client.Error += e => errors.Add(e.Message);
+            Assert.Equal(1UL, client.Send(PylonValue.Object(("move", 1))));
+            // The peer holds nearly the whole limit: the next input does not fit.
+            Interlocked.Exchange(ref wt.Held, 4090);
+            Assert.Equal(0UL, client.Send(PylonValue.Object(("move", 2))));
+            Pump();
+            Assert.Contains(errors, e => e.Contains("4096 bytes of inputs are waiting to go out"));
+            // Once the peer takes them, inputs go again, numbered on from the last one sent.
+            Interlocked.Exchange(ref wt.Held, 0);
+            Assert.Equal(2UL, client.Send(PylonValue.Object(("move", 3))));
+        }
+
+        [Fact]
+        public void AStreamFrameOverMaxFrameBytesEndsTheSessionBeforeItIsBuffered()
+        {
+            var closes = new List<ShardCloseInfo>();
+            var client = Make(tweak: o =>
+            {
+                o.Ticket = "t1";
+                o.MaxFrameBytes = 1000;
+                o.AutoReconnect = false;
+            });
+            client.Closed += c => closes.Add(c);
+            client.Connect();
+            Until("the session", () => client.Connected);
+            var wt = _wt.Last;
+            // Only the prefix of a 2000-byte frame: refused before its payload arrives.
+            wt.SendRaw(new byte[] { 0, 0, 0x07, 0xd0, 1, 2, 3 });
+            Until("the close", () => closes.Count == 1);
+            Assert.Contains("over 1000 bytes", closes[0].Reason);
+            Assert.NotNull(wt.ClientClose);
+        }
+
+        [Fact]
+        public void StreamFramesChecksTheLimitAsSoonAsThePrefixArrives()
+        {
+            var frames = new StreamFrames(10);
+            Assert.Single(frames.Push(new byte[] { 0, 0, 0, 2, 7, 8 }, 6));
+            var e = Assert.Throws<PylonException>(() => frames.Push(new byte[] { 0, 0, 0, 11 }, 4));
+            Assert.Contains("over 10 bytes", e.Message);
+            // A prefix split across chunks is checked once it is whole.
+            var split = new StreamFrames(10);
+            Assert.Empty(split.Push(new byte[] { 0, 0 }, 2));
+            Assert.Throws<PylonException>(() => split.Push(new byte[] { 0, 11 }, 2));
+        }
+
+        [Fact]
+        public void TheClientNeedsPluginAbi11OrLaterWithin1()
+        {
+            Assert.True(WebTransportNative.Compatible("1.1.0"));
+            Assert.True(WebTransportNative.Compatible("1.4.2"));
+            Assert.False(WebTransportNative.Compatible("1.0.0"));
+            Assert.False(WebTransportNative.Compatible("2.1.0"));
+            Assert.False(WebTransportNative.Compatible("0.22.12"));
+            Assert.False(WebTransportNative.Compatible("1"));
+            Assert.False(WebTransportNative.Compatible(null));
+        }
+
+        [Fact]
         public void AckBatchesFitTheSessionsMaxDatagramSize()
         {
             var acks = Enumerable.Range(1, 2000).Select(i => ((ulong)i * 1000, (ulong)i * 1000)).ToList();
@@ -811,6 +892,15 @@ namespace Pylon.Tests
 
         public void SendFrames(byte[] frame) => SendFrames(new[] { frame }, 5);
 
+        /// <summary>Raw stream bytes, no length prefix added.</summary>
+        public void SendRaw(byte[] bytes)
+        {
+            lock (_gate)
+            {
+                foreach (var b in bytes) _toClient.Enqueue(b);
+            }
+        }
+
         public void SendDatagram(byte[] d)
         {
             lock (_gate) _datagramsToClient.Enqueue(d);
@@ -834,6 +924,11 @@ namespace Pylon.Tests
         }
 
         public int MaxDatagramSize => 1200;
+
+        /// <summary>Stream bytes the test says the peer has not taken.</summary>
+        public long Held;
+
+        public long StreamQueued => Interlocked.Read(ref Held);
 
         bool IWebTransportSession.SendDatagram(byte[] data)
         {

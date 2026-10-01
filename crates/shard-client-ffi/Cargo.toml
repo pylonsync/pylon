@@ -7,7 +7,7 @@ homepage.workspace = true
 repository.workspace = true
 # The C ABI's version, not the workspace's: the committed plugin binaries
 # report it, and the C# client refuses another major version.
-version = "1.0.0"
+version = "1.1.0"
 publish = false
 
 [lib]

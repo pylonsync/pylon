@@ -12,9 +12,10 @@
 #   windows  Windows x86_64 .dll                            — Windows (MSVC), or cargo-xwin elsewhere
 #   all      every group above
 #
-# The binaries use the `plugin` profile (Cargo.toml). Each run writes
-# plugins.sha256 (source-hash.sh): CI fails when the sources change and
-# the binaries were not rebuilt.
+# The binaries use the `plugin` profile (Cargo.toml). plugins.sha256 has a
+# line per group, "<group> <source hash>" (source-hash.sh); a group's line
+# changes only when that group builds. CI fails unless every group's line
+# matches the current sources.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT="$(pwd)"
@@ -27,6 +28,18 @@ lib() { echo "$TARGET_DIR/$1/plugin/$2"; }
 groups=("$@")
 [ "${groups[0]:-}" = all ] && groups=(macos ios android linux windows)
 [ ${#groups[@]} -gt 0 ] || { echo "usage: $0 <macos|ios|android|linux|windows|all>..." >&2; exit 1; }
+
+HASHES="$ROOT/crates/shard-client-ffi/plugins.sha256"
+SOURCE_HASH="$("$ROOT/crates/shard-client-ffi/source-hash.sh")"
+# Set <group>'s line in plugins.sha256 to the hash of the sources it was built from.
+record() {
+	local others
+	others="$(grep -v "^$1 " "$HASHES" 2>/dev/null || true)"
+	{
+		[ -n "$others" ] && printf '%s\n' "$others"
+		printf '%s %s\n' "$1" "$SOURCE_HASH"
+	} | sort >"$HASHES"
+}
 
 for group in "${groups[@]}"; do
 	case "$group" in
@@ -120,6 +133,5 @@ PLIST
 		exit 1
 		;;
 	esac
+	record "$group"
 done
-
-"$ROOT/crates/shard-client-ffi/source-hash.sh" >"$ROOT/crates/shard-client-ffi/plugins.sha256"

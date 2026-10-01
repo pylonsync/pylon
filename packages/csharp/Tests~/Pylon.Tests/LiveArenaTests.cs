@@ -150,9 +150,13 @@ namespace Pylon.Tests
             Assert.True(game.Send("join") > 0);
             PumpUntil(() => game.Latest.Count > 0 && frames > 10);
             Pump();
-            var renderTick = game.Frame();
-            Assert.True(renderTick > 0, $"render tick {renderTick}");
-            Assert.True(renderTick < game.Tick, $"render tick {renderTick} should trail tick {game.Tick}");
+            var now = ShardClock.Now();
+            var renderTick = game.Frame(now);
+            var serverTick = game.Connection.Clock.ServerTick(now);
+            // The render tick trails the estimated server tick by the interpolation delay (100 ms, 2 ticks).
+            Assert.Equal(serverTick - 2, renderTick, 6);
+            // The estimate stays near the newest tick received (within 500 ms either way).
+            Assert.InRange(serverTick, game.Tick - 10.0, game.Tick + 10.0);
             Assert.NotEmpty(game.Entities);
         }
 
