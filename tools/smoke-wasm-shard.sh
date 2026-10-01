@@ -8,7 +8,8 @@
 # 2. `pylon start app.ts` boots from source; packages/react's
 #    shard-wasm.e2e.test.ts joins as two guests over /shard on the main port,
 #    moves, gets a rejection, and has a stolen ticket refused. The C#
-#    client's live tests (packages/csharp) run when `dotnet` is installed.
+#    client's live tests (packages/csharp) run when `dotnet` is installed,
+#    and at the end its live queries run against examples/todo-app.
 #    packages/realtime's shard-data.e2e.test.ts has the zone load a
 #    character, grant an item through a mutation once per key, write x
 #    back, and take a GM's heal after a commit, on SQLite.
@@ -174,6 +175,19 @@ cp "$WORLD/shards/island.wasm" "$TMP/island.wasm.committed"
 serve "$WORLD" app.ts world3d
 (cd "$ROOT/packages/realtime" && PYLON_WORLD3D_E2E="localhost:$PORT" bun test src/world3d.e2e.test.ts)
 stop
+
+echo "→ the C# client's live queries: examples/todo-app (Todo rows readable only by their owner)"
+if command -v dotnet >/dev/null 2>&1; then
+	serve "$ROOT/examples/todo-app" app.ts todo
+	(cd "$ROOT/packages/csharp" && PYLON_SYNC_TEST_URL="http://localhost:$PORT" \
+		dotnet test "Tests~/Pylon.Tests" --filter "FullyQualifiedName~LiveQueryLive")
+	stop
+elif [[ -n "${PYLON_SMOKE_REQUIRE_DOTNET:-}" ]]; then
+	echo "::error::dotnet is not installed" >&2
+	exit 1
+else
+	echo "  skipped: dotnet is not installed"
+fi
 
 echo
 echo "✓ WebAssembly shards run from source and from a pylon build artifact"

@@ -4,6 +4,8 @@ One scenario per file. Both engines run every file:
 
 - TypeScript: `packages/sync/src/conformance.test.ts`
 - Swift: `packages/swift/Tests/PylonSyncTests/SyncConformanceTests.swift`
+- C# (live queries, the scenarios without `update` or `delete` steps):
+  `packages/csharp/Tests~/Pylon.Tests/LiveQueryTests.cs`
 
 A scenario is a list of steps against a fake server that starts empty with
 `seq = 0` and one signed-in user. Server-side seeds take the next seq in

@@ -29,8 +29,11 @@ namespace Pylon
         /// <summary>How requests are sent. Default: <see cref="HttpClientTransport"/>.</summary>
         public IPylonHttpTransport? Transport { get; set; }
 
-        /// <summary>Where session-refresh callbacks run. Default: <see cref="PylonDispatcher.Capture"/>.</summary>
+        /// <summary>Where session-refresh and live-query callbacks run. Default: <see cref="PylonDispatcher.Capture"/>.</summary>
         public PylonDispatcher? Dispatcher { get; set; }
+
+        /// <summary>Settings for <see cref="PylonClient.Live"/>.</summary>
+        public LiveOptions Live { get; } = new LiveOptions();
 
         public PylonClientOptions(Uri baseUrl)
         {
@@ -52,6 +55,7 @@ namespace Pylon
         readonly IPylonHttpTransport _transport;
         readonly bool _ownsTransport;
         readonly string _tokenKey;
+        LiveSync? _live;
 
         public PylonClientOptions Options { get; }
         public IPylonStorage Storage { get; }
@@ -254,11 +258,20 @@ namespace Pylon
         }
 
         /// <summary>One page of rows, after the cursor <paramref name="after"/>.</summary>
-        public async Task<CursorPage> ListCursorAsync(
-            string entity, string? after = null, int limit = 50, CancellationToken ct = default)
+        public Task<CursorPage> ListCursorAsync(
+            string entity, string? after = null, int limit = 50, CancellationToken ct = default) =>
+            ListCursorAsync(entity, after, limit, ct, replication: false);
+
+        /// <param name="replication">
+        /// Mark the read as a replication fetch, so the entity's <c>sync</c> scope
+        /// applies (the live-query engine checking its replica).
+        /// </param>
+        internal async Task<CursorPage> ListCursorAsync(
+            string entity, string? after, int limit, CancellationToken ct, bool replication)
         {
             var path = new StringBuilder("/api/entities/").Append(EscapePath(entity))
                 .Append("/cursor?limit=").Append(limit.ToString(CultureInfo.InvariantCulture));
+            if (replication) path.Append("&sync=1");
             if (!string.IsNullOrEmpty(after)) path.Append("&after=").Append(Uri.EscapeDataString(after));
             return CursorPage.FromValue(await RequestAsync("GET", path.ToString(), null, ct).ConfigureAwait(false));
         }
@@ -283,6 +296,32 @@ namespace Pylon
         /// <summary>Full-text search (<c>POST /api/search/&lt;entity&gt;</c>).</summary>
         public Task<PylonValue> SearchAsync(string entity, PylonValue spec, CancellationToken ct = default) =>
             RequestAsync("POST", "/api/search/" + EscapePath(entity), spec, ct);
+
+        // ---- live queries ----
+
+        /// <summary>
+        /// Rows of <paramref name="entity"/> the server keeps current: it pushes
+        /// every insert, update, and delete the caller may see. The first call
+        /// opens the live socket; disposing the last query closes it. Rows come
+        /// from entities with <c>sync</c> on (the default).
+        /// </summary>
+        public LiveQuery Live(string entity, LiveQueryOptions? options = null)
+        {
+            if (string.IsNullOrEmpty(entity)) throw PylonException.InvalidArgument("entity is empty");
+            LiveSync live;
+            lock (_tokenKey)
+            {
+                live = _live ??= new LiveSync(this, Options.Live);
+            }
+            return live.Add(entity, options ?? new LiveQueryOptions());
+        }
+
+        /// <summary>Errors from the live-query engine (a failed pull or connect). It retries on its own.</summary>
+        public event Action<Exception>? LiveError;
+
+        internal void RaiseLiveError(Exception e) => LiveError?.Invoke(e);
+
+        internal LiveSync? LiveEngine => _live;
 
         // ---- requests ----
 
@@ -343,6 +382,7 @@ namespace Pylon
 
         public void Dispose()
         {
+            _live?.Dispose();
             if (_ownsTransport) ((IDisposable)_transport).Dispose();
         }
 

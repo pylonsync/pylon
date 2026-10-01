@@ -8,13 +8,14 @@ The C# SDK uses the same routes and wire format as the TypeScript and Swift clie
 - `Runtime/`: plain .NET Standard 2.1 with no Unity references and no reflection. It runs under IL2CPP and in any .NET app.
 - `Unity/`: token storage in PlayerPrefs and a converter that uses `JsonUtility`.
 
-The SDK does not include the offline sync engine. A game uses shards and functions.
+The SDK has live queries but no offline write queue: writes go through server functions.
 
 ## Types
 
 | Type | What it does |
 | --- | --- |
 | `PylonClient` | Signs in (guest, magic code, password), refreshes sessions, calls functions, and reads and writes entities. |
+| `LiveQuery` | Rows of one entity that the server keeps current. Made by `client.Live(...)`. |
 | `ShardConnection` | Connects to a shard over WebSocket. Decodes snapshots, applies replication frames, and sends inputs. Reconnects and follows transfers. |
 | `EntityTable` | Holds the entities a replicating shard sent this player. |
 | `ShardGame<TInput>` | Joins a connection, the clock, interpolation, and prediction for a render loop. A port of `connectShardGame`. |
@@ -66,6 +67,21 @@ The client also has these methods:
 - `ListAsync`, `ListCursorAsync`, `GetAsync`, `CreateAsync`, `UpdateAsync`, and `DeleteAsync`
 - `AggregateAsync` and `SearchAsync`
 - `RequestAsync`, for any other route
+
+## Live queries
+
+```csharp
+using var party = client.Live("PartyMember", new LiveQueryOptions
+{
+    Where = PylonValue.Object(("partyId", partyId)),
+});
+party.Changed += change => Redraw(party.Rows);
+```
+
+- The server sends each insert, update, and delete the caller may read. Read policies and field redaction apply on the server.
+- `Rows` and `Changed` change on the client's dispatcher.
+- After a reconnect, the query pulls from its cursor, so it loses no change.
+- Rows come from entities with `sync` on (the default).
 
 ## Your own types
 

@@ -71,6 +71,34 @@ Entities: `ListAsync`, `ListCursorAsync`, `GetAsync`, `CreateAsync`,
 `UpdateAsync`, `DeleteAsync`, `AggregateAsync`, `SearchAsync`. For any
 other route, use `RequestAsync`.
 
+## Live queries
+
+```csharp
+using var party = client.Live("PartyMember", new LiveQueryOptions
+{
+    Where = PylonValue.Object(("partyId", partyId)),
+    OrderBy = "joinedAt",
+});
+party.Changed += change =>
+{
+    foreach (var row in party.Rows) Show(row["name"].AsString());
+};
+```
+
+- The server pushes each insert, update, and delete the caller may read.
+  It applies the entity's read policies and field redaction, so a row
+  the caller may not read never arrives.
+- `Rows` and `Changed` change on the client's dispatcher (the Unity main
+  thread). `Synced` is true once the first pull completed.
+- After a reconnect it pulls from its cursor, so no change is lost, and
+  then removes rows the server stopped returning.
+- Rows come from entities with `sync` on (the default). Writes go
+  through server functions or the entity routes; the change comes back
+  here. There is no offline write queue.
+- Disposing the last query closes the live socket. `client.LiveError`
+  reports failed pulls and connects; the engine retries on its own.
+- For an app with a sync relay, set `client.Options.Live.UseRelay = true`.
+
 ## Values and your own types
 
 Arguments, results, rows, and shard snapshots are `PylonValue`: a JSON or

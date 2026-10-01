@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Live queries: `client.Live(entity, options)` returns a `LiveQuery` whose `Rows` the server keeps current over the sync routes and the live socket, with `Changed` on the dispatcher. It catches up from its cursor after a reconnect and runs the shared sync conformance scenarios that cover reads (#47).
 - `ShardGame<TInput>`, a port of the TypeScript `connectShardGame`: the connection, the clock, interpolated entities, and predictors that record inputs, drop refused ones, and reset when the connection reopens (#45).
 - `ShardConnectionOptions.Now` sets the clock for frame arrival and input send times.
 - The Arena sample runs on `ShardGame`.
