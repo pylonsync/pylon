@@ -72,7 +72,14 @@ fn start() -> Server {
     let dyn_registry: Arc<dyn DynShardRegistry> = registry.clone();
     let s = Arc::clone(&sessions);
     // No per-IP cap: every test client connects from 127.0.0.1.
-    std::thread::spawn(move || pylon_runtime::shard_ws::serve(listener, dyn_registry, s, 0));
+    std::thread::spawn(move || {
+        pylon_runtime::shard_ws::serve(
+            listener,
+            dyn_registry,
+            pylon_runtime::request_auth::AuthResolver::from_sessions(s),
+            0,
+        )
+    });
     Server {
         port,
         sessions,

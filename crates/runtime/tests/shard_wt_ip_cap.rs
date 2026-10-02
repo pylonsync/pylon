@@ -43,7 +43,7 @@ async fn sessions_over_the_per_ip_cap_are_refused() {
             url: url.clone(),
         },
         registry,
-        Arc::new(SessionStore::new()),
+        pylon_runtime::request_auth::AuthResolver::from_sessions(Arc::new(SessionStore::new())),
     )
     .expect("WebTransport starts");
     let (_, hashes) = shard_wt::endpoint_info().unwrap();

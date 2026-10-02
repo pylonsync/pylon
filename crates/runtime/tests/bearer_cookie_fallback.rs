@@ -518,3 +518,70 @@ fn an_operator_bearer_on_an_app_route_gives_way_to_the_app_cookie() {
     assert_ne!(v["user_id"].as_str(), Some(cookie_uid.as_str()));
     assert!(!r.bearer_rejected());
 }
+
+/// Open the dedicated SSE port (`port + 2`) with `headers` and return the
+/// response status.
+fn sse_status(port: u16, path: &str, headers: &[(&str, &str)]) -> u16 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut stream = loop {
+        match TcpStream::connect(format!("127.0.0.1:{}", port + 2)) {
+            Ok(s) => break s,
+            Err(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50))
+            }
+            Err(e) => panic!("the SSE port never listened: {e}"),
+        }
+    };
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut request = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n", port + 2);
+    for (k, v) in headers {
+        request.push_str(&format!("{k}: {v}\r\n"));
+    }
+    request.push_str("\r\n");
+    stream.write_all(request.as_bytes()).unwrap();
+    let mut buf = [0u8; 256];
+    let n = stream.read(&mut buf).unwrap();
+    let head = String::from_utf8_lossy(&buf[..n]);
+    head.split(' ').nth(1).unwrap().parse().unwrap()
+}
+
+#[test]
+fn the_sse_port_resolves_credentials_by_the_same_rules() {
+    let rt = test_runtime();
+    let port = start_server(Arc::clone(&rt));
+    let (_, token) = session_for(port, &rt, "sse@test.dev");
+    let cookie = format!("{COOKIE}={token}");
+
+    // The app's configured session cookie counts; a cross-site Origin is
+    // refused (the SSE port used to read a fixed `pylon_session` cookie
+    // with no Origin check).
+    assert_eq!(
+        sse_status(
+            port,
+            "/events",
+            &[("Cookie", &cookie), ("Origin", EVIL_ORIGIN)]
+        ),
+        403
+    );
+    assert_eq!(
+        sse_status(
+            port,
+            "/events",
+            &[("Cookie", &cookie), ("Origin", "http://localhost:3000")]
+        ),
+        200
+    );
+    // A same-origin EventSource (the port proxied under the app's origin)
+    // sends no Origin; a cross-site one always does.
+    assert_eq!(sse_status(port, "/events", &[("Cookie", &cookie)]), 200);
+    // An explicit token the resolver rejects is refused, as on HTTP (the SSE
+    // port used to look up sessions only, so a bad API key passed as
+    // anonymous).
+    assert_eq!(
+        sse_status(port, "/events", &[("Authorization", "Bearer pk.bad")]),
+        401
+    );
+    assert_eq!(sse_status(port, "/events?token=pk.bad", &[]), 401);
+}

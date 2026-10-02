@@ -34,7 +34,7 @@ use std::net::ToSocketAddrs;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use pylon_auth::SessionStore;
+use crate::request_auth::{AuthResolver, Credentials, Surface};
 use pylon_realtime::{
     wire, DynShardRegistry, FrameKind, ShardAuth, ShardError, SnapshotFormat, SubscriberId,
 };
@@ -242,7 +242,7 @@ fn server_config(config: &WebTransportConfig, identity: Identity) -> Result<Serv
 pub fn start(
     config: WebTransportConfig,
     registry: Arc<dyn DynShardRegistry>,
-    sessions: Arc<SessionStore>,
+    auth: Arc<AuthResolver>,
 ) -> Result<Arc<WebTransport>, String> {
     let rt = crate::shard_ws::runtime().ok_or("no connection runtime")?;
     let current = self_signed(&config)?;
@@ -267,7 +267,7 @@ pub fn start(
     );
     let endpoint = Arc::new(endpoint);
     rt.spawn(rotate(Arc::clone(&wt), Arc::clone(&endpoint)));
-    rt.spawn(accept_loop(endpoint, registry, sessions));
+    rt.spawn(accept_loop(endpoint, registry, auth));
     Ok(wt)
 }
 
@@ -304,11 +304,11 @@ async fn rotate(wt: Arc<WebTransport>, endpoint: Arc<Endpoint<Server>>) {
 async fn accept_loop(
     endpoint: Arc<Endpoint<Server>>,
     registry: Arc<dyn DynShardRegistry>,
-    sessions: Arc<SessionStore>,
+    auth: Arc<AuthResolver>,
 ) {
     loop {
         let incoming = endpoint.accept().await;
-        let (registry, sessions) = (Arc::clone(&registry), Arc::clone(&sessions));
+        let (registry, auth) = (Arc::clone(&registry), Arc::clone(&auth));
         tokio::spawn(async move {
             let request = match incoming.await {
                 Ok(r) => r,
@@ -337,7 +337,7 @@ async fn accept_loop(
                 }
             };
             let started = Instant::now();
-            let end = run_session(&conn, registry, sessions).await;
+            let end = run_session(&conn, registry, auth).await;
             log_connection_end_as("WT", started, &end);
         });
     }
@@ -489,7 +489,7 @@ fn close(conn: &Connection, code: u32, reason: &str) -> ConnectionEnd {
 async fn run_session(
     conn: &Connection,
     registry: Arc<dyn DynShardRegistry>,
-    sessions: Arc<SessionStore>,
+    auth: Arc<AuthResolver>,
 ) -> ConnectionEnd {
     let opened = tokio::time::timeout(HELLO_TIMEOUT, async {
         let (send, mut recv) = conn
@@ -510,7 +510,25 @@ async fn run_session(
         Err(_) => return close(conn, close_code::PROTOCOL, "no hello in time"),
     };
 
-    let auth_ctx = sessions.resolve(hello.token.as_deref());
+    // The hello's token, by the same rules as every transport (see
+    // `crate::request_auth`). There is no cookie on this transport.
+    let mut auth_ctx = match auth.identify(
+        &Credentials::explicit(hello.token.clone()),
+        Surface::App,
+        || false,
+    ) {
+        Ok(identity) => identity.ctx,
+        Err(e) => {
+            return close_after_notice(
+                conn,
+                &mut send,
+                close_code::POLICY,
+                &format!("unauthorized: {e}"),
+            )
+            .await
+        }
+    };
+    auth.enrich(&mut auth_ctx);
     let shard_auth: ShardAuth =
         match crate::shard_tickets::shard_auth(&auth_ctx, hello.ticket.as_deref()) {
             Ok(a) => a,

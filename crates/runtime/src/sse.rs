@@ -6,11 +6,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use pylon_auth::{AuthContext, SessionStore};
+use pylon_auth::AuthContext;
 use pylon_policy::{PolicyEngine, PolicyResult};
 use pylon_sync::{ChangeEvent, ChangeKind};
 
 use crate::ip_limit::{IpConnCounter, IpConnGuard};
+use crate::request_auth::{AuthResolver, CookieTrust, Credentials, Surface};
 
 const NUM_SHARDS: usize = 16;
 
@@ -456,7 +457,9 @@ impl SseHub {
 /// registration — no per-client thread is kept alive.
 pub fn start_sse_server(
     hub: Arc<SseHub>,
-    sessions: Arc<SessionStore>,
+    auth: Arc<AuthResolver>,
+    cookie_name: String,
+    cookie_trust: CookieTrust,
     port: u16,
     scope: &crate::listen::ListenScope,
 ) {
@@ -499,94 +502,122 @@ pub fn start_sse_server(
         };
 
         let hub = Arc::clone(&hub);
-        let sessions = Arc::clone(&sessions);
+        let auth = Arc::clone(&auth);
+        let cookie_name = cookie_name.clone();
+        let cookie_trust = Arc::clone(&cookie_trust);
         thread::Builder::new()
             .name("sse-accept".into())
             .stack_size(64 * 1024)
             .spawn(move || {
-                handle_sse_connection(hub, sessions, stream, guard);
+                handle_sse_connection(hub, &auth, &cookie_name, &cookie_trust, stream, guard);
             })
             .ok();
     }
 }
 
-/// Parse the initial HTTP request bytes to extract an auth token, in
-/// order: `Authorization: Bearer <t>`, session cookie (configurable
-/// name, defaulting to `pylon_session`), `?token=<t>` query param.
-/// Returns the first match. Browsers using EventSource can't set
-/// custom headers, so cookies + query params are the practical paths.
-fn extract_sse_token(buf: &[u8]) -> Option<String> {
+/// The parts of an SSE request that auth needs: its headers and the
+/// `?token=` query parameter (EventSource can't set headers, so browsers use
+/// the cookie or the query). `None` when the bytes are not a request.
+struct SseRequest {
+    headers: Vec<(String, String)>,
+    query_token: Option<String>,
+}
+
+fn parse_sse_request(buf: &[u8]) -> Option<SseRequest> {
     let text = std::str::from_utf8(buf).ok()?;
-    // Request line: "GET /events?token=... HTTP/1.1\r\n"
     let mut lines = text.split("\r\n");
+    // Request line: "GET /events?token=... HTTP/1.1"
     let request_line = lines.next()?;
-    // Pull token from query string.
     let query_token = request_line
         .split_whitespace()
         .nth(1)
-        .and_then(|path| path.split('?').nth(1))
-        .and_then(|q| {
-            q.split('&').find_map(|kv| {
-                let mut parts = kv.splitn(2, '=');
-                let key = parts.next()?;
-                let value = parts.next()?;
-                if key == "token" {
-                    Some(value.to_string())
-                } else {
-                    None
-                }
-            })
+        .and_then(|path| path.split_once('?'))
+        .and_then(|(_, q)| {
+            q.split('&')
+                .find_map(|kv| kv.strip_prefix("token="))
+                .map(str::to_string)
         });
-
-    let cookie_name =
-        std::env::var("PYLON_COOKIE_NAME").unwrap_or_else(|_| "pylon_session".to_string());
-
-    let mut bearer: Option<String> = None;
-    let mut cookie_value: Option<String> = None;
-    for line in lines {
-        let lower = line.to_ascii_lowercase();
-        if let Some(rest) = lower.strip_prefix("authorization:") {
-            // Re-read original-cased value for the token portion.
-            let original = &line[line.find(':')? + 1..];
-            let trimmed = original.trim();
-            if let Some(t) = trimmed.strip_prefix("Bearer ") {
-                bearer = Some(t.trim().to_string());
-            } else if let Some(t) = trimmed.strip_prefix("bearer ") {
-                bearer = Some(t.trim().to_string());
-            }
-            let _ = rest;
-        } else if lower.starts_with("cookie:") {
-            let original = &line[line.find(':')? + 1..];
-            for kv in original.split(';') {
-                let kv = kv.trim();
-                let mut parts = kv.splitn(2, '=');
-                let key = parts.next()?.trim();
-                let value = parts.next()?.trim();
-                if key == cookie_name {
-                    cookie_value = Some(value.to_string());
-                    break;
-                }
-            }
-        }
-    }
-    bearer.or(cookie_value).or(query_token)
+    let headers = lines
+        .take_while(|line| !line.is_empty())
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            Some((name.trim().to_string(), value.trim().to_string()))
+        })
+        .collect();
+    Some(SseRequest {
+        headers,
+        query_token,
+    })
 }
 
 fn handle_sse_connection(
     hub: Arc<SseHub>,
-    sessions: Arc<SessionStore>,
+    auth: &AuthResolver,
+    cookie_name: &str,
+    cookie_trust: &CookieTrust,
     mut stream: TcpStream,
     guard: IpConnGuard,
 ) {
-    // Consume the HTTP request headers. We use these to extract an
-    // auth token before sending the SSE response.
+    // Consume the HTTP request headers. We use these to extract the
+    // credentials before sending the SSE response.
     let mut buf = [0u8; 2048];
     let n = stream.read(&mut buf).unwrap_or(0);
-    let token = extract_sse_token(&buf[..n]);
+    let request = parse_sse_request(&buf[..n]).unwrap_or(SseRequest {
+        headers: Vec::new(),
+        query_token: None,
+    });
+    let header = |name: &str| {
+        request
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    };
+    let creds = Credentials::from_headers(
+        request
+            .headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str())),
+        &[cookie_name],
+    )
+    .or_query_token(request.query_token.clone());
 
-    // Resolve auth. SessionStore::resolve handles None (anonymous),
-    // valid bearer/session tokens, and the admin token.
-    let auth_ctx = sessions.resolve(token.as_deref());
+    // The same rules as every transport (see `crate::request_auth`); the
+    // session cookie counts only from a trusted Origin.
+    let reject = |stream: &mut TcpStream, status: &str, code: &str, message: &str| {
+        let body = format!(r#"{{"error":{{"code":"{code}","message":"{message}"}}}}"#);
+        let resp = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(resp.as_bytes());
+        let _ = stream.flush();
+    };
+    let identity = match auth.identify(&creds, Surface::App, || {
+        cookie_trust(header("Origin"), header("Host"))
+    }) {
+        Ok(identity) => identity,
+        Err(code) => {
+            reject(
+                &mut stream,
+                "401 Unauthorized",
+                code,
+                "the token is malformed, expired, or revoked",
+            );
+            return;
+        }
+    };
+    if identity.cookie_refused {
+        reject(
+            &mut stream,
+            "403 Forbidden",
+            "SSE_ORIGIN_FORBIDDEN",
+            "SSE with cookie auth requires a trusted Origin",
+        );
+        return;
+    }
+    let mut auth_ctx = identity.ctx;
+    auth.enrich(&mut auth_ctx);
 
     // Reject unauthenticated callers in non-dev mode unless the
     // operator explicitly opted in to anonymous SSE via

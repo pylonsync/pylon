@@ -64,6 +64,7 @@ pub mod presence;
 pub mod pubsub;
 pub mod rate_limit;
 pub mod reactive;
+pub mod request_auth;
 pub mod resp;
 pub mod resp_server;
 pub mod rooms;

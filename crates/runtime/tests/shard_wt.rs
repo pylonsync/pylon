@@ -135,7 +135,7 @@ async fn a_session_converges_through_dropped_datagrams() {
             url: url.clone(),
         },
         dyn_registry,
-        Arc::clone(&sessions),
+        pylon_runtime::request_auth::AuthResolver::from_sessions(Arc::clone(&sessions)),
     )
     .expect("WebTransport starts");
 

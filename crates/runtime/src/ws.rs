@@ -6,43 +6,11 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 
-use pylon_auth::{api_key::ApiKeyStore, resolve_bearer_token, AuthContext, SessionStore};
+use pylon_auth::{AuthContext, SessionStore};
 use pylon_policy::{PolicyEngine, PolicyResult};
 
-/// Auth resolution context for WS handshake.
-///
-/// Bundles the four pieces the shared `resolve_bearer_token` needs:
-/// session store, API-key store, optional admin token, optional JWT
-/// secret + issuer. Without this, the WS upgrade path used to only
-/// validate session tokens — admin/API-key/JWT bearers that worked
-/// over HTTP silently failed over WS, plus admin promotion / API-key
-/// revocation semantics diverged from the HTTP path. Caught in the
-/// 2026-05-10 codex pass-3 audit (P3 REGRESSION).
-pub struct WsAuth {
-    pub sessions: Arc<SessionStore>,
-    pub api_keys: Arc<ApiKeyStore>,
-    pub admin_token: Option<String>,
-    pub jwt_secret: Option<String>,
-    pub jwt_issuer: Option<String>,
-    /// Second half of identity resolution — see [`AuthEnricher`]. `None`
-    /// leaves the raw `resolve_bearer_token` result, which carries no
-    /// active-org role.
-    pub enrich: Option<AuthEnricher>,
-}
-
-/// Completes a freshly-resolved `AuthContext` the way the HTTP handler
-/// does: per-user admin designation (`lift_admin` / `lift_operator`) plus
-/// the caller's role in their ACTIVE org (`enrich_active_org_role`).
-///
-/// `resolve_bearer_token` alone yields identity + tenant but an EMPTY
-/// `roles` vec, because the session store can't resolve org membership.
-/// HTTP (`server.rs`) and SSR (`frontend.rs`) each ran this step; the WS
-/// handshake did not, so every socket filtered broadcasts under an
-/// identity with no roles. Any read policy calling `auth.hasAnyRole(...)`
-/// then denied EVERY change event for that connection — silently, since
-/// presence frames are unfiltered and kept flowing. Cross-client realtime
-/// looked dead on exactly the apps that gate reads by org role.
-pub type AuthEnricher = Arc<dyn Fn(&mut AuthContext) + Send + Sync>;
+pub use crate::request_auth::AuthEnricher;
+use crate::request_auth::{AuthResolver, Credentials, Identity, Surface};
 use pylon_sync::{ChangeEvent, ChangeKind};
 use tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tungstenite::protocol::Role;
@@ -987,7 +955,7 @@ pub struct WsHub {
     /// The token resolver the connections authenticated with, used to
     /// re-resolve them when a session ends ([`WsHub::revalidate_user`]).
     /// Set once at boot by the server.
-    auth_resolver: Mutex<Option<Arc<WsAuth>>>,
+    auth_resolver: Mutex<Option<Arc<AuthResolver>>>,
     /// Per-client CRDT subscriptions. Reader threads register `(entity,
     /// row_id)` pairs as the client mounts/unmounts useLoroDoc hooks;
     /// the binary CRDT broadcast path uses `subscribers()` to filter the
@@ -1518,7 +1486,7 @@ impl WsHub {
 
     /// Install the resolver used to re-check connection tokens when a
     /// session ends. Set once at boot by the server.
-    pub fn set_auth_resolver(&self, auth: Arc<WsAuth>) {
+    pub fn set_auth_resolver(&self, auth: Arc<AuthResolver>) {
         match self.auth_resolver.lock() {
             Ok(mut g) => *g = Some(auth),
             Err(poisoned) => *poisoned.into_inner() = Some(auth),
@@ -1577,15 +1545,9 @@ impl WsHub {
                     Ok(g) => g.user_id.clone(),
                     Err(poisoned) => poisoned.into_inner().user_id.clone(),
                 };
-                let still_valid = pylon_auth::recheck_bearer_token(
-                    handle.token.as_deref(),
-                    &resolver.sessions,
-                    &resolver.api_keys,
-                    resolver.admin_token.as_deref(),
-                    resolver.jwt_secret.as_deref(),
-                    resolver.jwt_issuer.as_deref(),
-                )
-                .is_ok_and(|ctx| ctx.user_id == user_id);
+                let still_valid = resolver
+                    .recheck_token(handle.token.as_deref(), Surface::App)
+                    .is_ok_and(|ctx| ctx.user_id == user_id);
                 if !still_valid {
                     self.end_client(id, &handle);
                     ended.push(id);
@@ -1743,7 +1705,7 @@ pub(crate) fn serialize_wire_event(event: &ChangeEvent) -> Option<String> {
 
 pub fn start_ws_server(
     hub: Arc<WsHub>,
-    auth: Arc<WsAuth>,
+    auth: Arc<AuthResolver>,
     port: u16,
     snapshot_fetcher: Option<SnapshotFetcher>,
     reactive: Option<Arc<crate::reactive::ReactiveRegistry>>,
@@ -1837,7 +1799,7 @@ pub fn start_ws_server(
 /// and clean disconnect with presence broadcast.
 fn handle_ws_connection(
     hub: Arc<WsHub>,
-    auth: Arc<WsAuth>,
+    auth: Arc<AuthResolver>,
     stream: TcpStream,
     // The socket peer's address; empty when it could not be read.
     socket_ip: String,
@@ -1874,12 +1836,11 @@ fn handle_ws_connection(
         Box::new(cloned) as Box<dyn WsStream>
     });
 
-    // Extract the bearer token from the handshake, preferring the
-    // Authorization header (native clients) and falling back to the
-    // `bearer.<token>` WebSocket subprotocol (browsers). We only learn
-    // whether the token is valid AFTER accept_hdr completes, since the
-    // header callback must return synchronously with a Response.
-    let token_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    // The handshake's credentials: the Authorization header (native
+    // clients) or the `bearer.<token>` subprotocol (browsers). This listener
+    // takes no session cookie. They are resolved AFTER accept_hdr completes,
+    // since the header callback must return synchronously with a Response.
+    let token_slot: Arc<Mutex<Credentials>> = Arc::new(Mutex::new(Credentials::default()));
     let slot_for_cb = Arc::clone(&token_slot);
     // The client's address as the HTTP server would resolve it (trusted
     // proxy hops, client-IP headers), from the handshake headers.
@@ -1911,38 +1872,20 @@ fn handle_ws_connection(
     let ws = match accept_hdr_with_config(
         stream,
         move |req: &Request, mut resp: Response| -> Result<Response, ErrorResponse> {
-            let mut chosen_protocol: Option<String> = None;
-            let mut auth: Option<String> = None;
-            for (name, value) in req.headers() {
-                let lower = name.as_str().to_ascii_lowercase();
-                if lower == "authorization" {
-                    if let Ok(v) = value.to_str() {
-                        if let Some(tok) = v.strip_prefix("Bearer ") {
-                            auth = Some(tok.to_string());
-                        }
-                    }
-                } else if lower == "sec-websocket-protocol" {
-                    if let Ok(v) = value.to_str() {
-                        for proto in v.split(',').map(str::trim) {
-                            if let Some(encoded) = proto.strip_prefix("bearer.") {
-                                if let Some(decoded) = percent_decode_token(encoded) {
-                                    auth = auth.or(Some(decoded));
-                                    chosen_protocol = Some(proto.to_string());
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            let creds = Credentials::from_headers(
+                req.headers()
+                    .iter()
+                    .filter_map(|(name, value)| Some((name.as_str(), value.to_str().ok()?))),
+                &[],
+            );
             // RFC 6455 §11.3.4 — echo the chosen subprotocol in the response or
             // browsers will refuse the connection.
-            if let Some(chosen) = chosen_protocol {
-                if let Ok(hv) = tungstenite::http::HeaderValue::from_str(&chosen) {
+            if let Some(chosen) = &creds.subprotocol {
+                if let Ok(hv) = tungstenite::http::HeaderValue::from_str(chosen) {
                     resp.headers_mut().insert("Sec-WebSocket-Protocol", hv);
                 }
             }
-            *slot_for_cb.lock().unwrap() = auth;
+            *slot_for_cb.lock().unwrap() = creds;
             *ip_for_cb.lock().unwrap() = handshake_client_ip(
                 req,
                 socket_ip.clone(),
@@ -1961,7 +1904,8 @@ fn handle_ws_connection(
     // tungstenite's handshake callback can't easily return a 401 without
     // a custom error response, and we already have the socket open for
     // a clean close frame.
-    let token = token_slot.lock().unwrap().clone();
+    let creds = token_slot.lock().unwrap().clone();
+    let identity = auth.identify(&creds, Surface::App, || false);
     let client_ip = Some(ip_slot.lock().unwrap().clone()).filter(|ip| !ip.is_empty());
 
     // Auth resolution happens inside run_authenticated_session so we
@@ -1980,7 +1924,7 @@ fn handle_ws_connection(
         ws,
         hub,
         auth,
-        token,
+        identity,
         client_ip,
         snapshot_fetcher,
         reactive,
@@ -2023,8 +1967,9 @@ fn handshake_client_ip(
 fn run_authenticated_session(
     ws: WebSocket<Box<dyn WsStream>>,
     hub: Arc<WsHub>,
-    auth: Arc<WsAuth>,
-    token: Option<String>,
+    auth: Arc<AuthResolver>,
+    // The handshake's identity, from `AuthResolver::identify`.
+    identity: Result<Identity, &'static str>,
     // The client's address, for the per-function rate limit of an
     // anonymous caller's reactive subscriptions. `None` when unknown.
     client_ip: Option<String>,
@@ -2040,19 +1985,12 @@ fn run_authenticated_session(
     // (single-thread fallback; no remaining production caller).
     dual_write_stream: Option<Box<dyn WsStream>>,
 ) {
-    // Use the shared bearer resolver so WS sees the same identities
-    // HTTP does — admin token / API key / JWT / session — not only
-    // session tokens like the pre-v0.3.72 path. Caught in the
-    // 2026-05-10 codex pass-3 audit (P3 REGRESSION).
-    let auth_ctx = match resolve_bearer_token(
-        token.as_deref(),
-        &auth.sessions,
-        &auth.api_keys,
-        auth.admin_token.as_deref(),
-        auth.jwt_secret.as_deref(),
-        auth.jwt_issuer.as_deref(),
-    ) {
-        Ok(ctx) => ctx,
+    let Identity {
+        ctx: mut auth_ctx,
+        token,
+        ..
+    } = match identity {
+        Ok(identity) => identity,
         Err(reason) => {
             let mut ws = ws;
             let _ = ws.close(Some(tungstenite::protocol::CloseFrame {
@@ -2062,16 +2000,9 @@ fn run_authenticated_session(
             return;
         }
     };
-    // Finish resolving the identity exactly as HTTP does — admin lift +
-    // active-org role. Without this the socket's `roles` stay empty and
-    // every `auth.hasAnyRole(...)` read policy denies the broadcast.
-    let auth_ctx = {
-        let mut ctx = auth_ctx;
-        if let Some(enrich) = auth.enrich.as_ref() {
-            enrich(&mut ctx);
-        }
-        ctx
-    };
+    // Admin lift + active-org role, as every transport does. Without the
+    // role, every `auth.hasAnyRole(...)` read policy denies the broadcast.
+    auth.enrich(&mut auth_ctx);
     // Anonymous WS connections are accepted — they subscribe to the
     // public broadcast firehose. Per-broadcast policy filtering
     // (`Shard::broadcast_change` runs `check_entity_read` against this
@@ -2766,7 +2697,7 @@ fn handle_reactive_control(
 /// `None` on any malformed byte rather than silently passing garbage
 /// through to the session store (which would just fail to resolve and
 /// look like a plain unauth attempt).
-fn percent_decode_token(s: &str) -> Option<String> {
+pub(crate) fn percent_decode_token(s: &str) -> Option<String> {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -2836,26 +2767,14 @@ pub(crate) fn ws_accept_value(client_key: &str) -> String {
 /// Result of inspecting an incoming HTTP request for a WS upgrade.
 pub struct WsUpgradeRequest {
     pub sec_key: String,
-    pub bearer_token: Option<String>,
-    /// First subprotocol from `Sec-WebSocket-Protocol` we want to
-    /// echo back. Browsers refuse the connection if a subprotocol
-    /// they offered isn't echoed.
-    pub chosen_protocol: Option<String>,
-    /// True when `bearer_token` was resolved from the ambient session
-    /// COOKIE (priority 3) rather than an explicit `Authorization` /
-    /// `bearer.<token>` subprotocol. The dispatch site Origin-gates this
-    /// path to defeat cross-site WebSocket hijacking (CSWSH): a browser
-    /// auto-attaches the victim's cookie to a cross-origin WS handshake,
-    /// so cookie-authed upgrades from an untrusted Origin must be
-    /// rejected. Explicit bearer auth is non-ambient (an attacker page
-    /// can't read the victim's token to set the subprotocol), so it
-    /// stays Origin-agnostic for native clients that send no Origin.
-    pub cookie_auth: bool,
-    /// The session cookie's token when the request carried one, whether or
-    /// not it became `bearer_token`. The dispatch site falls back to it when
-    /// an explicit bearer resolves to no one (see
-    /// [`WsUpgradeRequest::fall_back_to_cookie`]).
-    pub cookie_token: Option<String>,
+    /// The handshake's credentials: `Authorization: Bearer`, the
+    /// `bearer.<token>` subprotocol (echoed back, or browsers refuse the
+    /// connection), and the session cookie. The dispatch site resolves them
+    /// with `AuthResolver::identify`, trusting the cookie only from a trusted
+    /// Origin: a browser attaches the victim's cookie to a cross-origin
+    /// handshake (cross-site WebSocket hijacking), while an explicit token
+    /// is not ambient and stays Origin-agnostic for native clients.
+    pub credentials: Credentials,
     /// The client's address as the HTTP server resolved it (trusted
     /// proxy hops applied). Set by the dispatch site; `None` from
     /// [`inspect_ws_upgrade`].
@@ -2864,144 +2783,46 @@ pub struct WsUpgradeRequest {
 
 /// Pull the headers we need to perform a WS upgrade. Returns `None`
 /// when the request isn't a WebSocket upgrade attempt (no
-/// `Sec-WebSocket-Key`).
-///
-/// Bearer-token resolution priority (matches the HTTP request loop):
-///   1. `Authorization: Bearer <token>` header (native clients)
-///   2. `Sec-WebSocket-Protocol: bearer.<percent-encoded-token>` (browsers
-///      can't set Authorization on WebSocket, so the SDK encodes the token
-///      as a subprotocol name)
-///   3. `Cookie: <session_cookie_name>=<token>` (browsers using cookie
-///      auth — required for the Pylon Cloud dashboard's WS multiplex,
-///      otherwise the WS upgrade lands as anonymous and the auth gate
-///      closes the socket immediately, producing a tight reconnect loop)
-///
-/// Pass `cookie_name` so the framework's cookie-config-driven name
-/// (`<app>_session` by default) works without a magic constant here.
+/// `Sec-WebSocket-Key`, or no `Upgrade: websocket`). `cookie_names` are the
+/// session cookies to read, first match wins (see `Credentials`).
 pub fn inspect_ws_upgrade(
     headers: &[tiny_http::Header],
-    cookie_name: &str,
+    cookie_names: &[&str],
 ) -> Option<WsUpgradeRequest> {
-    let mut sec_key: Option<String> = None;
-    let mut upgrade_ok = false;
-    let mut bearer_token: Option<String> = None;
-    let mut chosen_protocol: Option<String> = None;
-    let mut cookie_header: Option<String> = None;
-    for h in headers {
-        let name = h.field.as_str().as_str().to_ascii_lowercase();
-        let value = h.value.as_str();
-        if name == "sec-websocket-key" {
-            sec_key = Some(value.to_string());
-        } else if name == "upgrade" && value.eq_ignore_ascii_case("websocket") {
-            upgrade_ok = true;
-        } else if name == "authorization" {
-            if let Some(tok) = value.strip_prefix("Bearer ") {
-                bearer_token = Some(tok.to_string());
-            }
-        } else if name == "sec-websocket-protocol" {
-            for proto in value.split(',').map(str::trim) {
-                if let Some(encoded) = proto.strip_prefix("bearer.") {
-                    if let Some(decoded) = percent_decode_token(encoded) {
-                        if bearer_token.is_none() {
-                            bearer_token = Some(decoded);
-                        }
-                        chosen_protocol = Some(proto.to_string());
-                        break;
-                    }
-                }
-            }
-        } else if name == "cookie" {
-            cookie_header = Some(value.to_string());
-        }
-    }
-    // Cookie fallback runs ONLY if no bearer was found via the
-    // header / subprotocol path — bearer wins so explicit auth can
-    // override the ambient cookie when both are present.
-    let cookie_token = cookie_header
-        .as_deref()
-        .and_then(|cookies| pylon_auth::extract_session_cookie(cookies, cookie_name));
-    let mut cookie_auth = false;
-    if bearer_token.is_none() {
-        if let Some(tok) = cookie_token.clone() {
-            bearer_token = Some(tok);
-            cookie_auth = true;
-        }
-    }
-    if !upgrade_ok {
+    let header = |name: &str| {
+        headers
+            .iter()
+            .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name))
+            .map(|h| h.value.as_str())
+    };
+    if !header("Upgrade").is_some_and(|v| v.eq_ignore_ascii_case("websocket")) {
         return None;
     }
-    sec_key.map(|sec_key| WsUpgradeRequest {
+    let sec_key = header("Sec-WebSocket-Key")?.to_string();
+    let credentials = Credentials::from_headers(
+        headers
+            .iter()
+            .map(|h| (h.field.as_str().as_str(), h.value.as_str())),
+        cookie_names,
+    );
+    Some(WsUpgradeRequest {
         sec_key,
-        bearer_token,
-        chosen_protocol,
-        cookie_auth,
-        cookie_token,
+        credentials,
         client_ip: None,
     })
-}
-
-impl WsUpgradeRequest {
-    /// Authenticate with the session cookie instead of an explicit bearer
-    /// that resolves to no one (an unknown, expired or revoked session
-    /// token, or an operator session, which is no one on the app's socket).
-    ///
-    /// The caller passes `origin_trusted`: the result of the same Origin
-    /// check a cookie-authenticated upgrade must pass. When it is false, or
-    /// the bearer resolves to an identity, or the cookie does not, nothing
-    /// changes. A bearer that `auth` rejects outright (a bad API key or JWT)
-    /// also stays, so the handshake still closes with that reason.
-    ///
-    /// Returns true when the request now authenticates with the cookie. The
-    /// `bearer.<token>` subprotocol the client offered is still echoed, so
-    /// the browser accepts the handshake.
-    pub fn fall_back_to_cookie(&mut self, auth: &WsAuth, origin_trusted: bool) -> bool {
-        if self.cookie_auth || !origin_trusted {
-            return false;
-        }
-        let (Some(bearer), Some(cookie)) =
-            (self.bearer_token.as_deref(), self.cookie_token.as_deref())
-        else {
-            return false;
-        };
-        if auth.has_identity(bearer) != Some(false) || auth.has_identity(cookie) != Some(true) {
-            return false;
-        }
-        self.bearer_token = Some(cookie.to_string());
-        self.cookie_auth = true;
-        true
-    }
-}
-
-impl WsAuth {
-    /// Whether `token` resolves to a user or the admin, after the same
-    /// enrichment the handshake applies. `None` when the resolver rejects
-    /// the token outright. Does not count as a use of an API key.
-    fn has_identity(&self, token: &str) -> Option<bool> {
-        let mut ctx = pylon_auth::recheck_bearer_token(
-            Some(token),
-            &self.sessions,
-            &self.api_keys,
-            self.admin_token.as_deref(),
-            self.jwt_secret.as_deref(),
-            self.jwt_issuer.as_deref(),
-        )
-        .ok()?;
-        if let Some(enrich) = self.enrich.as_ref() {
-            enrich(&mut ctx);
-        }
-        Some(ctx.user_id.is_some() || ctx.is_admin)
-    }
 }
 
 /// Hijack a tiny_http request as a WebSocket. Writes the 101
 /// response, takes ownership of the raw stream, wraps in tungstenite
 /// without re-handshaking, and runs the standard per-client loop.
 /// Spawn this on its own thread — the loop blocks on `socket.read()`.
+#[allow(clippy::too_many_arguments)]
 pub fn handle_http_upgrade(
     request: tiny_http::Request,
     upgrade: WsUpgradeRequest,
+    identity: Result<Identity, &'static str>,
     hub: Arc<WsHub>,
-    auth: Arc<WsAuth>,
+    auth: Arc<AuthResolver>,
     snapshot_fetcher: Option<SnapshotFetcher>,
     reactive: Option<Arc<crate::reactive::ReactiveRegistry>>,
     rooms: Option<Arc<dyn RoomBridge>>,
@@ -3013,7 +2834,7 @@ pub fn handle_http_upgrade(
         .with_header(
             tiny_http::Header::from_bytes(&b"Sec-WebSocket-Accept"[..], accept.as_bytes()).unwrap(),
         );
-    if let Some(proto) = &upgrade.chosen_protocol {
+    if let Some(proto) = &upgrade.credentials.subprotocol {
         if let Ok(h) =
             tiny_http::Header::from_bytes(&b"Sec-WebSocket-Protocol"[..], proto.as_bytes())
         {
@@ -3047,7 +2868,7 @@ pub fn handle_http_upgrade(
         ws,
         hub,
         auth,
-        upgrade.bearer_token,
+        identity,
         upgrade.client_ip,
         snapshot_fetcher,
         reactive,
@@ -3126,113 +2947,86 @@ mod tests {
     }
 
     #[test]
-    fn inspect_ws_upgrade_flags_cookie_auth_only_for_ambient_cookie() {
-        // CSWSH gate input: `cookie_auth` MUST be true iff the token came
-        // from the ambient session cookie (priority 3) and false for the
-        // explicit, non-ambient Authorization / `bearer.<token>` paths.
-        // The dispatch site Origin-gates only the cookie path.
-        fn hdr(name: &str, value: &str) -> tiny_http::Header {
-            tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()).unwrap()
-        }
-        let base = || {
-            vec![
-                hdr("Upgrade", "websocket"),
-                hdr("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ=="),
-            ]
-        };
-
-        // Ambient cookie only → cookie_auth = true.
-        let mut h = base();
-        h.push(hdr("Cookie", "app_session=tok-cookie"));
-        let r = inspect_ws_upgrade(&h, "app_session").unwrap();
-        assert_eq!(r.bearer_token.as_deref(), Some("tok-cookie"));
-        assert!(r.cookie_auth, "ambient cookie must set cookie_auth");
-
-        // Explicit Authorization bearer → cookie_auth = false.
-        let mut h = base();
-        h.push(hdr("Authorization", "Bearer tok-hdr"));
-        let r = inspect_ws_upgrade(&h, "app_session").unwrap();
-        assert_eq!(r.bearer_token.as_deref(), Some("tok-hdr"));
-        assert!(!r.cookie_auth, "Authorization bearer is non-ambient");
-
-        // `bearer.<token>` subprotocol → cookie_auth = false.
-        let mut h = base();
-        h.push(hdr("Sec-WebSocket-Protocol", "bearer.tok-proto"));
-        let r = inspect_ws_upgrade(&h, "app_session").unwrap();
-        assert_eq!(r.bearer_token.as_deref(), Some("tok-proto"));
-        assert!(!r.cookie_auth, "subprotocol bearer is non-ambient");
-
-        // BOTH explicit bearer AND cookie present → explicit wins, NOT ambient,
-        // so cookie_auth stays false (no Origin gate on an explicit token).
-        let mut h = base();
-        h.push(hdr("Authorization", "Bearer tok-hdr"));
-        h.push(hdr("Cookie", "app_session=tok-cookie"));
-        let r = inspect_ws_upgrade(&h, "app_session").unwrap();
-        assert_eq!(r.bearer_token.as_deref(), Some("tok-hdr"));
-        assert!(
-            !r.cookie_auth,
-            "explicit bearer must win over the ambient cookie"
-        );
-        assert_eq!(r.cookie_token.as_deref(), Some("tok-cookie"));
-    }
-
-    #[test]
-    fn stale_bearer_falls_back_to_the_cookie_only_from_a_trusted_origin() {
+    fn upgrade_credentials_resolve_through_the_shared_rules() {
+        // CSWSH gate: the cookie counts only when the dispatch site trusts
+        // the Origin; an explicit token (header or subprotocol) is not
+        // ambient and needs no Origin.
         fn hdr(name: &str, value: &str) -> tiny_http::Header {
             tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()).unwrap()
         }
         let sessions = Arc::new(SessionStore::new());
         let cookie_session = sessions.create("user-cookie".into());
         let bearer_session = sessions.create("user-bearer".into());
-        let auth = WsAuth {
+        let auth = AuthResolver {
             sessions: Arc::clone(&sessions),
-            api_keys: Arc::new(ApiKeyStore::new()),
+            api_keys: Arc::new(pylon_auth::api_key::ApiKeyStore::new()),
             admin_token: None,
             jwt_secret: None,
             jwt_issuer: None,
+            accounts: None,
             enrich: None,
         };
-        let upgrade = |bearer: &str| {
-            let headers = vec![
+        let upgrade = |extra: Vec<tiny_http::Header>| {
+            let mut headers = vec![
                 hdr("Upgrade", "websocket"),
                 hdr("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ=="),
-                hdr("Sec-WebSocket-Protocol", &format!("bearer.{bearer}")),
-                hdr("Cookie", &format!("app_session={}", cookie_session.token)),
             ];
-            inspect_ws_upgrade(&headers, "app_session").unwrap()
+            headers.extend(extra);
+            inspect_ws_upgrade(&headers, &["app_session"]).unwrap()
+        };
+        let cookie = || hdr("Cookie", &format!("app_session={}", cookie_session.token));
+        let user = |r: &WsUpgradeRequest, trusted: bool| {
+            auth.identify(&r.credentials, Surface::App, || trusted)
+                .unwrap()
         };
 
-        // A stale bearer from a trusted Origin gives way to the cookie, and
-        // the request is then Origin-gated as a cookie upgrade.
-        let mut r = upgrade("stale-token");
-        assert!(r.fall_back_to_cookie(&auth, true));
-        assert_eq!(
-            r.bearer_token.as_deref(),
-            Some(cookie_session.token.as_str())
-        );
-        assert!(r.cookie_auth);
-        assert_eq!(r.chosen_protocol.as_deref(), Some("bearer.stale-token"));
+        // Cookie only: used from a trusted Origin, refused otherwise.
+        let r = upgrade(vec![cookie()]);
+        let id = user(&r, true);
+        assert_eq!(id.ctx.user_id.as_deref(), Some("user-cookie"));
+        assert!(id.cookie_auth);
+        assert!(user(&r, false).cookie_refused);
 
-        // From an untrusted Origin the cookie is not used.
-        let mut r = upgrade("stale-token");
-        assert!(!r.fall_back_to_cookie(&auth, false));
-        assert_eq!(r.bearer_token.as_deref(), Some("stale-token"));
-        assert!(!r.cookie_auth);
-
-        // A valid bearer keeps winning.
-        let mut r = upgrade(&bearer_session.token);
-        assert!(!r.fall_back_to_cookie(&auth, true));
+        // A valid explicit token wins over the cookie, from any Origin.
+        let r = upgrade(vec![
+            hdr(
+                "Sec-WebSocket-Protocol",
+                &format!("bearer.{}", bearer_session.token),
+            ),
+            cookie(),
+        ]);
+        let id = user(&r, false);
+        assert_eq!(id.ctx.user_id.as_deref(), Some("user-bearer"));
+        assert!(!id.cookie_auth);
         assert_eq!(
-            r.bearer_token.as_deref(),
-            Some(bearer_session.token.as_str())
+            r.credentials.subprotocol.as_deref(),
+            Some(format!("bearer.{}", bearer_session.token).as_str())
         );
-        assert!(!r.cookie_auth);
+
+        // A stale explicit token gives way to the cookie only from a
+        // trusted Origin; the stale subprotocol is still echoed.
+        let r = upgrade(vec![
+            hdr("Sec-WebSocket-Protocol", "bearer.stale-token"),
+            cookie(),
+        ]);
+        let id = user(&r, true);
+        assert_eq!(id.ctx.user_id.as_deref(), Some("user-cookie"));
+        assert!(id.cookie_auth && id.explicit_rejected);
+        assert_eq!(
+            r.credentials.subprotocol.as_deref(),
+            Some("bearer.stale-token")
+        );
+        let id = user(&r, false);
+        assert_eq!(id.ctx.user_id, None);
+        assert_eq!(id.token.as_deref(), Some("stale-token"));
 
         // A revoked cookie is no fallback.
         sessions.revoke(&cookie_session.token);
-        let mut r = upgrade("stale-token");
-        assert!(!r.fall_back_to_cookie(&auth, true));
-        assert_eq!(r.bearer_token.as_deref(), Some("stale-token"));
+        let id = user(&r, true);
+        assert_eq!(id.ctx.user_id, None);
+
+        // Not an upgrade without `Upgrade: websocket`.
+        assert!(inspect_ws_upgrade(&[hdr("Sec-WebSocket-Key", "k")], &["app_session"]).is_none());
     }
 
     #[test]

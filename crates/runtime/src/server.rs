@@ -1520,6 +1520,19 @@ fn ws_cookie_origin_trusted(
     }
 }
 
+/// The SSE port's [`crate::request_auth::CookieTrust`]. An EventSource
+/// request is a GET the browser subjects to CORS, and a cross-site one
+/// always carries `Origin`; a same-origin one (the port proxied under the
+/// app's origin) may omit it. So a missing Origin trusts the cookie, and a
+/// present one must pass [`ws_cookie_origin_trusted`]. The `Host` header
+/// counts only in dev mode, as on the sync WebSocket.
+fn sse_cookie_trust(allowlist: Arc<Vec<String>>) -> crate::request_auth::CookieTrust {
+    Arc::new(move |origin: Option<&str>, host: Option<&str>| {
+        let host = host.filter(|_| crate::dev_access::dev_mode_enabled());
+        origin.is_none() || ws_cookie_origin_trusted(origin, &allowlist, host)
+    })
+}
+
 /// True when `origin`'s host equals the host part of the `Host` header value
 /// `host`, ignoring ports.
 fn origin_host_matches(origin: &str, host: &str) -> bool {
@@ -3912,21 +3925,24 @@ fn start_server(
         let accounts = Arc::clone(&account_store);
         let orgs_for_ws = Arc::clone(&orgs);
         Arc::new(move |ctx: &mut pylon_auth::AuthContext| {
-            // The sync socket belongs to the app: an operator session is no
-            // one there (see drop_operator_identity).
+            // The resolver already made an operator session no one on the
+            // app's surface; this keeps a re-enriched identity the same.
             drop_operator_identity(&accounts, ctx);
             lift_admin(&rt, ctx);
             pylon_auth::org::enrich_active_org_role(&orgs_for_ws, ctx);
         })
     };
     ws_hub.set_auth_enricher(Arc::clone(&ws_enrich));
-    let ws_auth = Arc::new(crate::ws::WsAuth {
+    // The one resolver every transport uses: HTTP, both sync WebSockets, the
+    // SSE port, and shard connections (see `crate::request_auth`).
+    let ws_auth = Arc::new(crate::request_auth::AuthResolver {
         enrich: Some(Arc::clone(&ws_enrich)),
         sessions: Arc::clone(&session_store),
         api_keys: Arc::clone(&api_keys),
         admin_token: admin_token.clone(),
         jwt_secret: jwt_secret().cloned(),
         jwt_issuer: jwt_issuer().cloned(),
+        accounts: Some(Arc::clone(&account_store)),
     });
     // A WebSocket keeps the identity it authenticated with. When a session
     // ends (sign-out, revocation, password change, refresh, expiry), the
@@ -4041,10 +4057,12 @@ fn start_server(
             );
         }
         let hub = Arc::clone(&sse_hub);
-        let sessions = Arc::clone(&session_store);
+        let auth = Arc::clone(&ws_auth);
+        let cookie_name = cookie_config.name.clone();
+        let cookie_trust = sse_cookie_trust(Arc::clone(&cors_allowlist));
         let scope = listen_scope.clone();
         std::thread::spawn(move || {
-            crate::sse::start_sse_server(hub, sessions, sse_port, &scope);
+            crate::sse::start_sse_server(hub, auth, cookie_name, cookie_trust, sse_port, &scope);
         });
     } else {
         tracing::info!("[sse] Dedicated SSE port :{sse_port} disabled by PYLON_SSE_PORT_DISABLE=1");
@@ -4053,10 +4071,10 @@ fn start_server(
     // Start shard WebSocket server on port+3 when a registry is provided.
     let shard_ws_port = port + 3;
     if let Some(reg) = shard_registry.clone() {
-        let sessions = Arc::clone(&session_store);
+        let auth = Arc::clone(&ws_auth);
         let scope = listen_scope.clone();
         std::thread::spawn(move || {
-            crate::shard_ws::start_shard_ws_server(reg, sessions, shard_ws_port, &scope);
+            crate::shard_ws::start_shard_ws_server(reg, auth, shard_ws_port, &scope);
         });
     }
     // Shard connections over WebTransport (UDP), when configured.
@@ -4064,7 +4082,7 @@ fn start_server(
         shard_registry.clone(),
         crate::shard_wt::WebTransportConfig::from_env(),
     ) {
-        if let Err(e) = crate::shard_wt::start(wt, reg, Arc::clone(&session_store)) {
+        if let Err(e) = crate::shard_wt::start(wt, reg, Arc::clone(&ws_auth)) {
             tracing::warn!("[shard-wt] WebTransport did not start: {e}");
         }
     }
@@ -4846,7 +4864,7 @@ fn start_server(
                         uri,
                         headers,
                         registry,
-                        Arc::clone(&session_store),
+                        Arc::clone(&ws_auth),
                     );
                     mt.record_request("GET", 101);
                 }
@@ -4880,7 +4898,7 @@ fn start_server(
         // rules without forcing operators to add a new proxy entry.
         if url == "/api/sync/ws" && method == Method::Get {
             if let Some(mut upgrade_req) =
-                crate::ws::inspect_ws_upgrade(request.headers(), &cookie_config.name)
+                crate::ws::inspect_ws_upgrade(request.headers(), &[cookie_config.name.as_str()])
             {
                 upgrade_req.client_ip = Some(dispatch_peer_ip_str.clone());
                 // CSWSH defense: an upgrade authenticated by the AMBIENT
@@ -4899,16 +4917,20 @@ fn start_server(
                 } else {
                     None
                 };
-                // A bearer that resolves to no one (a stale token the client
-                // kept) gives way to a valid session cookie, but only from an
-                // Origin that a cookie-only upgrade would be accepted from.
-                let cookie_origin_trusted = ws_cookie_origin_trusted(
-                    req_origin_header.as_deref(),
-                    &cors_allowlist,
-                    ws_host.as_deref(),
+                // The cookie counts (alone, or in place of a stale explicit
+                // token) only from a trusted Origin; see `request_auth`.
+                let identity = ws_auth.identify(
+                    &upgrade_req.credentials,
+                    crate::request_auth::Surface::App,
+                    || {
+                        ws_cookie_origin_trusted(
+                            req_origin_header.as_deref(),
+                            &cors_allowlist,
+                            ws_host.as_deref(),
+                        )
+                    },
                 );
-                upgrade_req.fall_back_to_cookie(&ws_auth, cookie_origin_trusted);
-                if upgrade_req.cookie_auth && !cookie_origin_trusted {
+                if identity.as_ref().is_ok_and(|id| id.cookie_refused) {
                     tracing::warn!(
                         "[ws] rejected cookie-authed upgrade from untrusted origin {:?} — \
                          add it to manifest.auth.trustedOrigins or PYLON_CORS_ORIGIN",
@@ -4940,6 +4962,7 @@ fn start_server(
                         crate::ws::handle_http_upgrade(
                             request,
                             upgrade_req,
+                            identity,
                             hub,
                             auth,
                             Some(fetcher),
@@ -6094,21 +6117,15 @@ fn start_server(
         // Two transports for the same opaque session token:
         //   1. `Authorization: Bearer <token>` — CLI, mobile, server-to-server
         //   2. `Cookie: <name>=<token>` — browsers (HttpOnly, XSS can't read)
-        // A bearer that resolves to an identity wins over the cookie. A bearer
-        // that resolves to no one gives way to a valid session cookie when the
-        // request passes the CSRF check a cookie-only request must pass. See
-        // `resolve_request_identity`.
-        let bearer_token: Option<String> = request
-            .headers()
-            .iter()
-            .find(|h| h.field.as_str() == "Authorization" || h.field.as_str() == "authorization")
-            .and_then(|h| {
-                let val = h.value.as_str();
-                val.strip_prefix("Bearer ").map(|t| t.to_string())
-            });
+        // Resolved by the same rules as every other transport (see
+        // `crate::request_auth`); the cookie is trusted when the request
+        // passes the CSRF check.
+        //
         // Studio's own requests (its pages, the admin API, and API calls the
         // Studio page marks) read the operator cookie first; every other
-        // request reads only the app's session cookie.
+        // request reads only the app's session cookie. On the app's surface an
+        // operator session is no one: it must not reach app functions or auth
+        // routes as a user (or, lifted, as an admin).
         let studio_request = is_studio_request(
             &url,
             request
@@ -6116,49 +6133,27 @@ fn start_server(
                 .iter()
                 .any(|h| h.field.as_str().as_str().eq_ignore_ascii_case(STUDIO_HEADER)),
         );
-        let cookie_token: Option<String> = request
-            .headers()
-            .iter()
-            .find(|h| h.field.as_str() == "Cookie" || h.field.as_str() == "cookie")
-            .and_then(|h| {
-                let c = h.value.as_str();
-                let studio = studio_request
-                    .then(|| {
-                        pylon_auth::extract_session_cookie(c, &studio_cookie_name(&cookie_config))
-                    })
-                    .flatten();
-                studio.or_else(|| pylon_auth::extract_session_cookie(c, &cookie_config.name))
-            });
-        // Token dispatcher (in priority order), shared with the WebSocket
-        // handshake through `pylon_auth::resolve_bearer_token`:
-        //   1. Admin token → AuthContext::admin
-        //   2. `pk.…` API key → AuthContext::from_api_key (401 on bad)
-        //   3. Looks-like-JWT + PYLON_JWT_SECRET set → JWT verify (401 on bad)
-        //   4. Otherwise → session store lookup (anonymous when unknown)
-        // An operator session is for running the deployment through Studio.
-        // On the app's own routes it is no one: it must not reach app
-        // functions or auth routes as a user (or, lifted, as an admin).
-        let resolve_token =
-            |token: Option<&str>| -> Result<pylon_auth::AuthContext, &'static str> {
-                let mut ctx = pylon_auth::resolve_bearer_token(
-                    token,
-                    &ss,
-                    &ak,
-                    admin_token.as_deref(),
-                    jwt_secret().map(String::as_str),
-                    jwt_issuer().map(String::as_str),
-                )?;
-                if !studio_request {
-                    drop_operator_identity(&account_store, &mut ctx);
-                }
-                Ok(ctx)
-            };
-        let identity = resolve_request_identity(
-            bearer_token,
-            cookie_token,
-            || csrf_check(&request, &csrf, is_dev).is_ok(),
-            resolve_token,
+        let studio_cookie = studio_cookie_name(&cookie_config);
+        let cookie_names: Vec<&str> = if studio_request {
+            vec![studio_cookie.as_str(), cookie_config.name.as_str()]
+        } else {
+            vec![cookie_config.name.as_str()]
+        };
+        let credentials = crate::request_auth::Credentials::from_headers(
+            request
+                .headers()
+                .iter()
+                .map(|h| (h.field.as_str().as_str(), h.value.as_str())),
+            &cookie_names,
         );
+        let surface = if studio_request {
+            crate::request_auth::Surface::Studio
+        } else {
+            crate::request_auth::Surface::App
+        };
+        let identity = ws_auth.identify(&credentials, surface, || {
+            csrf_check(&request, &csrf, is_dev).is_ok()
+        });
         let identity = match identity {
             Ok(identity) => identity,
             Err("JWT_MISCONFIGURED") => {
@@ -6203,7 +6198,7 @@ fn start_server(
         // The token the identity came from. The router uses it for the
         // routes that act on the session itself (logout, refresh, select-org).
         let auth_token: Option<String> = identity.token;
-        let bearer_rejected = identity.bearer_rejected;
+        let bearer_rejected = identity.explicit_rejected;
         let mut auth_ctx = identity.ctx;
 
         // Wave-7 E: trusted-device cookie. Read `pylon_trusted_device=<token>`,
@@ -10406,178 +10401,6 @@ pub(crate) fn drop_operator_identity(
 /// an unknown, expired or revoked session token, or an operator session on
 /// an app route. A client that stored the token clears it on this header.
 pub(crate) const BEARER_REJECTED_HEADER: &str = "X-Pylon-Bearer-Rejected";
-
-/// The identity a request acts as, and where it came from.
-#[derive(Debug)]
-pub(crate) struct RequestIdentity {
-    pub ctx: pylon_auth::AuthContext,
-    /// The token `ctx` came from. Routes that act on the session itself
-    /// (logout, refresh, select-org) act on this token.
-    pub token: Option<String>,
-    /// True when the request carried a bearer token that resolved to no one.
-    pub bearer_rejected: bool,
-}
-
-fn has_identity(ctx: &pylon_auth::AuthContext) -> bool {
-    ctx.user_id.is_some() || ctx.is_admin
-}
-
-/// Pick the identity for a request from its bearer token and its session
-/// cookie.
-///
-/// - No bearer: the cookie decides, as before.
-/// - A bearer that resolves to an identity wins. The cookie is not read.
-/// - A bearer that `resolve` rejects (a bad API key or JWT) fails the
-///   request. Those are explicit credentials, and a typo must not be
-///   covered up by the cookie.
-/// - A bearer that resolves to no one (an unknown, expired or revoked session
-///   token, or an operator session on an app route) gives way to the cookie
-///   when the cookie resolves to an identity AND `cookie_allowed` returns
-///   true. Otherwise the request is anonymous, as before.
-///
-/// `cookie_allowed` is the CSRF check that a cookie-only request must pass.
-/// The request loop skips that check for any request with a bearer header,
-/// so without it here a cross-site request could carry a junk bearer and
-/// ride the cookie past the check. With it, the fallback is never available
-/// to a request that the cookie alone could not authenticate.
-pub(crate) fn resolve_request_identity(
-    bearer: Option<String>,
-    cookie: Option<String>,
-    cookie_allowed: impl FnOnce() -> bool,
-    resolve: impl Fn(Option<&str>) -> Result<pylon_auth::AuthContext, &'static str>,
-) -> Result<RequestIdentity, &'static str> {
-    let Some(bearer) = bearer else {
-        let ctx = resolve(cookie.as_deref())?;
-        return Ok(RequestIdentity {
-            ctx,
-            token: cookie,
-            bearer_rejected: false,
-        });
-    };
-    let ctx = resolve(Some(&bearer))?;
-    if has_identity(&ctx) {
-        return Ok(RequestIdentity {
-            ctx,
-            token: Some(bearer),
-            bearer_rejected: false,
-        });
-    }
-    if let Some(cookie) = cookie {
-        if cookie_allowed() {
-            if let Ok(cookie_ctx) = resolve(Some(&cookie)) {
-                if has_identity(&cookie_ctx) {
-                    return Ok(RequestIdentity {
-                        ctx: cookie_ctx,
-                        token: Some(cookie),
-                        bearer_rejected: true,
-                    });
-                }
-            }
-        }
-    }
-    Ok(RequestIdentity {
-        ctx,
-        token: Some(bearer),
-        bearer_rejected: true,
-    })
-}
-
-#[cfg(test)]
-mod request_identity_tests {
-    use super::resolve_request_identity;
-    use pylon_auth::AuthContext;
-
-    /// "good-*" tokens resolve to a user, "admin" to the admin, "pk.bad" is
-    /// rejected, and anything else is anonymous.
-    fn resolve(token: Option<&str>) -> Result<AuthContext, &'static str> {
-        match token {
-            Some("admin") => Ok(AuthContext::admin()),
-            Some("pk.bad") => Err("INVALID_API_KEY"),
-            Some(t) if t.starts_with("good-") => Ok(AuthContext::authenticated(t.to_string())),
-            _ => Ok(AuthContext::anonymous()),
-        }
-    }
-
-    fn s(v: &str) -> Option<String> {
-        Some(v.to_string())
-    }
-
-    #[test]
-    fn valid_bearer_wins_and_the_cookie_is_not_checked() {
-        let id = resolve_request_identity(
-            s("good-bearer"),
-            s("good-cookie"),
-            || panic!("the CSRF check must not run when the bearer resolves"),
-            resolve,
-        )
-        .unwrap();
-        assert_eq!(id.ctx.user_id.as_deref(), Some("good-bearer"));
-        assert_eq!(id.token.as_deref(), Some("good-bearer"));
-        assert!(!id.bearer_rejected);
-    }
-
-    #[test]
-    fn admin_bearer_wins() {
-        let id = resolve_request_identity(s("admin"), s("good-cookie"), || true, resolve).unwrap();
-        assert!(id.ctx.is_admin);
-        assert!(!id.bearer_rejected);
-    }
-
-    #[test]
-    fn stale_bearer_gives_way_to_a_valid_cookie() {
-        let id = resolve_request_identity(s("stale"), s("good-cookie"), || true, resolve).unwrap();
-        assert_eq!(id.ctx.user_id.as_deref(), Some("good-cookie"));
-        assert_eq!(id.token.as_deref(), Some("good-cookie"));
-        assert!(id.bearer_rejected);
-    }
-
-    #[test]
-    fn stale_bearer_stays_anonymous_when_the_csrf_check_fails() {
-        let id = resolve_request_identity(s("stale"), s("good-cookie"), || false, resolve).unwrap();
-        assert_eq!(id.ctx.user_id, None);
-        assert_eq!(id.token.as_deref(), Some("stale"));
-        assert!(id.bearer_rejected);
-    }
-
-    #[test]
-    fn stale_bearer_without_a_cookie_is_anonymous() {
-        let id = resolve_request_identity(s("stale"), None, || true, resolve).unwrap();
-        assert_eq!(id.ctx.user_id, None);
-        assert!(id.bearer_rejected);
-    }
-
-    #[test]
-    fn stale_bearer_and_stale_cookie_are_anonymous() {
-        let id = resolve_request_identity(s("stale"), s("stale-cookie"), || true, resolve).unwrap();
-        assert_eq!(id.ctx.user_id, None);
-        assert_eq!(id.token.as_deref(), Some("stale"));
-        assert!(id.bearer_rejected);
-    }
-
-    #[test]
-    fn rejected_api_key_fails_even_with_a_valid_cookie() {
-        let err =
-            resolve_request_identity(s("pk.bad"), s("good-cookie"), || true, resolve).unwrap_err();
-        assert_eq!(err, "INVALID_API_KEY");
-    }
-
-    #[test]
-    fn cookie_only_requests_are_unchanged() {
-        let id = resolve_request_identity(
-            None,
-            s("good-cookie"),
-            || panic!("cookie-only requests are CSRF-checked before auth"),
-            resolve,
-        )
-        .unwrap();
-        assert_eq!(id.ctx.user_id.as_deref(), Some("good-cookie"));
-        assert!(!id.bearer_rejected);
-        let anon = resolve_request_identity(None, None, || true, resolve).unwrap();
-        assert_eq!(anon.ctx.user_id, None);
-        assert_eq!(anon.token, None);
-        assert!(!anon.bearer_rejected);
-    }
-}
 
 fn is_studio_shell_path(url: &str) -> bool {
     let path = url.split('?').next().unwrap_or(url);

@@ -109,5 +109,10 @@ fn main() {
         })
     );
     let dyn_registry: Arc<dyn DynShardRegistry> = registry;
-    pylon_runtime::shard_ws::serve(listener, dyn_registry, sessions, 0);
+    pylon_runtime::shard_ws::serve(
+        listener,
+        dyn_registry,
+        pylon_runtime::request_auth::AuthResolver::from_sessions(sessions),
+        0,
+    );
 }

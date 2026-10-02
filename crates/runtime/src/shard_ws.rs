@@ -23,8 +23,8 @@ use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::request_auth::{AuthResolver, Credentials, Surface};
 use futures_util::{SinkExt, StreamExt};
-use pylon_auth::SessionStore;
 use pylon_realtime::{
     wire, DynShardRegistry, FrameKind, OutboundQueue, ShardAuth, ShardError, SnapshotFormat,
     SubscriberId,
@@ -82,7 +82,7 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Blocking. Spawn on a background thread.
 pub fn start_shard_ws_server(
     registry: Arc<dyn DynShardRegistry>,
-    sessions: Arc<SessionStore>,
+    auth: Arc<AuthResolver>,
     port: u16,
     scope: &crate::listen::ListenScope,
 ) {
@@ -101,12 +101,7 @@ pub fn start_shard_ws_server(
         "[shard-ws] listening on ws://{}:{port}",
         scope.display_host()
     );
-    serve_listeners(
-        listener,
-        registry,
-        sessions,
-        max_connections_per_ip_from_env(),
-    );
+    serve_listeners(listener, registry, auth, max_connections_per_ip_from_env());
 }
 
 /// `PYLON_SHARD_WS_MAX_PER_IP`: concurrent shard connections one IP may
@@ -176,7 +171,7 @@ pub fn serve_upgraded(
     uri: String,
     headers: Vec<(String, String)>,
     registry: Arc<dyn DynShardRegistry>,
-    sessions: Arc<SessionStore>,
+    auth: Arc<AuthResolver>,
 ) {
     let Some(rt) = runtime() else { return };
     if let Err(e) = stream.set_nonblocking(true) {
@@ -202,7 +197,7 @@ pub fn serve_upgraded(
             None,
         )
         .await;
-        let end = run_connection(ws, params, registry, sessions).await;
+        let end = run_connection(ws, params, registry, auth).await;
         log_connection_end(started, &end);
     });
 }
@@ -256,17 +251,17 @@ pub fn chosen_subprotocol<'a>(headers: impl Iterator<Item = (&'a str, &'a str)>)
 pub fn serve(
     listener: TcpListener,
     registry: Arc<dyn DynShardRegistry>,
-    sessions: Arc<SessionStore>,
+    auth: Arc<AuthResolver>,
     max_per_ip: u32,
 ) {
-    serve_listeners(listener.into(), registry, sessions, max_per_ip)
+    serve_listeners(listener.into(), registry, auth, max_per_ip)
 }
 
 /// [`serve`] over one or more listeners (see [`crate::listen::Listeners`]).
 pub fn serve_listeners(
     listener: crate::listen::Listeners,
     registry: Arc<dyn DynShardRegistry>,
-    sessions: Arc<SessionStore>,
+    auth: Arc<AuthResolver>,
     max_per_ip: u32,
 ) {
     let Some(runtime) = runtime() else { return };
@@ -299,7 +294,7 @@ pub fn serve_listeners(
         }
         let _ = stream.set_nodelay(true);
         let registry = Arc::clone(&registry);
-        let sessions = Arc::clone(&sessions);
+        let auth = Arc::clone(&auth);
         runtime.spawn(async move {
             // The guard lives as long as the task, which lives for the full
             // connection: that ties the IP slot to the socket.
@@ -318,7 +313,7 @@ pub fn serve_listeners(
                 None => return,
             };
             let started = Instant::now();
-            let end = handle_connection(stream, registry, sessions).await;
+            let end = handle_connection(stream, registry, auth).await;
             log_connection_end(started, &end);
         });
     }
@@ -440,7 +435,7 @@ async fn route_to_owner(
 async fn handle_connection(
     stream: tokio::net::TcpStream,
     registry: Arc<dyn DynShardRegistry>,
-    sessions: Arc<SessionStore>,
+    auth: Arc<AuthResolver>,
 ) -> ConnectionEnd {
     // Capture the HTTP handshake so we can read the Request-URI and headers.
     let params = Arc::new(Mutex::new(HandshakeParams::default()));
@@ -471,7 +466,7 @@ async fn handle_connection(
     };
 
     let params = params.lock().unwrap().clone();
-    run_connection(ws, params, registry, sessions).await
+    run_connection(ws, params, registry, auth).await
 }
 
 /// How a shard connection ended. Written to the request log when the
@@ -517,36 +512,28 @@ fn read_handshake<'a>(
     uri: String,
     headers: impl Iterator<Item = (&'a str, &'a str)>,
 ) -> (HandshakeParams, Option<String>) {
+    let headers: Vec<(&str, &str)> = headers.collect();
+    // The bearer token: `Authorization`, or a `bearer.<url-encoded-token>`
+    // subprotocol (browsers can't set WebSocket headers). No session cookie.
+    let credentials = Credentials::from_headers(headers.iter().copied(), &[]);
+    let mut selected_protocol = credentials.subprotocol.clone();
     let mut p = HandshakeParams {
         uri,
+        credentials,
         ..Default::default()
     };
-    let mut selected_protocol: Option<String> = None;
     for (name, v) in headers {
         let lower = name.to_ascii_lowercase();
-        if lower == "authorization" {
-            p.auth_header = Some(v.to_string());
-        } else if lower == "x-pylon-shard-ticket" {
+        if lower == "x-pylon-shard-ticket" {
             p.ticket = Some(v.to_string());
         } else if lower == "sec-websocket-protocol" {
-            // Accept a `bearer.<url-encoded-token>` subprotocol as an
-            // alternative to the Authorization header. Browsers can't set
-            // WebSocket headers directly, so this is how a web client carries
-            // a bearer token without putting it in the URL. The exact chosen
+            // A `ticket.<url-encoded-ticket>` subprotocol carries a shard
+            // ticket the way `bearer.` carries a token. The exact chosen
             // subprotocol is echoed back in the handshake response, per RFC
             // 6455 §11.3.4 (otherwise some browsers refuse the connection).
-            // A `ticket.<url-encoded-ticket>` subprotocol carries a shard
-            // ticket the same way. Only one subprotocol can be selected in
-            // the response; the bearer one wins.
+            // Only one can be selected; the bearer one wins.
             for proto in v.split(',').map(str::trim) {
-                if let Some(encoded) = proto.strip_prefix("bearer.") {
-                    if p.bearer_from_subprotocol.is_none() {
-                        if let Ok(decoded) = urldecode_strict(encoded) {
-                            p.bearer_from_subprotocol = Some(decoded);
-                            selected_protocol = Some(proto.to_string());
-                        }
-                    }
-                } else if let Some(encoded) = proto.strip_prefix("ticket.") {
+                if let Some(encoded) = proto.strip_prefix("ticket.") {
                     if let Ok(decoded) = urldecode_strict(encoded) {
                         p.ticket = Some(decoded);
                         selected_protocol.get_or_insert_with(|| proto.to_string());
@@ -563,7 +550,7 @@ async fn run_connection(
     ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     params: HandshakeParams,
     registry: Arc<dyn DynShardRegistry>,
-    sessions: Arc<SessionStore>,
+    auth: Arc<AuthResolver>,
 ) -> ConnectionEnd {
     let query = params
         .uri
@@ -588,21 +575,19 @@ async fn run_connection(
         .unwrap_or(1200)
         .clamp(MIN_DATAGRAM, MAX_DATAGRAM);
 
-    // Resolve auth token. Preference order:
-    //   1. Authorization: Bearer ...   (native clients)
-    //   2. Sec-WebSocket-Protocol: bearer.<token>   (browsers)
-    //
-    // The legacy `?token=` query-string path was removed: it leaked the
-    // bearer token into proxy access logs, Referer headers, and browser
-    // history. All supported clients can send the subprotocol or header.
-    let token = params
-        .auth_header
-        .as_deref()
-        .and_then(|h| h.strip_prefix("Bearer "))
-        .map(|t| t.to_string())
-        .or_else(|| params.bearer_from_subprotocol.clone());
-    let auth_ctx = sessions.resolve(token.as_deref());
+    // The same rules as every transport (see `crate::request_auth`). There
+    // is no `?token=`: it leaked the token into proxy logs, Referer headers
+    // and browser history.
     let (mut sink, mut source) = ws.split();
+    let mut auth_ctx = match auth.identify(&params.credentials, Surface::App, || false) {
+        Ok(identity) => identity.ctx,
+        Err(e) => {
+            let reason = format!("unauthorized: {e}");
+            close_with(&mut sink, CloseCode::Policy, reason.clone()).await;
+            return ConnectionEnd::Closed(reason);
+        }
+    };
+    auth.enrich(&mut auth_ctx);
     let shard_auth: ShardAuth =
         match crate::shard_tickets::shard_auth(&auth_ctx, params.ticket.as_deref()) {
             Ok(a) => a,
@@ -957,8 +942,7 @@ pub(crate) async fn process_input(
 #[derive(Default, Clone)]
 struct HandshakeParams {
     uri: String,
-    auth_header: Option<String>,
-    bearer_from_subprotocol: Option<String>,
+    credentials: Credentials,
     /// A shard ticket from `X-Pylon-Shard-Ticket` or a `ticket.` subprotocol.
     ticket: Option<String>,
 }
@@ -1059,6 +1043,32 @@ mod tests {
         assert_eq!(pong_rtt(&pings, b"pong", at(9_000)), None);
     }
     use super::*;
+
+    #[test]
+    fn the_handshake_reads_the_token_and_ticket_and_picks_one_subprotocol() {
+        let (p, proto) = read_handshake(
+            "/shard?shard=a".into(),
+            [
+                ("authorization", "bearer tok-header"),
+                ("Sec-WebSocket-Protocol", "ticket.t%2D1, bearer.tok-proto"),
+                ("Cookie", "app_session=ignored"),
+            ]
+            .into_iter(),
+        );
+        // The Authorization header wins; the bearer subprotocol is echoed;
+        // shard connections take no cookie.
+        assert_eq!(p.credentials.explicit.as_deref(), Some("tok-header"));
+        assert_eq!(p.credentials.cookie, None);
+        assert_eq!(p.ticket.as_deref(), Some("t-1"));
+        assert_eq!(proto.as_deref(), Some("bearer.tok-proto"));
+
+        let (p, proto) = read_handshake(
+            String::new(),
+            [("Sec-WebSocket-Protocol", "ticket.t1")].into_iter(),
+        );
+        assert_eq!(p.credentials.explicit, None);
+        assert_eq!(proto.as_deref(), Some("ticket.t1"));
+    }
 
     #[test]
     fn query_param_parses_basic() {

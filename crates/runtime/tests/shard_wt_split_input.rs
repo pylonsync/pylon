@@ -95,7 +95,7 @@ async fn a_split_input_survives_acks_in_between() {
             url: url.clone(),
         },
         dyn_registry,
-        Arc::clone(&sessions),
+        pylon_runtime::request_auth::AuthResolver::from_sessions(Arc::clone(&sessions)),
     )
     .expect("WebTransport starts");
     let (_, hashes) = shard_wt::endpoint_info().unwrap();

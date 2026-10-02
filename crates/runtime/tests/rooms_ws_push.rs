@@ -206,7 +206,7 @@ fn http_request_with_auth(
 ///
 /// Uses the admin token via the `bearer.<token>` subprotocol path —
 /// matches how browsers authenticate the WS upgrade. The admin token
-/// gates the connection past `WsAuth::resolve_bearer_token`.
+/// gates the connection past `AuthResolver::identify`.
 fn connect_ws_admin(
     port: u16,
 ) -> tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>> {

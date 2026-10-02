@@ -107,7 +107,14 @@ fn version_3_converges_through_dropped_datagrams() {
     let port = listener.local_addr().unwrap().port();
     let dyn_registry: Arc<dyn DynShardRegistry> = registry.clone();
     let s = Arc::clone(&sessions);
-    std::thread::spawn(move || pylon_runtime::shard_ws::serve(listener, dyn_registry, s, 0));
+    std::thread::spawn(move || {
+        pylon_runtime::shard_ws::serve(
+            listener,
+            dyn_registry,
+            pylon_runtime::request_auth::AuthResolver::from_sessions(s),
+            0,
+        )
+    });
 
     let token = sessions.create("c1".to_string()).token;
     let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
