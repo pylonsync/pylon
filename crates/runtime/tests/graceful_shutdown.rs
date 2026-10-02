@@ -102,22 +102,24 @@ fn shutdown_refuses_new_connections_and_answers_open_ones() {
 
     pylon_runtime::server::request_shutdown();
 
-    // New connections are refused within a moment, not accepted and left
-    // unanswered.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while TcpStream::connect(&addr).is_ok() {
+    // A wake-up marker left in the request queue (here, from a second
+    // shutdown request) is not mistaken for a quiet queue: the connection
+    // that was already open still gets an answer. Sent at once, because the
+    // server stops after 500 ms with no request.
+    pylon_runtime::server::request_shutdown();
+    assert_eq!(get_health(&mut open), 200);
+
+    // New connections are refused, not accepted and left unanswered. On
+    // Windows a refused connect takes about 2 s (it retries the SYN).
+    let target: std::net::SocketAddr = addr.parse().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while TcpStream::connect_timeout(&target, Duration::from_secs(3)).is_ok() {
         assert!(
             Instant::now() < deadline,
             "the listener still accepts after shutdown"
         );
         std::thread::sleep(Duration::from_millis(20));
     }
-
-    // A wake-up marker left in the request queue (here, from a second
-    // shutdown request) is not mistaken for a quiet queue: the connection
-    // that was already open still gets an answer.
-    pylon_runtime::server::request_shutdown();
-    assert_eq!(get_health(&mut open), 200);
 
     // With nothing more to serve, the server stops.
     drop(open);
