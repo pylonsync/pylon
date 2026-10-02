@@ -351,6 +351,31 @@ fn design_render_variant_and_render_by_component() {
         std::env::set_var("PYLON_DEV_MODE", "1");
     }
     let port = start_stub_server(calls.clone());
+
+    // --- Boot warm-up: /health/ready answers 503 until the server has
+    // rendered `/` once, anonymously, on the (one) runner; then 200.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let r = get(port, "/health/ready", &[]);
+        if r.status == 200 {
+            break;
+        }
+        assert_eq!(r.status, 503, "/health/ready while warming: {}", r.body);
+        assert!(
+            std::time::Instant::now() < deadline,
+            "/health/ready never answered 200"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    {
+        let mut warm = calls.lock().unwrap();
+        assert_eq!(warm.len(), 1, "one warm render per runner: {warm:?}");
+        assert_eq!(warm[0].url, "/");
+        assert_eq!(warm[0].component, "app/page");
+        assert!(warm[0].auth.user_id.is_none() && !warm[0].design);
+        warm.clear();
+    }
+
     unsafe {
         std::env::set_var("PYLON_DEV_MODE", "0");
     }
