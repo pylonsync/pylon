@@ -512,13 +512,18 @@ async fn run_session(
 
     // The hello's token, by the same rules as every transport (see
     // `crate::request_auth`). There is no cookie on this transport.
-    let mut auth_ctx = match auth.identify(
-        &Credentials::explicit(hello.token.clone()),
-        Surface::App,
-        || false,
-    ) {
-        Ok(identity) => identity.ctx,
-        Err(e) => {
+    // Enrichment reads the database (a blocking Postgres client on a
+    // cluster), so it runs off the async workers.
+    let resolved = {
+        let (auth, creds) = (
+            Arc::clone(&auth),
+            Credentials::explicit(hello.token.clone()),
+        );
+        tokio::task::spawn_blocking(move || auth.identify_explicit(&creds, Surface::App)).await
+    };
+    let auth_ctx = match resolved {
+        Ok(Ok(ctx)) => ctx,
+        Ok(Err(e)) => {
             return close_after_notice(
                 conn,
                 &mut send,
@@ -527,8 +532,16 @@ async fn run_session(
             )
             .await
         }
+        Err(e) => {
+            return close_after_notice(
+                conn,
+                &mut send,
+                close_code::AGAIN,
+                &format!("auth task failed: {e}"),
+            )
+            .await
+        }
     };
-    auth.enrich(&mut auth_ctx);
     let shard_auth: ShardAuth =
         match crate::shard_tickets::shard_auth(&auth_ctx, hello.ticket.as_deref()) {
             Ok(a) => a,

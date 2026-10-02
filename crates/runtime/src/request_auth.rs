@@ -232,6 +232,20 @@ impl AuthResolver {
         }
     }
 
+    /// [`identify`](Self::identify) with no cookie, then [`enrich`](Self::enrich):
+    /// the whole resolution for a transport that reads only an explicit token
+    /// (shard connections, the sync WebSocket's own port). It may read the
+    /// database, so an async caller runs it on a blocking thread.
+    pub fn identify_explicit(
+        &self,
+        creds: &Credentials,
+        surface: Surface,
+    ) -> Result<AuthContext, &'static str> {
+        let mut ctx = self.identify(creds, surface, || false)?.ctx;
+        self.enrich(&mut ctx);
+        Ok(ctx)
+    }
+
     /// Apply the module's rules to `creds`. `cookie_trusted` runs at most
     /// once, and only when the cookie would be used.
     pub fn identify(

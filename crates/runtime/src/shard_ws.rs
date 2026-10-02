@@ -579,15 +579,25 @@ async fn run_connection(
     // is no `?token=`: it leaked the token into proxy logs, Referer headers
     // and browser history.
     let (mut sink, mut source) = ws.split();
-    let mut auth_ctx = match auth.identify(&params.credentials, Surface::App, || false) {
-        Ok(identity) => identity.ctx,
-        Err(e) => {
+    // Enrichment reads the database (a blocking Postgres client on a
+    // cluster), so it runs off the async workers.
+    let resolved = {
+        let (auth, creds) = (Arc::clone(&auth), params.credentials.clone());
+        tokio::task::spawn_blocking(move || auth.identify_explicit(&creds, Surface::App)).await
+    };
+    let auth_ctx = match resolved {
+        Ok(Ok(ctx)) => ctx,
+        Ok(Err(e)) => {
             let reason = format!("unauthorized: {e}");
             close_with(&mut sink, CloseCode::Policy, reason.clone()).await;
             return ConnectionEnd::Closed(reason);
         }
+        Err(e) => {
+            let reason = format!("auth task failed: {e}");
+            close_with(&mut sink, CloseCode::Again, reason.clone()).await;
+            return ConnectionEnd::Closed(reason);
+        }
     };
-    auth.enrich(&mut auth_ctx);
     let shard_auth: ShardAuth =
         match crate::shard_tickets::shard_auth(&auth_ctx, params.ticket.as_deref()) {
             Ok(a) => a,
