@@ -1,6 +1,6 @@
 {
   "name": "com.pylonsync.pylon",
-  "version": "0.22.15",
+  "version": "0.22.16",
   "displayName": "Pylon",
   "description": "C# client for Pylon apps: sign-in, server functions, entities, and realtime shards (snapshots, entity replication, prediction, interpolation).",
   "unity": "2021.3",
