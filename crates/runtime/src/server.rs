@@ -684,6 +684,19 @@ fn shutdown_delay(env: Option<&str>) -> std::time::Duration {
     std::time::Duration::from_secs(env.and_then(|v| v.trim().parse().ok()).unwrap_or(0))
 }
 
+/// How long a shutdown waits for in-flight work: `PYLON_DRAIN_SECS`,
+/// default 10, counted from when the listener closes. One deadline covers
+/// serving the requests already accepted and the wait for in-flight requests
+/// and jobs.
+fn drain_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(
+        std::env::var("PYLON_DRAIN_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10),
+    )
+}
+
 /// The graceful shutdown a signal starts: report draining, keep serving for
 /// `delay`, then [`request_shutdown`].
 fn begin_shutdown(delay: std::time::Duration) {
@@ -4238,37 +4251,59 @@ fn start_server(
     // Use recv() in a loop instead of incoming_requests() so we can share
     // the Arc<Server> with the shutdown path (incoming_requests borrows &self
     // which prevents moving the Arc into another thread).
+    //
+    // When a shutdown starts, the listener closes: new connections are
+    // refused, so a proxy sends them to another instance or retries. The loop
+    // still serves requests already accepted and requests on open keep-alive
+    // connections, until none arrives for CLOSING_QUIET or PYLON_DRAIN_SECS
+    // passes.
+    const CLOSING_QUIET: std::time::Duration = std::time::Duration::from_millis(500);
+    let mut closing_since: Option<Instant> = None;
     loop {
-        if SHUTDOWN.load(Ordering::Relaxed) {
-            break;
+        if closing_since.is_none() && SHUTDOWN.load(Ordering::Relaxed) {
+            server.close_listeners();
+            closing_since = Some(Instant::now());
         }
 
-        let mut request = match server.recv() {
-            Ok(rq) => rq,
-            Err(_) => {
-                // recv() errors on either an intentional `unblock()` (shutdown)
-                // or tiny_http giving up its accept loop and dropping the
-                // listener after ~64 consecutive accept errors (an EINVAL /
-                // connection-reset storm on the `[::]` dual-stack socket). The
-                // former: exit. The latter: rebuild the listener so the dev
-                // server keeps serving instead of silently going dark.
-                if SHUTDOWN.load(Ordering::Relaxed) {
-                    break;
-                }
-                match rebuild_with_retry(port, &listen_scope) {
-                    Some(new_server) => {
-                        set_server_handle(&new_server);
-                        server = new_server;
+        let mut request = if let Some(since) = closing_since {
+            // One PYLON_DRAIN_SECS deadline covers this phase and the drain
+            // below, which counts from the same start.
+            let left = drain_timeout().saturating_sub(since.elapsed());
+            if left.is_zero() {
+                break;
+            }
+            let wait = left.min(CLOSING_QUIET);
+            let waiting = Instant::now();
+            match server.recv_timeout(wait) {
+                Ok(Some(rq)) => rq,
+                // recv_timeout also returns None at once for a wake-up marker
+                // that request_shutdown queued; requests may sit behind it.
+                Ok(None) if waiting.elapsed() < wait => continue,
+                _ => break,
+            }
+        } else {
+            match server.recv() {
+                Ok(rq) => rq,
+                Err(_) => {
+                    // recv() errors on either an intentional `unblock()`
+                    // (shutdown) or tiny_http giving up its accept loop and
+                    // dropping the listener after ~64 consecutive accept
+                    // errors (an EINVAL / connection-reset storm on the `[::]`
+                    // dual-stack socket). The former: start closing. The
+                    // latter: rebuild the listener so the server keeps serving
+                    // instead of silently going dark.
+                    if SHUTDOWN.load(Ordering::Relaxed) {
                         continue;
                     }
-                    None => break, // shutdown requested mid-rebuild
+                    // None: a shutdown was requested mid-rebuild.
+                    if let Some(new_server) = rebuild_with_retry(port, &listen_scope) {
+                        set_server_handle(&new_server);
+                        server = new_server;
+                    }
+                    continue;
                 }
             }
         };
-
-        if SHUTDOWN.load(Ordering::Relaxed) {
-            break;
-        }
 
         // Acquire a dispatch slot BEFORE spawning the worker. If the global
         // cap or per-IP cap is hit, respond 503 with Retry-After: 1
@@ -9847,13 +9882,10 @@ fn start_server(
 
     // --- Drain phase ---
     // Stop accepting new work, let in-flight finish, close subsystems cleanly.
-    let drain_timeout = std::time::Duration::from_secs(
-        std::env::var("PYLON_DRAIN_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(10),
-    );
-    let start = Instant::now();
+    let drain_timeout = drain_timeout();
+    // Counted from when the listener closed, so serving the requests already
+    // accepted and this wait share one PYLON_DRAIN_SECS.
+    let start = closing_since.unwrap_or_else(Instant::now);
 
     // Stop any running shards so their tick loops exit.
     if let Some(host) = &wasm_shards {

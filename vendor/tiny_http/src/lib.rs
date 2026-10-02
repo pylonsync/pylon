@@ -476,13 +476,35 @@ impl Iterator for IncomingRequests<'_> {
     }
 }
 
-impl Drop for Server {
-    fn drop(&mut self) {
-        self.close.store(true, Relaxed);
-        // Connect briefly to ourselves to unblock each accept thread
+impl Server {
+    /// Pylon patch: stop accepting connections and close the listening
+    /// sockets. Requests already read stay queued for `recv`, `recv_timeout`
+    /// and `try_recv`, and open connections keep delivering requests, so a
+    /// graceful shutdown can finish them. Idempotent.
+    pub fn close_listeners(&self) {
+        if self.close.swap(true, Relaxed) {
+            return;
+        }
+        self.wake_accept_threads();
+    }
+
+    // Connect briefly to ourselves to unblock each accept thread, which
+    // sees the close flag and drops its listener.
+    fn wake_accept_threads(&self) {
         for addr in &self.listening_addrs {
             let maybe_stream = match addr {
-                ListenAddr::IP(addr) => TcpStream::connect(addr).map(Connection::from),
+                ListenAddr::IP(addr) => {
+                    // A wildcard bind ([::] or 0.0.0.0) is reached through
+                    // loopback; Windows refuses to connect to the wildcard.
+                    let mut target = *addr;
+                    if target.ip().is_unspecified() {
+                        target.set_ip(match target {
+                            std::net::SocketAddr::V4(_) => std::net::Ipv4Addr::LOCALHOST.into(),
+                            std::net::SocketAddr::V6(_) => std::net::Ipv6Addr::LOCALHOST.into(),
+                        });
+                    }
+                    TcpStream::connect(target).map(Connection::from)
+                }
                 #[cfg(unix)]
                 ListenAddr::Unix(addr) => {
                     // TODO: use connect_addr when its stabilized.
@@ -501,5 +523,11 @@ impl Drop for Server {
                 }
             }
         }
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.close_listeners();
     }
 }

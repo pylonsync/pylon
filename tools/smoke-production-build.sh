@@ -285,6 +285,12 @@ else
 	[[ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/health/ready")" == 503 ]] || fail "/health/ready after SIGTERM is not 503"
 	[[ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/")" == 200 ]] || fail "GET / during the shutdown delay failed"
 	kill -0 "$SERVER_PID" 2>/dev/null || fail "the server exited before its shutdown delay"
+	# After the delay the listener is closed: a new connection is refused at
+	# once (curl exit 7), never accepted and left unanswered (exit 28/52/56).
+	sleep 4
+	rc=0
+	curl -s -m 3 -o /dev/null "$BASE/" || rc=$?
+	[[ "$rc" == 7 ]] || fail "a new connection after the shutdown delay ended with curl exit $rc, not a refusal"
 	for _ in $(seq 1 40); do
 		kill -0 "$SERVER_PID" 2>/dev/null || break
 		sleep 0.5
