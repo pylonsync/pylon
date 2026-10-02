@@ -2,7 +2,7 @@
 
 import { SyncEngine, generateId, pylonFetch, type Row } from "@pylonsync/sync";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { callFn, getBaseUrl, getReactStorage, storageKey } from "./index";
+import { callFn, clientTransport } from "./index";
 
 // ---------------------------------------------------------------------------
 // Query shapes
@@ -1014,13 +1014,7 @@ export function useAggregate<Row = Record<string, unknown>>(
     setError(null);
     try {
       const json = await pylonFetch<{ rows?: Row[] }>(
-        {
-          baseUrl: getBaseUrl(),
-          getToken: () =>
-            (getReactStorage().get(storageKey("token")) ?? undefined) as
-              | string
-              | undefined,
-        },
+        clientTransport(),
         `/api/aggregate/${entity}`,
         { method: "POST", body: specKey },
       );
@@ -1162,13 +1156,7 @@ export function useSearch<T = Row>(
         total?: number;
         tookMs?: number;
       }>(
-        {
-          baseUrl: getBaseUrl(),
-          getToken: () =>
-            (getReactStorage().get(storageKey("token")) ?? undefined) as
-              | string
-              | undefined,
-        },
+        clientTransport(),
         `/api/search/${entity}`,
         {
           method: "POST",

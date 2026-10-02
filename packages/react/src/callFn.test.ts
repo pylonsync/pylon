@@ -6,7 +6,7 @@
 // behaved differently depending on which import you reached for.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { callFn } from "./index";
+import { callFn, configureClient, getReactStorage, setReactStorage } from "./index";
 import { peekActiveEngine, setActiveEngine } from "./engine-registry";
 
 describe("callFn", () => {
@@ -72,6 +72,43 @@ describe("callFn", () => {
     await callFn("addRoom", { name: "Main" }, { token: "someone-elses" });
     expect(calls).toHaveLength(0);
     expect(requests).toHaveLength(1);
+  });
+
+  test("a stored token the server rejects is cleared and not sent again", async () => {
+    // The server answers `X-Pylon-Bearer-Rejected: 1` when the bearer
+    // resolved to no one; it used the session cookie instead. The next call
+    // must not resend the stale token.
+    const data = new Map<string, string>([
+      ["pylon:miles:token", "stale"],
+      ["pylon:miles:userId", "u_old"],
+    ]);
+    const prevStorage = getReactStorage();
+    setReactStorage({
+      get: (k) => data.get(k) ?? null,
+      set: (k, v) => void data.set(k, v),
+      remove: (k) => void data.delete(k),
+    });
+    configureClient({ appName: "miles" });
+    globalThis.fetch = (async (input: any, init: any = {}) => {
+      const headers = (init.headers ?? {}) as Record<string, string>;
+      requests.push({ url: String(input?.url ?? input), headers });
+      const reply: Record<string, string> = { "content-type": "application/json" };
+      if (headers.Authorization === "Bearer stale") reply["x-pylon-bearer-rejected"] = "1";
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: reply });
+    }) as typeof fetch;
+    try {
+      await callFn("resetDemoDealership");
+      expect(data.has("pylon:miles:token")).toBe(false);
+      expect(data.has("pylon:miles:userId")).toBe(false);
+      await callFn("resetDemoDealership");
+      expect(requests.map((r) => r.headers.Authorization as string | undefined)).toEqual([
+        "Bearer stale",
+        undefined,
+      ]);
+    } finally {
+      setReactStorage(prevStorage);
+      configureClient({ appName: "default" });
+    }
   });
 
   test("peekActiveEngine never constructs an engine", async () => {

@@ -70,11 +70,13 @@ export {
 export type { PylonRouter } from "./useRouter";
 
 import {
+  clearRejectedToken,
   defaultStorage,
   pylonFetch,
   pylonFetchRaw,
   PylonHttpError,
   type Storage as PylonStorage,
+  type TransportConfig,
 } from "@pylonsync/sync";
 import { peekActiveEngine } from "./engine-registry";
 
@@ -385,13 +387,27 @@ function assertBaseUrlSafeForEnv(): void {
  * token getter, and cookie credentials are all centralized in
  * `pylonFetch`. Cookie-auth apps work because the transport always
  * sets `credentials: "include"`; bearer-auth apps work because
- * `getToken` returns the cached session token.
+ * `getToken` returns the stored session token (or `explicitToken`).
+ *
+ * When the server answers that the token sent resolved to no one
+ * (`X-Pylon-Bearer-Rejected`), the stored token is cleared so later
+ * calls stop sending it and the session cookie applies alone. An
+ * `explicitToken` that is not the stored token is left to its caller.
+ *
+ * @internal Shared by the helpers in this package.
  */
-function transportConfig(): import("@pylonsync/sync").TransportConfig {
+export function clientTransport(explicitToken?: string): TransportConfig {
   return {
     baseUrl: getBaseUrl(),
-    getToken: () => currentAuthToken() ?? undefined,
+    getToken: () => explicitToken ?? currentAuthToken() ?? undefined,
+    onBearerRejected: (token) => {
+      clearRejectedToken(_storage, storageKey("token"), token);
+    },
   };
+}
+
+function transportConfig(): TransportConfig {
+  return clientTransport();
 }
 
 async function apiRequest(
@@ -610,10 +626,7 @@ export async function callFn<T = unknown>(
     return engine.fn<T>(name, args);
   }
   return pylonFetch<T>(
-    {
-      baseUrl: getBaseUrl(),
-      getToken: () => options.token ?? currentAuthToken() ?? undefined,
-    },
+    clientTransport(options.token),
     `/api/fn/${name}`,
     { method: "POST", json: args },
   );
@@ -773,10 +786,7 @@ export async function* streamFn(
   args: Record<string, unknown> = {},
   options: StreamFnOptions = {}
 ): AsyncGenerator<string, unknown, unknown> {
-  const transport = {
-    baseUrl: getBaseUrl(),
-    getToken: () => options.token ?? currentAuthToken() ?? undefined,
-  };
+  const transport = clientTransport(options.token);
   // Streaming response — use pylonFetchRaw so we can read .body
   // ourselves. URL + auth + credentials are centralized in the
   // transport.
@@ -877,10 +887,7 @@ export async function* resumeStream(
   streamId: string,
   options: { token?: string; since?: number } = {}
 ): AsyncGenerator<string, unknown, unknown> {
-  const transport = {
-    baseUrl: getBaseUrl(),
-    getToken: () => options.token ?? currentAuthToken() ?? undefined,
-  };
+  const transport = clientTransport(options.token);
   const cursor: SseCursor = {
     lastSeq: options.since ?? 0,
     terminal: false,
@@ -1018,10 +1025,7 @@ export async function uploadFile(
   filename ??= "upload";
   contentType ??= "application/octet-stream";
 
-  const transport = {
-    baseUrl: getBaseUrl(),
-    getToken: () => options.token ?? currentAuthToken() ?? undefined,
-  };
+  const transport = clientTransport(options.token);
 
   const slot = await pylonFetch<{ uploadUrl: string; assetId: string }>(
     transport,

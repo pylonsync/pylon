@@ -2851,6 +2851,11 @@ pub struct WsUpgradeRequest {
     /// can't read the victim's token to set the subprotocol), so it
     /// stays Origin-agnostic for native clients that send no Origin.
     pub cookie_auth: bool,
+    /// The session cookie's token when the request carried one, whether or
+    /// not it became `bearer_token`. The dispatch site falls back to it when
+    /// an explicit bearer resolves to no one (see
+    /// [`WsUpgradeRequest::fall_back_to_cookie`]).
+    pub cookie_token: Option<String>,
     /// The client's address as the HTTP server resolved it (trusted
     /// proxy hops applied). Set by the dispatch site; `None` from
     /// [`inspect_ws_upgrade`].
@@ -2912,13 +2917,14 @@ pub fn inspect_ws_upgrade(
     // Cookie fallback runs ONLY if no bearer was found via the
     // header / subprotocol path — bearer wins so explicit auth can
     // override the ambient cookie when both are present.
+    let cookie_token = cookie_header
+        .as_deref()
+        .and_then(|cookies| pylon_auth::extract_session_cookie(cookies, cookie_name));
     let mut cookie_auth = false;
     if bearer_token.is_none() {
-        if let Some(cookies) = cookie_header.as_deref() {
-            if let Some(tok) = pylon_auth::extract_session_cookie(cookies, cookie_name) {
-                bearer_token = Some(tok);
-                cookie_auth = true;
-            }
+        if let Some(tok) = cookie_token.clone() {
+            bearer_token = Some(tok);
+            cookie_auth = true;
         }
     }
     if !upgrade_ok {
@@ -2929,8 +2935,62 @@ pub fn inspect_ws_upgrade(
         bearer_token,
         chosen_protocol,
         cookie_auth,
+        cookie_token,
         client_ip: None,
     })
+}
+
+impl WsUpgradeRequest {
+    /// Authenticate with the session cookie instead of an explicit bearer
+    /// that resolves to no one (an unknown, expired or revoked session
+    /// token, or an operator session, which is no one on the app's socket).
+    ///
+    /// The caller passes `origin_trusted`: the result of the same Origin
+    /// check a cookie-authenticated upgrade must pass. When it is false, or
+    /// the bearer resolves to an identity, or the cookie does not, nothing
+    /// changes. A bearer that `auth` rejects outright (a bad API key or JWT)
+    /// also stays, so the handshake still closes with that reason.
+    ///
+    /// Returns true when the request now authenticates with the cookie. The
+    /// `bearer.<token>` subprotocol the client offered is still echoed, so
+    /// the browser accepts the handshake.
+    pub fn fall_back_to_cookie(&mut self, auth: &WsAuth, origin_trusted: bool) -> bool {
+        if self.cookie_auth || !origin_trusted {
+            return false;
+        }
+        let (Some(bearer), Some(cookie)) =
+            (self.bearer_token.as_deref(), self.cookie_token.as_deref())
+        else {
+            return false;
+        };
+        if auth.has_identity(bearer) != Some(false) || auth.has_identity(cookie) != Some(true) {
+            return false;
+        }
+        self.bearer_token = Some(cookie.to_string());
+        self.cookie_auth = true;
+        true
+    }
+}
+
+impl WsAuth {
+    /// Whether `token` resolves to a user or the admin, after the same
+    /// enrichment the handshake applies. `None` when the resolver rejects
+    /// the token outright. Does not count as a use of an API key.
+    fn has_identity(&self, token: &str) -> Option<bool> {
+        let mut ctx = pylon_auth::recheck_bearer_token(
+            Some(token),
+            &self.sessions,
+            &self.api_keys,
+            self.admin_token.as_deref(),
+            self.jwt_secret.as_deref(),
+            self.jwt_issuer.as_deref(),
+        )
+        .ok()?;
+        if let Some(enrich) = self.enrich.as_ref() {
+            enrich(&mut ctx);
+        }
+        Some(ctx.user_id.is_some() || ctx.is_admin)
+    }
 }
 
 /// Hijack a tiny_http request as a WebSocket. Writes the 101
@@ -3113,6 +3173,66 @@ mod tests {
             !r.cookie_auth,
             "explicit bearer must win over the ambient cookie"
         );
+        assert_eq!(r.cookie_token.as_deref(), Some("tok-cookie"));
+    }
+
+    #[test]
+    fn stale_bearer_falls_back_to_the_cookie_only_from_a_trusted_origin() {
+        fn hdr(name: &str, value: &str) -> tiny_http::Header {
+            tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()).unwrap()
+        }
+        let sessions = Arc::new(SessionStore::new());
+        let cookie_session = sessions.create("user-cookie".into());
+        let bearer_session = sessions.create("user-bearer".into());
+        let auth = WsAuth {
+            sessions: Arc::clone(&sessions),
+            api_keys: Arc::new(ApiKeyStore::new()),
+            admin_token: None,
+            jwt_secret: None,
+            jwt_issuer: None,
+            enrich: None,
+        };
+        let upgrade = |bearer: &str| {
+            let headers = vec![
+                hdr("Upgrade", "websocket"),
+                hdr("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ=="),
+                hdr("Sec-WebSocket-Protocol", &format!("bearer.{bearer}")),
+                hdr("Cookie", &format!("app_session={}", cookie_session.token)),
+            ];
+            inspect_ws_upgrade(&headers, "app_session").unwrap()
+        };
+
+        // A stale bearer from a trusted Origin gives way to the cookie, and
+        // the request is then Origin-gated as a cookie upgrade.
+        let mut r = upgrade("stale-token");
+        assert!(r.fall_back_to_cookie(&auth, true));
+        assert_eq!(
+            r.bearer_token.as_deref(),
+            Some(cookie_session.token.as_str())
+        );
+        assert!(r.cookie_auth);
+        assert_eq!(r.chosen_protocol.as_deref(), Some("bearer.stale-token"));
+
+        // From an untrusted Origin the cookie is not used.
+        let mut r = upgrade("stale-token");
+        assert!(!r.fall_back_to_cookie(&auth, false));
+        assert_eq!(r.bearer_token.as_deref(), Some("stale-token"));
+        assert!(!r.cookie_auth);
+
+        // A valid bearer keeps winning.
+        let mut r = upgrade(&bearer_session.token);
+        assert!(!r.fall_back_to_cookie(&auth, true));
+        assert_eq!(
+            r.bearer_token.as_deref(),
+            Some(bearer_session.token.as_str())
+        );
+        assert!(!r.cookie_auth);
+
+        // A revoked cookie is no fallback.
+        sessions.revoke(&cookie_session.token);
+        let mut r = upgrade("stale-token");
+        assert!(!r.fall_back_to_cookie(&auth, true));
+        assert_eq!(r.bearer_token.as_deref(), Some("stale-token"));
     }
 
     #[test]

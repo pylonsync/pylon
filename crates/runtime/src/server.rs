@@ -4899,13 +4899,16 @@ fn start_server(
                 } else {
                     None
                 };
-                if upgrade_req.cookie_auth
-                    && !ws_cookie_origin_trusted(
-                        req_origin_header.as_deref(),
-                        &cors_allowlist,
-                        ws_host.as_deref(),
-                    )
-                {
+                // A bearer that resolves to no one (a stale token the client
+                // kept) gives way to a valid session cookie, but only from an
+                // Origin that a cookie-only upgrade would be accepted from.
+                let cookie_origin_trusted = ws_cookie_origin_trusted(
+                    req_origin_header.as_deref(),
+                    &cors_allowlist,
+                    ws_host.as_deref(),
+                );
+                upgrade_req.fall_back_to_cookie(&ws_auth, cookie_origin_trusted);
+                if upgrade_req.cookie_auth && !cookie_origin_trusted {
                     tracing::warn!(
                         "[ws] rejected cookie-authed upgrade from untrusted origin {:?} — \
                          add it to manifest.auth.trustedOrigins or PYLON_CORS_ORIGIN",
@@ -6035,33 +6038,7 @@ fn start_server(
             // the check for them so server-to-server API callers keep working
             // without needing Origin headers.
             if !is_bearer && !matches!(method, Method::Get | Method::Head | Method::Options) {
-                let origin = request
-                    .headers()
-                    .iter()
-                    .find(|h| h.field.as_str() == "Origin" || h.field.as_str() == "origin")
-                    .map(|h| h.value.as_str().to_string());
-                let referer = request
-                    .headers()
-                    .iter()
-                    .find(|h| h.field.as_str() == "Referer" || h.field.as_str() == "referer")
-                    .map(|h| h.value.as_str().to_string());
-                // Dev accepts same-origin posts (Origin matches Host). See
-                // the CSRF allowlist comment at boot.
-                let host = if is_dev {
-                    request
-                        .headers()
-                        .iter()
-                        .find(|h| h.field.equiv("Host"))
-                        .map(|h| h.value.as_str().to_string())
-                } else {
-                    None
-                };
-                if let Err(err) = csrf.check_with_host(
-                    method_str,
-                    origin.as_deref(),
-                    referer.as_deref(),
-                    host.as_deref(),
-                ) {
+                if let Err(err) = csrf_check(&request, &csrf, is_dev) {
                     let body = json_error(&err.code, &err.message);
                     let response = with_security_headers(
                         Response::from_string(&body)
@@ -6112,13 +6089,15 @@ fn start_server(
 
         // Extract auth token + auth context EARLY so every fast path (upload,
         // shard SSE, fn streaming, AI streaming) can enforce auth the same
-        // way the router does. Previously these paths ran before auth
-        // extraction and bypassed the plugin/router auth chain entirely.
+        // way the router does.
         //
         // Two transports for the same opaque session token:
         //   1. `Authorization: Bearer <token>` — CLI, mobile, server-to-server
         //   2. `Cookie: <name>=<token>` — browsers (HttpOnly, XSS can't read)
-        // Bearer wins when both are present (explicit beats ambient).
+        // A bearer that resolves to an identity wins over the cookie. A bearer
+        // that resolves to no one gives way to a valid session cookie when the
+        // request passes the CSRF check a cookie-only request must pass. See
+        // `resolve_request_identity`.
         let bearer_token: Option<String> = request
             .headers()
             .iter()
@@ -6137,102 +6116,75 @@ fn start_server(
                 .iter()
                 .any(|h| h.field.as_str().as_str().eq_ignore_ascii_case(STUDIO_HEADER)),
         );
-        let cookie_token: Option<String> = if bearer_token.is_some() {
-            None
-        } else {
-            let cookies = request
-                .headers()
-                .iter()
-                .find(|h| h.field.as_str() == "Cookie" || h.field.as_str() == "cookie")
-                .map(|h| h.value.as_str().to_string());
-            cookies.as_deref().and_then(|c| {
+        let cookie_token: Option<String> = request
+            .headers()
+            .iter()
+            .find(|h| h.field.as_str() == "Cookie" || h.field.as_str() == "cookie")
+            .and_then(|h| {
+                let c = h.value.as_str();
                 let studio = studio_request
                     .then(|| {
                         pylon_auth::extract_session_cookie(c, &studio_cookie_name(&cookie_config))
                     })
                     .flatten();
                 studio.or_else(|| pylon_auth::extract_session_cookie(c, &cookie_config.name))
-            })
-        };
-        let auth_token: Option<String> = bearer_token.or(cookie_token);
-        // Token dispatcher (in priority order):
+            });
+        // Token dispatcher (in priority order), shared with the WebSocket
+        // handshake through `pylon_auth::resolve_bearer_token`:
         //   1. Admin token → AuthContext::admin
         //   2. `pk.…` API key → AuthContext::from_api_key (401 on bad)
-        //   3. Looks-like-JWT + PYLON_JWT_SECRET set → JWT verify
-        //   4. Otherwise → session store lookup
-        // pk. check happens BEFORE looks_like_jwt because an api-key
-        // token also has 3 dot-separated segments and would otherwise
-        // be misrouted.
-        let auth_ctx_result: Result<pylon_auth::AuthContext, &'static str> = if admin_token
-            .is_some()
-            && auth_token.is_some()
-            && pylon_auth::constant_time_eq(
-                auth_token.as_deref().unwrap_or("").as_bytes(),
-                admin_token.as_deref().unwrap_or("").as_bytes(),
-            )
-        {
-            Ok(pylon_auth::AuthContext::admin())
-        } else if let Some(t) = auth_token.as_deref() {
-            if t.starts_with("pk.") {
-                match ak.verify(t) {
-                    Ok(key) => Ok(pylon_auth::AuthContext::from_api_key(
-                        key.user_id,
-                        key.id,
-                        key.scopes,
-                    )),
-                    Err(_) => Err("INVALID_API_KEY"),
+        //   3. Looks-like-JWT + PYLON_JWT_SECRET set → JWT verify (401 on bad)
+        //   4. Otherwise → session store lookup (anonymous when unknown)
+        // An operator session is for running the deployment through Studio.
+        // On the app's own routes it is no one: it must not reach app
+        // functions or auth routes as a user (or, lifted, as an admin).
+        let resolve_token =
+            |token: Option<&str>| -> Result<pylon_auth::AuthContext, &'static str> {
+                let mut ctx = pylon_auth::resolve_bearer_token(
+                    token,
+                    &ss,
+                    &ak,
+                    admin_token.as_deref(),
+                    jwt_secret().map(String::as_str),
+                    jwt_issuer().map(String::as_str),
+                )?;
+                if !studio_request {
+                    drop_operator_identity(&account_store, &mut ctx);
                 }
-            } else if pylon_auth::jwt::looks_like_jwt(t) && jwt_secret().is_some() {
-                // P0-6 (codex Wave-5 review): require PYLON_JWT_ISSUER
-                // when JWT auth is enabled. Without it, tokens minted
-                // with the same HS256 secret for ANY issuer would
-                // verify, letting a JWT minted for "external-system"
-                // log in as that system's `sub`. Refuse on misconfig.
-                let Some(issuer) = jwt_issuer() else {
-                    tracing::warn!(
-                        "[auth] PYLON_JWT_SECRET set but PYLON_JWT_ISSUER missing — \
-                         refusing JWT verify (set both to enable JWT sessions)"
-                    );
-                    // Pre-refactor used `Err("JWT_MISCONFIGURED")?` which
-                    // propagated to start()'s Result and crashed the server.
-                    // Now we're inside a per-request closure returning () —
-                    // reject just this request and let the operator see the
-                    // misconfig in the warn log + their failed requests.
-                    let body = json_error(
-                        "JWT_MISCONFIGURED",
-                        "JWT auth requires both PYLON_JWT_SECRET and PYLON_JWT_ISSUER",
-                    );
-                    let response = with_security_headers(
-                        Response::from_string(&body)
-                            .with_status_code(503u16)
-                            .with_header(
-                                Header::from_bytes("Content-Type", "application/json").unwrap(),
-                            ),
-                    );
-                    let _ = request.respond(response);
-                    mt.record_request(method.as_str(), 503);
-                    return;
-                };
-                let secret = jwt_secret().expect("checked above");
-                match pylon_auth::jwt::verify(t, secret.as_bytes(), Some(issuer)) {
-                    Ok(claims) => {
-                        let mut ctx = pylon_auth::AuthContext::authenticated(claims.sub);
-                        ctx.roles = claims.roles;
-                        if let Some(t) = claims.tenant_id {
-                            ctx = ctx.with_tenant(t);
-                        }
-                        Ok(ctx)
-                    }
-                    Err(_) => Err("INVALID_JWT"),
-                }
-            } else {
-                Ok(ss.resolve(Some(t)))
+                Ok(ctx)
+            };
+        let identity = resolve_request_identity(
+            bearer_token,
+            cookie_token,
+            || csrf_check(&request, &csrf, is_dev).is_ok(),
+            resolve_token,
+        );
+        let identity = match identity {
+            Ok(identity) => identity,
+            Err("JWT_MISCONFIGURED") => {
+                // Without PYLON_JWT_ISSUER, a token minted with the same
+                // HS256 secret for ANY issuer would verify. Reject just this
+                // request; the operator sees the misconfig in the warn log
+                // and in the failed requests.
+                tracing::warn!(
+                    "[auth] PYLON_JWT_SECRET set but PYLON_JWT_ISSUER missing — \
+                     refusing JWT verify (set both to enable JWT sessions)"
+                );
+                let body = json_error(
+                    "JWT_MISCONFIGURED",
+                    "JWT auth requires both PYLON_JWT_SECRET and PYLON_JWT_ISSUER",
+                );
+                let response = with_security_headers(
+                    Response::from_string(&body)
+                        .with_status_code(503u16)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        ),
+                );
+                let _ = request.respond(response);
+                mt.record_request(method.as_str(), 503);
+                return;
             }
-        } else {
-            Ok(ss.resolve(None))
-        };
-        let mut auth_ctx = match auth_ctx_result {
-            Ok(c) => c,
             Err(reason) => {
                 let body = format!(
                     r#"{{"error":{{"code":"{reason}","message":"Bearer token is malformed, expired, or revoked"}}}}"#
@@ -6248,6 +6200,11 @@ fn start_server(
                 return;
             }
         };
+        // The token the identity came from. The router uses it for the
+        // routes that act on the session itself (logout, refresh, select-org).
+        let auth_token: Option<String> = identity.token;
+        let bearer_rejected = identity.bearer_rejected;
+        let mut auth_ctx = identity.ctx;
 
         // Wave-7 E: trusted-device cookie. Read `pylon_trusted_device=<token>`,
         // resolve it, and if the record's user_id matches the current
@@ -6279,12 +6236,6 @@ fn start_server(
         // (`crate::frontend::resolve_request_auth`) via `lift_admin` so both
         // paths resolve `is_admin` identically — see the helper's doc for the
         // two designation paths + the API-key exclusion.
-        // An operator session is for running the deployment through Studio.
-        // On the app's own routes it is no one: it must not reach app
-        // functions or auth routes as a user (or, lifted, as an admin).
-        if !studio_request {
-            drop_operator_identity(&account_store, &mut auth_ctx);
-        }
         lift_admin(&runtime, &mut auth_ctx);
         // Operators own no row in the app's User entity, so lift_admin can't
         // see them. Same ordering rationale: before org-role enrichment.
@@ -9797,10 +9748,16 @@ fn start_server(
                     // HTTP response landing and the WS broadcast of the
                     // same events arriving. Without expose-headers the
                     // browser strips the header on cross-origin reads.
-                    "X-Pylon-Change-Seq",
+                    // X-Pylon-Bearer-Rejected tells the SDK to clear a stored
+                    // token the server did not accept.
+                    "X-Pylon-Change-Seq, X-Pylon-Bearer-Rejected",
                 )
                 .unwrap(),
             );
+        if bearer_rejected {
+            response = response
+                .with_header(Header::from_bytes(BEARER_REJECTED_HEADER, "1").unwrap());
+        }
         // Cookie-based auth requires `Access-Control-Allow-Credentials:
         // true` on the response, paired with a specific origin. Vary
         // ensures intermediaries don't cache one origin's response and
@@ -9986,6 +9943,31 @@ fn start_server(
 // The route() function has been extracted to the `pylon-router` crate.
 // See `pylon_router::route()` for the platform-agnostic routing logic.
 // The server now delegates to it via a `RouterContext`.
+
+/// The CSRF Origin/Referer check that a request authenticated by the
+/// session cookie must pass. Safe methods (GET, HEAD, OPTIONS) pass. In dev,
+/// an Origin that matches the Host also passes (see the CSRF allowlist
+/// comment at boot).
+fn csrf_check(
+    request: &tiny_http::Request,
+    csrf: &pylon_plugin::builtin::csrf::CsrfPlugin,
+    is_dev: bool,
+) -> Result<(), pylon_plugin::PluginError> {
+    let header = |name: &str| {
+        request
+            .headers()
+            .iter()
+            .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name))
+            .map(|h| h.value.as_str().to_string())
+    };
+    let host = if is_dev { header("Host") } else { None };
+    csrf.check_with_host(
+        request.method().as_str(),
+        header("Origin").as_deref(),
+        header("Referer").as_deref(),
+        host.as_deref(),
+    )
+}
 
 fn json_error(code: &str, message: &str) -> String {
     pylon_router::json_error(code, message)
@@ -10417,6 +10399,183 @@ pub(crate) fn drop_operator_identity(
         && pylon_auth::operator::find_by_user_id(accounts, uid).is_some()
     {
         *auth_ctx = pylon_auth::AuthContext::anonymous();
+    }
+}
+
+/// Response header set when the request's bearer token resolved to no one:
+/// an unknown, expired or revoked session token, or an operator session on
+/// an app route. A client that stored the token clears it on this header.
+pub(crate) const BEARER_REJECTED_HEADER: &str = "X-Pylon-Bearer-Rejected";
+
+/// The identity a request acts as, and where it came from.
+#[derive(Debug)]
+pub(crate) struct RequestIdentity {
+    pub ctx: pylon_auth::AuthContext,
+    /// The token `ctx` came from. Routes that act on the session itself
+    /// (logout, refresh, select-org) act on this token.
+    pub token: Option<String>,
+    /// True when the request carried a bearer token that resolved to no one.
+    pub bearer_rejected: bool,
+}
+
+fn has_identity(ctx: &pylon_auth::AuthContext) -> bool {
+    ctx.user_id.is_some() || ctx.is_admin
+}
+
+/// Pick the identity for a request from its bearer token and its session
+/// cookie.
+///
+/// - No bearer: the cookie decides, as before.
+/// - A bearer that resolves to an identity wins. The cookie is not read.
+/// - A bearer that `resolve` rejects (a bad API key or JWT) fails the
+///   request. Those are explicit credentials, and a typo must not be
+///   covered up by the cookie.
+/// - A bearer that resolves to no one (an unknown, expired or revoked session
+///   token, or an operator session on an app route) gives way to the cookie
+///   when the cookie resolves to an identity AND `cookie_allowed` returns
+///   true. Otherwise the request is anonymous, as before.
+///
+/// `cookie_allowed` is the CSRF check that a cookie-only request must pass.
+/// The request loop skips that check for any request with a bearer header,
+/// so without it here a cross-site request could carry a junk bearer and
+/// ride the cookie past the check. With it, the fallback is never available
+/// to a request that the cookie alone could not authenticate.
+pub(crate) fn resolve_request_identity(
+    bearer: Option<String>,
+    cookie: Option<String>,
+    cookie_allowed: impl FnOnce() -> bool,
+    resolve: impl Fn(Option<&str>) -> Result<pylon_auth::AuthContext, &'static str>,
+) -> Result<RequestIdentity, &'static str> {
+    let Some(bearer) = bearer else {
+        let ctx = resolve(cookie.as_deref())?;
+        return Ok(RequestIdentity {
+            ctx,
+            token: cookie,
+            bearer_rejected: false,
+        });
+    };
+    let ctx = resolve(Some(&bearer))?;
+    if has_identity(&ctx) {
+        return Ok(RequestIdentity {
+            ctx,
+            token: Some(bearer),
+            bearer_rejected: false,
+        });
+    }
+    if let Some(cookie) = cookie {
+        if cookie_allowed() {
+            if let Ok(cookie_ctx) = resolve(Some(&cookie)) {
+                if has_identity(&cookie_ctx) {
+                    return Ok(RequestIdentity {
+                        ctx: cookie_ctx,
+                        token: Some(cookie),
+                        bearer_rejected: true,
+                    });
+                }
+            }
+        }
+    }
+    Ok(RequestIdentity {
+        ctx,
+        token: Some(bearer),
+        bearer_rejected: true,
+    })
+}
+
+#[cfg(test)]
+mod request_identity_tests {
+    use super::resolve_request_identity;
+    use pylon_auth::AuthContext;
+
+    /// "good-*" tokens resolve to a user, "admin" to the admin, "pk.bad" is
+    /// rejected, and anything else is anonymous.
+    fn resolve(token: Option<&str>) -> Result<AuthContext, &'static str> {
+        match token {
+            Some("admin") => Ok(AuthContext::admin()),
+            Some("pk.bad") => Err("INVALID_API_KEY"),
+            Some(t) if t.starts_with("good-") => Ok(AuthContext::authenticated(t.to_string())),
+            _ => Ok(AuthContext::anonymous()),
+        }
+    }
+
+    fn s(v: &str) -> Option<String> {
+        Some(v.to_string())
+    }
+
+    #[test]
+    fn valid_bearer_wins_and_the_cookie_is_not_checked() {
+        let id = resolve_request_identity(
+            s("good-bearer"),
+            s("good-cookie"),
+            || panic!("the CSRF check must not run when the bearer resolves"),
+            resolve,
+        )
+        .unwrap();
+        assert_eq!(id.ctx.user_id.as_deref(), Some("good-bearer"));
+        assert_eq!(id.token.as_deref(), Some("good-bearer"));
+        assert!(!id.bearer_rejected);
+    }
+
+    #[test]
+    fn admin_bearer_wins() {
+        let id = resolve_request_identity(s("admin"), s("good-cookie"), || true, resolve).unwrap();
+        assert!(id.ctx.is_admin);
+        assert!(!id.bearer_rejected);
+    }
+
+    #[test]
+    fn stale_bearer_gives_way_to_a_valid_cookie() {
+        let id = resolve_request_identity(s("stale"), s("good-cookie"), || true, resolve).unwrap();
+        assert_eq!(id.ctx.user_id.as_deref(), Some("good-cookie"));
+        assert_eq!(id.token.as_deref(), Some("good-cookie"));
+        assert!(id.bearer_rejected);
+    }
+
+    #[test]
+    fn stale_bearer_stays_anonymous_when_the_csrf_check_fails() {
+        let id = resolve_request_identity(s("stale"), s("good-cookie"), || false, resolve).unwrap();
+        assert_eq!(id.ctx.user_id, None);
+        assert_eq!(id.token.as_deref(), Some("stale"));
+        assert!(id.bearer_rejected);
+    }
+
+    #[test]
+    fn stale_bearer_without_a_cookie_is_anonymous() {
+        let id = resolve_request_identity(s("stale"), None, || true, resolve).unwrap();
+        assert_eq!(id.ctx.user_id, None);
+        assert!(id.bearer_rejected);
+    }
+
+    #[test]
+    fn stale_bearer_and_stale_cookie_are_anonymous() {
+        let id = resolve_request_identity(s("stale"), s("stale-cookie"), || true, resolve).unwrap();
+        assert_eq!(id.ctx.user_id, None);
+        assert_eq!(id.token.as_deref(), Some("stale"));
+        assert!(id.bearer_rejected);
+    }
+
+    #[test]
+    fn rejected_api_key_fails_even_with_a_valid_cookie() {
+        let err =
+            resolve_request_identity(s("pk.bad"), s("good-cookie"), || true, resolve).unwrap_err();
+        assert_eq!(err, "INVALID_API_KEY");
+    }
+
+    #[test]
+    fn cookie_only_requests_are_unchanged() {
+        let id = resolve_request_identity(
+            None,
+            s("good-cookie"),
+            || panic!("cookie-only requests are CSRF-checked before auth"),
+            resolve,
+        )
+        .unwrap();
+        assert_eq!(id.ctx.user_id.as_deref(), Some("good-cookie"));
+        assert!(!id.bearer_rejected);
+        let anon = resolve_request_identity(None, None, || true, resolve).unwrap();
+        assert_eq!(anon.ctx.user_id, None);
+        assert_eq!(anon.token, None);
+        assert!(!anon.bearer_rejected);
     }
 }
 

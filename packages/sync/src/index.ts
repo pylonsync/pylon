@@ -9,6 +9,8 @@
 // ---------------------------------------------------------------------------
 
 import {
+  bearerRejected,
+  clearRejectedToken,
   pylonFetch,
   PylonHttpError,
   type TransportConfig,
@@ -45,7 +47,10 @@ export {
 export { IndexedDBPersistence, persistChange } from "./persistence";
 export type { ReplicaPersistence } from "./persistence";
 export {
+  BEARER_REJECTED_HEADER,
+  bearerRejected,
   buildRequest,
+  clearRejectedToken,
   pylonFetch,
   pylonFetchRaw,
   PylonHttpError,
@@ -1922,6 +1927,7 @@ export class SyncEngine {
             void this.pull();
           }
         },
+        onBearerRejected: (token) => this.dropRejectedToken(token),
       },
       path,
       {
@@ -2701,6 +2707,29 @@ export class SyncEngine {
   }
 
   /**
+   * The server answered with `X-Pylon-Bearer-Rejected`: the token the request
+   * sent resolved to no one (expired, revoked, or not a session of this app).
+   * Clear it from the app's namespace so later requests stop sending it and
+   * the session cookie, when there is one, applies alone. A token passed in
+   * `config.token` belongs to the caller and stays.
+   */
+  private dropRejectedToken(token: string): void {
+    if (this.config.token) return;
+    if (clearRejectedToken(this.storage, this.tokenStorageKey(), token)) {
+      console.warn(
+        "[pylon] the server rejected the stored auth token (expired, revoked, " +
+          "or issued by another app) and it has been cleared. Requests now " +
+          "authenticate with the session cookie when there is one.",
+      );
+    }
+  }
+
+  /** `dropRejectedToken` for a response to a request that sent `token`. */
+  private observeBearerVerdict(res: Response, token: string | null | undefined): void {
+    if (token && bearerRejected(res)) this.dropRejectedToken(token);
+  }
+
+  /**
    * Apply a freshly-observed session through the resolver and act on
    * the verdict. Serialized via `sessionChain` so concurrent triggers
    * (refreshResolvedSession from app code + multi-tab `session`
@@ -2899,10 +2928,12 @@ export class SyncEngine {
     // same → `resetReplica` never fires on /api/auth/select-org
     // → the local store keeps every previous tenant's rows in
     // cache and `db.useQuery` returns stale data after a switch.
-    return fetch(`${this.config.baseUrl}${path}`, {
+    const res = await fetch(`${this.config.baseUrl}${path}`, {
       headers,
       credentials: "include",
     });
+    this.observeBearerVerdict(res, token);
+    return res;
   }
 
   /**
@@ -3040,6 +3071,7 @@ export class SyncEngine {
         headers,
         credentials: "include",
       });
+      this.observeBearerVerdict(res, token);
       if (!res.ok) return null;
       const body = (await res.json()) as { token?: string; url?: string };
       if (!body.token || !body.url) return null;
@@ -3076,6 +3108,7 @@ export class SyncEngine {
       credentials: "include",
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
+    this.observeBearerVerdict(res, token);
     const text = await res.text();
     let parsed: unknown = null;
     if (text) {
@@ -4220,6 +4253,7 @@ export class SyncEngine {
       credentials: "include",
       body: body ? JSON.stringify(body) : undefined,
     });
+    this.observeBearerVerdict(res, token);
 
     if (!res.ok) {
       // Surface the status so the caller can distinguish transient

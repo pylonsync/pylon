@@ -16,6 +16,9 @@
 //  - X-Pylon-Change-Seq response header surfaced via the optional
 //    `onChangeSeq` callback (so callers can trigger catch-up pulls
 //    when a mutation's seq exceeds their local cursor)
+//  - X-Pylon-Bearer-Rejected response header surfaced via the optional
+//    `onBearerRejected` callback (so the owner of a stored token can
+//    clear a token the server no longer accepts)
 //
 // Streaming + raw-binary callers (file uploads, SSE) bypass the
 // JSON-parse step but reuse the URL/auth/credentials logic via
@@ -40,6 +43,48 @@ export interface TransportConfig {
    *  header when the server sets one. Returning a Promise pauses no
    *  one — the transport doesn't await it. */
   onChangeSeq?: (seq: number) => void;
+  /** Invoked with the bearer token a request sent when the server answers
+   *  with `X-Pylon-Bearer-Rejected: 1`: the server resolved the token to no
+   *  one (unknown, expired, or revoked). The code that stored the token
+   *  clears it here, so later requests stop sending it. */
+  onBearerRejected?: (token: string) => void;
+}
+
+/** Response header the server sets when the request's bearer token resolved
+ *  to no one. Lower case, as `Headers.get` matches without case. */
+export const BEARER_REJECTED_HEADER = "x-pylon-bearer-rejected";
+
+/** True when the server marked the bearer token the request sent as rejected. */
+export function bearerRejected(res: Response): boolean {
+  return res.headers?.get?.(BEARER_REJECTED_HEADER) === "1";
+}
+
+/**
+ * Remove a token the server rejected from `storage`, together with its
+ * `:userId` sibling. Only removes it when `key` still holds that exact token,
+ * so a sign-in that wrote a new token while the request was in flight keeps
+ * its token.
+ *
+ * The default unprefixed key `pylon_token` is left alone. Every app on an
+ * origin that has no `appName` shares it, so the token can belong to another
+ * app. Returns true when the token was removed.
+ */
+export function clearRejectedToken(
+  storage: { get(key: string): string | null; remove(key: string): void },
+  key: string,
+  token: string,
+): boolean {
+  if (key === "pylon_token") return false;
+  try {
+    if (storage.get(key) !== token) return false;
+    storage.remove(key);
+    if (key.endsWith(":token")) storage.remove(key.replace(/:token$/, ":userId"));
+    return true;
+  } catch {
+    // Storage can throw (Safari private mode). The token stays; the server
+    // keeps answering with the session cookie.
+    return false;
+  }
 }
 
 /**
@@ -90,13 +135,13 @@ export function buildRequest(
   config: TransportConfig,
   path: string,
   init: PylonRequestInit = {},
-): { url: string; init: RequestInit } {
+): { url: string; init: RequestInit; token?: string } {
   const base = resolveBaseUrl(config);
   const url = `${base}${path}`;
   const headers: Record<string, string> = { ...(init.headers ?? {}) };
   // Auth: explicit getToken wins over static token. Either may be
   // null/undefined — cookie-auth apps rely solely on credentials.
-  const token = config.getToken?.() ?? config.token;
+  const token = config.getToken?.() ?? config.token ?? undefined;
   if (token) headers["Authorization"] = `Bearer ${token}`;
   if (init.accept) headers["Accept"] = init.accept;
   let body: BodyInit | undefined = init.body;
@@ -106,6 +151,7 @@ export function buildRequest(
   }
   return {
     url,
+    token: token || undefined,
     init: {
       method: init.method ?? (body !== undefined ? "POST" : "GET"),
       headers,
@@ -153,8 +199,9 @@ export async function pylonFetch<T = unknown>(
   path: string,
   init: PylonRequestInit = {},
 ): Promise<T> {
-  const { url, init: req } = buildRequest(config, path, init);
+  const { url, init: req, token } = buildRequest(config, path, init);
   const res = await fetch(url, req);
+  reportBearerVerdict(config, res, token);
   const text = await res.text();
   let parsed: unknown = null;
   if (text) {
@@ -200,6 +247,19 @@ export async function pylonFetchRaw(
   path: string,
   init: PylonRequestInit = {},
 ): Promise<Response> {
-  const { url, init: req } = buildRequest(config, path, init);
-  return fetch(url, req);
+  const { url, init: req, token } = buildRequest(config, path, init);
+  const res = await fetch(url, req);
+  reportBearerVerdict(config, res, token);
+  return res;
+}
+
+/** Call `config.onBearerRejected` when the server rejected the token sent. */
+function reportBearerVerdict(
+  config: TransportConfig,
+  res: Response,
+  token: string | undefined,
+): void {
+  if (token && config.onBearerRejected && bearerRejected(res)) {
+    config.onBearerRejected(token);
+  }
 }
