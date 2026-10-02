@@ -38,7 +38,7 @@ git push origin main
 # → live at https://your-app.stack0.app
 ```
 
-A deploy is live once each machine answers `/health/ready` with 200, which happens after the runtime has rendered a page on every function runner. With more than one machine, the control plane updates one machine at a time and waits until it is ready, and Fly's health check passes, before it moves to the next. The other machines serve the previous release meanwhile. A machine that is not ready after 150 seconds stops the rollout, the deploy fails, and the machines not yet updated keep the previous release. With one machine, each deploy restarts it, and requests that arrive during the restart are delayed or fail.
+A deploy is live once each machine answers `/health/ready` with 200, which happens after the runtime has rendered a page on every function runner. With more than one machine, the control plane updates one machine at a time and waits until it is ready, and Fly's health check passes, before it moves to the next. The other machines serve the previous release meanwhile. A machine that is not ready after 150 seconds stops the rollout, the deploy fails, and the machines not yet updated keep the previous release. With one machine, each deploy restarts it. Requests that arrive during the restart wait until the new process is ready, typically 20 to 35 seconds.
 
 You can also trigger a manual deploy of any branch from the project's dashboard. Use this to redeploy without a fresh push, or to ship a feature branch to the project's machine for testing.
 
