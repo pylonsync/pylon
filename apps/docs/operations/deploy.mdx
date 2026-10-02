@@ -218,7 +218,7 @@ Use `/health` for liveness and `/health/ready` to decide when an instance gets t
 4. Shards save their state. With several machines, each shard moves to another machine (up to `PYLON_SHARD_DRAIN_SECS`, default 20).
 5. The server flushes the change log, checkpoints SQLite, and exits.
 
-A second signal stops the process at once.
+A second signal stops the process at once. On Windows there is no `SIGTERM`, and the process stops at once.
 
 Set `PYLON_SHUTDOWN_DELAY_SECS` to at least the time your load balancer takes to mark an instance unhealthy: the number of failed checks it needs, times the check interval, plus the check timeout. For example, 3 failed checks at a 10 s interval with a 5 s timeout need at least 35 s. During the delay the load balancer sees the 503 and stops sending new requests, while requests that are already on their way still get an answer. A platform that removes the instance from the load balancer before it sends `SIGTERM` (for example, ECS behind an ALB) needs no delay. Give the platform's kill timeout room for the whole sequence: the delay, plus `PYLON_DRAIN_SECS`, plus `PYLON_SHARD_DRAIN_SECS` if you run shards.
 

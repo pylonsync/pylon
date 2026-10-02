@@ -270,22 +270,30 @@ FN="$(curl -fsS -X POST "$BASE/api/fn/greet" -H 'content-type: application/json'
 echo "$FN" | grep -q '"duration":"2m"' || fail "greet did not use the external package: $FN"
 echo "$FN" | grep -q 'hello from content' || fail "greet did not read the included file: $FN"
 
-echo "→ SIGTERM: /health/ready drains while pages are still served"
-kill -TERM "$SERVER_PID"
-sleep 1
-READY="$(curl -s "$BASE/health/ready")"
-echo "$READY" | grep -q '"status":"draining"' || fail "/health/ready after SIGTERM: $READY"
-[[ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/health/ready")" == 503 ]] || fail "/health/ready after SIGTERM is not 503"
-[[ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/")" == 200 ]] || fail "GET / during the shutdown delay failed"
-kill -0 "$SERVER_PID" 2>/dev/null || fail "the server exited before its shutdown delay"
-for _ in $(seq 1 40); do
-	kill -0 "$SERVER_PID" 2>/dev/null || break
-	sleep 0.5
-done
-kill -0 "$SERVER_PID" 2>/dev/null && fail "the server did not exit after its shutdown delay and drain"
-wait "$SERVER_PID" 2>/dev/null || true
-SERVER_PID=""
-grep -q "Drain complete" "$TMP/server.log" || fail "the server did not drain before it exited"
+# Windows has no SIGTERM: kill ends the process at once, so the drain is
+# checked on Unix only.
+if [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* || "$(uname -s)" == CYGWIN* ]]; then
+	kill "$SERVER_PID"
+	wait "$SERVER_PID" 2>/dev/null || true
+	SERVER_PID=""
+else
+	echo "→ SIGTERM: /health/ready drains while pages are still served"
+	kill -TERM "$SERVER_PID"
+	sleep 1
+	READY="$(curl -s "$BASE/health/ready")"
+	echo "$READY" | grep -q '"status":"draining"' || fail "/health/ready after SIGTERM: $READY"
+	[[ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/health/ready")" == 503 ]] || fail "/health/ready after SIGTERM is not 503"
+	[[ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/")" == 200 ]] || fail "GET / during the shutdown delay failed"
+	kill -0 "$SERVER_PID" 2>/dev/null || fail "the server exited before its shutdown delay"
+	for _ in $(seq 1 40); do
+		kill -0 "$SERVER_PID" 2>/dev/null || break
+		sleep 0.5
+	done
+	kill -0 "$SERVER_PID" 2>/dev/null && fail "the server did not exit after its shutdown delay and drain"
+	wait "$SERVER_PID" 2>/dev/null || true
+	SERVER_PID=""
+	grep -q "Drain complete" "$TMP/server.log" || fail "the server did not drain before it exited"
+fi
 find "$TMP/run/dist" -type f | sort >"$TMP/files.after"
 diff "$TMP/files.before" "$TMP/files.after" >/dev/null || {
 	diff "$TMP/files.before" "$TMP/files.after" >&2 || true
