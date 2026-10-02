@@ -19,6 +19,8 @@
 #   4. The server writes nothing inside the artifact: data goes next to it.
 #   5. /health/ready answers 200 only after the SSR warm-up rendered / on
 #      every runner, and the first page after it is warm.
+#   6. After SIGTERM, /health/ready answers 503 "draining" while pages are
+#      still served for PYLON_SHUTDOWN_DELAY_SECS, then the server exits.
 
 set -euo pipefail
 
@@ -221,7 +223,7 @@ echo "→ pylon start <dir> with no node_modules above it"
 mkdir -p "$TMP/run"
 cp -R "$APP/dist" "$TMP/run/dist"
 find "$TMP/run/dist" -type f | sort >"$TMP/files.before"
-(cd "$TMP/run" && PYLON_DEV_MODE=true exec "$PYLON" start dist --port "$PORT" >"$TMP/server.log" 2>&1) &
+(cd "$TMP/run" && PYLON_DEV_MODE=true PYLON_SHUTDOWN_DELAY_SECS=4 exec "$PYLON" start dist --port "$PORT" >"$TMP/server.log" 2>&1) &
 SERVER_PID=$!
 for _ in $(seq 1 60); do
 	curl -fsS "http://localhost:$PORT/health" >/dev/null 2>&1 && break
@@ -268,9 +270,22 @@ FN="$(curl -fsS -X POST "$BASE/api/fn/greet" -H 'content-type: application/json'
 echo "$FN" | grep -q '"duration":"2m"' || fail "greet did not use the external package: $FN"
 echo "$FN" | grep -q 'hello from content' || fail "greet did not read the included file: $FN"
 
-kill "$SERVER_PID"
+echo "→ SIGTERM: /health/ready drains while pages are still served"
+kill -TERM "$SERVER_PID"
+sleep 1
+READY="$(curl -s "$BASE/health/ready")"
+echo "$READY" | grep -q '"status":"draining"' || fail "/health/ready after SIGTERM: $READY"
+[[ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/health/ready")" == 503 ]] || fail "/health/ready after SIGTERM is not 503"
+[[ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/")" == 200 ]] || fail "GET / during the shutdown delay failed"
+kill -0 "$SERVER_PID" 2>/dev/null || fail "the server exited before its shutdown delay"
+for _ in $(seq 1 40); do
+	kill -0 "$SERVER_PID" 2>/dev/null || break
+	sleep 0.5
+done
+kill -0 "$SERVER_PID" 2>/dev/null && fail "the server did not exit after its shutdown delay and drain"
 wait "$SERVER_PID" 2>/dev/null || true
 SERVER_PID=""
+grep -q "Drain complete" "$TMP/server.log" || fail "the server did not drain before it exited"
 find "$TMP/run/dist" -type f | sort >"$TMP/files.after"
 diff "$TMP/files.before" "$TMP/files.after" >/dev/null || {
 	diff "$TMP/files.before" "$TMP/files.after" >&2 || true

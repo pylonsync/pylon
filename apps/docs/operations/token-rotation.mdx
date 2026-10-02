@@ -29,7 +29,7 @@ The server only reads `PYLON_ADMIN_TOKEN` at startup. Rotation requires a restar
    openssl rand -hex 32 > /etc/pylon/admin_token.new
    ```
 
-2. **Deploy side-by-side**. Start a new instance with the new token and let the load balancer health check promote it. Stop routing traffic to the old instance, then let your load balancer's connection drain finish so mid-request admin calls complete before you send `SIGTERM`. (SIGTERM itself is not graceful; see [Deploy → Shutdown and rolling deploys](/operations/deploy#shutdown-and-rolling-deploys). The drain must happen at the load balancer.)
+2. **Deploy side-by-side**. Start a new instance with the new token and let the load balancer health check promote it. Then send `SIGTERM` to the old instance. It answers `/health/ready` with 503 and finishes the requests it has before it exits; see [Deploy → Shutdown and rolling deploys](/operations/deploy#shutdown-and-rolling-deploys).
 
 3. **Update clients**. Update any automation (CI, runbooks, cron, admin UIs) that hardcodes the old token. Search Vault, 1Password, GitHub Actions secrets, Cloudflare environment variables, and other secret stores for the old token prefix before you delete the value.
 

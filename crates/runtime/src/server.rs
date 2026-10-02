@@ -659,11 +659,52 @@ pub fn request_shutdown() {
     }
 }
 
-/// Turn SIGTERM and SIGINT into a graceful shutdown: the request loop stops,
-/// in-flight requests drain, and shards stop (on several machines, after
-/// saving their state and leaving the shard directory, so they move at
-/// once). A second signal ends the process at once. The handler only writes
-/// a byte to a pipe; a thread reads it and calls [`request_shutdown`].
+/// Set when a shutdown signal arrives: `/health/ready` answers 503
+/// `draining` from then on, so a load balancer stops sending new requests
+/// while the server still serves them for [`shutdown_delay`].
+static DRAINING: AtomicBool = AtomicBool::new(false);
+
+/// The `/health/ready` answer: draining wins over warming, which wins over
+/// ready.
+fn readiness(draining: bool, ssr_ready: bool) -> (u16, &'static str) {
+    if draining {
+        (503, "draining")
+    } else if !ssr_ready {
+        (503, "warming")
+    } else {
+        (200, "ready")
+    }
+}
+
+/// How long the server keeps taking requests after a shutdown signal,
+/// with `/health/ready` at 503, before it stops accepting and drains:
+/// `PYLON_SHUTDOWN_DELAY_SECS`, default 0. Set it to at least the load
+/// balancer's health check interval plus its timeout.
+fn shutdown_delay(env: Option<&str>) -> std::time::Duration {
+    std::time::Duration::from_secs(env.and_then(|v| v.trim().parse().ok()).unwrap_or(0))
+}
+
+/// The graceful shutdown a signal starts: report draining, keep serving for
+/// `delay`, then [`request_shutdown`].
+fn begin_shutdown(delay: std::time::Duration) {
+    DRAINING.store(true, Ordering::SeqCst);
+    if !delay.is_zero() {
+        tracing::warn!(
+            "[shutdown] /health/ready answers 503; serving requests for {}s more (PYLON_SHUTDOWN_DELAY_SECS)",
+            delay.as_secs()
+        );
+        std::thread::sleep(delay);
+    }
+    request_shutdown();
+}
+
+/// Turn SIGTERM and SIGINT into a graceful shutdown ([`begin_shutdown`]):
+/// `/health/ready` answers 503, requests are still served for
+/// [`shutdown_delay`], then the request loop stops, in-flight requests
+/// drain, and shards stop (on several machines, after saving their state
+/// and leaving the shard directory, so they move at once). A second signal
+/// ends the process at once. The handler only writes a byte to a pipe; a
+/// thread reads it and starts the shutdown.
 #[cfg(unix)]
 fn install_shutdown_signals() {
     use std::sync::atomic::AtomicI32;
@@ -714,7 +755,9 @@ fn install_shutdown_signals() {
                         libc::signal(libc::SIGTERM, libc::SIG_DFL);
                         libc::signal(libc::SIGINT, libc::SIG_DFL);
                     }
-                    request_shutdown();
+                    begin_shutdown(shutdown_delay(
+                        std::env::var("PYLON_SHUTDOWN_DELAY_SECS").ok().as_deref(),
+                    ));
                 }
             });
     });
@@ -722,6 +765,27 @@ fn install_shutdown_signals() {
 
 #[cfg(not(unix))]
 fn install_shutdown_signals() {}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+
+    #[test]
+    fn readiness_reports_draining_then_warming_then_ready() {
+        assert_eq!(readiness(true, true), (503, "draining"));
+        assert_eq!(readiness(true, false), (503, "draining"));
+        assert_eq!(readiness(false, false), (503, "warming"));
+        assert_eq!(readiness(false, true), (200, "ready"));
+    }
+
+    #[test]
+    fn the_shutdown_delay_is_off_unless_set() {
+        let secs = |d: std::time::Duration| d.as_secs();
+        assert_eq!(secs(shutdown_delay(None)), 0);
+        assert_eq!(secs(shutdown_delay(Some(" 10 "))), 10);
+        assert_eq!(secs(shutdown_delay(Some("soon"))), 0);
+    }
+}
 
 /// Global handle to the *current* `tiny_http::Server` so `request_shutdown()`
 /// can call `unblock()` without holding a reference — and so the request loop
@@ -4879,10 +4943,9 @@ fn start_server(
         // waits for it before sending traffic; /health stays the liveness
         // check and answers at once.
         if url == "/health/ready" && method == Method::Get {
-            let ready = crate::frontend::ssr_ready();
-            let status = if ready { 200u16 } else { 503u16 };
+            let (status, state) = readiness(DRAINING.load(Ordering::SeqCst), crate::frontend::ssr_ready());
             let body = serde_json::json!({
-                "status": if ready { "ready" } else { "warming" },
+                "status": state,
                 "uptime_secs": start_time.elapsed().as_secs(),
             })
             .to_string();

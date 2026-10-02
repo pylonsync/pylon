@@ -210,14 +210,26 @@ Use `/health` for liveness and `/health/ready` to decide when an instance gets t
 
 ## Shutdown and rolling deploys
 
-`SIGTERM` terminates the process. The runtime does not yet install a signal handler, so SIGTERM does not run an in-process drain. The drain path exists in the runtime, but it is not wired to a signal yet. Two things make an abrupt stop safe in practice:
+`SIGTERM` or `SIGINT` starts a graceful shutdown:
 
-- **SQLite (WAL mode) is crash-consistent.** An abrupt stop does not corrupt the database. The next start recovers the WAL, so there is no unflushed data to lose.
-- **Drain at the load balancer, not in the process.** For a rolling deploy with zero dropped requests, stop routing new traffic to the old instance. Wait out your load balancer's connection-drain (deregistration) delay so in-flight requests finish. Then stop the process.
+1. `/health/ready` returns 503 with `{"status":"draining"}`.
+2. The server keeps serving requests for `PYLON_SHUTDOWN_DELAY_SECS` (default 0).
+3. The server stops accepting requests and waits up to `PYLON_DRAIN_SECS` (default 10) for in-flight requests and in-memory jobs to finish.
+4. Shards save their state. With several machines, each shard moves to another machine (up to `PYLON_SHARD_DRAIN_SECS`, default 20).
+5. The server flushes the change log, checkpoints SQLite, and exits.
 
-For a rolling deploy: start the new instance, wait until `/health/ready` returns 200, stop routing traffic to the old one, wait for the drain window, then send `SIGTERM`.
+A second signal stops the process at once.
 
-`PYLON_DRAIN_SECS` (default 10s) bounds the drain loop for paths that do invoke the runtime's shutdown, such as a programmatic shutdown. It is not a SIGTERM grace period.
+Set `PYLON_SHUTDOWN_DELAY_SECS` to at least the time your load balancer takes to mark an instance unhealthy: the number of failed checks it needs, times the check interval, plus the check timeout. For example, 3 failed checks at a 10 s interval with a 5 s timeout need at least 35 s. During the delay the load balancer sees the 503 and stops sending new requests, while requests that are already on their way still get an answer. A platform that removes the instance from the load balancer before it sends `SIGTERM` (for example, ECS behind an ALB) needs no delay. Give the platform's kill timeout room for the whole sequence: the delay, plus `PYLON_DRAIN_SECS`, plus `PYLON_SHARD_DRAIN_SECS` if you run shards.
+
+For a rolling deploy with more than one instance:
+
+1. Start a new instance.
+2. Wait until its `/health/ready` returns 200.
+3. Send `SIGTERM` to one old instance.
+4. Repeat until no old instance is left.
+
+More than one instance needs Postgres. SQLite allows one instance per database file. On a single instance a deploy restarts the process, so requests fail until the new process is ready. An abrupt stop does not corrupt SQLite: WAL mode is crash-consistent.
 
 ## Native clients (iOS, macOS, Android)
 
