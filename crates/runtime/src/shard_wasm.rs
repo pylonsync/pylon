@@ -3142,20 +3142,10 @@ impl WasmShardHost {
                 return;
             };
             match c.dir.take_over(&orphan, &c.me.id, epoch) {
-                Ok(true) => {
-                    if orphan.machine_id == c.me.id {
-                        tracing::info!(
-                            "[shard {}] placed here under an earlier lease; starting it again",
-                            orphan.shard_id
-                        );
-                    } else {
-                        tracing::info!(
-                            "[shard {}] machine {} is dead; starting it here",
-                            orphan.shard_id,
-                            orphan.machine_id
-                        );
-                    }
-                    if orphan.failed.is_none() {
+                Ok(true) => match orphan_takeover(&orphan, &c.me.id) {
+                    OrphanTakeover::Skip(note) => tracing::warn!("{note}"),
+                    OrphanTakeover::Start(note) => {
+                        tracing::info!("{note}");
                         match self.adopt(&orphan, epoch) {
                             Ok(_) => tracing::info!(
                                 "[shard {}] took over from machine {}",
@@ -3167,7 +3157,7 @@ impl WasmShardHost {
                             }
                         }
                     }
-                }
+                },
                 Ok(false) => {}
                 Err(e) => tracing::warn!("[shard {}] take over failed: {e}", orphan.shard_id),
             }
@@ -4010,5 +4000,80 @@ mod lease_tests {
 
     fn clock_expired_at(clock: &LeaseClock, now: Instant) -> bool {
         LeaseClock::millis(now) >= clock.until_ms.load(Ordering::Acquire)
+    }
+}
+
+/// What a machine does with an orphan it just took over, and what it logs.
+#[derive(Debug, PartialEq, Eq)]
+enum OrphanTakeover {
+    Start(String),
+    /// A placement that failed to start keeps its state and is not started
+    /// again until it is stopped; the note says why and how to clear it.
+    Skip(String),
+}
+
+fn orphan_takeover(orphan: &Placement, me: &str) -> OrphanTakeover {
+    let id = &orphan.shard_id;
+    if let Some(why) = &orphan.failed {
+        return OrphanTakeover::Skip(format!(
+            "[shard {id}] not started: it failed to start earlier ({why}). \
+             Stop it (ctx.shards.stop or POST /api/shards/{id}/stop) to remove it, then create it again"
+        ));
+    }
+    OrphanTakeover::Start(if orphan.machine_id == me {
+        format!("[shard {id}] placed here under an earlier lease; starting it again")
+    } else {
+        format!(
+            "[shard {id}] machine {} is dead; starting it here",
+            orphan.machine_id
+        )
+    })
+}
+
+#[cfg(test)]
+mod orphan_takeover_tests {
+    use super::*;
+
+    fn placement(machine: &str, failed: Option<&str>) -> Placement {
+        Placement {
+            shard_id: "combat-test".into(),
+            kind: "match".into(),
+            params: serde_json::json!({ "arena": true }),
+            machine_id: machine.into(),
+            pinned: false,
+            failed: failed.map(str::to_string),
+            epoch: 1,
+        }
+    }
+
+    #[test]
+    fn a_placement_that_failed_to_start_is_skipped_with_its_reason_and_the_fix() {
+        let note = orphan_takeover(
+            &placement("local:1", Some("shard init failed: unknown field `arena`")),
+            "local:2",
+        );
+        let OrphanTakeover::Skip(note) = note else {
+            panic!("a failed placement must not start: {note:?}")
+        };
+        assert!(note.contains("[shard combat-test] not started"));
+        assert!(note.contains("unknown field `arena`"));
+        assert!(note.contains("ctx.shards.stop"));
+        assert!(!note.contains("starting it here"));
+    }
+
+    #[test]
+    fn other_orphans_start_with_where_they_came_from() {
+        assert_eq!(
+            orphan_takeover(&placement("local:1", None), "local:2"),
+            OrphanTakeover::Start(
+                "[shard combat-test] machine local:1 is dead; starting it here".into()
+            )
+        );
+        assert_eq!(
+            orphan_takeover(&placement("local:2", None), "local:2"),
+            OrphanTakeover::Start(
+                "[shard combat-test] placed here under an earlier lease; starting it again".into()
+            )
+        );
     }
 }
