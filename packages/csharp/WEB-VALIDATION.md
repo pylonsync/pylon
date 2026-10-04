@@ -31,10 +31,18 @@ server, and ran 30 seconds more. "Checks" means:
 
 A Firefox player and a native macOS player built from the same project
 shared `arena-main` (the panel showed 2 players and 2 frontier entities).
-During development a Camelot Web build joined a native Camelot player over
-WebSocket: both saw each other move, hits registered, and movement
-corrections stayed under 2 cm. Lag-compensated attacks are a Camelot
-feature; the Arena sample has none.
+Camelot checked lag-compensated combat on v0.22.18. A Chrome player and a
+native macOS player fought in one local match over WebSocket (the server
+ran no WebTransport, so the SDK fell back):
+
+- The browser sent 742 inputs. All 17 attack envelopes carried
+  `input.attack`, a `client_seq`, and a finite `view_tick`.
+- The native player landed 14 bow hits on the browser player. The browser
+  player's largest movement correction was 1.1 cm.
+- After 12 seconds offline, the browser reconnected and resumed inputs. A
+  page reload closed the old socket, and a new guest joined.
+
+The Arena sample has no combat; use a game like Camelot for that check.
 
 ## Automated checks
 
