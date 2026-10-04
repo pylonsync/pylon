@@ -38,12 +38,13 @@ feature; the Arena sample has none.
 
 ## Automated checks
 
-- `node --test packages/csharp/Tests~/Browser/bridge.test.mjs`: 9 passed
-  (queue limits, failed connections, release, fetch abort).
+- `node --test packages/csharp/Tests~/Browser/bridge.test.mjs`: 13 passed
+  (receive limits, datagram backlog, close codes kept, failed connections,
+  release, fetch abort).
 - `dotnet build packages/csharp/Tests~/Pylon.Core -p:DefineConstants=UNITY_WEBGL`:
   the browser code paths compile with warnings as errors.
-- `dotnet test packages/csharp/Tests~/Pylon.Tests`: 158 passed, 16 skipped
-  without servers; 170 passed, 4 skipped (provider sign-in) with both
+- `dotnet test packages/csharp/Tests~/Pylon.Tests`: 159 passed, 16 skipped
+  without servers; 171 passed, 4 skipped (provider sign-in) with both
   servers and WebTransport running.
 
 ## Not tested

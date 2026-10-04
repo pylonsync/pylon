@@ -170,3 +170,84 @@ test('WebTransport open failure permits the connection layer to fall back', asyn
   api.PylonWeb_Release(id);
   assert.equal(Object.keys(context.PylonWeb.handles).length, 0);
 });
+
+// A fake WebTransport session whose close, reads and writes the test drives.
+function fakeTransport() {
+  const sessions = [];
+  class Transport {
+    constructor() {
+      sessions.push(this);
+      this.ready = Promise.resolve();
+      this.closed = new Promise(resolve => { this.closeWith = resolve; });
+      this.readers = [];
+      this.writes = [];
+      const readable = () => ({ getReader: () => {
+        const r = { read: () => new Promise(resolve => { r.deliver = resolve; }), cancel: async () => { r.cancelled = true; } };
+        this.readers.push(r); return r;
+      }});
+      const writable = { getWriter: () => ({ write: () => new Promise((resolve, reject) => this.writes.push({ resolve, reject })) }) };
+      this.stream = { readable: readable(), writable };
+      this.datagrams = { readable: readable(), writable, maxDatagramSize: 1200 };
+    }
+    async createBidirectionalStream() { return this.stream; }
+    close() { this.stopped = true; this.closeWith({ closeCode: 0, reason: '' }); }
+  }
+  return { Transport, sessions };
+}
+
+test('a server close keeps its code and reason when a pending write fails afterwards', async () => {
+  const { Transport, sessions } = fakeTransport();
+  const { api, context } = bridge({ WebTransport: Transport });
+  const id = api.PylonWT_Open('https://example/shard', '[]');
+  await flush();
+  assert.equal(api.PylonWT_Write(id, 0, 4, 0), 1);
+  sessions[0].closeWith({ closeCode: 1, reason: 'unauthorized: no ticket' });
+  await flush();
+  sessions[0].writes[0].reject(new Error('closed'));
+  await flush();
+  assert.equal(api.PylonWeb_State(id), 2);
+  assert.equal(api.PylonWeb_CloseCode(id), 1);
+  const n = api.PylonWeb_CloseReason(id, 0, 256);
+  assert.equal(new TextDecoder().decode(context.HEAPU8.slice(0, n)), 'unauthorized: no ticket');
+});
+
+test('a local failure keeps its reason when the session then reports closed', async () => {
+  const { Transport, sessions } = fakeTransport();
+  const { api, context } = bridge({ WebTransport: Transport });
+  const id = api.PylonWT_Open('https://example/shard', '[]');
+  await flush();
+  assert.equal(api.PylonWT_Write(id, 0, 4, 0), 1);
+  sessions[0].writes[0].reject(new Error('reset'));
+  await flush();
+  await flush();
+  assert.equal(api.PylonWeb_CloseCode(id), -1);
+  const n = api.PylonWeb_CloseReason(id, 0, 256);
+  assert.equal(new TextDecoder().decode(context.HEAPU8.slice(0, n)), 'Browser WebTransport write failed');
+});
+
+test('a datagram backlog drops the oldest datagrams and keeps the session', async () => {
+  const { Transport, sessions } = fakeTransport();
+  const { api, context } = bridge({ WebTransport: Transport });
+  const id = api.PylonWT_Open('https://example/shard', '[]');
+  await flush();
+  const datagrams = sessions[0].readers[1];
+  for (let i = 0; i < 4100; i++) {
+    datagrams.deliver({ value: new Uint8Array([i % 256, i >> 8]) });
+    await flush();
+  }
+  assert.equal(api.PylonWeb_State(id), 1);
+  // The first four were dropped; the oldest kept is number 4.
+  assert.equal(api.PylonWT_Read(id, 0, 16, 1), 2);
+  assert.deepEqual(Array.from(context.HEAPU8.slice(0, 2)), [4, 0]);
+});
+
+test('the WebSocket receive bound applies per message; the backlog has its own total', () => {
+  const { api, sockets } = bridge();
+  const id = api.PylonWeb_Open('ws://example', '[]', 8);
+  sockets[0].onopen();
+  for (let i = 0; i < 10; i++) sockets[0].onmessage({ data: new Uint8Array(8).buffer });
+  assert.equal(api.PylonWeb_State(id), 1);
+  sockets[0].onmessage({ data: new Uint8Array(9).buffer });
+  assert.equal(api.PylonWeb_State(id), 2);
+  assert.equal(api.PylonWeb_CloseCode(id), 1009);
+});

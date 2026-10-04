@@ -366,6 +366,33 @@ namespace Pylon.Tests
         }
 
         [Fact]
+        public async Task AFrameOverMaxFrameBytesClosesTheConnectionWithoutAnError()
+        {
+            using var server = new FakeShardServer();
+            server.OnConnection = async (_, ws) =>
+            {
+                await ws.SendAsync(new ArraySegment<byte>(new byte[2048]), WebSocketMessageType.Binary, true, default);
+                await Task.Delay(5000);
+            };
+            var closes = new BlockingCollection<ShardCloseInfo>();
+            var errors = new List<Exception>();
+            using var c = new ShardConnection("arena-1", new ShardConnectionOptions
+            {
+                WsUrl = server.Url("arena-1"),
+                SubscriberId = "p1",
+                MaxFrameBytes = 1024,
+                AutoReconnect = false,
+                Dispatcher = PylonDispatcher.Inline,
+            });
+            c.Closed += closes.Add;
+            c.Error += e => { lock (errors) errors.Add(e); };
+            c.Connect();
+            Assert.Equal("a frame over 1024 bytes", Take(closes).Reason);
+            await Task.Delay(100);
+            lock (errors) Assert.Empty(errors);
+        }
+
+        [Fact]
         public void AFullSendQueueRefusesTheInput()
         {
             using var link = new ShardConnection.WsLink(new ClientWebSocket(), 10);

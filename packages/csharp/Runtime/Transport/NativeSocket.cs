@@ -54,7 +54,7 @@ namespace Pylon
                 if (message.Length + r.Count > _maxBytes)
                 {
                     Abort();
-                    throw new InvalidOperationException($"a frame over {_maxBytes} bytes");
+                    return new SocketMessage { Closed = true, CloseReason = $"a frame over {_maxBytes} bytes" };
                 }
                 message.Write(buffer, 0, r.Count);
                 if (r.EndOfMessage) return new SocketMessage { Bytes = message.ToArray(), Text = r.MessageType == WebSocketMessageType.Text };

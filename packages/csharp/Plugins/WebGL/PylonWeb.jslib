@@ -4,8 +4,13 @@ mergeInto(LibraryManager.library, {
     handles: {},
     add: function(value) { var id = PylonWeb.next++; PylonWeb.handles[id] = value; return id; },
     bytes: function(text) { return new TextEncoder().encode(text); },
+    // Total bytes a socket may hold unread, across messages.
+    totalMax: 64 * 1024 * 1024,
+    // Close the handle and free its resources. The first close recorded
+    // (the server's code and reason, or the first local failure) is kept.
     stop: function(h, code, reason) {
-      h.state = 2; h.code = code; h.reason = reason;
+      if (h.state !== 2) { h.code = code; h.reason = reason; }
+      h.state = 2;
       h.queue = []; h.queued = 0;
       if (h.session) {
         try { h.session.close(); } catch (_) {}
@@ -29,14 +34,17 @@ mergeInto(LibraryManager.library, {
       ws.onmessage = function(e) {
         var text = typeof e.data === 'string';
         var bytes = text ? PylonWeb.bytes(e.data) : new Uint8Array(e.data);
-        if (h.queued + bytes.length > h.max || h.queue.length >= 4096) {
+        // max bounds one message, as on native; the total and the count
+        // bound what an unread backlog may hold.
+        if (bytes.length > h.max) { PylonWeb.stop(h, 1009, 'a message over ' + h.max + ' bytes'); return; }
+        if (h.queued + bytes.length > Math.max(h.max, PylonWeb.totalMax) || h.queue.length >= 4096) {
           PylonWeb.stop(h, 1009, 'Browser receive queue limit exceeded');
           return;
         }
         h.queue.push({ bytes: bytes, text: text }); h.queued += bytes.length;
       };
       ws.onerror = function() { PylonWeb.stop(h, 1006, 'Browser WebSocket failed'); };
-      ws.onclose = function(e) { h.state = 2; h.code = e.code; h.reason = e.reason; };
+      ws.onclose = function(e) { if (h.state !== 2) { h.state = 2; h.code = e.code; h.reason = e.reason; } };
     } catch (_) { PylonWeb.stop(h, 1006, 'Browser WebSocket could not open'); }
     return id;
   },

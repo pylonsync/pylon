@@ -207,8 +207,12 @@ The sample includes its own collider preservation file.
   tab as a latency benchmark. The server remains authoritative.
 - WebSockets are reliable and ordered. Packet loss can delay later frames.
   Browser WebTransport avoids that dependency for replication datagrams.
-- Receive queues and WebSocket send buffers have bounds. Overflow closes
-  the connection. Automatic reconnect obtains a fresh baseline.
+- A received message over `MaxFrameBytes` closes the connection, as on
+  native. An unread backlog over 64 MB or 4096 messages also closes a
+  WebSocket or the WebTransport stream; old datagrams are dropped instead.
+  Automatic reconnect obtains a fresh baseline. When the WebSocket send
+  buffer is full, sends wait for the next frame, and `ShardGame.Send`
+  refuses inputs once its queue is full, as on native.
 - Browser handshake errors do not expose the HTTP status or detailed TLS
   error to C#. Use the browser console and server logs for diagnosis.
 - Browser HTTP cancellation aborts the request. It cannot undo a server

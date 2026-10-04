@@ -35,6 +35,7 @@ namespace Pylon
         readonly int _maxBytes;
         int _id;
         bool _disposed;
+        bool _opened;
         public BrowserSocket(int maxBytes) { _maxBytes = maxBytes; }
         public bool IsOpen => _id != 0 && BrowserBridge.PylonWeb_State(_id) == 1;
         public async Task ConnectAsync(Uri url, IReadOnlyDictionary<string, string> headers, IReadOnlyList<string> protocols, CancellationToken ct)
@@ -52,6 +53,7 @@ namespace Pylon
                 }
                 ct.ThrowIfCancellationRequested();
                 if (!IsOpen) throw new InvalidOperationException("Browser WebSocket handshake failed. Check TLS, origin, and credentials.");
+                _opened = true;
             }
             catch { Abort(); throw; }
         }
@@ -60,7 +62,13 @@ namespace Pylon
             while (true)
             {
                 ct.ThrowIfCancellationRequested();
-                if (_disposed) throw new ObjectDisposedException(nameof(BrowserSocket));
+                // Closed or aborted here: an open socket ends like one the
+                // server closed, as ClientWebSocket reports it on native.
+                if (_disposed)
+                {
+                    if (!_opened) throw new ObjectDisposedException(nameof(BrowserSocket));
+                    return new SocketMessage { Closed = true, CloseReason = "closed locally" };
+                }
                 int length = BrowserBridge.PylonWeb_Next(_id);
                 if (length >= 0)
                 {

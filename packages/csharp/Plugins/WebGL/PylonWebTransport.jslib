@@ -2,7 +2,7 @@ mergeInto(LibraryManager.library, {
   PylonWT_Available: function() { return typeof WebTransport !== 'undefined' ? 1 : 0; },
   PylonWT_Open__deps: ['$PylonWeb'],
   PylonWT_Open: function(url, hashes) {
-    var h = { state: 0, queue: [], queued: 0, streams: [], datagrams: [], received: 0, pending: 0, datagramPending: 0, code: -1, reason: '' };
+    var h = { state: 0, queue: [], queued: 0, streams: [], datagrams: [], streamBytes: 0, datagramBytes: 0, pending: 0, datagramPending: 0, code: -1, reason: '' };
     var id = PylonWeb.add(h);
     var fail = function() { if (PylonWeb.handles[id]) PylonWeb.stop(h, -1, 'Browser WebTransport failed'); };
     try {
@@ -13,8 +13,9 @@ mergeInto(LibraryManager.library, {
         return { algorithm: 'sha-256', value: bytes };
       });
       var session = h.session = new WebTransport(UTF8ToString(url), options);
+      // The first close recorded wins: a local failure already set it.
       session.closed.then(function(info) {
-        if (!PylonWeb.handles[id]) return;
+        if (!PylonWeb.handles[id] || h.state === 2) return;
         h.state = 2; h.code = info.closeCode; h.reason = info.reason || '';
       }).catch(fail);
       session.ready.then(function() {
@@ -27,17 +28,31 @@ mergeInto(LibraryManager.library, {
           h.streamReader = stream.readable.getReader();
           h.datagramReader = session.datagrams.readable.getReader();
           h.state = 1;
-          var read = function(reader, queue) {
-            reader.read().then(function(part) {
+          var limit = 64 * 1024 * 1024;
+          // The reliable stream must not lose bytes: an over-full backlog
+          // ends the session. Datagrams are unreliable and stale ones are
+          // useless, so a backlog drops the oldest instead (Unity frames
+          // stop in a hidden tab while datagrams keep arriving).
+          var readStream = function() {
+            h.streamReader.read().then(function(part) {
               if (!PylonWeb.handles[id] || h.state !== 1) return;
               if (part.done) { fail(); return; }
-              if (h.received + part.value.length > 64 * 1024 * 1024 || queue.length >= 4096) { fail(); return; }
-              queue.push(part.value); h.received += part.value.length;
-              read(reader, queue);
+              if (h.streamBytes + part.value.length > limit || h.streams.length >= 4096) { fail(); return; }
+              h.streams.push(part.value); h.streamBytes += part.value.length;
+              readStream();
             }).catch(fail);
           };
-          read(h.streamReader, h.streams);
-          read(h.datagramReader, h.datagrams);
+          var readDatagrams = function() {
+            h.datagramReader.read().then(function(part) {
+              if (!PylonWeb.handles[id] || h.state !== 1) return;
+              if (part.done) { fail(); return; }
+              h.datagrams.push(part.value); h.datagramBytes += part.value.length;
+              while (h.datagrams.length > 4096 || h.datagramBytes > limit) h.datagramBytes -= h.datagrams.shift().length;
+              readDatagrams();
+            }).catch(fail);
+          };
+          readStream();
+          readDatagrams();
         });
       }).catch(fail);
     } catch (_) { fail(); }
@@ -69,11 +84,12 @@ mergeInto(LibraryManager.library, {
     var h = PylonWeb.handles[id];
     if (!h) return datagram ? -2 : -7;
     var queue = datagram ? h.datagrams : h.streams;
+    var counter = datagram ? 'datagramBytes' : 'streamBytes';
     if (!queue.length) return datagram ? -2 : (h.state === 2 ? -7 : 0);
     var bytes = queue[0];
-    if (datagram && bytes.length > length) { queue.shift(); h.received -= bytes.length; return -3; }
+    if (datagram && bytes.length > length) { queue.shift(); h[counter] -= bytes.length; return -3; }
     var n = Math.min(bytes.length, length);
-    HEAPU8.set(bytes.subarray(0, n), ptr); h.received -= n;
+    HEAPU8.set(bytes.subarray(0, n), ptr); h[counter] -= n;
     if (n === bytes.length) queue.shift(); else queue[0] = bytes.subarray(n);
     return n;
   }
