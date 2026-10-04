@@ -1,7 +1,9 @@
 #nullable enable
 using System;
 using System.Collections.Generic;
+#if !UNITY_WEBGL || UNITY_EDITOR
 using System.Net.Http;
+#endif
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -49,6 +51,7 @@ namespace Pylon
         Task<PylonHttpResponse> SendAsync(PylonHttpRequest request, CancellationToken cancellationToken);
     }
 
+#if !UNITY_WEBGL || UNITY_EDITOR
     /// <summary>The default transport, on <see cref="HttpClient"/>.</summary>
     public sealed class HttpClientTransport : IPylonHttpTransport, IDisposable
     {
@@ -110,4 +113,5 @@ namespace Pylon
             if (_owns) _http.Dispose();
         }
     }
+#endif
 }

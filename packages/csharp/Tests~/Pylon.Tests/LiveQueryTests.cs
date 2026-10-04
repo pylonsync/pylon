@@ -414,6 +414,7 @@ namespace Pylon.Tests
             };
             using var q = client.Live("Note");
             Until(() => q.Get("n1") != null, "the first pull");
+            Until(() => Volatile.Read(ref server) != null, "the live socket");
             sync.FailNextPull = 503;
             server!.SendAsync(Encoding.UTF8.GetBytes("{\"type\":\"session-changed\"}"),
                 System.Net.WebSockets.WebSocketMessageType.Text, true, default).Wait();

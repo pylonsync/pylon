@@ -30,6 +30,7 @@ namespace Pylon.Realtime
         public const int ErrStreamEnded = -7;
         public const int ErrFull = -8;
 
+#if !UNITY_WEBGL || UNITY_EDITOR
         [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
         static extern ulong pylon_wt_connect(byte[] url, byte[]? hashes, UIntPtr hashCount);
 
@@ -145,6 +146,7 @@ namespace Pylon.Realtime
             var n = pylon_wt_error(handle, buf, (UIntPtr)buf.Length);
             return n <= 0 ? "" : Encoding.UTF8.GetString(buf, 0, Math.Min(n, buf.Length));
         }
+#endif
     }
 
     /// <summary>One WebTransport session: the stream, datagrams, and how it ended. Polled; it calls nothing back.</summary>
@@ -177,6 +179,7 @@ namespace Pylon.Realtime
         IWebTransportSession? Connect(string url, byte[][] certHashes);
     }
 
+#if !UNITY_WEBGL || UNITY_EDITOR
     internal sealed class NativeWebTransport : IWebTransportFactory
     {
         public static readonly NativeWebTransport Instance = new NativeWebTransport();
@@ -218,4 +221,5 @@ namespace Pylon.Realtime
             }
         }
     }
+#endif
 }

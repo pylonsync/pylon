@@ -26,7 +26,7 @@ namespace Pylon
         /// <summary>Where the session token is kept. Default: memory.</summary>
         public IPylonStorage? Storage { get; set; }
 
-        /// <summary>How requests are sent. Default: <see cref="HttpClientTransport"/>.</summary>
+        /// <summary>How requests are sent. Uses the platform HTTP transport by default.</summary>
         public IPylonHttpTransport? Transport { get; set; }
 
         /// <summary>Where session-refresh and live-query callbacks run. Default: <see cref="PylonDispatcher.Capture"/>.</summary>
@@ -72,7 +72,11 @@ namespace Pylon
             }
             else
             {
+#if UNITY_WEBGL && !UNITY_EDITOR
+                _transport = new BrowserHttpTransport(options.Timeout);
+#else
                 _transport = new HttpClientTransport(options.Timeout);
+#endif
                 _ownsTransport = true;
             }
             _tokenKey = StorageKeys.Token(options.AppName);
@@ -107,7 +111,7 @@ namespace Pylon
         /// <summary>Start a guest session (<c>POST /api/auth/guest</c>) and store its token.</summary>
         public async Task<SessionResponse> SignInAsGuestAsync(CancellationToken ct = default)
         {
-            var session = SessionResponse.FromValue(await RequestAsync("POST", "/api/auth/guest", PylonValue.Object(), ct).ConfigureAwait(false));
+            var session = SessionResponse.FromValue(await RequestAsync("POST", "/api/auth/guest", PylonValue.Object(), ct).ConfigureAwait(SocketFactory.ContinueOnContext));
             SetSession(session.Token);
             return session;
         }
@@ -176,7 +180,7 @@ namespace Pylon
 
         async Task<SessionResponse> SignInAsync(string path, PylonValue body, CancellationToken ct)
         {
-            var session = SessionResponse.FromValue(await RequestAsync("POST", path, body, ct).ConfigureAwait(false));
+            var session = SessionResponse.FromValue(await RequestAsync("POST", path, body, ct).ConfigureAwait(SocketFactory.ContinueOnContext));
             SetSession(session.Token);
             return session;
         }
@@ -190,21 +194,21 @@ namespace Pylon
         public async Task<SessionResponse> RefreshSessionAsync(CancellationToken ct = default)
         {
             if (Token == null) throw PylonException.InvalidArgument("there is no session to refresh");
-            var session = SessionResponse.FromValue(await RequestAsync("POST", "/api/auth/refresh", null, ct).ConfigureAwait(false));
+            var session = SessionResponse.FromValue(await RequestAsync("POST", "/api/auth/refresh", null, ct).ConfigureAwait(SocketFactory.ContinueOnContext));
             SetSession(session.Token);
             return session;
         }
 
         /// <summary>Who the stored token belongs to (<c>GET /api/auth/me</c>).</summary>
         public async Task<ResolvedSession> MeAsync(CancellationToken ct = default) =>
-            ResolvedSession.FromValue(await RequestAsync("GET", "/api/auth/me", null, ct).ConfigureAwait(false));
+            ResolvedSession.FromValue(await RequestAsync("GET", "/api/auth/me", null, ct).ConfigureAwait(SocketFactory.ContinueOnContext));
 
         /// <summary>End the session on the server and forget the token.</summary>
         public async Task LogoutAsync(CancellationToken ct = default)
         {
             try
             {
-                await RequestAsync("POST", "/api/auth/logout", null, ct).ConfigureAwait(false);
+                await RequestAsync("POST", "/api/auth/logout", null, ct).ConfigureAwait(SocketFactory.ContinueOnContext);
             }
             finally
             {
@@ -243,7 +247,7 @@ namespace Pylon
                 if (wait.TotalMilliseconds > int.MaxValue - 1) wait = TimeSpan.FromMilliseconds(int.MaxValue - 1);
                 try
                 {
-                    await Task.Delay(wait, ct).ConfigureAwait(false);
+                    await SocketFactory.Delay(wait, ct).ConfigureAwait(SocketFactory.ContinueOnContext);
                 }
                 catch (OperationCanceledException)
                 {
@@ -252,7 +256,7 @@ namespace Pylon
                 if (DateTimeOffset.UtcNow.ToUnixTimeSeconds() < next - margin.TotalSeconds) continue;
                 try
                 {
-                    var session = await RefreshSessionAsync(ct).ConfigureAwait(false);
+                    var session = await RefreshSessionAsync(ct).ConfigureAwait(SocketFactory.ContinueOnContext);
                     if (ct.IsCancellationRequested) return;
                     next = session.ExpiresAt ?? DateTimeOffset.UtcNow.ToUnixTimeSeconds() + (long)margin.TotalSeconds * 2;
                     if (onRefresh != null) Dispatcher.Post(() => onRefresh(session));
@@ -271,7 +275,7 @@ namespace Pylon
                 {
                     try
                     {
-                        await Task.Delay(TimeSpan.FromMinutes(1), ct).ConfigureAwait(false);
+                        await SocketFactory.Delay(TimeSpan.FromMinutes(1), ct).ConfigureAwait(SocketFactory.ContinueOnContext);
                     }
                     catch (OperationCanceledException)
                     {
@@ -291,20 +295,20 @@ namespace Pylon
         /// <summary>Call a server function and convert its result.</summary>
         public async Task<TResult> CallFnAsync<TResult>(
             string name, PylonValue? args, IPylonConverter<TResult> result, CancellationToken ct = default) =>
-            Convert(result, await CallFnAsync(name, args, ct).ConfigureAwait(false));
+            Convert(result, await CallFnAsync(name, args, ct).ConfigureAwait(SocketFactory.ContinueOnContext));
 
         /// <summary>Call a server function with converted arguments and result.</summary>
         public async Task<TResult> CallFnAsync<TArgs, TResult>(
             string name, TArgs args, IPylonConverter<TArgs> argsConverter, IPylonConverter<TResult> result,
             CancellationToken ct = default) =>
-            Convert(result, await CallFnAsync(name, argsConverter.ToValue(args), ct).ConfigureAwait(false));
+            Convert(result, await CallFnAsync(name, argsConverter.ToValue(args), ct).ConfigureAwait(SocketFactory.ContinueOnContext));
 
         // ---- entities ----
 
         /// <summary>Every row of an entity the caller may read (<c>GET /api/entities/&lt;entity&gt;</c>).</summary>
         public async Task<IReadOnlyList<PylonValue>> ListAsync(string entity, CancellationToken ct = default)
         {
-            var body = await RequestAsync("GET", "/api/entities/" + EscapePath(entity), null, ct).ConfigureAwait(false);
+            var body = await RequestAsync("GET", "/api/entities/" + EscapePath(entity), null, ct).ConfigureAwait(SocketFactory.ContinueOnContext);
             // The server wraps rows as {count, data, limit, offset}; a bare array is accepted too.
             return body.Kind == PylonValueKind.Array ? body.Items : body["data"].Items;
         }
@@ -325,7 +329,7 @@ namespace Pylon
                 .Append("/cursor?limit=").Append(limit.ToString(CultureInfo.InvariantCulture));
             if (replication) path.Append("&sync=1");
             if (!string.IsNullOrEmpty(after)) path.Append("&after=").Append(Uri.EscapeDataString(after));
-            return CursorPage.FromValue(await RequestAsync("GET", path.ToString(), null, ct).ConfigureAwait(false));
+            return CursorPage.FromValue(await RequestAsync("GET", path.ToString(), null, ct).ConfigureAwait(SocketFactory.ContinueOnContext));
         }
 
         /// <summary>One row by id.</summary>
@@ -394,7 +398,7 @@ namespace Pylon
                 bytes = Encoding.UTF8.GetBytes(body.ToJson());
             }
             var url = new Uri(Options.BaseUrl, pathAndQuery);
-            var response = await _transport.SendAsync(new PylonHttpRequest(method, url, headers, bytes), ct).ConfigureAwait(false);
+            var response = await _transport.SendAsync(new PylonHttpRequest(method, url, headers, bytes), ct).ConfigureAwait(SocketFactory.ContinueOnContext);
             if (response.Status < 200 || response.Status >= 300) throw PylonException.FromResponse(response.Status, response.Body);
             if (response.Body.Length == 0) return PylonValue.Null;
             try

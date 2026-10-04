@@ -1,9 +1,9 @@
 #nullable enable
 using System;
 using System.Collections.Generic;
-using System.IO;
+#if !UNITY_WEBGL || UNITY_EDITOR
 using System.Net.Http;
-using System.Net.WebSockets;
+#endif
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -206,7 +206,7 @@ namespace Pylon.Realtime
     /// Frames are applied to <see cref="Entities"/> on that same thread, so
     /// the table is safe to read from event handlers and from Update.
     ///
-    /// WebGL is not supported: it has no <see cref="ClientWebSocket"/>.
+    /// Unity Web uses browser networking APIs.
     /// </summary>
     public sealed class ShardConnection : IDisposable
     {
@@ -216,19 +216,31 @@ namespace Pylon.Realtime
         /// <summary>Ticks kept waiting at most; more means the datagrams stopped.</summary>
         const int MaxPendingTicks = 100;
 
+#if !UNITY_WEBGL || UNITY_EDITOR
         static readonly HttpClient InfoHttp = new HttpClient();
+#endif
 
         /// <summary>Opens WebTransport sessions: the native plugin. Tests set their own before <see cref="Connect"/>.</summary>
+#if UNITY_WEBGL && !UNITY_EDITOR
+        internal IWebTransportFactory WebTransports = BrowserWebTransport.Instance;
+#else
         internal IWebTransportFactory WebTransports = NativeWebTransport.Instance;
+#endif
 
         /// <summary>Reads the WebTransport endpoint: (HTTP status, body). Tests set their own before <see cref="Connect"/>.</summary>
         internal Func<Uri, CancellationToken, Task<(int Status, string Body)>> FetchInfo = DefaultFetchInfo;
 
         static async Task<(int Status, string Body)> DefaultFetchInfo(Uri url, CancellationToken ct)
         {
-            using var response = await InfoHttp.GetAsync(url, ct).ConfigureAwait(false);
-            var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+#if UNITY_WEBGL && !UNITY_EDITOR
+            using var transport = new BrowserHttpTransport(System.Threading.Timeout.InfiniteTimeSpan);
+            var response = await transport.SendAsync(new PylonHttpRequest("GET", url, new Dictionary<string, string>(), null), ct);
+            return (response.Status, Encoding.UTF8.GetString(response.Body));
+#else
+            using var response = await InfoHttp.GetAsync(url, ct).ConfigureAwait(SocketFactory.ContinueOnContext);
+            var body = await response.Content.ReadAsStringAsync().ConfigureAwait(SocketFactory.ContinueOnContext);
             return ((int)response.StatusCode, body);
+#endif
         }
 
         readonly ShardConnectionOptions _options;
@@ -372,7 +384,7 @@ namespace Pylon.Realtime
                 if (_started) return;
                 _started = true;
             }
-            _ = Task.Run(RunAsync);
+            _ = SocketFactory.Run(RunAsync);
         }
 
         /// <summary>
@@ -444,7 +456,7 @@ namespace Pylon.Realtime
             while (!ct.IsCancellationRequested)
             {
                 SetState(ShardConnectionState.Connecting, null);
-                var ticket = await NextTicketAsync(ct).ConfigureAwait(false);
+                var ticket = await NextTicketAsync(ct).ConfigureAwait(SocketFactory.ContinueOnContext);
                 if (ct.IsCancellationRequested || State == ShardConnectionState.Failed) return;
 
                 Link? link = null;
@@ -455,7 +467,7 @@ namespace Pylon.Realtime
                 {
                     try
                     {
-                        link = await OpenWebTransportAsync(ticket, ct).ConfigureAwait(false);
+                        link = await OpenWebTransportAsync(ticket, ct).ConfigureAwait(SocketFactory.ContinueOnContext);
                     }
                     catch (OperationCanceledException) when (ct.IsCancellationRequested)
                     {
@@ -486,7 +498,7 @@ namespace Pylon.Realtime
                                 SetState(ShardConnectionState.Disconnected, e.Message);
                                 return;
                             }
-                            if (!await BackoffAsync(ct).ConfigureAwait(false)) return;
+                            if (!await BackoffAsync(ct).ConfigureAwait(SocketFactory.ContinueOnContext)) return;
                             continue;
                         }
                     }
@@ -498,16 +510,15 @@ namespace Pylon.Realtime
                 {
                     if (link == null)
                     {
-                        var socket = new ClientWebSocket();
-                        ConfigureCredentials(socket, ticket);
+                        var socket = SocketFactory.Create(_options.MaxFrameBytes);
                         ws = new WsLink(socket, _options.MaxFrameBytes);
                         link = ws;
-                        await socket.ConnectAsync(BuildUrl(), ct).ConfigureAwait(false);
+                        await ConnectSocketAsync(socket, BuildUrl(), ticket, ct).ConfigureAwait(SocketFactory.ContinueOnContext);
                     }
                     Began(link);
                     close = ws != null
-                        ? await ReceiveAsync(ws, ct).ConfigureAwait(false)
-                        : await PollAsync((WtLink)link, ct).ConfigureAwait(false);
+                        ? await ReceiveAsync(ws, ct).ConfigureAwait(SocketFactory.ContinueOnContext)
+                        : await PollAsync((WtLink)link, ct).ConfigureAwait(SocketFactory.ContinueOnContext);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
@@ -517,11 +528,7 @@ namespace Pylon.Realtime
                 catch (Exception e)
                 {
                     RaiseError(PylonException.Transport($"shard {ShardId}: {e.Message}", e));
-                    close = ws != null
-                        ? new ShardCloseInfo(
-                            ws.Socket.CloseStatus.HasValue ? (int?)ws.Socket.CloseStatus.Value : null,
-                            ws.Socket.CloseStatusDescription ?? "")
-                        : new ShardCloseInfo(null, e.Message, true);
+                    close = new ShardCloseInfo(null, e.Message, ws == null);
                 }
                 finally
                 {
@@ -554,7 +561,7 @@ namespace Pylon.Realtime
                 }
                 SetState(ShardConnectionState.Disconnected, close.Reason);
                 if (!_options.AutoReconnect) return;
-                if (!await BackoffAsync(ct).ConfigureAwait(false)) return;
+                if (!await BackoffAsync(ct).ConfigureAwait(SocketFactory.ContinueOnContext)) return;
             }
         }
 
@@ -568,7 +575,7 @@ namespace Pylon.Realtime
             }
             try
             {
-                await Task.Delay(delay, ct).ConfigureAwait(false);
+                await SocketFactory.Delay(delay, ct).ConfigureAwait(SocketFactory.ContinueOnContext);
                 return true;
             }
             catch (OperationCanceledException)
@@ -582,6 +589,7 @@ namespace Pylon.Realtime
         {
             lock (_gate)
             {
+                _cts.Token.ThrowIfCancellationRequested();
                 _link = link;
                 _linkTransport = link is WtLink ? ShardTransport.WebTransport : ShardTransport.WebSocket;
                 _state = ShardConnectionState.Connected;
@@ -609,69 +617,27 @@ namespace Pylon.Realtime
         {
             link.StartSending(ct, RaiseError);
             var socket = link.Socket;
-            var buffer = new byte[64 * 1024];
-            var message = new MemoryStream();
             while (true)
             {
-                WebSocketReceiveResult result;
-                CancellationTokenSource? idle = null;
-                try
+                SocketMessage result;
+                using var idle = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                if (_options.IdleTimeout.HasValue)
                 {
-                    var token = ct;
-                    if (_options.IdleTimeout.HasValue)
-                    {
-                        idle = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                        idle.CancelAfter(_options.IdleTimeout.Value);
-                        token = idle.Token;
-                    }
-                    result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), token).ConfigureAwait(false);
+#if UNITY_WEBGL && !UNITY_EDITOR
+                    _ = SocketFactory.CancelAfter(idle, _options.IdleTimeout.Value);
+#else
+                    idle.CancelAfter(_options.IdleTimeout.Value);
+#endif
                 }
+                try { result = await socket.ReceiveAsync(idle.Token).ConfigureAwait(SocketFactory.ContinueOnContext); }
                 catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                 {
                     link.Abort();
                     return new ShardCloseInfo(null, $"no frame for {_options.IdleTimeout!.Value.TotalSeconds:0.#} s");
                 }
-                catch (WebSocketException) when (idle != null && idle.IsCancellationRequested && !ct.IsCancellationRequested)
-                {
-                    link.Abort();
-                    return new ShardCloseInfo(null, $"no frame for {_options.IdleTimeout!.Value.TotalSeconds:0.#} s");
-                }
-                catch (WebSocketException)
-                {
-                    return new ShardCloseInfo(
-                        socket.CloseStatus.HasValue ? (int?)socket.CloseStatus.Value : null,
-                        socket.CloseStatusDescription ?? "the connection dropped");
-                }
-                finally
-                {
-                    idle?.Dispose();
-                }
-                if (result.MessageType == WebSocketMessageType.Close)
-                {
-                    try
-                    {
-                        using var closing = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-                        await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "", closing.Token).ConfigureAwait(false);
-                    }
-                    catch (Exception)
-                    {
-                        // The server already went; nothing to acknowledge.
-                    }
-                    return new ShardCloseInfo(
-                        result.CloseStatus.HasValue ? (int?)result.CloseStatus.Value : null,
-                        result.CloseStatusDescription ?? "");
-                }
-                if (message.Length + result.Count > _options.MaxFrameBytes)
-                {
-                    link.Abort();
-                    return new ShardCloseInfo(null, $"a frame over {_options.MaxFrameBytes} bytes");
-                }
-                message.Write(buffer, 0, result.Count);
-                if (!result.EndOfMessage) continue;
-                var bytes = message.ToArray();
-                message.SetLength(0);
-                // Text messages carry nothing in wire version 2.
-                if (result.MessageType == WebSocketMessageType.Binary) OnFrame(link, bytes, _now());
+                finally { idle.Cancel(); }
+                if (result.Closed) return new ShardCloseInfo(result.CloseCode, result.CloseReason ?? "");
+                if (!result.Text) OnFrame(link, result.Bytes, _now());
             }
         }
 
@@ -716,18 +682,22 @@ namespace Pylon.Realtime
             var factory = WebTransports;
             if (!factory.Available)
                 throw new WebTransportUnavailable(WebTransportUnavailable.Reason.Unsupported,
+#if UNITY_WEBGL && !UNITY_EDITOR
+                    "this browser has no WebTransport");
+#else
                     WebTransportNative.Version() is string v
                         ? $"the WebTransport plugin is version {v}; this client needs {WebTransportNative.AbiMajor}.x"
                         : "the WebTransport plugin is not loaded on this platform");
+#endif
             // One deadline for the whole open: the endpoint request, the session, and its stream.
-            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            deadline.CancelAfter(_options.WebTransportTimeout);
+            using var timeout = new SocketDeadline(ct, _options.WebTransportTimeout);
+            var deadline = timeout.Source;
             var timeoutMs = _options.WebTransportTimeout.TotalMilliseconds;
             string url;
             byte[][] hashes;
             try
             {
-                var (status, body) = await FetchInfo(WebTransportInfoUrl(), deadline.Token).ConfigureAwait(false);
+                var (status, body) = await FetchInfo(WebTransportInfoUrl(), deadline.Token).ConfigureAwait(SocketFactory.ContinueOnContext);
                 if (status == 404)
                     throw new WebTransportUnavailable(WebTransportUnavailable.Reason.Unsupported, "the app does not serve WebTransport");
                 if (status < 200 || status > 299)
@@ -773,7 +743,7 @@ namespace Pylon.Realtime
                         throw new WebTransportUnavailable(WebTransportUnavailable.Reason.Failed,
                             $"the session did not open in {timeoutMs:0} ms");
                     }
-                    await Task.Delay(5, CancellationToken.None).ConfigureAwait(false);
+                    await SocketFactory.Delay(5, CancellationToken.None).ConfigureAwait(SocketFactory.ContinueOnContext);
                 }
                 string shard;
                 lock (_gate) shard = _shardId;
@@ -793,12 +763,14 @@ namespace Pylon.Realtime
         /// </summary>
         async Task<ShardCloseInfo> PollAsync(WtLink link, CancellationToken ct)
         {
+#if !UNITY_WEBGL || UNITY_EDITOR
             using var watchdog = new Timer(_ => Post(() =>
             {
                 if (ReferenceEquals(CurrentLink, link)) Stalled(link);
             }), null, 1000, 1000);
             return await Task.Factory.StartNew(() =>
             {
+#endif
                 var frames = new StreamFrames(_options.MaxFrameBytes);
                 var chunk = new byte[64 * 1024];
                 var datagram = new byte[65536];
@@ -849,10 +821,17 @@ namespace Pylon.Realtime
                         link.Close();
                         return new ShardCloseInfo(null, $"no frame for {idle.TotalSeconds:0.#} s", true);
                     }
+#if UNITY_WEBGL && !UNITY_EDITOR
+                    Stalled(link);
+                    await Task.Yield();
+#else
                     if (!busy) Thread.Sleep(1);
+#endif
                 }
                 return new ShardCloseInfo(null, "closed", true);
-            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default).ConfigureAwait(false);
+#if !UNITY_WEBGL || UNITY_EDITOR
+            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default).ConfigureAwait(SocketFactory.ContinueOnContext);
+#endif
         }
 
         Link? CurrentLink
@@ -1263,7 +1242,7 @@ namespace Pylon.Realtime
             {
                 try
                 {
-                    return await _options.TicketProvider(shard, ct).ConfigureAwait(false);
+                    return await _options.TicketProvider(shard, ct).ConfigureAwait(SocketFactory.ContinueOnContext);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
@@ -1278,17 +1257,26 @@ namespace Pylon.Realtime
             return _options.Ticket;
         }
 
-        void ConfigureCredentials(ClientWebSocket socket, string? ticket)
+        Task ConnectSocketAsync(IPylonSocket socket, Uri url, string? ticket, CancellationToken ct)
         {
+            var headers = new Dictionary<string, string>();
+            var protocols = new List<string>();
+            var subprotocols = _options.Credentials == ShardCredentialTransport.Subprotocols;
+#if UNITY_WEBGL && !UNITY_EDITOR
+            subprotocols = true;
+#endif
             var token = _options.Token;
-            if (_options.Credentials == ShardCredentialTransport.Subprotocols)
+            if (subprotocols)
             {
-                if (!string.IsNullOrEmpty(token)) socket.Options.AddSubProtocol("bearer." + Uri.EscapeDataString(token));
-                if (!string.IsNullOrEmpty(ticket)) socket.Options.AddSubProtocol("ticket." + Uri.EscapeDataString(ticket));
-                return;
+                if (!string.IsNullOrEmpty(token)) protocols.Add("bearer." + Uri.EscapeDataString(token));
+                if (!string.IsNullOrEmpty(ticket)) protocols.Add("ticket." + Uri.EscapeDataString(ticket));
             }
-            if (!string.IsNullOrEmpty(token)) socket.Options.SetRequestHeader("Authorization", "Bearer " + token);
-            if (!string.IsNullOrEmpty(ticket)) socket.Options.SetRequestHeader("X-Pylon-Shard-Ticket", ticket);
+            else
+            {
+                if (!string.IsNullOrEmpty(token)) headers["Authorization"] = "Bearer " + token;
+                if (!string.IsNullOrEmpty(ticket)) headers["X-Pylon-Shard-Ticket"] = ticket;
+            }
+            return socket.ConnectAsync(url, headers, protocols, ct);
         }
 
         internal Uri BuildUrl()
@@ -1414,18 +1402,23 @@ namespace Pylon.Realtime
         /// <summary>One WebSocket and its send queue. Sends go out in order, one at a time.</summary>
         internal sealed class WsLink : Link
         {
-            public readonly ClientWebSocket Socket;
+            public readonly IPylonSocket Socket;
             readonly Queue<(byte[] Bytes, bool Text)> _queue = new Queue<(byte[], bool)>();
             readonly SemaphoreSlim _signal = new SemaphoreSlim(0);
             readonly CancellationTokenSource _stop = new CancellationTokenSource();
             readonly int _maxQueuedBytes;
             int _queuedBytes;
 
-            public WsLink(ClientWebSocket socket, int maxQueuedBytes)
+            public WsLink(IPylonSocket socket, int maxQueuedBytes)
             {
                 Socket = socket;
                 _maxQueuedBytes = maxQueuedBytes;
             }
+
+#if !UNITY_WEBGL || UNITY_EDITOR
+            public WsLink(System.Net.WebSockets.ClientWebSocket socket, int maxQueuedBytes)
+                : this(new NativeSocket(maxQueuedBytes, socket), maxQueuedBytes) { }
+#endif
 
             public override bool Enqueue(byte[] envelope, bool json)
             {
@@ -1442,13 +1435,13 @@ namespace Pylon.Realtime
             public void StartSending(CancellationToken ct, Action<Exception> onError)
             {
                 var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _stop.Token);
-                _ = Task.Run(async () =>
+                _ = SocketFactory.Run(async () =>
                 {
                     try
                     {
                         while (true)
                         {
-                            await _signal.WaitAsync(linked.Token).ConfigureAwait(false);
+                            await SocketFactory.WaitAsync(_signal, linked.Token).ConfigureAwait(SocketFactory.ContinueOnContext);
                             (byte[] Bytes, bool Text) item;
                             lock (_queue)
                             {
@@ -1456,19 +1449,18 @@ namespace Pylon.Realtime
                                 _queuedBytes -= item.Bytes.Length;
                             }
                             await Socket.SendAsync(
-                                new ArraySegment<byte>(item.Bytes),
-                                item.Text ? WebSocketMessageType.Text : WebSocketMessageType.Binary,
-                                true,
-                                linked.Token).ConfigureAwait(false);
+                                item.Bytes,
+                                item.Text,
+                                linked.Token).ConfigureAwait(SocketFactory.ContinueOnContext);
                         }
                     }
                     catch (OperationCanceledException)
                     {
                     }
-                    catch (Exception e) when (e is WebSocketException || e is ObjectDisposedException || e is InvalidOperationException)
+                    catch (Exception e)
                     {
                         // The socket closed; the receive side reports it.
-                        if (Socket.State == WebSocketState.Open) onError(e);
+                        if (Socket.IsOpen) onError(e);
                     }
                     finally
                     {
@@ -1491,14 +1483,14 @@ namespace Pylon.Realtime
 
             public override void Close()
             {
-                _ = Task.Run(async () =>
+                _ = SocketFactory.Run(async () =>
                 {
                     try
                     {
-                        if (Socket.State == WebSocketState.Open)
+                        if (Socket.IsOpen)
                         {
-                            using var t = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-                            await Socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "", t.Token).ConfigureAwait(false);
+                            using var t = new SocketDeadline(CancellationToken.None, TimeSpan.FromSeconds(2));
+                            await Socket.CloseAsync(t.Source.Token).ConfigureAwait(SocketFactory.ContinueOnContext);
                         }
                     }
                     catch (Exception)

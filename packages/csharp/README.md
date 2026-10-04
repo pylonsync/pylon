@@ -18,6 +18,10 @@ and no reflection. It runs under IL2CPP and in any .NET app. `Unity/` adds
 PlayerPrefs token storage and a `JsonUtility` converter. `Plugins/` holds
 the WebTransport plugin for each platform (see [WebTransport](#webtransport)).
 
+Unity Web uses browser WebSockets and HTTP by default. `ShardGame` also
+tries browser WebTransport, with WebSocket fallback. See [Web setup](WEB.md)
+and [test results](WEB-VALIDATION.md).
+
 ## Install
 
 In Unity, open **Window > Package Manager**, click **+**, choose **Install
@@ -34,7 +38,7 @@ Any release tag from `v0.22.12` on works. Or add it to `Packages/manifest.json`:
 ```
 
 Unity 2021.3 or later. Supported platforms: Windows, macOS, Linux, iOS, and
-Android. WebGL is not supported: it has no `System.Net.WebSockets`.
+Android, and Unity 6 Web builds. See [Unity Web setup and validation](WEB.md).
 
 Outside Unity, compile `Runtime/**/*.cs` into your project (it targets
 `netstandard2.1`), or reference `Tests~/Pylon.Core/Pylon.Core.csproj`.
@@ -195,7 +199,7 @@ var shard = new ShardConnection(shardId, new ShardConnectionOptions
 - `Auto`: the default for `ShardGame`. It uses WebTransport when it opens.
   Otherwise it uses a WebSocket, and keeps using WebSockets on that
   connection. The fallback happens when:
-  - the plugin is missing
+  - the native plugin or browser WebTransport API is missing
   - the app does not serve WebTransport
   - UDP is blocked
   - the session does not open within `WebTransportTimeout` (3 s)

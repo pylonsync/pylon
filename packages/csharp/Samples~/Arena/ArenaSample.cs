@@ -1,6 +1,7 @@
 #nullable enable
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using Pylon;
 using Pylon.Realtime;
 using Pylon.Unity;
@@ -55,6 +56,8 @@ namespace Pylon.Samples.Arena
         /// <summary>The target the predictor shows for this player, in arena units.</summary>
         public Vector2? PredictedTarget { get; private set; }
 
+        public Material? sampleMaterial;
+        readonly CancellationTokenSource _stop = new CancellationTokenSource();
         PylonClient? _client;
         ShardGame<PylonValue>? _game;
         Predictor<Vector2?, PylonValue>? _target;
@@ -75,18 +78,19 @@ namespace Pylon.Samples.Arena
                     Storage = new PlayerPrefsStorage(),
                 });
                 Status = "signing in";
-                var session = await _client.SignInAsGuestAsync();
+                var session = await _client.SignInAsGuestAsync(_stop.Token);
                 SubscriberId = session.UserId;
 
                 Status = "calling joinArena";
-                var join = await _client.CallFnAsync("joinArena", PylonValue.Object(("arena", arena)));
+                var join = await _client.CallFnAsync("joinArena", PylonValue.Object(("arena", arena)), _stop.Token);
 
+                _stop.Token.ThrowIfCancellationRequested();
                 // Created on the main thread, so every event below runs there.
                 _game = new ShardGame<PylonValue>(join["shardId"].AsString(), new ShardConnectionOptions
                 {
                     BaseUrl = _client.BaseUrl,
                     SubscriberId = join["subscriberId"].AsString(),
-                    Ticket = join["ticket"].AsString(),
+                    TicketProvider = async (_, ct) => (await _client.CallFnAsync("joinArena", PylonValue.Object(("arena", arena)), ct))["ticket"].AsString(),
                     TickRate = 20,
                     IdleTimeout = TimeSpan.FromSeconds(5),
                     Transport = transport,
@@ -96,7 +100,7 @@ namespace Pylon.Samples.Arena
                     input["move_to"].IsNull
                         ? target
                         : new Vector2(input["move_to"]["x"].AsFloat(), input["move_to"]["y"].AsFloat()));
-                _game.Opened += () => Status = $"connected over {_game.Connection.Transport}";
+                _game.Opened += () => { Status = $"connected over {_game.Connection.Transport}"; LastError = null; };
                 _game.StateChanged += (state, reason) => Status = reason == null ? state.ToString() : $"{state}: {reason}";
                 _game.Connection.Snapshot += OnSnapshot;
                 _game.InputRejected += r => LastError = $"input {r.ClientSeq} refused: {r.Code} {r.Message}";
@@ -104,6 +108,7 @@ namespace Pylon.Samples.Arena
                 Status = "connecting";
                 _game.Connect();
             }
+            catch (OperationCanceledException) { }
             catch (PylonException e)
             {
                 Status = "failed";
@@ -129,6 +134,7 @@ namespace Pylon.Samples.Arena
                 if (!_dots.TryGetValue(id, out var dot))
                 {
                     dot = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+                    if (sampleMaterial != null) dot.GetComponent<Renderer>().material = sampleMaterial;
                     dot.name = id == SubscriberId ? "You" : id;
                     dot.transform.localScale = Vector3.one * 0.3f;
                     var hue = p["hue"].AsFloat() / 360f;
@@ -198,6 +204,7 @@ namespace Pylon.Samples.Arena
             if (_targetMarker == null)
             {
                 _targetMarker = GameObject.CreatePrimitive(PrimitiveType.Cube);
+                if (sampleMaterial != null) _targetMarker.GetComponent<Renderer>().material = sampleMaterial;
                 _targetMarker.name = "Your target";
                 _targetMarker.transform.localScale = Vector3.one * 0.12f;
                 _targetMarker.GetComponent<Renderer>().material.color = Color.yellow;
@@ -210,6 +217,8 @@ namespace Pylon.Samples.Arena
         void SetUpScene()
         {
             var ground = GameObject.CreatePrimitive(PrimitiveType.Plane);
+            if (sampleMaterial != null) ground.GetComponent<Renderer>().material = sampleMaterial;
+            ground.GetComponent<Renderer>().material.color = new Color(0.25f, 0.3f, 0.35f);
             ground.name = "Arena floor";
             // A plane is 10 by 10 units.
             ground.transform.localScale = new Vector3(800 * scale / 10, 1, 500 * scale / 10);
@@ -235,6 +244,7 @@ namespace Pylon.Samples.Arena
 
         void OnDestroy()
         {
+            _stop.Cancel();
             _game?.Dispose();
             _client?.Dispose();
         }

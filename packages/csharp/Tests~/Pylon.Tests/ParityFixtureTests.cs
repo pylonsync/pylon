@@ -123,7 +123,7 @@ namespace Pylon.Tests
                 Assert.Null(binary);
             }
         }
-    
+
         /// <summary>
         /// The server's lag compensation (pylon-replication's ViewHistory)
         /// places each entity where this interpolator does, for the frames it

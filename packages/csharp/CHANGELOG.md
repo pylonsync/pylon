@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Unity Web: sign-in, server functions, live queries, and shards run in
+  browser builds over `fetch` and browser WebSockets. `ShardGame` tries
+  browser WebTransport first and falls back to WebSockets, with the same
+  replication, prediction, acknowledgements, and `view_tick` inputs as
+  native players, so browser and native players share a shard. Native
+  networking is excluded from Web builds; native behavior is unchanged.
+  Waits run on Unity frames, requests cancel and browser handles are
+  released on disposal, and socket queues are bounded. See `WEB.md` and
+  `WEB-VALIDATION.md`. The Arena sample adds Web and macOS build commands
+  and a validation panel.
+
 - Live queries: `client.Live(entity, options)` returns a `LiveQuery` whose `Rows` the server keeps current over the sync routes and the live socket, with `Changed` on the dispatcher. It catches up from its cursor after a reconnect and runs the shared sync conformance scenarios that cover reads (#47).
 - `ShardGame<TInput>`, a port of the TypeScript `connectShardGame`: the connection, the clock, interpolated entities, and predictors that record inputs, drop refused ones, and reset when the connection reopens (#45).
 - `ShardConnectionOptions.Now` sets the clock for frame arrival and input send times.

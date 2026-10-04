@@ -2,8 +2,6 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.IO;
-using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -63,7 +61,7 @@ namespace Pylon
         CancellationTokenSource? _run;
         /// <summary>Cancelled when the current socket's connection ends.</summary>
         CancellationTokenSource? _connection;
-        ClientWebSocket? _socket;
+        IPylonSocket? _socket;
         int _connects;
 
         public LiveSync(PylonClient client, LiveOptions options)
@@ -94,7 +92,7 @@ namespace Pylon
 
         internal bool Connected
         {
-            get { lock (_gate) return _socket?.State == WebSocketState.Open; }
+            get { lock (_gate) return _socket?.IsOpen == true; }
         }
 
         /// <summary>
@@ -104,7 +102,7 @@ namespace Pylon
         /// </summary>
         internal void OnTokenChanged()
         {
-            ClientWebSocket? socket;
+            IPylonSocket? socket;
             lock (_gate)
             {
                 if (_run == null) return;
@@ -129,7 +127,7 @@ namespace Pylon
         /// <summary>Drop the live socket without a close frame, as a lost network does.</summary>
         internal void DropSocketForTest()
         {
-            ClientWebSocket? s;
+            IPylonSocket? s;
             lock (_gate) s = _socket;
             try
             {
@@ -156,7 +154,7 @@ namespace Pylon
             if (start)
             {
                 var ct = _run!.Token;
-                _ = Task.Run(() => RunAsync(ct));
+                _ = SocketFactory.Run(() => RunAsync(ct));
             }
             else
             {
@@ -187,7 +185,7 @@ namespace Pylon
 
         void Stop(CancellationTokenSource? run)
         {
-            ClientWebSocket? socket;
+            IPylonSocket? socket;
             lock (_gate)
             {
                 socket = _socket;
@@ -229,10 +227,11 @@ namespace Pylon
                 {
                     int session;
                     lock (_gate) session = _session;
-                    var (url, credential) = await TargetAsync(ct).ConfigureAwait(false);
-                    var socket = new ClientWebSocket();
-                    if (!string.IsNullOrEmpty(credential)) socket.Options.AddSubProtocol("bearer." + Uri.EscapeDataString(credential));
-                    await socket.ConnectAsync(url, ct).ConfigureAwait(false);
+                    var (url, credential) = await TargetAsync(ct).ConfigureAwait(SocketFactory.ContinueOnContext);
+                    using var socket = SocketFactory.Create(64 * 1024 * 1024);
+                    var protocols = new List<string>();
+                    if (!string.IsNullOrEmpty(credential)) protocols.Add("bearer." + Uri.EscapeDataString(credential));
+                    await socket.ConnectAsync(url, new Dictionary<string, string>(), protocols, ct).ConfigureAwait(SocketFactory.ContinueOnContext);
                     opened = true;
                     lock (_gate)
                     {
@@ -259,8 +258,8 @@ namespace Pylon
                         // Changes broadcast between the last pull and this open are
                         // in the log: pull them. After a reconnect, also drop rows the
                         // server stopped returning (a revocation sent while away).
-                        _ = Task.Run(() => CatchUpAsync(reconnect, connection.Token));
-                        await ReceiveAsync(socket, ct).ConfigureAwait(false);
+                        _ = SocketFactory.Run(() => CatchUpAsync(reconnect, connection.Token));
+                        await ReceiveAsync(socket, ct).ConfigureAwait(SocketFactory.ContinueOnContext);
                     }
                     finally
                     {
@@ -291,14 +290,14 @@ namespace Pylon
                     _options.ReconnectBaseDelay.TotalMilliseconds * Math.Pow(2, Math.Min(attempts - 1, 20)));
                 try
                 {
-                    await Task.Delay(TimeSpan.FromMilliseconds(_random.NextDouble() * max), ct).ConfigureAwait(false);
+                    await SocketFactory.Delay(TimeSpan.FromMilliseconds(_random.NextDouble() * max), ct).ConfigureAwait(SocketFactory.ContinueOnContext);
                 }
                 catch (OperationCanceledException)
                 {
                     return;
                 }
                 // Catch up before the next connect attempt.
-                await PullSafeAsync(ct).ConfigureAwait(false);
+                await PullSafeAsync(ct).ConfigureAwait(SocketFactory.ContinueOnContext);
             }
         }
 
@@ -307,15 +306,15 @@ namespace Pylon
         {
             for (var attempt = 0; !ct.IsCancellationRequested; attempt++)
             {
-                if (await PullSafeAsync(ct).ConfigureAwait(false))
+                if (await PullSafeAsync(ct).ConfigureAwait(SocketFactory.ContinueOnContext))
                 {
-                    if (reconnect) await ReconcileAsync(ct).ConfigureAwait(false);
+                    if (reconnect) await ReconcileAsync(ct).ConfigureAwait(SocketFactory.ContinueOnContext);
                     return;
                 }
                 var delay = Math.Min(30_000, _options.ReconnectBaseDelay.TotalMilliseconds * Math.Pow(2, Math.Min(attempt, 10)));
                 try
                 {
-                    await Task.Delay(TimeSpan.FromMilliseconds(delay), ct).ConfigureAwait(false);
+                    await SocketFactory.Delay(TimeSpan.FromMilliseconds(delay), ct).ConfigureAwait(SocketFactory.ContinueOnContext);
                 }
                 catch (OperationCanceledException)
                 {
@@ -329,7 +328,7 @@ namespace Pylon
             var token = _client.Token;
             if (_options.UseRelay)
             {
-                var relay = await _client.RequestAsync("GET", "/api/sync/relay-token", null, ct).ConfigureAwait(false);
+                var relay = await _client.RequestAsync("GET", "/api/sync/relay-token", null, ct).ConfigureAwait(SocketFactory.ContinueOnContext);
                 var url = relay["url"].AsStringOr(null);
                 var blob = relay["token"].AsStringOr(null);
                 if (url == null || blob == null) throw PylonException.Decoding("the relay token response has no url or token");
@@ -342,15 +341,15 @@ namespace Pylon
             return (b.Uri, token);
         }
 
-        async Task PingAsync(ClientWebSocket socket, CancellationToken ct)
+        async Task PingAsync(IPylonSocket socket, CancellationToken ct)
         {
             var ping = Encoding.UTF8.GetBytes("{\"type\":\"ping\"}");
             try
             {
                 while (!ct.IsCancellationRequested)
                 {
-                    await Task.Delay(_options.PingInterval, ct).ConfigureAwait(false);
-                    await socket.SendAsync(new ArraySegment<byte>(ping), WebSocketMessageType.Text, true, ct).ConfigureAwait(false);
+                    await SocketFactory.Delay(_options.PingInterval, ct).ConfigureAwait(SocketFactory.ContinueOnContext);
+                    await socket.SendAsync(ping, true, ct).ConfigureAwait(SocketFactory.ContinueOnContext);
                 }
             }
             catch (Exception)
@@ -359,28 +358,13 @@ namespace Pylon
             }
         }
 
-        async Task ReceiveAsync(ClientWebSocket socket, CancellationToken ct)
+        async Task ReceiveAsync(IPylonSocket socket, CancellationToken ct)
         {
-            var buffer = new byte[64 * 1024];
-            var message = new MemoryStream();
             while (!ct.IsCancellationRequested)
             {
-                WebSocketReceiveResult r;
-                try
-                {
-                    r = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), ct).ConfigureAwait(false);
-                }
-                catch (WebSocketException)
-                {
-                    return;
-                }
-                if (r.MessageType == WebSocketMessageType.Close) return;
-                message.Write(buffer, 0, r.Count);
-                if (message.Length > 64 * 1024 * 1024) return;
-                if (!r.EndOfMessage) continue;
-                // Binary frames carry CRDT updates, which live queries do not use.
-                if (r.MessageType == WebSocketMessageType.Text) OnText(Encoding.UTF8.GetString(message.GetBuffer(), 0, (int)message.Length));
-                message.SetLength(0);
+                var message = await socket.ReceiveAsync(ct).ConfigureAwait(SocketFactory.ContinueOnContext);
+                if (message.Closed) return;
+                if (message.Text) OnText(Encoding.UTF8.GetString(message.Bytes));
             }
         }
 
@@ -442,7 +426,7 @@ namespace Pylon
                         ct = _connection?.Token ?? CancellationToken.None;
                     }
                     NotifyAll();
-                    _ = Task.Run(() => CatchUpAsync(false, ct));
+                    _ = SocketFactory.Run(() => CatchUpAsync(false, ct));
                     return;
                 }
             }
@@ -454,7 +438,7 @@ namespace Pylon
         {
             try
             {
-                await PullAsync(ct).ConfigureAwait(false);
+                await PullAsync(ct).ConfigureAwait(SocketFactory.ContinueOnContext);
                 return true;
             }
             catch (OperationCanceledException)
@@ -471,10 +455,10 @@ namespace Pylon
         /// <summary>Catch up from the cursor: the snapshot (from 0) and the change log, all pages.</summary>
         internal async Task PullAsync(CancellationToken ct = default)
         {
-            await _pullLock.WaitAsync(ct).ConfigureAwait(false);
+            await SocketFactory.WaitAsync(_pullLock, ct).ConfigureAwait(SocketFactory.ContinueOnContext);
             try
             {
-                await PullLockedAsync(ct).ConfigureAwait(false);
+                await PullLockedAsync(ct).ConfigureAwait(SocketFactory.ContinueOnContext);
             }
             finally
             {
@@ -501,7 +485,7 @@ namespace Pylon
             {
                 NotifyAll();
                 // The socket carries the old token: reconnect with the new one.
-                ClientWebSocket? old;
+                IPylonSocket? old;
                 lock (_gate) old = _socket;
                 try
                 {
@@ -535,7 +519,7 @@ namespace Pylon
                     // snapshot_after is opaque and already URL-encoded by the server: append it as is.
                     var path = "/api/sync/pull?since=" + since.ToString(CultureInfo.InvariantCulture);
                     if (snapshotAfter != null) path += "&snapshot_after=" + snapshotAfter;
-                    var resp = await _client.RequestAsync("GET", path, null, ct).ConfigureAwait(false);
+                    var resp = await _client.RequestAsync("GET", path, null, ct).ConfigureAwait(SocketFactory.ContinueOnContext);
                     var next = resp["cursor"]["last_seq"].IsNumber ? resp["cursor"]["last_seq"].AsULong() : since;
                     lock (_gate)
                     {
@@ -575,17 +559,17 @@ namespace Pylon
                     // log: snapshot from zero, once.
                     lock (_gate) ResetLocked();
                     NotifyAll();
-                    await PullLockedAsync(ct).ConfigureAwait(false);
+                    await PullLockedAsync(ct).ConfigureAwait(SocketFactory.ContinueOnContext);
                     return;
                 }
                 // Snapshotting did not converge: back off instead of re-snapshotting.
                 var delay = TimeSpan.FromMilliseconds(Math.Min(30_000, 1000 * Math.Pow(2, Math.Min(attempt, 5))));
-                _ = Task.Run(async () =>
+                _ = SocketFactory.Run(async () =>
                 {
                     try
                     {
-                        await Task.Delay(delay, ct).ConfigureAwait(false);
-                        await PullSafeAsync(ct).ConfigureAwait(false);
+                        await SocketFactory.Delay(delay, ct).ConfigureAwait(SocketFactory.ContinueOnContext);
+                        await PullSafeAsync(ct).ConfigureAwait(SocketFactory.ContinueOnContext);
                     }
                     catch (OperationCanceledException)
                     {
@@ -623,9 +607,9 @@ namespace Pylon
             {
                 for (var tries = 0; tries < 5 && !ct.IsCancellationRequested; tries++)
                 {
-                    if (await ReconcileEntityAsync(entity, ct).ConfigureAwait(false)) break;
+                    if (await ReconcileEntityAsync(entity, ct).ConfigureAwait(SocketFactory.ContinueOnContext)) break;
                     // A change landed during the fetch: the fetched set is stale. Fetch again.
-                    await Task.Delay(TimeSpan.FromMilliseconds(100 * (tries + 1)), ct).ConfigureAwait(false);
+                    await SocketFactory.Delay(TimeSpan.FromMilliseconds(100 * (tries + 1)), ct).ConfigureAwait(SocketFactory.ContinueOnContext);
                 }
             }
         }
@@ -649,7 +633,7 @@ namespace Pylon
                     var pages = 0;
                     do
                     {
-                        var page = await _client.ListCursorAsync(entity, after, 500, ct, replication: true).ConfigureAwait(false);
+                        var page = await _client.ListCursorAsync(entity, after, 500, ct, replication: true).ConfigureAwait(SocketFactory.ContinueOnContext);
                         foreach (var row in page.Data)
                         {
                             var id = row["id"].AsStringOr(null);
