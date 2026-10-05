@@ -1,4 +1,5 @@
-//! `pylon db` — backup / restore / url.
+//! `pylon db` — backup / restore of a Cloud project, and `copy` (local, see
+//! `db_copy`).
 
 use pylon_kernel::ExitCode;
 use serde::Deserialize;
@@ -28,6 +29,10 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         .filter(|a| !a.starts_with('-') && *a != "db")
         .map(|s| s.as_str())
         .collect();
+    // `copy` works on local files and a database URL; no Cloud login.
+    if positional.first() == Some(&"copy") {
+        return super::db_copy::run(args, json_mode);
+    }
     let creds = match require_credentials() {
         Ok(c) => c,
         Err(e) => {
@@ -63,7 +68,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         ),
         Some(sub) => {
             output::print_error(&format!("unknown subcommand: \"{sub}\""));
-            eprintln!("Usage: pylon db [list | backup | restore <id>]");
+            eprintln!("Usage: pylon db [list | backup | restore <id> | copy --from <pylon.db>]");
             ExitCode::Usage
         }
     }

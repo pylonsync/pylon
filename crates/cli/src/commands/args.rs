@@ -45,6 +45,18 @@ const VALUE_FLAGS: &[&str] = &[
 /// either way the following token is its value, not a positional.
 const VALUE_SHORT_FLAGS: &[&str] = &["-p"];
 
+/// The value of `--flag value` or `--flag=value`, if given.
+pub fn flag_value(args: &[String], flag: &str) -> Option<String> {
+    let prefix = format!("{flag}=");
+    args.iter().enumerate().find_map(|(i, a)| {
+        if a == flag {
+            args.get(i + 1).cloned()
+        } else {
+            a.strip_prefix(&prefix).map(str::to_owned)
+        }
+    })
+}
+
 /// Collect positional args (entry file path, etc.) from an argv slice,
 /// skipping the leading subcommand name + any `--flag value` pairs.
 pub fn collect_positional<'a>(args: &'a [String], subcommand: &str) -> Vec<&'a str> {

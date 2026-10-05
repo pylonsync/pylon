@@ -149,6 +149,25 @@ pylon db restore <backup-id>       # restore from one
 
 Watch the project's Deployments tab for restore progress; restoring rolls the Fly machine.
 
+### Copy a SQLite app to Postgres
+
+`pylon db copy` copies all of a SQLite app's data into an empty Postgres database. It runs on the files, so it needs no login.
+
+```bash
+pylon db copy --from /data/pylon.db --to postgres://… --check   # report values Postgres refuses; write nothing
+pylon db copy --from /data/pylon.db --to postgres://…           # copy
+```
+
+The copy includes:
+
+- the entity rows, with encrypted fields as they are stored
+- the auth state, jobs, workflow runs, CRDT documents and the change log
+- the search index, which it fills on Postgres
+
+`--to` defaults to `DATABASE_URL`. `--manifest` defaults to `pylon.manifest.json`. The copy refuses a database that already has rows. It reads the SQLite files and does not change them.
+
+To copy when the server starts, set `PYLON_IMPORT_FROM_SQLITE=/data/pylon.db` together with a Postgres `DATABASE_URL`. The server copies the data before it accepts requests. If the copy fails, the server does not start, and it writes the error to `_pylon_sqlite_import_failures`. Later starts find the finished copy and skip it.
+
 ## Data browser
 
 ```bash

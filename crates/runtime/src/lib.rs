@@ -11,6 +11,7 @@ pub mod connections;
 pub mod crdt_cache;
 pub mod cron;
 pub mod datastore;
+pub mod db_copy;
 pub mod dev_access;
 pub mod dev_diagnostics;
 pub mod encryption;
@@ -371,20 +372,20 @@ fn ensure_cron_lease_entity(manifest: &mut AppManifest) {
         .push(crate::datastore::cron_lease_entity());
 }
 
-/// Bootstrap the framework-internal `_CronLease` table on Postgres.
+/// Bootstrap a framework-injected entity's table on Postgres
+/// (`_CronLease`, `_Connection`).
 ///
 /// `open_postgres` deliberately does NOT auto-create app tables — schema is
-/// applied via `pylon migrate`, which reads the app's `pylon.manifest.json`.
-/// But `_CronLease` is injected at runtime boot and never appears in that
-/// file, so `pylon migrate` would never create it. Mirror the CRDT-sidecar
-/// bootstrap a few lines up: run idempotent `CREATE TABLE / INDEX IF NOT
-/// EXISTS` on every open. Without this, the cross-replica lease insert in
-/// `claim_cron_lease` hits a missing relation, fails open, and every replica
-/// fires the cron — exactly the behavior the lease exists to prevent.
-fn ensure_cron_lease_table_pg(
+/// applied from the app's `pylon.manifest.json` (`pylon start`, `pylon
+/// migrate`). Injected entities never appear in that file, so nothing else
+/// creates their tables. Run idempotent `CREATE TABLE / INDEX IF NOT EXISTS`
+/// on every open, the same way the CRDT sidecar is bootstrapped. Without it
+/// the cross-replica cron lease insert hits a missing relation and fails
+/// open (every replica fires the cron), and every connection write fails.
+fn ensure_framework_table_pg(
     store: &pylon_storage::pg_datastore::PostgresDataStore,
+    entity: &ManifestEntity,
 ) -> Result<(), RuntimeError> {
-    let entity = crate::datastore::cron_lease_entity();
     let fields: Vec<pylon_storage::FieldSpec> = entity
         .fields
         .iter()
@@ -1056,12 +1057,16 @@ impl Runtime {
                 code: "FN_CALLS_BOOTSTRAP_FAILED".into(),
                 message: format!("create _pylon_fn_calls: {e}"),
             })?;
-        // `pylon migrate` never sees the injected `_CronLease` (it's not in the
-        // app's manifest file), so create its table here — idempotently — the
-        // same way the CRDT sidecar is bootstrapped above. SQLite gets it for
-        // free via `from_connection`'s CREATE TABLE IF NOT EXISTS pass.
+        // The schema apply never sees the injected `_CronLease` and
+        // `_Connection` (they're not in the app's manifest file), so create
+        // their tables here, idempotently, the same way the CRDT sidecar is
+        // bootstrapped above. SQLite gets them from `from_connection`'s
+        // CREATE TABLE IF NOT EXISTS pass.
         if !manifest.crons.is_empty() {
-            ensure_cron_lease_table_pg(&store)?;
+            ensure_framework_table_pg(&store, &crate::datastore::cron_lease_entity())?;
+        }
+        if !manifest.connections.is_empty() {
+            ensure_framework_table_pg(&store, &connections::connection_entity())?;
         }
         validate_encrypted_fields(&manifest)?;
         retention::rules_from_manifest(&manifest)?;

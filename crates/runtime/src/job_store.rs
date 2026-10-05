@@ -217,6 +217,25 @@ impl JobStore {
         Ok(jobs)
     }
 
+    /// Load every job in any status. Used to copy the queue to Postgres.
+    pub fn load_all(&self) -> Result<Vec<Job>, String> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, name, payload, priority, status, max_retries, retry_count, \
+                 queue, delay_secs, error, created_at, started_at, completed_at, auth, \
+                 ready_at \
+                 FROM jobs \
+                 ORDER BY created_at ASC",
+            )
+            .map_err(|e| format!("Prepare failed: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| Ok(row_to_job(row)))
+            .map_err(|e| format!("Query failed: {e}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Query failed: {e}"))
+    }
+
     /// Count jobs by status.
     pub fn count_by_status(&self, status: &str) -> usize {
         let conn = self.conn.lock().unwrap();

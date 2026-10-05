@@ -176,6 +176,25 @@ The runtime picks its backend from the URL prefix:
 
 `DATABASE_URL` takes precedence over `PYLON_DB_PATH` when both are set.
 
+### Moving a SQLite app to Postgres
+
+A SQLite app keeps its state in four files: `pylon.db`, `<db>.sessions.db`
+(or `PYLON_SESSION_DB`), `<db>.jobs.db` and `<db>.workflows.db`. On Postgres
+all of it is in one database. `pylon db copy --from <pylon.db> --to <url>`
+copies every file into an empty database; add `--check` to list the values
+Postgres refuses (for example an empty string in a datetime column) without
+writing.
+
+To copy during the cutover, start the server with both
+`DATABASE_URL=postgres://…` and `PYLON_IMPORT_FROM_SQLITE=<pylon.db>`. The
+server copies before it opens the port and does not start when the copy
+fails; the error is in `_pylon_sqlite_import_failures`. The SQLite files are
+only read, so pointing the app back at them loses nothing. The row in
+`_pylon_sqlite_import` records the finished copy; later starts skip it.
+
+Columns of fields the manifest no longer declares, and tables of entities it
+no longer declares, stay in SQLite. The copy lists them.
+
 ### Postgres runtime state
 
 What works on Postgres today:

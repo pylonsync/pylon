@@ -515,7 +515,7 @@ fn print_usage() {
     println!("  secrets  [list|set|rm|import] Manage project secrets");
     println!("  logs tail                 Tail the project's request log");
     println!("  domains  [list|add|verify|rm] Manage custom domains");
-    println!("  db       [list|backup|restore] Database snapshots");
+    println!("  db       [list|backup|restore|copy] Database snapshots; copy SQLite to Postgres");
     println!("  data     [entities|list|get] Browse entity rows from the shell");
     println!("  deployments [list|logs|rollback] List, tail build logs, roll back");
     println!("  members  [list|invite]    Org members");

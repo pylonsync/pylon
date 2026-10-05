@@ -240,6 +240,28 @@ impl WorkflowStore {
         }
     }
 
+    /// Load every workflow run in any status, with its steps and stored
+    /// events. Used to copy the store to Postgres.
+    pub fn load_all(&self) -> Result<Vec<WorkflowInstance>, String> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {WORKFLOW_COLUMNS} FROM workflows ORDER BY created_at ASC"
+            ))
+            .map_err(|e| format!("Prepare failed: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| Ok(row_to_workflow(row)))
+            .map_err(|e| format!("Query failed: {e}"))?;
+        let mut workflows = Vec::new();
+        for row in rows {
+            let mut wf = row.map_err(|e| format!("Query failed: {e}"))?;
+            wf.steps = load_steps(&conn, &wf.id)?;
+            wf.pending_events = load_events(&conn, &wf.id)?;
+            workflows.push(wf);
+        }
+        Ok(workflows)
+    }
+
     /// Load all active workflows (Pending, Running, WaitingForEvent).
     pub fn load_active(&self) -> Result<Vec<WorkflowInstance>, String> {
         let conn = self.conn.lock().unwrap();

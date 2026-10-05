@@ -11176,6 +11176,14 @@ fn build_sqlite_auth_stores(path: &str, session_lifetime: u64) -> Result<AuthSto
 /// plus one connection per auth backend (~10). On a small managed Postgres
 /// (PlanetScale PS_5, ~25 connections) that headroom is what lets a redeploy
 /// or burst get a connection instead of being refused.
+/// Create every auth table on Postgres, the same way boot does. Used by
+/// `db_copy` before it copies auth rows from SQLite.
+pub(crate) fn create_pg_auth_tables(
+    pool: std::sync::Arc<pylon_storage::pg_datastore::PgPool>,
+) -> Result<(), String> {
+    build_pg_auth_stores(pool, 0).map(|_| ())
+}
+
 fn build_pg_auth_stores(
     pool: std::sync::Arc<pylon_storage::pg_datastore::PgPool>,
     session_lifetime: u64,

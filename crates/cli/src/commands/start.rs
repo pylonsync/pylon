@@ -19,7 +19,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use pylon_kernel::{Diagnostic, ExitCode, Severity};
+use pylon_kernel::{AppManifest, Diagnostic, ExitCode, Severity};
 
 use crate::commands::args::{collect_positional, parse_port};
 use crate::manifest::{parse_manifest, validate_all};
@@ -488,58 +488,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     // migrations are the operator's explicit responsibility via
     // `pylon migrate`. Postgres apply uses `LivePostgresAdapter`.
     if is_pg {
-        match pylon_storage::postgres::live::LivePostgresAdapter::connect(&db_target) {
-            Ok(mut adapter) => {
-                // Reflect ONLY when the manifest's schema shape actually
-                // changed. `plan_from_live` interrogates the catalog, and on
-                // Postgres that is the single most expensive thing this process
-                // does — 8.2M rows read to return 16k on a 33-table app. Paying
-                // it on every boot made ordinary deploy churn indistinguishable
-                // from an attack on the database: 48 boots in a day held a small
-                // primary at 100% CPU until it stopped accepting connections.
-                // See schema_fingerprint for the full account.
-                let fingerprint = pylon_storage::postgres::schema_fingerprint(&manifest);
-                let forced = std::env::var("PYLON_SCHEMA_FORCE_REFLECT")
-                    .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
-                let unchanged = !forced
-                    && adapter
-                        .read_schema_fingerprint()
-                        .ok()
-                        .flatten()
-                        .is_some_and(|stored| stored == fingerprint);
-                if unchanged {
-                    if !json_mode {
-                        println!("  Database: schema unchanged (fingerprint match)");
-                    }
-                } else if let Ok(plan) = adapter.plan_from_live(&manifest) {
-                    match adapter.apply_plan(&plan) {
-                        Ok(()) => {
-                            // Only after a SUCCESSFUL apply — recording it
-                            // first would let a failed migration mark itself
-                            // done and every later boot skip the work.
-                            if let Err(e) = adapter.write_schema_fingerprint(&fingerprint) {
-                                if !json_mode {
-                                    eprintln!(
-                                        "[start] could not record schema fingerprint ({e}); \
-                                         the next boot will reflect again"
-                                    );
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            if !json_mode {
-                                eprintln!("[start] Postgres schema apply failed: {e}");
-                            }
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                if !json_mode {
-                    eprintln!("[start] Could not connect to Postgres for schema apply: {e}");
-                }
-            }
-        }
+        apply_pg_schema(&db_target, &manifest, json_mode);
     } else if let Ok(adapter) = pylon_storage::sqlite::SqliteAdapter::open(&db_target) {
         if let Ok(plan) = adapter.plan_from_live(&manifest) {
             let meta = pylon_storage::sqlite::PushMetadata {
@@ -560,6 +509,21 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
             return ExitCode::Error;
         }
     };
+
+    // Moving a SQLite app to Postgres: copy its data before the server
+    // takes a request. Refusing to start on failure keeps the app from
+    // serving an empty database; the SQLite files are only read, so going
+    // back to SQLite loses nothing.
+    if is_pg {
+        if let Some(sqlite_path) = std::env::var("PYLON_IMPORT_FROM_SQLITE")
+            .ok()
+            .filter(|v| !v.is_empty())
+        {
+            if !super::db_copy::run_at_boot(&runtime, &sqlite_path, json_mode) {
+                return ExitCode::Error;
+            }
+        }
+    }
 
     // Hand the runtime the paths to studio artefacts (if present) so
     // /studio renders against the user's config and /studio/extensions.js
@@ -609,6 +573,65 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     }
 
     ExitCode::Ok
+}
+
+/// Bring the Postgres schema in line with the manifest. In prod only
+/// expand-compatible changes apply; destructive migrations are the
+/// operator's explicit responsibility via `pylon migrate`. Failures are
+/// logged, not fatal, as before: the runtime reports missing tables itself.
+pub(crate) fn apply_pg_schema(db_target: &str, manifest: &AppManifest, json_mode: bool) {
+    match pylon_storage::postgres::live::LivePostgresAdapter::connect(db_target) {
+        Ok(mut adapter) => {
+            // Reflect ONLY when the manifest's schema shape actually
+            // changed. `plan_from_live` interrogates the catalog, and on
+            // Postgres that is the single most expensive thing this process
+            // does — 8.2M rows read to return 16k on a 33-table app. Paying
+            // it on every boot made ordinary deploy churn indistinguishable
+            // from an attack on the database: 48 boots in a day held a small
+            // primary at 100% CPU until it stopped accepting connections.
+            // See schema_fingerprint for the full account.
+            let fingerprint = pylon_storage::postgres::schema_fingerprint(manifest);
+            let forced = std::env::var("PYLON_SCHEMA_FORCE_REFLECT")
+                .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+            let unchanged = !forced
+                && adapter
+                    .read_schema_fingerprint()
+                    .ok()
+                    .flatten()
+                    .is_some_and(|stored| stored == fingerprint);
+            if unchanged {
+                if !json_mode {
+                    println!("  Database: schema unchanged (fingerprint match)");
+                }
+            } else if let Ok(plan) = adapter.plan_from_live(manifest) {
+                match adapter.apply_plan(&plan) {
+                    Ok(()) => {
+                        // Only after a SUCCESSFUL apply — recording it
+                        // first would let a failed migration mark itself
+                        // done and every later boot skip the work.
+                        if let Err(e) = adapter.write_schema_fingerprint(&fingerprint) {
+                            if !json_mode {
+                                eprintln!(
+                                    "[start] could not record schema fingerprint ({e}); \
+                                     the next boot will reflect again"
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if !json_mode {
+                            eprintln!("[start] Postgres schema apply failed: {e}");
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            if !json_mode {
+                eprintln!("[start] Could not connect to Postgres for schema apply: {e}");
+            }
+        }
+    }
 }
 
 #[cfg(test)]

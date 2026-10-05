@@ -1121,7 +1121,7 @@ impl ShardDirectory {
 }
 
 /// The directory's tables in Postgres, created or brought up to date.
-fn create_pg_schema(pool: &PgPool) -> Result<(), String> {
+pub(crate) fn create_pg_schema(pool: &PgPool) -> Result<(), String> {
     pool.with_client(|client| {
         let mut tx = client.transaction()?;
         tx.execute("SELECT pg_advisory_xact_lock($1)", &[&SCHEMA_LOCK_ID])?;

@@ -368,6 +368,27 @@ impl PgWorkflowStore {
         outcome
     }
 
+    /// Insert stored events for a run as they were, with their receive
+    /// times. Used to copy a SQLite store; [`Self::push_event`] is the path
+    /// for new events. Postgres numbers the events again, in the given order.
+    pub fn restore_events(&self, id: &str, events: &[BufferedEvent]) -> Result<(), String> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        self.pool.with_client(|client| {
+            let mut tx = client.transaction()?;
+            for event in events {
+                let received_at = parse_stamp_i64(&event.received_at);
+                tx.execute(
+                    "INSERT INTO _pylon_workflow_events (workflow_id,event,data,received_at)
+                     VALUES ($1,$2,$3,$4)",
+                    &[&id, &event.event, &event.data, &received_at],
+                )?;
+            }
+            tx.commit()
+        })
+    }
+
     pub fn load_events(&self, id: &str) -> Result<Vec<BufferedEvent>, String> {
         self.pool.with_client(|client| load_events(client, id))
     }

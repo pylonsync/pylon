@@ -3375,6 +3375,7 @@ version = "0.22.19"
 dependencies = [
  "base64",
  "bytes",
+ "chrono",
  "fast_image_resize",
  "futures-util",
  "hmac 0.12.1",

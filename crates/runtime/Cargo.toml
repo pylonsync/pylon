@@ -42,6 +42,7 @@ postgres = { workspace = true }
 # The BytesMut buffer postgres' ToSql writes into (the shard directory's values).
 bytes = "1"
 rusqlite = { workspace = true }
+chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tiny_http = { workspace = true }
