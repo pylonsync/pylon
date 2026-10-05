@@ -488,8 +488,7 @@ pub fn copy(
         &app,
         &source_conn,
         &shapes,
-        skipped,
-        skipped_columns,
+        (skipped, skipped_columns),
     );
     if result.is_err() {
         if let Err(e) = empty_tables(pg, &target_tables) {
@@ -506,8 +505,7 @@ fn write_all<'a>(
     app: &Connection,
     source_conn: &'a dyn Fn(SourceDb) -> Option<&'a Connection>,
     shapes: &[TableShape],
-    skipped: Vec<TableCount>,
-    skipped_columns: Vec<SkippedColumn>,
+    (skipped, skipped_columns): (Vec<TableCount>, Vec<SkippedColumn>),
 ) -> Result<CopyReport, CopyError> {
     let jobs = copy_jobs(pg, &source.jobs_db)?;
     let workflows = copy_workflows(pg, &source.workflows_db)?;
