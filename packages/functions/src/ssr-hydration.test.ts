@@ -164,3 +164,77 @@ describe("streaming hydration (#278)", () => {
     }
   });
 });
+
+// A route with a loading.tsx: ssr-runtime.ts wraps the page in ONE Suspense
+// boundary whose fallback is the loading module, inside the layouts. The
+// client's first hydration must build the same tree (buildTree's
+// `loadingFor` in ssr-client-bundler.ts). Without the boundary, React finds
+// the server's Suspense marker where it expects the page's first element and
+// throws a hydration mismatch (#418): Stack0 Cloud's dashboard did this on
+// every load, since app/dashboard/loading.tsx exists.
+describe("route-level loading.tsx hydration", () => {
+  function Layout({ children }: { children?: any }) {
+    return React.createElement("main", { id: "layout" }, children);
+  }
+  function Loading() {
+    return React.createElement("p", { id: "pending" }, "Loading…");
+  }
+  function DashPage() {
+    return React.createElement("div", { id: "page" }, "Dashboard");
+  }
+  const withBoundary = (page: any) =>
+    React.createElement(Suspense, { fallback: React.createElement(Loading) }, page);
+
+  async function serverHtml(): Promise<string> {
+    const stream = await renderToReadableStream(
+      React.createElement(Layout, null, withBoundary(React.createElement(DashPage))),
+    );
+    await (stream as any).allReady;
+    const reader = stream.getReader();
+    let html = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      html += dec.decode(value);
+    }
+    return html;
+  }
+
+  async function hydrateErrors(clientTree: any): Promise<string[]> {
+    const html = await serverHtml();
+    const win = new Window({ url: "http://localhost/" });
+    const root = win.document.createElement("div");
+    root.insertAdjacentHTML("afterbegin", html);
+    win.document.body.appendChild(root);
+    registerDom(win);
+    const errors: string[] = [];
+    const origErr = console.error;
+    console.error = (...a: any[]) => {
+      errors.push(a.map(String).join(" "));
+    };
+    try {
+      const { hydrateRoot } = await import("react-dom/client");
+      hydrateRoot(root as any, clientTree, {
+        onRecoverableError: (e: any) => errors.push(String(e?.message ?? e)),
+      });
+      await new Promise((r) => setTimeout(r, 50));
+    } finally {
+      console.error = origErr;
+    }
+    return errors.filter((e) => /hydrat|did not match|mismatch/i.test(e));
+  }
+
+  test("the client tree with the same boundary hydrates without a mismatch", async () => {
+    const errors = await hydrateErrors(
+      React.createElement(Layout, null, withBoundary(React.createElement(DashPage))),
+    );
+    expect(errors).toEqual([]);
+  });
+
+  test("the client tree without the boundary mismatches (the bug)", async () => {
+    const errors = await hydrateErrors(
+      React.createElement(Layout, null, React.createElement(DashPage)),
+    );
+    expect(errors.length).toBeGreaterThan(0);
+  });
+});

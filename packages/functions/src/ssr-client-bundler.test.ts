@@ -687,6 +687,28 @@ describe("loading.tsx is wired into the client build", () => {
     expect(sharedChunks).toContain("app/dashboard/loading");
   });
 
+  test("first hydration wraps the page in the same Suspense boundary the server renders", async () => {
+    tempDir = makeFixture(
+      {
+        "dashboard/page.tsx": PAGE_BODY("Dash"),
+        "dashboard/loading.tsx": LOADING_BODY,
+      },
+      { "layout.tsx": LAYOUT_BODY },
+    );
+    originalCwd = process.cwd();
+    process.chdir(tempDir);
+    await buildClientBundle();
+    const runtime = fs.readFileSync(
+      path.join(tempDir, ".pylon", "client-runtime.ts"),
+      "utf8",
+    );
+    // The hydrating tree is built with the page's component path, which
+    // resolves its loading module and wraps the page in <Suspense>
+    // (see ssr-hydration.test.ts for why a missing boundary breaks hydration).
+    expect(runtime).toContain("buildTree(Page, Layouts, currentPageProps, data.component)");
+    expect(runtime).toContain("createElement(Suspense, { fallback: createElement(Loading, props) }, tree)");
+  });
+
   test("an app with no loading.tsx still builds and navigates", async () => {
     // The runtime's import of ./loading-registry is unconditional, so the
     // staged module must exist even with nothing to put in it.
