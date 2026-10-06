@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use pylon_kernel::ExitCode;
 use serde::Deserialize;
 
-use crate::cloud_client::{post_json, require_credentials, set_default_project};
+use crate::cloud_client::{post_json, require_credentials};
 use crate::output;
 use crate::project_context::{clear_context_file, write_context_file};
 
@@ -394,10 +394,9 @@ fn run_create(args: &[String], json_mode: bool) -> ExitCode {
         }
     };
 
-    // Pin the new project as the local context right away (same as
+    // Link the new project to this directory right away (same as
     // `pylon projects use`) so a follow-up `pylon deploy` targets it
     // even if the caller skips or aborts the provisioning wait.
-    set_default_project(&created.slug);
     let context_path = write_context_file(&created.slug).ok();
 
     if !json_mode {
@@ -602,11 +601,6 @@ fn run_use(slug_arg: Option<&str>, json_mode: bool) -> ExitCode {
             eprintln!("  List available projects: pylon projects list");
             return ExitCode::Usage;
         }
-        // Persist the global default too so subsequent invocations
-        // from any cwd remember the selection. Per-dir context still
-        // wins when present; this is purely the fallback for callers
-        // running outside the .pylon/ tree.
-        set_default_project(slug);
         match write_context_file(slug) {
             Ok(path) => {
                 if json_mode {
@@ -614,15 +608,13 @@ fn run_use(slug_arg: Option<&str>, json_mode: bool) -> ExitCode {
                         "ok": true,
                         "slug": slug,
                         "path": path.to_string_lossy(),
-                        "default_project_persisted": true,
                     });
                     println!("{}", serde_json::to_string(&out).unwrap_or_default());
                 } else {
-                    println!("✓ Project context set to {slug}");
-                    println!("  Local:  {}", path.display());
-                    println!("  Global: ~/.config/pylon/state.json");
+                    println!("✓ Linked this directory to {slug}");
+                    println!("  Context file: {}", path.display());
                     println!(
-                        "  Subsequent `pylon` commands anywhere will target it without --project."
+                        "  `pylon` commands in this directory and its subdirectories target it."
                     );
                 }
                 ExitCode::Ok

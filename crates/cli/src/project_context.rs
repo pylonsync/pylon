@@ -10,8 +10,10 @@
 //!      `pylon projects use <slug>`)
 //!   5. TTY interactive picker via `listMyProjectsForCli`
 //!   6. Hard error pointing at #1 — non-TTY callers (CI, --json) MUST
-//!      pass --project explicitly so a misconfigured pipeline doesn't
-//!      silently target the wrong project.
+//!      pass --project explicitly.
+//!
+//! There is no machine-wide default project. A project is linked to a
+//! directory, and only commands run inside that directory target it.
 
 use std::fs;
 use std::path::PathBuf;
@@ -33,31 +35,24 @@ struct ProjectPickerEntry {
 }
 
 /// Resolve the project slug WITHOUT any interactive fallback: `--project`
-/// flag → `$PYLON_PROJECT` → `.pylon/project` context file → global default.
-/// Returns `None` when nothing is linked. Callers like `deploy` use this to
-/// detect "no project here" so they can offer to provision one, instead of
-/// dropping into the shared picker (which only lists existing projects).
+/// flag → `$PYLON_PROJECT` → `.pylon/project` context file. Returns `None`
+/// when nothing is linked. Callers like `deploy` use this to detect "no
+/// project here" so they can offer to provision one, instead of dropping
+/// into the shared picker (which only lists existing projects).
 pub fn resolve_project_slug_noninteractive(args: &[String]) -> Option<String> {
     resolve_project_with_source(args).map(|(slug, _)| slug)
 }
 
-/// Where a resolved slug came from. Mutating commands (deploy) treat the
-/// machine-global default as a WEAK signal: it follows the last
-/// `pylon login` / `pylon projects use` run anywhere on the machine, so
-/// deploying an unlinked directory against it can silently overwrite an
-/// unrelated production app. Explicit sources (flag / env / context file)
-/// are per-invocation or per-directory and carry intent.
+/// Where a resolved slug came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectSource {
     Flag,
     Env,
     ContextFile,
-    GlobalDefault,
 }
 
 /// Same resolution order as `resolve_project_slug_noninteractive`, but
-/// reports WHERE the slug came from so callers can gate the dangerous
-/// global-default fallback (see `ProjectSource`).
+/// reports WHERE the slug came from.
 pub fn resolve_project_with_source(args: &[String]) -> Option<(String, ProjectSource)> {
     // 1 + 2. --project flag (with or without =).
     if let Some(slug) = args
@@ -81,19 +76,7 @@ pub fn resolve_project_with_source(args: &[String]) -> Option<(String, ProjectSo
         }
     }
     // 4. .pylon/project from cwd or any ancestor.
-    if let Some(slug) = read_context_file() {
-        return Some((slug, ProjectSource::ContextFile));
-    }
-    // 5. Global default from ~/.config/pylon/state.json (set by
-    //    `pylon projects use <slug>` / the picker / auto-provision).
-    if let Ok(state) = crate::cloud_client::load_state() {
-        if let Some(slug) = state.default_project {
-            if !slug.is_empty() {
-                return Some((slug, ProjectSource::GlobalDefault));
-            }
-        }
-    }
-    None
+    read_context_file().map(|slug| (slug, ProjectSource::ContextFile))
 }
 
 /// Resolve the project slug for a cloud-aware command. `args` is the
@@ -107,9 +90,8 @@ pub fn resolve_project_slug(
     if let Some(slug) = resolve_project_slug_noninteractive(args) {
         return Ok(slug);
     }
-    // 6. Interactive picker — TTY only. CI / --json gets an error
-    //    pointing at the flag so a misconfigured pipeline doesn't
-    //    silently target a previously-set context.
+    // 5. Interactive picker — TTY only. CI / --json gets an error
+    //    pointing at the flag.
     use std::io::{BufRead, IsTerminal, Write};
     if json_mode || !std::io::stdin().is_terminal() {
         return Err(

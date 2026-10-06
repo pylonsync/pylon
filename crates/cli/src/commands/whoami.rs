@@ -6,9 +6,9 @@
 //! `.pylon/project` inherited from a parent directory all present as
 //! "why did that go somewhere else?"
 //!
-//! Reports where the project slug came from, since the resolution
-//! order (flag → env → context file → machine-global default) is
-//! exactly what makes the answer surprising.
+//! Reports where the project slug came from (flag → env → context
+//! file), since an inherited `.pylon/project` is what makes the
+//! answer surprising.
 
 use pylon_kernel::ExitCode;
 use serde::Deserialize;
@@ -136,7 +136,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
             }
         }
         None => {
-            println!("  project   none — run `pylon projects use <slug>`");
+            println!("  project   none linked to this directory — run `pylon projects use <slug>`");
         }
     }
     ExitCode::Ok
@@ -170,7 +170,6 @@ fn source_label(source: ProjectSource) -> &'static str {
         ProjectSource::Flag => "from --project",
         ProjectSource::Env => "from $PYLON_PROJECT",
         ProjectSource::ContextFile => "from .pylon/project",
-        ProjectSource::GlobalDefault => "machine default — not linked to this directory",
     }
 }
 
@@ -179,6 +178,5 @@ fn source_key(source: ProjectSource) -> &'static str {
         ProjectSource::Flag => "flag",
         ProjectSource::Env => "env",
         ProjectSource::ContextFile => "context-file",
-        ProjectSource::GlobalDefault => "global-default",
     }
 }
