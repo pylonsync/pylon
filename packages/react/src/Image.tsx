@@ -65,7 +65,8 @@ export interface ImageProps
   quality?: PylonImageQuality;
   /**
    * Override the candidate widths used in `srcset`. By default we
-   * emit 1x and 2x of `width`, capped at 3840px.
+   * emit every allowed width from 256px up to 2x of `width` (rounded
+   * down to an allowed width), plus the 1x width.
    */
   widths?: number[];
   /**
@@ -115,6 +116,36 @@ function optimizedUrl(src: string, width: number, quality: number): string {
   return `/_pylon/image?src=${encodeURIComponent(src)}&w=${w}&q=${q}`;
 }
 
+/** Smallest ladder width offered in a default srcset. */
+const MIN_CANDIDATE = 256;
+
+/**
+ * srcset widths for an image displayed at `width` CSS px.
+ *
+ * Every allowed width from MIN_CANDIDATE up to the largest one that does
+ * not exceed 2x, plus the 1x width. The browser then picks by `sizes` and
+ * device pixel ratio, so a small slot gets a small file.
+ *
+ * The 2x candidate rounds DOWN. Rounding up turned a 1200px image's 2x
+ * (2400) into a 3840px request, larger than most sources and several
+ * times the bytes.
+ */
+export function imageCandidateWidths(
+  width: number,
+  widths?: number[],
+): { widths: number[]; oneX: number } {
+  if (widths && widths.length > 0) {
+    const list = Array.from(new Set(widths.map((w) => Math.round(w)))).sort((a, b) => a - b);
+    return { widths: list, oneX: list.find((w) => w >= width) ?? list[list.length - 1] };
+  }
+  const oneX = DEFAULT_WIDTHS.find((w) => w >= width) ?? MAX_WIDTH;
+  const twoXCap = Math.min(width * 2, MAX_WIDTH);
+  const list = DEFAULT_WIDTHS.filter(
+    (w) => w >= Math.min(MIN_CANDIDATE, oneX) && w <= Math.max(oneX, twoXCap),
+  );
+  return { widths: list, oneX };
+}
+
 export function Image({
   src,
   width,
@@ -148,25 +179,10 @@ export function Image({
     );
   }
 
-  // Candidate widths: explicit list, else default ladder filtered
-  // to "smallest that satisfies 1x" through "smallest that
-  // satisfies 2x", picked from DEFAULT_WIDTHS. Picking from the
-  // ladder (rather than [width, width*2]) keeps URLs in the
-  // server's allowed-widths set so we never get back a 400.
-  const candidates = (() => {
-    if (widths && widths.length > 0) {
-      return Array.from(new Set(widths.map((w) => Math.round(w)))).sort(
-        (a, b) => a - b,
-      );
-    }
-    const oneX = DEFAULT_WIDTHS.find((w) => w >= width) ?? MAX_WIDTH;
-    const targetTwoX = Math.min(width * 2, MAX_WIDTH);
-    const twoX = DEFAULT_WIDTHS.find((w) => w >= targetTwoX) ?? MAX_WIDTH;
-    return Array.from(new Set([oneX, twoX])).sort((a, b) => a - b);
-  })();
-
-  const baseSrc = optimizedUrl(src, candidates[candidates.length - 1], quality);
-  const srcSet = candidates
+  const candidates = imageCandidateWidths(width, widths);
+  // The 1x candidate is the fallback for browsers that ignore srcset.
+  const baseSrc = optimizedUrl(src, candidates.oneX, quality);
+  const srcSet = candidates.widths
     .map((w) => `${optimizedUrl(src, w, quality)} ${w}w`)
     .join(", ");
 
