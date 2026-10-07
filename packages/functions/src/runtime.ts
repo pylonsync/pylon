@@ -15,6 +15,7 @@
  *   needs to queue multiple RPCs per call_id.
  */
 
+import { createLineSplitter } from "./ndjson-lines";
 import type {
   DbReader,
   DbWriter,
@@ -206,24 +207,14 @@ const RPC_TIMEOUT_MS = 60_000;
 
 async function readerLoop(): Promise<void> {
   const reader = Bun.stdin.stream().getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
+  const lines = createLineSplitter(dispatch);
 
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
-
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      dispatch(line);
-    }
+    lines.push(value);
   }
-
-  if (buffer.trim()) dispatch(buffer);
+  lines.end();
 
   // stdin closed — the host is gone. Reject every pending RPC so awaiting
   // handlers unwind instead of hanging and keeping the Bun process alive
