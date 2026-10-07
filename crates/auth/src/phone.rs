@@ -1,8 +1,9 @@
 //! Phone / SMS magic-code sign-in.
 //!
 //! Mirror of the email magic-code flow but with phone numbers as
-//! the identity. Same code shape (6-digit numeric), same expiry
-//! (10 min), same single-use semantics. Pluggable SMS transport
+//! the identity. Same code shape (numeric, 6 digits by default — see
+//! [`crate::code_policy`]), same expiry (10 min), same single-use
+//! semantics, same per-identifier wrong-guess limit. Pluggable SMS transport
 //! lets apps use Twilio / MessageBird / a webhook.
 //!
 //! Phone numbers are E.164-normalized (`+15551234567`) before any
@@ -11,7 +12,7 @@
 //!
 //! Workflow:
 //!   1. POST /api/auth/phone/send-code  { phone }
-//!      → SMS arrives with `Your sign-in code is 123456`.
+//!      → SMS arrives with the sign-in text (see [`crate::sms_templates`]).
 //!   2. POST /api/auth/phone/verify     { phone, code }
 //!      → returns the session token, same shape as magic-email.
 //!
@@ -43,7 +44,13 @@ pub enum PhoneCodeError {
     Expired,
     BadCode,
     TooManyAttempts,
-    Throttled { retry_after_secs: u64 },
+    Throttled {
+        retry_after_secs: u64,
+    },
+    /// This phone has used its wrong-guess budget for the last 24 hours.
+    Locked {
+        retry_after_secs: u64,
+    },
     InvalidPhone,
 }
 
@@ -56,6 +63,9 @@ impl std::fmt::Display for PhoneCodeError {
             Self::TooManyAttempts => f.write_str("too many failed attempts; request a new code"),
             Self::Throttled { retry_after_secs } => {
                 write!(f, "wait {retry_after_secs}s before requesting another code")
+            }
+            Self::Locked { retry_after_secs } => {
+                write!(f, "too many wrong codes; try again in {retry_after_secs}s")
             }
             Self::InvalidPhone => f.write_str("phone number not in E.164 format"),
         }
@@ -103,6 +113,8 @@ impl PhoneCodeBackend for InMemoryPhoneCodeBackend {
 
 pub struct PhoneCodeStore {
     backend: Box<dyn PhoneCodeBackend>,
+    /// Code length and the per-phone wrong-guess limit.
+    guard: crate::code_policy::CodeGuard,
 }
 
 impl Default for PhoneCodeStore {
@@ -120,15 +132,37 @@ impl PhoneCodeStore {
         Self::with_backend(Box::new(InMemoryPhoneCodeBackend::default()))
     }
     pub fn with_backend(backend: Box<dyn PhoneCodeBackend>) -> Self {
-        Self { backend }
+        Self {
+            backend,
+            guard: crate::code_policy::CodeGuard::default(),
+        }
     }
 
-    /// Generate + store a 6-digit code, returning it for the caller
-    /// to send via SMS. Throttled to one request per 30 seconds per
-    /// phone to make SMS-cost-bombing impractical.
+    /// Use `guard` for the code length and the wrong-guess limit. Servers
+    /// pass a guard with a durable ledger; the default counts in memory.
+    pub fn with_guard(mut self, guard: crate::code_policy::CodeGuard) -> Self {
+        self.guard = guard;
+        self
+    }
+
+    /// Digits per code (`PYLON_AUTH_CODE_LENGTH`, 6 by default).
+    pub fn code_length(&self) -> u8 {
+        self.guard.policy.length()
+    }
+
+    /// Generate + store a code, returning it for the caller to send via
+    /// SMS. Throttled to one request per 30 seconds per phone to make
+    /// SMS-cost-bombing impractical, and refused while the phone is over
+    /// its wrong-guess limit.
     pub fn try_create(&self, phone: &str) -> Result<String, PhoneCodeError> {
         let normalized = normalize(phone).ok_or(PhoneCodeError::InvalidPhone)?;
         let now = now_secs();
+        if let Some(retry_after_secs) = self
+            .guard
+            .locked_for(&crate::code_policy::phone_key(&normalized), now)
+        {
+            return Err(PhoneCodeError::Locked { retry_after_secs });
+        }
         if let Some(existing) = self.backend.get(&normalized) {
             if now - existing.issued_at < Self::RESEND_THROTTLE_SECS {
                 return Err(PhoneCodeError::Throttled {
@@ -136,7 +170,7 @@ impl PhoneCodeStore {
                 });
             }
         }
-        let code = generate_code();
+        let code = self.guard.policy.generate();
         let pc = PhoneCode {
             phone: normalized.clone(),
             code: code.clone(),
@@ -155,15 +189,22 @@ impl PhoneCodeStore {
     /// requested codes.
     pub fn try_verify(&self, phone: &str, code: &str) -> Result<(), PhoneCodeError> {
         let normalized = normalize(phone).ok_or(PhoneCodeError::InvalidPhone)?;
+        let now = now_secs();
+        let key = crate::code_policy::phone_key(&normalized);
+        if let Some(retry_after_secs) = self.guard.locked_for(&key, now) {
+            // Same compare cost as a real verify; never accepts.
+            let _ = crate::constant_time_eq(b"nocode", code.trim().as_bytes());
+            return Err(PhoneCodeError::Locked { retry_after_secs });
+        }
         let entry = self.backend.get(&normalized);
         match entry {
             None => {
                 // P3-2 (codex Wave-5 review): equalize timing.
-                let _ = crate::constant_time_eq(b"000000", code.trim().as_bytes());
+                let _ = crate::constant_time_eq(b"nocode", code.trim().as_bytes());
                 Err(PhoneCodeError::NotFound)
             }
             Some(mut entry) => {
-                if entry.expires_at <= now_secs() {
+                if entry.expires_at <= now {
                     self.backend.remove(&normalized);
                     return Err(PhoneCodeError::Expired);
                 }
@@ -174,9 +215,11 @@ impl PhoneCodeStore {
                 let ok = crate::constant_time_eq(entry.code.as_bytes(), code.trim().as_bytes());
                 if ok {
                     self.backend.remove(&normalized);
+                    self.guard.record_success(&key);
                     Ok(())
                 } else {
                     entry.attempts += 1;
+                    self.guard.record_failure(&key, now);
                     self.backend.put_attempts(&normalized, entry.attempts);
                     if entry.attempts >= Self::MAX_ATTEMPTS {
                         self.backend.remove(&normalized);
@@ -219,12 +262,6 @@ pub fn normalize(input: &str) -> Option<String> {
         return None;
     }
     Some(out)
-}
-
-/// Generate a zero-padded 6-digit code.
-fn generate_code() -> String {
-    use rand::Rng;
-    format!("{:06}", rand::thread_rng().gen_range(0..1_000_000))
 }
 
 fn now_secs() -> u64 {
@@ -323,6 +360,7 @@ fn url_encode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::code_policy::CodeFailureLedger;
 
     #[test]
     fn normalize_strips_formatting() {
@@ -411,5 +449,64 @@ mod tests {
         // Same phone, different formatting → throttled.
         let err = store.try_create("+15551234567").unwrap_err();
         assert!(matches!(err, PhoneCodeError::Throttled { .. }));
+    }
+
+    fn four_digit_store() -> (
+        PhoneCodeStore,
+        std::sync::Arc<crate::code_policy::InMemoryCodeFailureLedger>,
+    ) {
+        use crate::code_policy::{CodeGuard, CodePolicy, InMemoryCodeFailureLedger};
+        let ledger = std::sync::Arc::new(InMemoryCodeFailureLedger::new());
+        let guard = CodeGuard::new(CodePolicy::new(4).unwrap(), ledger.clone());
+        (PhoneCodeStore::new().with_guard(guard), ledger)
+    }
+
+    #[test]
+    fn phone_code_uses_the_configured_length() {
+        let (store, _) = four_digit_store();
+        assert_eq!(store.code_length(), 4);
+        let code = store.try_create("+15551234567").unwrap();
+        assert_eq!(code.len(), 4);
+        assert!(code.bytes().all(|b| b.is_ascii_digit()));
+    }
+
+    #[test]
+    fn phone_wrong_guesses_are_recorded_and_success_clears_them() {
+        let (store, ledger) = four_digit_store();
+        let code = store.try_create("+15551234567").unwrap();
+        let bad = if code == "0000" { "0001" } else { "0000" };
+        assert_eq!(
+            store.try_verify("+1 555 123 4567", bad),
+            Err(PhoneCodeError::BadCode)
+        );
+        assert_eq!(ledger.count_since("phone:+15551234567", 0), 1);
+        store.try_verify("+15551234567", &code).unwrap();
+        assert_eq!(ledger.count_since("phone:+15551234567", 0), 0);
+    }
+
+    #[test]
+    fn phone_locked_number_gets_no_code_and_no_verify() {
+        let (store, ledger) = four_digit_store();
+        let code = store.try_create("+15551234567").unwrap();
+        let now = now_secs();
+        for _ in 0..10 {
+            ledger.record("phone:+15551234567", now);
+        }
+        assert!(matches!(
+            store.try_verify("+15551234567", &code),
+            Err(PhoneCodeError::Locked { .. })
+        ));
+        assert!(matches!(
+            store.try_create("+15551234567"),
+            Err(PhoneCodeError::Locked { .. })
+        ));
+        assert!(store.try_create("+15557654321").is_ok());
+        // The lock lifts once the failures leave the window.
+        ledger.clear("phone:+15551234567");
+        let old = now - crate::code_policy::FAILURE_WINDOW_SECS - 1;
+        for _ in 0..10 {
+            ledger.record("phone:+15551234567", old);
+        }
+        assert!(store.try_verify("+15551234567", &code).is_ok());
     }
 }

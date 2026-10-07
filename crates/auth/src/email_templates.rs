@@ -25,7 +25,8 @@ use std::collections::HashMap;
 /// The five built-in transactional emails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EmailTemplate {
-    /// 6-digit magic code (`/api/auth/magic/send`). Vars: `{{code}}`.
+    /// Numeric magic code (`/api/auth/magic/send`), 6 digits by default
+    /// (`PYLON_AUTH_CODE_LENGTH`). Vars: `{{code}}`.
     MagicCode,
     /// One-shot magic link (`/api/auth/magic-link/send`).
     /// Vars: `{{url}}`.
@@ -149,7 +150,7 @@ pub fn render(template: EmailTemplate, vars: &HashMap<&str, &str>) -> (String, S
 /// expressions, no method calls, no format specifiers, no nested
 /// braces. Anything that doesn't match the simple shape is left
 /// literal in the output.
-fn substitute(template: &str, allowed: &[&str], vars: &HashMap<&str, &str>) -> String {
+pub(crate) fn substitute(template: &str, allowed: &[&str], vars: &HashMap<&str, &str>) -> String {
     let mut out = String::with_capacity(template.len());
     let bytes = template.as_bytes();
     let mut i = 0;

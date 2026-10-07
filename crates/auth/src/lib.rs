@@ -8,6 +8,7 @@
 // + pylon-workers ends up with the auth-flow routes returning
 // typed 503s instead of failing to compile.
 pub mod audit;
+pub mod code_policy;
 pub mod cookie;
 pub mod device;
 pub mod email_blocklist;
@@ -18,6 +19,7 @@ pub mod rate_limit;
 pub mod relay_blob;
 pub mod scim;
 pub mod session_handoff;
+pub mod sms_templates;
 pub mod trusted_device;
 pub mod trusted_mint;
 pub mod verification;
@@ -2389,6 +2391,9 @@ impl MagicCodeBackend for InMemoryMagicCodeBackend {
 pub struct MagicCodeStore {
     cache: Mutex<HashMap<String, MagicCode>>,
     backend: Box<dyn MagicCodeBackend>,
+    /// Code length and the per-email wrong-guess limit
+    /// (see [`code_policy`]).
+    guard: code_policy::CodeGuard,
 }
 
 #[derive(Debug, Clone)]
@@ -2401,16 +2406,16 @@ pub struct MagicCode {
     pub attempts: u32,
 }
 
-/// Maximum verify attempts per code before it's burned. 5 is a common bound —
-/// lets the user fix typos without enabling realistic brute-force against a
-/// 6-digit code space.
+/// Maximum verify attempts per code before it's burned. 5 lets the user fix
+/// typos. Guessing across many codes is limited separately, per email, by
+/// [`code_policy::CodeGuard`].
 const MAX_ATTEMPTS: u32 = 5;
 
 /// Minimum seconds between successive `create()` calls for the same email.
 /// Throttles magic-code spam (user can't be flooded with login codes).
 const CREATE_COOLDOWN_SECS: u64 = 60;
-/// Compared against on the no-code path so that path costs the same as a
-/// real verify. Never issued: it is not six digits.
+/// Compared against on the no-code and locked paths so they cost the same
+/// as a real verify. Never issued: codes are digits only.
 const DUMMY_MAGIC_CODE: &str = "nocode";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2425,6 +2430,10 @@ pub enum MagicCodeError {
     Expired,
     /// Another code was requested too recently. Wait and try again.
     Throttled { retry_after_secs: u64 },
+    /// This email has used its wrong-guess budget for the last 24 hours
+    /// ([`code_policy::CodePolicy::daily_failure_limit`]). No new codes or
+    /// verifies until `retry_after_secs` passes.
+    Locked { retry_after_secs: u64 },
 }
 
 impl Default for MagicCodeStore {
@@ -2453,11 +2462,24 @@ impl MagicCodeStore {
         Self {
             cache: Mutex::new(cache),
             backend,
+            guard: code_policy::CodeGuard::default(),
         }
     }
 
-    /// Generate a 6-digit code for an email and return it. Subject to a
-    /// per-email cooldown — returns the error-shape via `try_create`.
+    /// Use `guard` for the code length and the wrong-guess limit. Servers
+    /// pass a guard with a durable ledger; the default counts in memory.
+    pub fn with_guard(mut self, guard: code_policy::CodeGuard) -> Self {
+        self.guard = guard;
+        self
+    }
+
+    /// Digits per code (`PYLON_AUTH_CODE_LENGTH`, 6 by default).
+    pub fn code_length(&self) -> u8 {
+        self.guard.policy.length()
+    }
+
+    /// Generate a code for an email and return it. Subject to a per-email
+    /// cooldown and the wrong-guess limit — `try_create` returns why not.
     pub fn create(&self, email: &str) -> String {
         // Back-compat wrapper: same signature as before, but we still burn
         // the cooldown if one is active. Use `try_create` for a Result shape.
@@ -2468,6 +2490,9 @@ impl MagicCodeStore {
     /// or an error describing why one couldn't be issued.
     pub fn try_create(&self, email: &str) -> Result<String, MagicCodeError> {
         let now = now_secs();
+        if let Some(retry_after_secs) = self.guard.locked_for(&code_policy::email_key(email), now) {
+            return Err(MagicCodeError::Locked { retry_after_secs });
+        }
 
         let mut codes = self.cache.lock().unwrap();
 
@@ -2486,7 +2511,7 @@ impl MagicCodeStore {
             }
         }
 
-        let code = generate_magic_code();
+        let code = self.guard.policy.generate();
         let mc = MagicCode {
             email: email.to_string(),
             code: code.clone(),
@@ -2508,9 +2533,6 @@ impl MagicCodeStore {
         matches!(self.try_verify(email, code), Ok(()))
     }
 
-    /// Verify a code. Returns a typed error so callers can surface specific
-    /// messages. On the MAX_ATTEMPTS-th failure, the code is burned — even
-    /// correct subsequent attempts return `TooManyAttempts`.
     /// Every magic code currently in the cache. Powers the Studio
     /// "Auth tables" view; not for app use. Includes expired codes —
     /// the cache only drops them on next verify attempt for that email.
@@ -2521,8 +2543,17 @@ impl MagicCodeStore {
             .unwrap_or_default()
     }
 
+    /// Verify a code. Returns a typed error so callers can surface specific
+    /// messages. On the MAX_ATTEMPTS-th failure, the code is burned — even
+    /// correct subsequent attempts return `TooManyAttempts`.
     pub fn try_verify(&self, email: &str, code: &str) -> Result<(), MagicCodeError> {
         let now = now_secs();
+        let key = code_policy::email_key(email);
+        if let Some(retry_after_secs) = self.guard.locked_for(&key, now) {
+            // Same compare cost as a real verify; never accepts.
+            let _ = constant_time_eq(DUMMY_MAGIC_CODE.as_bytes(), code.as_bytes());
+            return Err(MagicCodeError::Locked { retry_after_secs });
+        }
         let mut codes = self.cache.lock().unwrap();
 
         let mc = match codes.get_mut(email) {
@@ -2549,6 +2580,7 @@ impl MagicCodeStore {
         if !ok {
             mc.attempts += 1;
             self.backend.bump_attempts(email);
+            self.guard.record_failure(&key, now);
             // Burn the code at MAX_ATTEMPTS so retries can't hit max.
             if mc.attempts >= MAX_ATTEMPTS {
                 return Err(MagicCodeError::TooManyAttempts);
@@ -2559,6 +2591,7 @@ impl MagicCodeStore {
         // Correct code — consume it.
         codes.remove(email);
         self.backend.remove(email);
+        self.guard.record_success(&key);
         Ok(())
     }
 }
@@ -2569,14 +2602,6 @@ impl MagicCodeStore {
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
-}
-
-/// Generate a 6-digit magic code using a CSPRNG.
-fn generate_magic_code() -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let code: u32 = rng.gen_range(0..1_000_000);
-    format!("{:06}", code)
 }
 
 /// Generate a session token with 256 bits of entropy from a CSPRNG.
@@ -3708,6 +3733,95 @@ mod tests {
         // Each email has its own code.
         assert!(store.verify("alice@example.com", &code1));
         assert!(store.verify("bob@example.com", &code2));
+    }
+
+    use code_policy::CodeFailureLedger;
+
+    fn four_digit_guard() -> (
+        code_policy::CodeGuard,
+        std::sync::Arc<code_policy::InMemoryCodeFailureLedger>,
+    ) {
+        let ledger = std::sync::Arc::new(code_policy::InMemoryCodeFailureLedger::new());
+        let guard =
+            code_policy::CodeGuard::new(code_policy::CodePolicy::new(4).unwrap(), ledger.clone());
+        (guard, ledger)
+    }
+
+    fn wrong_code(code: &str) -> String {
+        if code == "0000" {
+            "0001".into()
+        } else {
+            "0000".into()
+        }
+    }
+
+    #[test]
+    fn magic_code_uses_the_configured_length() {
+        let (guard, _) = four_digit_guard();
+        let store = MagicCodeStore::new().with_guard(guard);
+        assert_eq!(store.code_length(), 4);
+        let code = store.try_create("a@example.com").unwrap();
+        assert_eq!(code.len(), 4);
+        assert!(code.bytes().all(|b| b.is_ascii_digit()));
+    }
+
+    #[test]
+    fn magic_code_wrong_guesses_are_recorded_and_success_clears_them() {
+        let (guard, ledger) = four_digit_guard();
+        let store = MagicCodeStore::new().with_guard(guard);
+        let code = store.try_create("a@example.com").unwrap();
+        let bad = wrong_code(&code);
+        assert_eq!(
+            store.try_verify("a@example.com", &bad),
+            Err(MagicCodeError::BadCode)
+        );
+        assert_eq!(
+            store.try_verify("a@example.com", &bad),
+            Err(MagicCodeError::BadCode)
+        );
+        assert_eq!(ledger.count_since("email:a@example.com", 0), 2);
+        // A verify with no code issued is not a guess against a code.
+        let _ = store.try_verify("b@example.com", "1234");
+        assert_eq!(ledger.count_since("email:b@example.com", 0), 0);
+        store.try_verify("a@example.com", &code).unwrap();
+        assert_eq!(ledger.count_since("email:a@example.com", 0), 0);
+    }
+
+    #[test]
+    fn magic_code_locked_email_gets_no_code_and_no_verify() {
+        let (guard, ledger) = four_digit_guard();
+        let store = MagicCodeStore::new().with_guard(guard);
+        let code = store.try_create("a@example.com").unwrap();
+        let now = now_secs();
+        for _ in 0..10 {
+            ledger.record("email:a@example.com", now);
+        }
+        // Even the right code is refused while locked.
+        match store.try_verify("a@example.com", &code) {
+            Err(MagicCodeError::Locked { retry_after_secs }) => {
+                assert!(
+                    retry_after_secs > 0 && retry_after_secs <= code_policy::FAILURE_WINDOW_SECS
+                )
+            }
+            other => panic!("expected Locked, got {other:?}"),
+        }
+        assert!(matches!(
+            store.try_create("a@example.com"),
+            Err(MagicCodeError::Locked { .. })
+        ));
+        // Other emails are not affected.
+        assert!(store.try_create("b@example.com").is_ok());
+    }
+
+    #[test]
+    fn magic_code_lock_lifts_after_the_window() {
+        let (guard, ledger) = four_digit_guard();
+        let store = MagicCodeStore::new().with_guard(guard);
+        let old = now_secs() - code_policy::FAILURE_WINDOW_SECS - 1;
+        for _ in 0..10 {
+            ledger.record("email:a@example.com", old);
+        }
+        assert!(store.try_create("a@example.com").is_ok());
     }
 
     // -- Constant-time comparison --

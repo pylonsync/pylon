@@ -1,9 +1,9 @@
 ---
 title: Email verification
-description: "Verify an authenticated user's email with the same six-digit code primitive used for magic-code sign-in."
+description: "Verify an authenticated user's email with the same code primitive used for magic-code sign-in."
 ---
 
-After a user signs up (via password, OAuth with an unverified email, etc.), you usually want to confirm they own the email address. The email-verification flow uses the same primitive as [magic-code sign-in](/auth/magic-codes), but gated on an authenticated session. It sends a 6-digit code to the user's `email` field and stamps `emailVerified` on a successful verify.
+After a user signs up (via password, OAuth with an unverified email, etc.), you usually want to confirm they own the email address. The email-verification flow uses the same primitive as [magic-code sign-in](/auth/magic-codes), but gated on an authenticated session. It sends a code (6 digits by default) to the user's `email` field and stamps `emailVerified` on a successful verify.
 
 The OAuth and SSO sign-in paths stamp `emailVerified` automatically, because the upstream IdP already verified the email. Use this flow when the IdP did not verify the email (manual signup, edit-email flow, etc.).
 
@@ -11,7 +11,7 @@ The OAuth and SSO sign-in paths stamp `emailVerified` automatically, because the
 
 | Endpoint | Method | Auth | Purpose |
 | --- | --- | --- | --- |
-| `/api/auth/email/send-verification` | POST | session | Email a 6-digit code to the user's current email |
+| `/api/auth/email/send-verification` | POST | session | Email a code to the user's current email |
 | `/api/auth/email/verify` | POST | session | Submit the code; stamp `emailVerified` |
 
 ## Schema
@@ -37,7 +37,7 @@ curl -X POST https://your-app/api/auth/email/send-verification \
   -H 'Authorization: Bearer pylon_token'
 ```
 
-Pylon looks up the caller's User row, reads `email`, creates a 6-digit code, and sends an email with subject `"Verify your email address"` through the configured email transport. Body: `"Your email verification code is: <code>\n\nThis code will expire in 10 minutes."`.
+Pylon looks up the caller's User row, reads `email`, creates a code, and sends an email with subject `"Verify your email address"` through the configured email transport. Body: `"Your email verification code is: <code>\n\nThis code will expire in 10 minutes."`. Override both with `PYLON_EMAIL_TEMPLATE_EMAIL_VERIFY_SUBJECT` and `PYLON_EMAIL_TEMPLATE_EMAIL_VERIFY_BODY`. The response includes `codeLength`.
 
 Response in production:
 
@@ -125,11 +125,11 @@ Pylon does not add `auth.emailVerified` to the policy DSL today. The field lives
 
 ## Security guarantees
 
-- **Code generation, comparison, throttling shared with [magic-codes](/auth/magic-codes)** — 6-digit numeric, 10-minute TTL, burn-after-5-wrong-attempts, constant-time comparison.
+- **Code generation, comparison, throttling shared with [magic-codes](/auth/magic-codes)** — numeric (6 digits by default, `PYLON_AUTH_CODE_LENGTH`), 10-minute TTL, burn-after-5-wrong-attempts, the same daily wrong-guess limit per email (`429 CODE_LOCKED`), constant-time comparison.
 - **Session-gated** — only the authenticated user can request and verify their own email. There is no admin override. To mark an email verified from another process, write the User row directly with admin auth.
 - **ISO 8601 timestamp format** — `pylon_kernel::util::now_iso()` produces `2026-01-15T10:30:00Z`. An email is verified only when `emailVerified` is non-null.
 
 ## Where to go next
 
-- **[Magic codes](/auth/magic-codes)** — the same 6-digit code primitive as a primary sign-in flow
+- **[Magic codes](/auth/magic-codes)** — the same code primitive as a primary sign-in flow
 - **[Password](/auth/password)** — the register flow that produces an unverified email

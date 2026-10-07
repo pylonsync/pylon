@@ -9,7 +9,7 @@ Pylon ships a complete auth system in the binary. You do not add Auth0, Clerk, o
 
 | Feature | How |
 | --- | --- |
-| Magic-code sign-in | 6-digit code emailed to the user; verify via `/api/auth/magic/verify` |
+| Magic-code sign-in | Code (6 digits by default) emailed to the user; verify via `/api/auth/magic/verify` |
 | Email + password | Argon2-hashed; `/api/auth/password/register` + `/login` |
 | OAuth | Google + GitHub built in; CSRF-protected via state tokens |
 | Sessions | Opaque 256-bit tokens, 30-day default expiry, refresh + revoke |
@@ -52,7 +52,7 @@ All under `/api/auth/`:
 | Endpoint | Method | Purpose |
 | --- | --- | --- |
 | `/me` | GET | Resolve the current session — returns `AuthContext` |
-| `/magic/send` | POST | Email a 6-digit code |
+| `/magic/send` | POST | Email a code (6 digits by default) |
 | `/magic/verify` | POST | Trade code for session token |
 | `/password/register` | POST | Create user + sign in |
 | `/password/login` | POST | Sign in with email + password |
@@ -89,7 +89,7 @@ All under `/api/auth/`:
 | `/invites/:token/accept` | POST | Accept an invite (must be logged in with the invited email) |
 | `/billing/checkout` (under `/api/`) | POST | Mint a Stripe Checkout Session for the current user |
 | `/billing/webhook` (under `/api/`) | POST | Stripe webhook target (verifies signature) |
-| `/phone/send-code` | POST | Send a 6-digit code via SMS (Twilio, configurable transport) |
+| `/phone/send-code` | POST | Send a code (6 digits by default) via SMS (Twilio, configurable transport) |
 | `/phone/verify` | POST | Verify the code; mints session, creates user if new |
 | `/siwe/nonce` | GET | Mint a SIWE nonce for `?address=0x…` (EIP-4361 step 1) |
 | `/siwe/verify` | POST | Verify EIP-191 signature; mints session keyed on wallet address |
@@ -153,7 +153,7 @@ In a policy:
 ## Security guarantees
 
 - **Tokens are CSPRNG-generated** with 256 bits of entropy, prefixed `pylon_`. No JWT signing key to rotate.
-- **Magic codes** are 6-digit numeric, expire after 10 minutes, burn after 5 wrong attempts, and use constant-time comparison.
+- **Magic codes** are numeric (6 digits by default, 4 to 8 with `PYLON_AUTH_CODE_LENGTH`), expire after 10 minutes, burn after 5 wrong attempts, and use constant-time comparison. Each email and phone number also has a daily wrong-guess limit (`429 CODE_LOCKED`).
 - **Magic-code create** is throttled to 1 per email per minute.
 - **Passwords** are hashed with Argon2id (the OWASP-recommended default).
 - **OAuth state** is CSRF-protected via single-use tokens (10-minute expiry).
@@ -224,6 +224,19 @@ it. It reads only `PYLON_EMAIL_*`. That separation lets a host back auth
 email with a shared, locked-down key (for example, on a dedicated sending
 subdomain) without exposing it to app sends. Stack0 Cloud configures auth
 email this way.
+
+One-time codes (magic codes, email verification, phone):
+
+```bash
+PYLON_AUTH_CODE_LENGTH=6        # digits per code, 4 to 8 (default 6)
+PYLON_APP_NAME="Acme"           # names the sender in the sign-in SMS
+PYLON_SMS_TEMPLATE_SIGN_IN_CODE="{{app_name}}: your sign-in code is {{code}}. It expires in 10 minutes."
+```
+
+An invalid `PYLON_AUTH_CODE_LENGTH` stops the server at boot. Shorter codes
+get a lower daily wrong-guess limit per email or phone (10 for 4 digits,
+1,000 for 6). See [Code length](/auth/magic-codes#code-length) and
+[SMS text](/auth/phone#sms-text).
 
 Cookie auth (browser apps):
 

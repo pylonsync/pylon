@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+* **auth:** `PYLON_AUTH_CODE_LENGTH` sets the digits in magic, email-verification, and phone codes, from 4 to 8 (default 6). An invalid value stops the server at boot. `/api/auth/magic/send`, `/api/auth/email/send-verification`, and `/api/auth/phone/send-code` return `codeLength`.
+* **auth:** each email and phone number has a daily wrong-guess limit across codes: `10^length / 1000`, at least 10 (10 for 4 digits, 1,000 for 6). When it is reached, sends and verifies return `429 CODE_LOCKED` until the oldest wrong guess is 24 hours old. A correct code clears the count. The count is stored in `_pylon_code_failures` (SQLite or Postgres), so a restart does not reset it.
+* **auth:** `PYLON_SMS_TEMPLATE_SIGN_IN_CODE` sets the sign-in SMS text, with `{{code}}` and `{{app_name}}`. The app name comes from `PYLON_APP_NAME`, then `PYLON_EMAIL_APP_NAME`. The default text names the app when one is set.
+
+### Bug Fixes
+
+* **auth:** `/api/auth/email/send-verification` now uses the `EMAIL_VERIFY` email template overrides, like the post-registration email.
+
 ## [0.8.0](https://github.com/pylonsync/pylon/compare/v0.7.0...v0.8.0) (2026-09-04)
 
 

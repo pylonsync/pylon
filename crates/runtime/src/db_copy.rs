@@ -309,6 +309,7 @@ pub(crate) const AUTH_TABLES: &[&str] = &[
     "_pylon_sessions",
     "_pylon_oauth_state",
     "_pylon_magic_codes",
+    "_pylon_code_failures",
     "_pylon_session_handoff",
     "_pylon_accounts",
     "_pylon_api_keys",

@@ -49,6 +49,7 @@ impl CrdtPruneReport {
         }
     }
 }
+pub mod code_failure_backend;
 pub mod loro_store;
 pub mod magic_code_backend;
 pub mod markdown;

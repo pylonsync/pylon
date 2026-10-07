@@ -1628,6 +1628,9 @@ pub(crate) fn handle(
                     ),
                 ));
             }
+            Err(pylon_auth::MagicCodeError::Locked { retry_after_secs }) => {
+                return Some(code_locked(retry_after_secs));
+            }
             Err(e) => {
                 return Some((
                     500,
@@ -1658,15 +1661,23 @@ pub(crate) fn handle(
                 ));
             }
         }
+        let code_length = ctx.magic_codes.code_length();
         if ctx.is_dev {
             return Some((
                 200,
-                serde_json::json!({"sent": true, "email": email, "dev_code": code}).to_string(),
+                serde_json::json!({
+                    "sent": true,
+                    "email": email,
+                    "codeLength": code_length,
+                    "dev_code": code,
+                })
+                .to_string(),
             ));
         }
         return Some((
             200,
-            serde_json::json!({"sent": true, "email": email}).to_string(),
+            serde_json::json!({"sent": true, "email": email, "codeLength": code_length})
+                .to_string(),
         ));
     }
 
@@ -1796,6 +1807,9 @@ pub(crate) fn handle(
                     ),
                 ));
             }
+            Err(pylon_auth::MagicCodeError::Locked { retry_after_secs }) => {
+                return Some(code_locked(retry_after_secs));
+            }
             Err(_) => {}
         }
         return Some((401, json_error("INVALID_CODE", "Invalid or expired code")));
@@ -1803,7 +1817,8 @@ pub(crate) fn handle(
 
     // POST /api/auth/email/send-verification
     //
-    // Issues a 6-digit code to the *current session's* email address and
+    // Issues a code (PYLON_AUTH_CODE_LENGTH digits, 6 by default) to the
+    // *current session's* email address and
     // ships it via the EmailSender hook. Authenticated only — the email
     // is read from the User row keyed by `ctx.auth_ctx.user_id`, never from
     // the request body, so a logged-in caller can't trigger a code for
@@ -1841,6 +1856,9 @@ pub(crate) fn handle(
                     ),
                 ));
             }
+            Err(pylon_auth::MagicCodeError::Locked { retry_after_secs }) => {
+                return Some(code_locked(retry_after_secs));
+            }
             Err(e) => {
                 return Some((
                     500,
@@ -1851,12 +1869,13 @@ pub(crate) fn handle(
                 ));
             }
         };
-        let subject = "Verify your email address";
-        let body_text = format!(
-            "Your email verification code is: {code}\n\nThis code will expire in 10 minutes."
+        let vars = std::collections::HashMap::from([("code", code.as_str())]);
+        let (subject, body_text) = pylon_auth::email_templates::render(
+            pylon_auth::email_templates::EmailTemplate::EmailVerify,
+            &vars,
         );
         if let Err(e) = ctx.email.send(&pylon_kernel::EmailMessage::plain(
-            &email, subject, &body_text,
+            &email, &subject, &body_text,
         )) {
             if !ctx.is_dev {
                 tracing::warn!(
@@ -1869,15 +1888,23 @@ pub(crate) fn handle(
                 ));
             }
         }
+        let code_length = ctx.magic_codes.code_length();
         if ctx.is_dev {
             return Some((
                 200,
-                serde_json::json!({"sent": true, "email": email, "dev_code": code}).to_string(),
+                serde_json::json!({
+                    "sent": true,
+                    "email": email,
+                    "codeLength": code_length,
+                    "dev_code": code,
+                })
+                .to_string(),
             ));
         }
         return Some((
             200,
-            serde_json::json!({"sent": true, "email": email}).to_string(),
+            serde_json::json!({"sent": true, "email": email, "codeLength": code_length})
+                .to_string(),
         ));
     }
 
@@ -1970,6 +1997,9 @@ pub(crate) fn handle(
                         "Too many verification attempts. Request a new code.",
                     ),
                 ));
+            }
+            Err(pylon_auth::MagicCodeError::Locked { retry_after_secs }) => {
+                return Some(code_locked(retry_after_secs));
             }
             Err(_) => {}
         }
@@ -5513,6 +5543,9 @@ pub(crate) fn handle(
                     ),
                 ));
             }
+            Err(pylon_auth::phone::PhoneCodeError::Locked { retry_after_secs }) => {
+                return Some(code_locked(retry_after_secs));
+            }
             Err(pylon_auth::phone::PhoneCodeError::InvalidPhone) => {
                 return Some((
                     400,
@@ -5524,7 +5557,7 @@ pub(crate) fn handle(
         let mut sent = false;
         if let Some(twilio) = pylon_auth::phone::TwilioSmsTransport::from_env() {
             use pylon_auth::phone::SmsSender;
-            let body_text = format!("Your sign-in code is: {code}\nExpires in 10 minutes.");
+            let body_text = pylon_auth::sms_templates::render_sign_in_code(&code);
             if let Err(e) = twilio.send_sms(phone, &body_text) {
                 tracing::warn!("[phone] twilio send failed: {e}");
             } else {
@@ -5534,8 +5567,10 @@ pub(crate) fn handle(
         // The code goes back in the response only to a dev caller on this
         // machine (`ctx.is_dev`). Returning it because the SMS did not go
         // out would hand any caller a sign-in code for any phone number.
+        let code_length = ctx.phone_codes.code_length();
         if ctx.is_dev {
-            let mut response = serde_json::json!({"sent": sent, "phone": phone});
+            let mut response =
+                serde_json::json!({"sent": sent, "phone": phone, "codeLength": code_length});
             response["dev_code"] = serde_json::Value::String(code);
             return Some((200, response.to_string()));
         }
@@ -5550,7 +5585,8 @@ pub(crate) fn handle(
         }
         return Some((
             200,
-            serde_json::json!({"sent": true, "phone": phone}).to_string(),
+            serde_json::json!({"sent": true, "phone": phone, "codeLength": code_length})
+                .to_string(),
         ));
     }
 
@@ -5571,6 +5607,9 @@ pub(crate) fn handle(
             .and_then(|v| v.as_str())
             .map(String::from);
         if let Err(e) = ctx.phone_codes.try_verify(phone, code) {
+            if let pylon_auth::phone::PhoneCodeError::Locked { retry_after_secs } = e {
+                return Some(code_locked(retry_after_secs));
+            }
             let http_code = match e {
                 pylon_auth::phone::PhoneCodeError::TooManyAttempts => 429,
                 pylon_auth::phone::PhoneCodeError::InvalidPhone => 400,
@@ -7215,7 +7254,7 @@ pub(crate) fn handle(
     // ─── Magic links ──────────────────────────────────────────────────
     //
     // Like magic codes but the user clicks a URL instead of typing
-    // a 6-digit code. /send mints + emails; /verify takes the token
+    // a code. /send mints + emails; /verify takes the token
     // (via either the GET `?token=` browser flow or POST JSON body)
     // and mints a session.
     if url == "/api/auth/magic-link/send" && method == HttpMethod::Post {
@@ -7730,8 +7769,52 @@ fn run_delete_account_hook(ctx: &RouterContext, user_id: &str) -> Result<(), (u1
     }
 }
 
+/// 429 for an email or phone over its daily wrong-code limit
+/// ([`pylon_auth::code_policy`]). Same body on send and verify.
+fn code_locked(retry_after_secs: u64) -> (u16, String) {
+    (
+        429,
+        json_error_with_hint(
+            "CODE_LOCKED",
+            "Too many wrong codes. Try again later.",
+            &format!("Try again in {}.", retry_hint(retry_after_secs)),
+        ),
+    )
+}
+
+/// "about 3 hours", "about 12 minutes", "45 seconds".
+fn retry_hint(secs: u64) -> String {
+    match secs {
+        0..=59 => format!("{secs} seconds"),
+        60..=3599 => {
+            let m = secs.div_ceil(60);
+            format!("about {m} minute{}", if m == 1 { "" } else { "s" })
+        }
+        _ => {
+            let h = secs.div_ceil(3600);
+            format!("about {h} hour{}", if h == 1 { "" } else { "s" })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn code_locked_body_and_retry_hint() {
+        let (status, body) = super::code_locked(3 * 3600 - 10);
+        assert_eq!(status, 429);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["error"]["code"], "CODE_LOCKED");
+        assert_eq!(
+            v["error"]["message"],
+            "Too many wrong codes. Try again later."
+        );
+        assert_eq!(super::retry_hint(45), "45 seconds");
+        assert_eq!(super::retry_hint(60), "about 1 minute");
+        assert_eq!(super::retry_hint(61), "about 2 minutes");
+        assert_eq!(super::retry_hint(3 * 3600 - 10), "about 3 hours");
+    }
+
     use super::{
         insert_oidc_email_claims, invite_accept_url, newest_avatar, oidc_email_is_verified,
     };

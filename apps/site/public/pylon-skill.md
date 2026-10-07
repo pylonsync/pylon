@@ -930,7 +930,7 @@ Dev-mode failures are disclosed where you'll see them: unhandled function errors
 This skill focused on the React/TS happy path. Pylon has more — fetch the docs page when these come up:
 
 ### Auth (`/auth/*` in the docs)
-- **Magic codes** (`/api/auth/magic/send` + `/verify`) — recommended sign-in flow. 6-digit, 10-min expiry, throttled.
+- **Magic codes** (`/api/auth/magic/send` + `/verify`) — recommended sign-in flow. 6 digits by default (`PYLON_AUTH_CODE_LENGTH`, 4–8), 10-min expiry, throttled, daily wrong-guess limit per email (`429 CODE_LOCKED`).
 - **Email + password** (`/api/auth/password/register` + `/login`) — Argon2id-hashed.
 - **OAuth** — Google + GitHub built in (`/api/auth/login/:provider` + `/callback/:provider`). CSRF-protected via state tokens.
 - **Sessions** — opaque 256-bit tokens, 30-day default. `/api/auth/refresh`, `/sessions` GET/DELETE for management.

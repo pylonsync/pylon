@@ -10981,7 +10981,7 @@ fn build_auth_stores(
         if force_in_memory {
             // Tests that explicitly opt out of persistence shouldn't be
             // overridden by an ambient DATABASE_URL in CI.
-            return Ok(in_memory_auth_stores(session_lifetime));
+            return in_memory_auth_stores(session_lifetime);
         }
         return build_pg_auth_stores(pool, session_lifetime);
     }
@@ -10997,7 +10997,7 @@ fn build_auth_stores(
 
     if let Some(url) = pg_url {
         if force_in_memory {
-            return Ok(in_memory_auth_stores(session_lifetime));
+            return in_memory_auth_stores(session_lifetime);
         }
         let pool = pylon_storage::pg_datastore::PgPool::connect(
             &url,
@@ -11013,7 +11013,7 @@ fn build_auth_stores(
         .or_else(|| app_db_path.map(|p| format!("{p}.sessions.db")));
 
     match (force_in_memory, sqlite_path) {
-        (true, _) => Ok(in_memory_auth_stores(session_lifetime)),
+        (true, _) => in_memory_auth_stores(session_lifetime),
         (false, Some(path)) => build_sqlite_auth_stores(&path, session_lifetime),
         // No persistent backend configured. In dev this is fine — ephemeral
         // sessions match the ephemeral in-memory datastore. In a production
@@ -11025,7 +11025,7 @@ fn build_auth_stores(
         // sessions in prod opt in explicitly with PYLON_SESSION_IN_MEMORY=1.
         (false, None) => {
             ephemeral_sessions_boot_check(force_in_memory, crate::frontend::is_dev_mode())?;
-            Ok(in_memory_auth_stores(session_lifetime))
+            in_memory_auth_stores(session_lifetime)
         }
     }
 }
@@ -11072,23 +11072,39 @@ fn local_put_owned_by_other(
     }
 }
 
-fn in_memory_auth_stores(session_lifetime: u64) -> AuthStores {
-    AuthStores {
+/// The sign-in code length from `PYLON_AUTH_CODE_LENGTH`, with the
+/// wrong-guess ledger the magic-code and phone stores share. An invalid
+/// length stops the boot.
+fn code_guard(
+    ledger: Arc<dyn pylon_auth::code_policy::CodeFailureLedger>,
+) -> Result<pylon_auth::code_policy::CodeGuard, String> {
+    let policy =
+        pylon_auth::code_policy::CodePolicy::from_env().map_err(|e| format!("[pylon] {e}"))?;
+    Ok(pylon_auth::code_policy::CodeGuard::new(policy, ledger))
+}
+
+/// Every auth store in memory. Only for tests and explicit
+/// `PYLON_SESSION_IN_MEMORY=1`, where all auth state is ephemeral anyway.
+fn in_memory_auth_stores(session_lifetime: u64) -> Result<AuthStores, String> {
+    let guard = code_guard(Arc::new(
+        pylon_auth::code_policy::InMemoryCodeFailureLedger::new(),
+    ))?;
+    Ok(AuthStores {
         session_store: Arc::new(SessionStore::new().with_lifetime(session_lifetime)),
-        magic_codes: Arc::new(pylon_auth::MagicCodeStore::new()),
+        magic_codes: Arc::new(pylon_auth::MagicCodeStore::new().with_guard(guard.clone())),
         oauth_state: Arc::new(pylon_auth::OAuthStateStore::new()),
         session_handoff: Arc::new(pylon_auth::session_handoff::SessionHandoffStore::new()),
         account_store: Arc::new(pylon_auth::AccountStore::new()),
         api_keys: Arc::new(pylon_auth::api_key::ApiKeyStore::new()),
         siwe: pylon_auth::siwe::NonceStore::new(),
-        phone_codes: Arc::new(pylon_auth::phone::PhoneCodeStore::new()),
+        phone_codes: Arc::new(pylon_auth::phone::PhoneCodeStore::new().with_guard(guard)),
         passkeys: Arc::new(pylon_auth::webauthn::PasskeyStore::new()),
         verification: Arc::new(pylon_auth::verification::VerificationStore::new()),
         audit: Arc::new(pylon_auth::audit::AuditStore::new()),
         trusted_devices: Arc::new(pylon_auth::trusted_device::InMemoryTrustedDeviceStore::new()),
         org_sso: Arc::new(pylon_auth::org_sso::InMemoryOrgSsoStore::new()),
         saml: Arc::new(pylon_auth::saml::InMemorySamlStore::new()),
-    }
+    })
 }
 
 /// Open every SQLite-backed auth store at `path`. Fails fast at boot
@@ -11106,10 +11122,15 @@ fn build_sqlite_auth_stores(path: &str, session_lifetime: u64) -> Result<AuthSto
     ))
     .with_lifetime(session_lifetime);
     tracing::info!("[pylon] Auth state (SQLite): {path}");
+    let guard = code_guard(Arc::new(
+        crate::code_failure_backend::SqliteCodeFailureLedger::open(path)
+            .map_err(|e| map_err("code-failure", e))?,
+    ))?;
     let magic_codes = pylon_auth::MagicCodeStore::with_backend(Box::new(
         crate::magic_code_backend::SqliteMagicCodeBackend::open(path)
             .map_err(|e| map_err("magic-code", e))?,
-    ));
+    ))
+    .with_guard(guard.clone());
     let oauth_state = pylon_auth::OAuthStateStore::with_backend(Box::new(
         crate::oauth_backend::SqliteOAuthBackend::open(path)
             .map_err(|e| map_err("OAuth state", e))?,
@@ -11152,7 +11173,7 @@ fn build_sqlite_auth_stores(path: &str, session_lifetime: u64) -> Result<AuthSto
         account_store: Arc::new(account_store),
         api_keys: Arc::new(api_keys),
         siwe: pylon_auth::siwe::NonceStore::new(),
-        phone_codes: Arc::new(pylon_auth::phone::PhoneCodeStore::new()),
+        phone_codes: Arc::new(pylon_auth::phone::PhoneCodeStore::new().with_guard(guard)),
         passkeys: Arc::new(pylon_auth::webauthn::PasskeyStore::new()),
         verification: Arc::new(verification),
         audit: Arc::new(audit),
@@ -11206,10 +11227,15 @@ fn build_pg_auth_stores(
         "[pylon] Auth state (Postgres): sharing the entity-store pool ({} conns)",
         pool.max_size()
     );
+    let guard = code_guard(Arc::new(
+        crate::code_failure_backend::PostgresCodeFailureLedger::with_pool(pool.clone())
+            .map_err(|e| map_err("code-failure", e))?,
+    ))?;
     let magic_codes = pylon_auth::MagicCodeStore::with_backend(Box::new(
         crate::magic_code_backend::PostgresMagicCodeBackend::with_pool(pool.clone())
             .map_err(|e| map_err("magic-code", e))?,
-    ));
+    ))
+    .with_guard(guard.clone());
     let oauth_state = pylon_auth::OAuthStateStore::with_backend(Box::new(
         crate::oauth_backend::PostgresOAuthBackend::with_pool(pool.clone())
             .map_err(|e| map_err("OAuth state", e))?,
@@ -11254,7 +11280,7 @@ fn build_pg_auth_stores(
         account_store: Arc::new(account_store),
         api_keys: Arc::new(api_keys),
         siwe: pylon_auth::siwe::NonceStore::new(),
-        phone_codes: Arc::new(pylon_auth::phone::PhoneCodeStore::new()),
+        phone_codes: Arc::new(pylon_auth::phone::PhoneCodeStore::new().with_guard(guard)),
         passkeys: Arc::new(pylon_auth::webauthn::PasskeyStore::new()),
         verification: Arc::new(verification),
         audit: Arc::new(audit),

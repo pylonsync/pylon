@@ -1,16 +1,16 @@
 ---
 title: Magic codes
-description: "Email a 6-digit code, exchange it for a session. Pylon's recommended sign-in flow."
+description: "Email a numeric code (6 digits by default), exchange it for a session. Pylon's recommended sign-in flow."
 ---
 
-Magic codes are the simplest sign-in flow Pylon ships. The user types an email, gets a 6-digit code, and types it back to sign in. There are no passwords to remember and no OAuth credentials to obtain. Most apps should start here.
+Magic codes are the simplest sign-in flow Pylon ships. The user types an email, gets a numeric code (6 digits by default), and types it back to sign in. There are no passwords to remember and no OAuth credentials to obtain. Most apps should start here.
 
 ## How it works
 
 ```
 client            POST /api/auth/magic/send  { email }
    ←  { sent: true }
-                  → user receives email with 6-digit code
+                  → user receives email with the code
 client            POST /api/auth/magic/verify { email, code }
    ←  { token, user_id, expires_at }
 ```
@@ -28,13 +28,15 @@ curl -X POST https://your-app/api/auth/magic/send \
 Response:
 
 ```json
-{ "sent": true, "email": "alice@example.com" }
+{ "sent": true, "email": "alice@example.com", "codeLength": 6 }
 ```
+
+`codeLength` is the number of digits in the code (see [Code length](#code-length)). Use it to size the code input.
 
 In dev mode (`PYLON_DEV_MODE=true`), a request from the same machine also gets `dev_code` in the response, so you can sign in without an email provider configured. Requests from other devices don't; the code prints to the `pylon dev` terminal instead.
 
 ```json
-{ "sent": true, "email": "alice@example.com", "dev_code": "428193" }
+{ "sent": true, "email": "alice@example.com", "codeLength": 6, "dev_code": "428193" }
 ```
 
 ## Verify a code
@@ -92,7 +94,48 @@ let session = try await client.verifyMagicCode(
 - **10-minute expiry** — codes are short-lived.
 - **60-second send cooldown per email** — clients can't flood a user with codes. Returns `429 RATE_LIMITED` with `retry_after_secs`.
 - **Single-use** — verifying a code consumes it.
-- **CSPRNG-generated** — codes are uniform random in `0..1_000_000`.
+- **CSPRNG-generated** — codes are uniform random over every code of the configured length, zero-padded (`0427` is a valid 4-digit code).
+- **Daily wrong-guess limit per email** — see [Wrong-guess limit](#wrong-guess-limit).
+
+## Code length
+
+`PYLON_AUTH_CODE_LENGTH` sets the number of digits in every one-time code Pylon sends: magic codes, [email verification](/auth/email-verification) codes, and [phone](/auth/phone) codes. The value is a whole number from 4 to 8. The default is 6.
+
+```bash
+PYLON_AUTH_CODE_LENGTH=4
+```
+
+Any other value (`3`, `9`, `six`) stops the server at boot with an error that names the variable. The send responses return the length as `codeLength`.
+
+## Wrong-guess limit
+
+Each code burns after 5 wrong tries, and a new code can be requested every 60 seconds. Without a limit across codes, an attacker could make thousands of guesses a day against one email. Pylon counts wrong guesses per email (and per phone number) over a rolling 24 hours. When the count reaches the limit, Pylon refuses new codes and verifies for that email until the oldest counted wrong guess is more than 24 hours old.
+
+The limit scales with the code length, so an attacker's daily chance of guessing a code stays near 0.1%:
+
+| `PYLON_AUTH_CODE_LENGTH` | Wrong guesses allowed per 24 hours |
+| --- | --- |
+| 4 | 10 |
+| 5 | 100 |
+| 6 (default) | 1,000 |
+| 7 | 10,000 |
+| 8 | 100,000 |
+
+A correct code clears the count for that email. The count is stored in the auth database (`_pylon_code_failures` in SQLite or Postgres), so a restart or deploy does not reset it.
+
+While an email is locked, `/magic/send`, `/magic/verify`, `/email/send-verification`, and `/email/verify` return:
+
+```json
+{
+  "error": {
+    "code": "CODE_LOCKED",
+    "message": "Too many wrong codes. Try again later.",
+    "hint": "Try again in about 3 hours."
+  }
+}
+```
+
+with status `429`. A locked email refuses even the correct code.
 
 ## Configuring email delivery
 
@@ -122,7 +165,14 @@ Your sign-in code is: 428193
 This code will expire in 10 minutes.
 ```
 
-To customize, write your own action that calls `magic/send` server-side and sends your own templated email. The plugin system also supports replacing the email transport. See [Plugins → Integrations](/plugins/integrations).
+To change the copy, set `PYLON_EMAIL_TEMPLATE_MAGIC_CODE_SUBJECT` and `PYLON_EMAIL_TEMPLATE_MAGIC_CODE_BODY`. The template can use `{{code}}` and `{{app_name}}` (from `PYLON_EMAIL_APP_NAME`). Any other `{{...}}` is removed.
+
+```bash
+PYLON_EMAIL_APP_NAME="Acme"
+PYLON_EMAIL_TEMPLATE_MAGIC_CODE_SUBJECT="Your {{app_name}} code"
+```
+
+The plugin system also supports replacing the email transport. See [Plugins → Integrations](/plugins/integrations).
 
 ## Error responses
 
@@ -131,6 +181,7 @@ To customize, write your own action that calls `magic/send` server-side and send
 | `MISSING_EMAIL` | 400 | No `email` in body |
 | `MISSING_CODE` | 400 | No `code` in body (verify only) |
 | `RATE_LIMITED` | 429 | Cooldown on send, or too many bad verifies |
+| `CODE_LOCKED` | 429 | The email reached its [wrong-guess limit](#wrong-guess-limit) |
 | `INVALID_CODE` | 401 | Wrong code, expired, or already used |
 | `EMAIL_SEND_FAILED` | 500 | Provider rejected the send |
 

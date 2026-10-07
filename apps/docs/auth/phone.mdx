@@ -1,15 +1,15 @@
 ---
 title: Phone / SMS sign-in
-description: "Sign users in with E.164-normalized phone numbers and six-digit SMS codes through Twilio or a custom sender."
+description: "Sign users in with E.164-normalized phone numbers and SMS codes (6 digits by default) through Twilio or a custom sender."
 ---
 
-Phone sign-in follows the magic-code flow with SMS as the delivery channel. The user enters a phone number, Pylon sends a six-digit code, and a successful verification mints a session. Phone numbers are E.164-normalized (`+15551234567`) before storage or transport.
+Phone sign-in follows the magic-code flow with SMS as the delivery channel. The user enters a phone number, Pylon sends a numeric code (6 digits by default, set by [`PYLON_AUTH_CODE_LENGTH`](/auth/magic-codes#code-length)), and a successful verification mints a session. Phone numbers are E.164-normalized (`+15551234567`) before storage or transport.
 
 ## Endpoints
 
 | Endpoint | Method | Auth | Purpose |
 | --- | --- | --- | --- |
-| `/api/auth/phone/send-code` | POST | none | Send a 6-digit code via SMS |
+| `/api/auth/phone/send-code` | POST | none | Send a code via SMS |
 | `/api/auth/phone/verify` | POST | none | Verify the code; mints session, creates user on first sign-in |
 
 The user entity needs a `phone` field and optionally `phoneVerified`:
@@ -39,16 +39,18 @@ curl -X POST https://your-app/api/auth/phone/send-code \
 Response in production (Twilio configured, send succeeded):
 
 ```json
-{ "sent": true, "phone": "+15551234567" }
+{ "sent": true, "phone": "+15551234567", "codeLength": 6 }
 ```
 
-Response in dev mode OR if SMS send failed (so the user isn't blocked):
+`codeLength` is the number of digits in the code. Use it to size the code input.
+
+Response in dev mode, to a request from the same machine:
 
 ```json
-{ "sent": false, "phone": "+15551234567", "dev_code": "123456" }
+{ "sent": false, "phone": "+15551234567", "codeLength": 6, "dev_code": "123456" }
 ```
 
-The `dev_code` field is returned whenever `PYLON_DEV_MODE=true` or the SMS transport returned an error. A misconfigured Twilio account then does not lock anyone out during early development. In production with a working Twilio config, `dev_code` is omitted and only the SMS carries the code.
+`dev_code` is returned only in dev mode. Outside dev mode, if the SMS does not go out, the response is `503 SMS_NOT_SENT` and the code is never returned.
 
 Errors:
 
@@ -57,8 +59,29 @@ Errors:
 | 400 | `INVALID_PHONE` | Phone is not valid E.164 (`+` + 10-15 digits) |
 | 400 | `CAPTCHA_FAILED` | CAPTCHA gate (when configured) rejected the request |
 | 429 | `RATE_LIMITED` | Throttled — wait `retry_after_secs` |
+| 429 | `CODE_LOCKED` | The number reached its daily [wrong-guess limit](/auth/magic-codes#wrong-guess-limit) |
+| 503 | `SMS_NOT_SENT` | The SMS provider is not configured or rejected the send |
 
-The code is 6 digits, expires in 10 minutes, and is rate-limited per-number to prevent SMS spam.
+The code is 6 digits by default, expires in 10 minutes, and is rate-limited per number to prevent SMS spam.
+
+## SMS text
+
+The default text is:
+
+```
+Acme: your sign-in code is 0427. It expires in 10 minutes.
+```
+
+The app name comes from `PYLON_APP_NAME`, then `PYLON_EMAIL_APP_NAME`. Without an app name, the text is `Your sign-in code is 0427. It expires in 10 minutes.` US carriers reviewing an A2P 10DLC campaign expect each text to name the sender, so set `PYLON_APP_NAME`.
+
+To change the text, set `PYLON_SMS_TEMPLATE_SIGN_IN_CODE`. It can use `{{code}}` and `{{app_name}}`. Any other `{{...}}` is removed.
+
+```bash
+PYLON_APP_NAME="Acme"
+PYLON_SMS_TEMPLATE_SIGN_IN_CODE="{{app_name}}: {{code}} is your sign-in code. It expires in 10 minutes."
+```
+
+The text in your A2P campaign's sample messages must match what Pylon sends.
 
 ## Verifying
 
@@ -91,6 +114,7 @@ Errors:
 | 401 | `INVALID_CODE` | Wrong code, expired, or already burned |
 | 400 | `INVALID_CODE` | Phone not valid E.164 |
 | 429 | `INVALID_CODE` | Too many wrong attempts — the code is burned |
+| 429 | `CODE_LOCKED` | The number reached its daily wrong-guess limit. Even the correct code is refused until the lock lifts |
 
 On first successful verify Pylon stamps `phoneVerified` to the current ISO 8601 timestamp.
 
@@ -123,13 +147,14 @@ impl SmsSender for MyProvider {
 }
 ```
 
-The shipped `pylon` binary wires only the built-in Twilio transport. The `/phone/send-code` route handler calls it directly via `TwilioSmsTransport::from_env()`. The prebuilt binary has no env-var switch or registration hook to swap in a custom `SmsSender`. (`PhoneCodeStore` only generates and persists the 6-digit code. It returns the code to the caller, which delivers it; it does not hold an `SmsSender`.) To run a different provider today, build on the `pylon-auth` crate directly in your own Rust binary. Env-configurable third-party transports for the shipped binary are not yet available.
+The shipped `pylon` binary wires only the built-in Twilio transport. The `/phone/send-code` route handler calls it directly via `TwilioSmsTransport::from_env()`. The prebuilt binary has no env-var switch or registration hook to swap in a custom `SmsSender`. (`PhoneCodeStore` only generates and persists the code. It returns the code to the caller, which delivers it; it does not hold an `SmsSender`.) To run a different provider today, build on the `pylon-auth` crate directly in your own Rust binary. Env-configurable third-party transports for the shipped binary are not yet available.
 
 ## Security guarantees
 
 - **E.164 normalization** on `phone` before storage. `(555) 123-4567`, `555-123-4567`, and `+15551234567` collapse to the same canonical form. No two accounts share a number.
-- **6-digit code, 10-minute TTL** — same as magic codes.
+- **6-digit code by default, 10-minute TTL** — same as magic codes. `PYLON_AUTH_CODE_LENGTH` sets 4 to 8 digits.
 - **Code burns after wrong attempts** — `try_verify` increments an attempt counter; too many wrong attempts and the code is invalidated server-side. Status `429 INVALID_CODE`.
+- **Daily wrong-guess limit per number** — 1,000 wrong guesses per 24 hours with 6-digit codes, 10 with 4-digit codes. Stored in the auth database, so a restart does not reset it. See [Wrong-guess limit](/auth/magic-codes#wrong-guess-limit).
 - **Constant-time code comparison** — no timing leak on verify.
 - **Per-number rate limit** on `send-code` so a phone-number enumeration attack cannot exhaust the SMS budget.
 - **Optional CAPTCHA gate** — set `PYLON_CAPTCHA_PROVIDER` to require a captcha token before send. See [CAPTCHA](/auth/captcha).
