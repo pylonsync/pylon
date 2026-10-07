@@ -3,7 +3,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "version": "0.22.21",
+  "version": "0.22.22",
   "description": "Pylon realtime shard client pieces with no framework: the wire protocol, codecs, and the entity replication decoder and table.",
   "type": "module",
   "main": "./src/index.ts",
