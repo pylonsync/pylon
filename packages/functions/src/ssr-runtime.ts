@@ -692,35 +692,38 @@ export function renderMetadata(React: any, m: SsrMetadata | undefined): any {
       kids.push(el("link", a));
     }
   }
-  if (m.jsonLd) {
-    const items = Array.isArray(m.jsonLd) ? m.jsonLd : [m.jsonLd];
-    items.forEach((item, i) => {
-      let json: string;
-      try {
-        json = JSON.stringify(item);
-      } catch {
-        return; // unserializable (cycle) — skip rather than throw the render
-      }
-      if (!json) return;
-      // Escape `<`, `>`, `&` to their \uXXXX JSON forms so the payload can't
-      // break out of the <script> element (e.g. a value containing
-      // `</script>`), no matter how the renderer treats raw-text children.
-      // JSON.parse decodes these back, so the structured data stays valid. This
-      // is why no dangerouslySetInnerHTML is needed: the text child is inert.
-      const safe = json
-        .replace(/</g, "\\u003c")
-        .replace(/>/g, "\\u003e")
-        .replace(/&/g, "\\u0026");
-      kids.push(
-        React.createElement(
-          "script",
-          { key: `ld${i}`, type: "application/ld+json", "data-pylon-meta": "" },
-          safe,
-        ),
-      );
-    });
-  }
   return kids.length > 0 ? el(React.Fragment, null, ...kids) : null;
+}
+
+/**
+ * Serialize `metadata.jsonLd` to `<script type="application/ld+json">` HTML
+ * for the head injection. This is a string, not React elements: React 19
+ * hoists <title>/<meta>/<link> out of the hydration tree, but not <script>.
+ * A script inside the server-only metadata fragment stayed in the body, the
+ * client (which renders the page alone) had nothing there, and hydration
+ * failed on every page with structured data. In <head> the tag is outside
+ * the tree React hydrates. It carries `data-pylon-meta` so the client
+ * swaps it on navigation with the other page tags.
+ *
+ * `<`, `>`, `&` become \uXXXX escapes, so a value can't close the script
+ * element. JSON.parse reads them back, so the data stays valid.
+ */
+export function renderJsonLdHead(m: SsrMetadata | undefined): string {
+  if (!m?.jsonLd) return "";
+  const items = Array.isArray(m.jsonLd) ? m.jsonLd : [m.jsonLd];
+  let html = "";
+  for (const item of items) {
+    let json: string | undefined;
+    try {
+      json = JSON.stringify(item);
+    } catch {
+      continue; // unserializable (cycle) — skip rather than throw the render
+    }
+    if (!json) continue;
+    const safe = json.replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
+    html += `<script type="application/ld+json" data-pylon-meta>${safe}</script>`;
+  }
+  return html;
 }
 
 const MODULE_EXTS = [".tsx", ".ts", ".jsx", ".js"];
@@ -2400,6 +2403,8 @@ async function renderBoundaryToClient(
   },
   // Design render: no hydration tail, inlined CSS, `<base href>`.
   design?: { headers: Record<string, string | undefined> },
+  // Page-metadata head HTML that is not React-rendered (JSON-LD).
+  metaHeadHtml = "",
 ): Promise<void> {
   const stream: ReadableStream<Uint8Array> = await renderToReadableStream(tree, {
     onError(e: unknown) {
@@ -2442,6 +2447,7 @@ async function renderBoundaryToClient(
     // page is at least styled (static). (collectBoundaryHeadBlob emits fonts.)
     headBlob = await collectBoundaryHeadBlob();
   }
+  headBlob += metaHeadHtml;
   // renderToReadableStream resolved without throwing → safe to commit the
   // head now, then drain the (already-rendered) shell, injecting CSS.
   send({ type: "response_start", call_id: callId, status, headers });
@@ -2584,6 +2590,7 @@ async function tryRenderBoundary(
         errorForClient,
       },
       opts.design,
+      renderJsonLdHead(boundaryMeta),
     );
     return true;
   } catch (e) {
@@ -3850,6 +3857,7 @@ export async function handleRenderRoute(
       // 404 page is unstyled. Hydration stays disabled (handled below).
       headBlob += await collectBoundaryHeadBlob();
     }
+    headBlob += renderJsonLdHead(metadata);
 
     // The host can dispatch a boundary module (`app/not-found` / `app/error`)
     // by name for an unmatched-URL 404. Boundaries render server-only — no
@@ -3884,6 +3892,7 @@ export async function handleRenderRoute(
       sendChunk(
         '<!DOCTYPE html><html><head><meta charset="utf-8">' +
           (await renderElementToString(renderToReadableStream, metaFragment)) +
+          renderJsonLdHead(metadata) +
           "</head><body>",
       );
     } else {

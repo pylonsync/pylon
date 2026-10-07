@@ -8,6 +8,7 @@ import {
   applyAutoIcons,
   applyAutoSocialImages,
   renderMetadata,
+  renderJsonLdHead,
   buildHydrationTail,
   errorDigest,
   resolveOrigin,
@@ -579,19 +580,29 @@ describe("renderMetadata head-tag marking (client-nav sync)", () => {
     expect(renderMetadata(fakeReact, {})).toBeNull();
   });
 
-  test("emits JSON-LD as an escaped application/ld+json script", () => {
+  test("renderMetadata never emits a <script> (JSON-LD goes to the head blob)", () => {
+    // React 19 does not hoist <script> out of the hydration tree. A JSON-LD
+    // script in this server-only fragment stayed in the body and broke
+    // hydration on every page with structured data.
     const frag = renderMetadata(fakeReact, {
+      title: "T",
+      jsonLd: { "@type": "Organization", name: "Pylon" },
+    });
+    const scripts: any[] = frag.children.filter((k: any) => k.type === "script");
+    expect(scripts.length).toBe(0);
+  });
+
+  test("renderJsonLdHead emits an escaped application/ld+json script", () => {
+    const html = renderJsonLdHead({
       jsonLd: {
         "@context": "https://schema.org",
         "@type": "Organization",
         name: "Pylon </script><x>&y",
       },
     });
-    const scripts: any[] = frag.children.filter((k: any) => k.type === "script");
-    expect(scripts.length).toBe(1);
-    expect(scripts[0].props.type).toBe("application/ld+json");
-    expect(scripts[0].props["data-pylon-meta"]).toBe("");
-    const body = scripts[0].children[0] as string;
+    const match = html.match(/^<script type="application\/ld\+json" data-pylon-meta>(.*)<\/script>$/s);
+    expect(match).not.toBeNull();
+    const body = match![1];
     // Breakout chars must be \u-escaped — the payload can't contain a literal
     // `</script>`, `<`, `>`, or `&`.
     expect(body).not.toContain("</script>");
@@ -603,12 +614,20 @@ describe("renderMetadata head-tag marking (client-nav sync)", () => {
     expect(parsed.name).toBe("Pylon </script><x>&y");
   });
 
-  test("JSON-LD array emits one script per item", () => {
-    const frag = renderMetadata(fakeReact, {
-      jsonLd: [{ "@type": "A" }, { "@type": "B" }],
-    });
-    const scripts: any[] = frag.children.filter((k: any) => k.type === "script");
-    expect(scripts.map((s) => JSON.parse(s.children[0])["@type"])).toEqual(["A", "B"]);
+  test("renderJsonLdHead emits one script per array item", () => {
+    const html = renderJsonLdHead({ jsonLd: [{ "@type": "A" }, { "@type": "B" }] });
+    const bodies = [...html.matchAll(/<script[^>]*>(.*?)<\/script>/gs)].map((m) => JSON.parse(m[1])["@type"]);
+    expect(bodies).toEqual(["A", "B"]);
+  });
+
+  test("renderJsonLdHead returns an empty string without jsonLd, and skips unserializable items", () => {
+    expect(renderJsonLdHead(undefined)).toBe("");
+    expect(renderJsonLdHead({ title: "x" })).toBe("");
+    const cyclic: any = { "@type": "Loop" };
+    cyclic.self = cyclic;
+    const html = renderJsonLdHead({ jsonLd: [cyclic, { "@type": "Ok" }] });
+    expect(html.match(/<script/g)?.length).toBe(1);
+    expect(html).toContain('"Ok"');
   });
 
   test("emits the extended SEO/social tags", () => {
