@@ -25,6 +25,13 @@
 #                            "app"). Becomes the package name, the page title,
 #                            and the session cookie name — the control plane
 #                            passes the project's name so it isn't "workspace"
+#   PYLON_DEV_GIT_URL        https clone URL, with a read token, of the repo that
+#                            holds the project's source. When set, the first
+#                            boot clones it and PYLON_DEV_TEMPLATE is ignored.
+#                            The URL is not kept in .git/config: commits leave
+#                            through /_pylon/dev/git/commit, which takes a fresh
+#                            URL per call.
+#   PYLON_DEV_GIT_BRANCH     branch to clone                (default main)
 #   PYLON_DEV_FILE_API_TOKEN bearer token gating the file-write API (set by the
 #                            control plane; unset = open, local dev only)
 #   PYLON_BIN                pylon binary to exec          (default `pylon` on PATH)
@@ -49,6 +56,8 @@ set -eu
 WORKSPACE="${PYLON_DEV_WORKSPACE:-/data/workspace}"
 PORT="${PYLON_PORT:-8080}"
 TEMPLATE="${PYLON_DEV_TEMPLATE:-}"
+GIT_URL="${PYLON_DEV_GIT_URL:-}"
+GIT_BRANCH="${PYLON_DEV_GIT_BRANCH:-main}"
 PYLON_BIN="${PYLON_BIN:-pylon}"
 MARKER="$WORKSPACE/.pylon-seeded"
 CREATE_PYLON="/pylon/packages/create-pylon/bin/create-pylon.js"
@@ -56,7 +65,24 @@ CREATE_PYLON="/pylon/packages/create-pylon/bin/create-pylon.js"
 if [ ! -f "$MARKER" ]; then
 	echo "[dev-boot] seeding workspace at $WORKSPACE"
 	mkdir -p "$WORKSPACE"
-	if [ -n "$TEMPLATE" ] && [ -f "$CREATE_PYLON" ]; then
+	if [ -n "$GIT_URL" ]; then
+		# The project's repo is the source. Clone into a temp dir, then move it
+		# in, so a clone that fails halfway leaves the workspace empty and the
+		# next boot retries. Drop the remote afterwards: its URL carries a token.
+		echo "[dev-boot] cloning the project repo (branch $GIT_BRANCH)"
+		STAGE="$(mktemp -d)"
+		if GIT_TERMINAL_PROMPT=0 git -c credential.helper= clone -q --single-branch \
+			--branch "$GIT_BRANCH" "$GIT_URL" "$STAGE/repo" 2>/tmp/git-clone.log; then
+			git -C "$STAGE/repo" remote remove origin
+			cp -a "$STAGE/repo/." "$WORKSPACE/" ||
+				echo "[dev-boot] could not move the clone into the workspace"
+		else
+			# git prints the URL on failure; keep the token out of the log.
+			sed 's#https://[^@ ]*@#https://#g' /tmp/git-clone.log >&2
+			echo "[dev-boot] clone failed" >&2
+		fi
+		rm -rf "$STAGE" /tmp/git-clone.log
+	elif [ -n "$TEMPLATE" ] && [ -f "$CREATE_PYLON" ]; then
 		# Scaffold the SAME templates `npm create @pylonsync/pylon` offers, using
 		# the scaffolder itself — the image already ships packages/, so the
 		# templates and their substitution logic are right here.
@@ -107,7 +133,9 @@ if [ ! -f "$MARKER" ]; then
 	#
 	# Best-effort: a workspace that fails to become a repo should still boot and
 	# serve. Identity is set locally so commits don't depend on global config.
-	if command -v git >/dev/null 2>&1 && [ ! -d "$WORKSPACE/.git" ]; then
+	# Not for a cloned workspace: after a failed clone, an empty repo here would
+	# block the next boot's retry.
+	if [ -z "$GIT_URL" ] && command -v git >/dev/null 2>&1 && [ ! -d "$WORKSPACE/.git" ]; then
 		(
 			cd "$WORKSPACE" || exit 0
 			git init -q 2>/dev/null || exit 0
@@ -116,6 +144,15 @@ if [ ! -f "$MARKER" ]; then
 			git add -A 2>/dev/null
 			git commit -qm "Starter workspace" 2>/dev/null
 		) || echo "[dev-boot] git init skipped (non-fatal)"
+	fi
+	# A cloned repo has no identity yet. Keep the seed marker out of commits:
+	# .git/info/exclude is local to this clone and never pushed.
+	if [ -d "$WORKSPACE/.git" ]; then
+		git -C "$WORKSPACE" config user.email "agent@pylonsync.com"
+		git -C "$WORKSPACE" config user.name "Pylon Build"
+		mkdir -p "$WORKSPACE/.git/info"
+		grep -qx '/.pylon-seeded' "$WORKSPACE/.git/info/exclude" 2>/dev/null ||
+			echo '/.pylon-seeded' >>"$WORKSPACE/.git/info/exclude"
 	fi
 	# Only mark the workspace seeded if seeding actually produced an app.
 	#
@@ -128,7 +165,7 @@ if [ ! -f "$MARKER" ]; then
 	#
 	# An intentionally empty workspace (no template requested) is still marked,
 	# since empty is the asked-for result there and retrying would never end.
-	if [ -z "$TEMPLATE" ] || [ -f "$WORKSPACE/app.ts" ]; then
+	if { [ -z "$TEMPLATE" ] && [ -z "$GIT_URL" ]; } || [ -f "$WORKSPACE/app.ts" ]; then
 		touch "$MARKER"
 		echo "[dev-boot] seed complete"
 	else

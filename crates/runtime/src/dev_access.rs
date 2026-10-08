@@ -10,7 +10,8 @@
 //! - The OAuth callback accepts a caller-supplied email.
 //! - `/admin/*` and `/metrics` are open when no operator token is set, which
 //!   includes minting a Studio ticket.
-//! - `/_pylon/dev/files/*` writes files into the workspace, and
+//! - `/_pylon/dev/files/*` writes files into the workspace,
+//!   `/_pylon/dev/git/*` commits, pushes, and resets it, and
 //!   `/_pylon/dev/render` renders workspace modules.
 //!
 //! These are for the developer at the keyboard. A request gets them only

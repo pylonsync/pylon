@@ -30,6 +30,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use tiny_http::{Header, Method, Request, Response};
 
+mod dev_git;
+
 /// Build progress / outcome surfaced to the SPA handler so non-API
 /// GETs can render a useful holding page while `bun install + bun
 /// run build` finishes on first boot.
@@ -975,8 +977,8 @@ enum DevTokenCheck {
 }
 
 /// Whether `request` may use the dev workspace endpoints
-/// (`/_pylon/dev/files/*`, `/_pylon/dev/render`), which write and run code in
-/// the workspace.
+/// (`/_pylon/dev/files/*`, `/_pylon/dev/git/*`, `/_pylon/dev/render`), which
+/// write and run code in the workspace.
 ///
 /// - `PYLON_DEV_FILE_API_TOKEN` set: the request must carry the bearer token.
 /// - Unset: the caller must be on this machine, and its page (if any) on
@@ -1226,6 +1228,14 @@ pub fn try_handle(
         if path_only.starts_with("/_pylon/dev/files/") {
             if is_dev_mode() {
                 return serve_dev_file_write(request, path_only, cors_origin);
+            }
+            return Err(request);
+        }
+        // Commit/push and sync for a hosted sandbox. Same gate as the files API.
+        if path_only.starts_with("/_pylon/dev/git/") {
+            if is_dev_mode() {
+                dev_git::serve(request, path_only, cors_origin);
+                return Ok(());
             }
             return Err(request);
         }
