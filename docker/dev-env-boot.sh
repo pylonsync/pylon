@@ -44,6 +44,8 @@
 #                                build picks one per request. Matches the proxy's upstream.
 #   PYLON_DEV_MODEL              default model when a build doesn't specify one
 #                                (defaults to the first of PYLON_DEV_MODELS)
+#   PYLON_DEV_MESSAGES_MODELS    subset of PYLON_DEV_MODELS that speak
+#                                Anthropic's /v1/messages (Claude models)
 #   PYLON_DEV_RESPONSES_MODELS   subset of PYLON_DEV_MODELS that speak the
 #                                /v1/responses API rather than
 #                                /v1/chat/completions (OpenAI GPT-5.x needs
@@ -223,14 +225,20 @@ if [ -n "${PYLON_DEV_MODEL_PROXY_URL:-}" ] &&
 	#
 	#   pylon            @ai-sdk/openai-compatible  ->  /v1/chat/completions
 	#   pylon-responses  @ai-sdk/openai             ->  /v1/responses
+	#   pylon-anthropic  @ai-sdk/anthropic          ->  /v1/messages
 	#
 	# OpenAI's GPT-5.x family REFUSES function tools over chat/completions while
 	# reasoning is enabled, and a coding agent without tools does nothing — so
 	# models named in PYLON_DEV_RESPONSES_MODELS have to go through the second
-	# provider. Both point at the same proxy with the same token; only the
-	# protocol differs. An org mixing vendors gets some models in each.
+	# provider. Claude models named in PYLON_DEV_MESSAGES_MODELS go through the
+	# native Anthropic package, which keeps prompt caching (Anthropic's
+	# OpenAI-compatible endpoint does not cache, and a coding agent resends the
+	# whole context every step). All point at the same proxy with the same
+	# token; only the protocol differs. An org mixing vendors gets some models
+	# in each.
 	OC_CHAT_JSON=""
 	OC_RESP_JSON=""
+	OC_MSG_JSON=""
 	OLD_IFS="$IFS"
 	IFS=","
 	for m in ${PYLON_DEV_MODELS:-$PYLON_DEV_MODEL}; do
@@ -243,16 +251,22 @@ if [ -n "${PYLON_DEV_MODEL_PROXY_URL:-}" ] &&
 		case ",$(printf '%s' "${PYLON_DEV_RESPONSES_MODELS:-}" | tr -d ' ')," in
 		*",$m,"*) is_resp=1 ;;
 		esac
+		is_msg=0
+		case ",$(printf '%s' "${PYLON_DEV_MESSAGES_MODELS:-}" | tr -d ' ')," in
+		*",$m,"*) is_msg=1 ;;
+		esac
 		# Declare what the model can take. Without `attachment` OpenCode drops
 		# image parts on the floor and the model answers "I cannot read images"
 		# to a screenshot the builder just sent it. Responses models (GPT-5.x)
 		# read images and PDFs; chat models are assumed to read images.
-		if [ "$is_resp" = "1" ]; then
+		if [ "$is_resp" = "1" ] || [ "$is_msg" = "1" ]; then
 			entry="\"$m\": { \"name\": \"$m\", \"attachment\": true, \"modalities\": { \"input\": [\"text\", \"image\", \"pdf\"], \"output\": [\"text\"] } }"
 		else
 			entry="\"$m\": { \"name\": \"$m\", \"attachment\": true, \"modalities\": { \"input\": [\"text\", \"image\"], \"output\": [\"text\"] } }"
 		fi
-		if [ "$is_resp" = "1" ]; then
+		if [ "$is_msg" = "1" ]; then
+			if [ -z "$OC_MSG_JSON" ]; then OC_MSG_JSON="$entry"; else OC_MSG_JSON="$OC_MSG_JSON, $entry"; fi
+		elif [ "$is_resp" = "1" ]; then
 			if [ -z "$OC_RESP_JSON" ]; then OC_RESP_JSON="$entry"; else OC_RESP_JSON="$OC_RESP_JSON, $entry"; fi
 		else
 			if [ -z "$OC_CHAT_JSON" ]; then OC_CHAT_JSON="$entry"; else OC_CHAT_JSON="$OC_CHAT_JSON, $entry"; fi
@@ -265,6 +279,9 @@ if [ -n "${PYLON_DEV_MODEL_PROXY_URL:-}" ] &&
 	case ",$(printf '%s' "${PYLON_DEV_RESPONSES_MODELS:-}" | tr -d ' ')," in
 	*",$OC_DEFAULT,"*) OC_DEFAULT_PROVIDER="pylon-responses" ;;
 	esac
+	case ",$(printf '%s' "${PYLON_DEV_MESSAGES_MODELS:-}" | tr -d ' ')," in
+	*",$OC_DEFAULT,"*) OC_DEFAULT_PROVIDER="pylon-anthropic" ;;
+	esac
 
 	OC_PROVIDERS=""
 	if [ -n "$OC_CHAT_JSON" ]; then
@@ -273,6 +290,12 @@ if [ -n "${PYLON_DEV_MODEL_PROXY_URL:-}" ] &&
 	if [ -n "$OC_RESP_JSON" ]; then
 		RESP_BLOCK="\"pylon-responses\": { \"npm\": \"@ai-sdk/openai\", \"name\": \"Pylon Build (Responses)\", \"options\": { \"baseURL\": \"${PYLON_DEV_MODEL_PROXY_URL}/v1\", \"apiKey\": \"${PYLON_DEV_MODEL_PROXY_TOKEN}\" }, \"models\": { ${OC_RESP_JSON} } }"
 		if [ -z "$OC_PROVIDERS" ]; then OC_PROVIDERS="$RESP_BLOCK"; else OC_PROVIDERS="$OC_PROVIDERS, $RESP_BLOCK"; fi
+	fi
+	if [ -n "$OC_MSG_JSON" ]; then
+		# @ai-sdk/anthropic posts to <baseURL>/messages and sends the token as
+		# x-api-key, which the proxy accepts in place of a bearer.
+		MSG_BLOCK="\"pylon-anthropic\": { \"npm\": \"@ai-sdk/anthropic\", \"name\": \"Pylon Build (Anthropic)\", \"options\": { \"baseURL\": \"${PYLON_DEV_MODEL_PROXY_URL}/v1\", \"apiKey\": \"${PYLON_DEV_MODEL_PROXY_TOKEN}\" }, \"models\": { ${OC_MSG_JSON} } }"
+		if [ -z "$OC_PROVIDERS" ]; then OC_PROVIDERS="$MSG_BLOCK"; else OC_PROVIDERS="$OC_PROVIDERS, $MSG_BLOCK"; fi
 	fi
 
 	# Regenerated every boot from env (rootfs is ephemeral) — no secrets persist.
@@ -283,7 +306,7 @@ if [ -n "${PYLON_DEV_MODEL_PROXY_URL:-}" ] &&
 }
 JSON
 	export OPENCODE_SERVER_PASSWORD="${PYLON_DEV_OPENCODE_PASSWORD:-}"
-	echo "[dev-boot] starting opencode serve on :$OC_PORT (models: ${PYLON_DEV_MODELS:-$PYLON_DEV_MODEL}, default pylon/${OC_DEFAULT})"
+	echo "[dev-boot] starting opencode serve on :$OC_PORT (models: ${PYLON_DEV_MODELS:-$PYLON_DEV_MODEL}, default ${OC_DEFAULT_PROVIDER}/${OC_DEFAULT})"
 	(opencode serve --port "$OC_PORT" --hostname :: >/tmp/opencode.log 2>&1 &)
 fi
 
