@@ -41,4 +41,16 @@ postgres-live = ["postgres", "tokio-postgres-rustls", "rustls", "rustls-native-c
 
 [dev-dependencies]
 tempfile = "3"
+rusqlite = { workspace = true, features = ["trace"] }
 
+[[bench]]
+name = "search_facets"
+harness = false
+
+[[bench]]
+name = "vector_scan"
+harness = false
+
+[[bench]]
+name = "search_updates"
+harness = false

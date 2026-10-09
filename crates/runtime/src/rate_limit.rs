@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 /// maps.
 const SHARD_COUNT: usize = 16;
 
-type Bucket = HashMap<String, Vec<Instant>>;
+type Bucket = HashMap<String, VecDeque<Instant>>;
 
 /// Per-IP rate limiter using a sliding window.
 ///
@@ -34,6 +34,7 @@ impl RateLimiter {
     /// Create a new rate limiter.
     ///
     /// - `max_requests`: maximum number of requests allowed within the window.
+    ///   Zero rejects every request.
     /// - `window_secs`: sliding window duration in seconds.
     pub fn new(max_requests: u32, window_secs: u64) -> Self {
         let shards = std::iter::repeat_with(|| Mutex::new(HashMap::new()))
@@ -61,29 +62,42 @@ impl RateLimiter {
     /// with the number of seconds to wait before the next request will be
     /// accepted.
     pub fn check(&self, ip: &str) -> Result<(), u64> {
-        let now = Instant::now();
+        if self.max_requests == 0 {
+            return Err(self.window.as_secs().max(1));
+        }
         let mut buckets = self.shard_for(ip).lock().unwrap_or_else(|e| e.into_inner());
+        // Timestamp under the lock so concurrent inserts stay in time order.
+        let now = Instant::now();
 
         // Look up by &str first and only allocate an owned key on a genuine
         // miss. The `entry(ip.to_string())` form forced a fresh String on
         // EVERY request, including the common already-present-IP hit.
         if let Some(timestamps) = buckets.get_mut(ip) {
             // Remove entries outside the sliding window.
-            timestamps.retain(|t| now.duration_since(*t) < self.window);
+            self.expire(timestamps, now);
             if timestamps.len() as u32 >= self.max_requests {
-                let oldest = timestamps.first().unwrap();
+                let oldest = timestamps.front().unwrap();
                 let elapsed = now.duration_since(*oldest).as_secs();
                 let retry_after = self.window.as_secs().saturating_sub(elapsed);
                 // Ensure we always return at least 1 second.
                 return Err(retry_after.max(1));
             }
-            timestamps.push(now);
+            timestamps.push_back(now);
             return Ok(());
         }
 
         // First request from this IP (in this shard) — now we pay for the key.
-        buckets.insert(ip.to_string(), vec![now]);
+        buckets.insert(ip.to_string(), VecDeque::from([now]));
         Ok(())
+    }
+
+    fn expire(&self, timestamps: &mut VecDeque<Instant>, now: Instant) {
+        while timestamps
+            .front()
+            .is_some_and(|t| now.duration_since(*t) >= self.window)
+        {
+            timestamps.pop_front();
+        }
     }
 
     /// Remove all expired entries from every bucket.
@@ -91,12 +105,12 @@ impl RateLimiter {
     /// Call periodically (e.g., from a background thread) to prevent unbounded
     /// memory growth from IPs that stop sending requests.
     pub fn cleanup(&self) {
-        let now = Instant::now();
         for shard in self.shards.iter() {
             let mut buckets = shard.lock().unwrap_or_else(|e| e.into_inner());
+            let now = Instant::now();
             // Remove expired timestamps, then drop empty buckets entirely.
             buckets.retain(|_ip, timestamps| {
-                timestamps.retain(|t| now.duration_since(*t) < self.window);
+                self.expire(timestamps, now);
                 !timestamps.is_empty()
             });
         }
@@ -104,13 +118,13 @@ impl RateLimiter {
 
     /// Get the current request count for an IP within the active window.
     pub fn current_count(&self, ip: &str) -> u32 {
-        let now = Instant::now();
         let buckets = self.shard_for(ip).lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
         match buckets.get(ip) {
-            Some(timestamps) => timestamps
-                .iter()
-                .filter(|t| now.duration_since(**t) < self.window)
-                .count() as u32,
+            Some(timestamps) => {
+                let expired = timestamps.partition_point(|t| now.duration_since(*t) >= self.window);
+                (timestamps.len() - expired) as u32
+            }
             None => 0,
         }
     }
@@ -213,5 +227,79 @@ mod tests {
         rl.check("10.0.0.1").unwrap();
         rl.check("10.0.0.1").unwrap();
         assert_eq!(rl.current_count("10.0.0.1"), 3);
+    }
+
+    #[test]
+    fn zero_limit_rejects_without_creating_a_bucket() {
+        for window in [0, 60] {
+            let limiter = RateLimiter::new(0, window);
+            for _ in 0..3 {
+                assert_eq!(limiter.check("client"), Err(window.max(1)));
+            }
+            assert_eq!(limiter.current_count("client"), 0);
+            assert!(limiter.shard_for("client").lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn expiry_removes_only_the_expired_prefix_including_the_boundary() {
+        let limiter = RateLimiter::new(4, 10);
+        let now = Instant::now();
+        let active = now - Duration::from_secs(9);
+        let mut timestamps = VecDeque::from([
+            now - Duration::from_secs(11),
+            now - Duration::from_secs(10),
+            active,
+            now,
+        ]);
+        limiter.expire(&mut timestamps, now);
+        assert_eq!(timestamps, VecDeque::from([active, now]));
+        limiter.expire(&mut timestamps, now + Duration::from_secs(10));
+        assert!(timestamps.is_empty());
+    }
+
+    #[test]
+    fn concurrent_requests_preserve_the_limit_and_timestamp_order() {
+        let limiter = RateLimiter::new(128, 3600);
+        let allowed = std::sync::atomic::AtomicUsize::new(0);
+        thread::scope(|scope| {
+            for _ in 0..16 {
+                scope.spawn(|| {
+                    for _ in 0..100 {
+                        if limiter.check("client").is_ok() {
+                            allowed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                });
+            }
+        });
+        assert_eq!(allowed.load(std::sync::atomic::Ordering::Relaxed), 128);
+        assert_eq!(limiter.current_count("client"), 128);
+        let buckets = limiter.shard_for("client").lock().unwrap();
+        let times = &buckets["client"];
+        assert!(times.iter().zip(times.iter().skip(1)).all(|(a, b)| a <= b));
+    }
+
+    #[test]
+    fn counts_and_admission_ignore_expired_requests_in_a_wrapped_queue() {
+        let limiter = RateLimiter::new(3, 3600);
+        let now = Instant::now();
+        let old = now - Duration::from_secs(7200);
+        let mut timestamps = VecDeque::with_capacity(4);
+        timestamps.extend([old, old, old, now]);
+        timestamps.pop_front();
+        timestamps.pop_front();
+        timestamps.push_back(now);
+        limiter
+            .shard_for("client")
+            .lock()
+            .unwrap()
+            .insert("client".into(), timestamps);
+        assert_eq!(limiter.current_count("client"), 2);
+        assert!(limiter.check("client").is_ok());
+        assert!(limiter.check("client").is_err());
+        assert_eq!(limiter.current_count("client"), 3);
+        limiter.cleanup();
+        assert_eq!(limiter.current_count("client"), 3);
     }
 }

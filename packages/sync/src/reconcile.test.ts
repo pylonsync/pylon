@@ -248,6 +248,25 @@ describe("SyncEngine.reconcile", () => {
     expect(engine.store.list("DeletedEntity").length).toBe(0);
   });
 
+  test("a stale 404 cannot remove rows loaded after reset", async () => {
+    let respond!: (value: { status: number; body: unknown }) => void;
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => { started = resolve; });
+    restore = installFetch(async () => {
+      started();
+      return new Promise((resolve) => { respond = resolve; });
+    });
+    const engine = makeEngine();
+    seedStore(engine, "Doc", [{ id: "same", title: "old" }]);
+    const pending = engine.reconcile(["Doc"]);
+    await ready;
+    await (engine as unknown as { resetReplicaInner(): Promise<void> }).resetReplicaInner();
+    seedStore(engine, "Doc", [{ id: "same", title: "new" }]);
+    respond({ status: 404, body: {} });
+    await pending;
+    expect(engine.store.get("Doc", "same")?.title).toBe("new");
+  });
+
   test("transient 403 keeps rows; two consecutive 403s drop them (#343)", async () => {
     // A single 403 can be a bearer caught mid-refresh or a momentary policy
     // blip; nuking the cache on the first one made rows flash away and return

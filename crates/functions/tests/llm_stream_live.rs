@@ -444,3 +444,171 @@ impl DataStore for NullStore {
         unreachable!()
     }
 }
+
+#[test]
+fn provider_calls_on_one_runner_overlap_and_keep_auth_separate() {
+    if !bun_available() {
+        eprintln!("skipped: bun is not on PATH");
+        return;
+    }
+    let dir = app_dir(
+        "provider-concurrency",
+        &[(
+            "provider",
+            r#"
+export default {
+  type: "action",
+  handler: async (ctx, args) => {
+    if (args.kind === "complete") return await ctx.llm.complete({ messages: [] });
+    if (args.kind === "embed") return await ctx.llm.embed([ctx.auth.userId]);
+    if (args.kind === "files") return await ctx.files.store("bytes", { name: ctx.auth.userId });
+    if (args.kind === "connections") return (await ctx.connections.get("test")).accessToken;
+    await ctx.email.send(ctx.auth.userId, "test", "test");
+    return ctx.auth.userId;
+  },
+};
+"#,
+        )],
+    );
+    let runner = start_runner(&dir);
+    for kind in ["complete", "embed", "email", "files", "connections"] {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let release_hook = Arc::clone(&release);
+        let enter = move |user: &str| {
+            entered_tx.send(user.to_owned()).unwrap();
+            let (lock, ready) = &*release_hook;
+            let (released, timeout) = ready
+                .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(10), |v| !*v)
+                .unwrap();
+            assert!(
+                *released && !timeout.timed_out(),
+                "test did not release provider"
+            );
+        };
+        match kind {
+            "complete" => runner.set_llm_hook(Box::new(move |_, auth| {
+                let user = auth.user_id.as_deref().unwrap();
+                enter(user);
+                Ok(serde_json::json!(user))
+            })),
+            "embed" => runner.set_llm_embed_hook(Box::new(move |request, auth| {
+                let user = auth.user_id.as_deref().unwrap();
+                assert_eq!(request["input"][0], user);
+                enter(user);
+                Ok(serde_json::json!({ "embeddings": [[if user == "u1" { 1 } else { 2 }]] }))
+            })),
+            "files" => runner.set_files_op_hook(Box::new(move |op, auth| {
+                let user = auth.user_id.as_deref().unwrap();
+                let pylon_functions::protocol::FilesOp::Store { name, .. } = op else {
+                    panic!("expected a file write");
+                };
+                assert_eq!(name, user);
+                enter(user);
+                Ok(serde_json::json!(user))
+            })),
+            "connections" => runner.set_connection_hook(Box::new(move |op, payload, auth| {
+                assert_eq!(op, "get");
+                assert_eq!(payload["name"], "test");
+                let user = auth.user_id.as_deref().unwrap();
+                enter(user);
+                Ok(serde_json::json!({ "access_token": user, "scope": null, "expires_at": null }))
+            })),
+            _ => runner.set_email_hook(Box::new(move |message| {
+                enter(&message.to);
+                Ok(())
+            })),
+        }
+        std::thread::scope(|scope| {
+            let calls: Vec<_> = ["u1", "u2"]
+                .into_iter()
+                .map(|user| {
+                    let runner = &runner;
+                    scope.spawn(move || {
+                        let mut caller = auth();
+                        caller.user_id = Some(user.into());
+                        runner.call(
+                            &NullStore,
+                            "provider",
+                            FnType::Action,
+                            serde_json::json!({ "kind": kind }),
+                            caller,
+                            None,
+                            None,
+                            None,
+                        )
+                    })
+                })
+                .collect();
+            let first = entered_rx.recv_timeout(Duration::from_secs(5));
+            let second = entered_rx.recv_timeout(Duration::from_secs(5));
+            // Always release both calls before asserting, including on failure.
+            *release.0.lock().unwrap() = true;
+            release.1.notify_all();
+            let results: Vec<_> = calls
+                .into_iter()
+                .map(|call| call.join().unwrap().unwrap().0)
+                .collect();
+            let mut users = vec![
+                first.expect("first provider entered"),
+                second.expect("second provider entered before release"),
+            ];
+            users.sort();
+            assert_eq!(users, ["u1", "u2"]);
+            if kind == "embed" {
+                assert_eq!(
+                    results,
+                    [serde_json::json!([[1]]), serde_json::json!([[2]])]
+                );
+            } else {
+                assert_eq!(results, [serde_json::json!("u1"), serde_json::json!("u2")]);
+            }
+        });
+    }
+    drop(runner);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn trace_error_limits_preserve_the_callers_error() {
+    if !bun_available() {
+        eprintln!("skipped: bun is not on PATH");
+        return;
+    }
+    let dir = app_dir(
+        "large-error",
+        &[(
+            "fails",
+            r#"
+export default {
+  type: "action",
+  handler: async (ctx) => { throw ctx.error("TEST_ERROR", "文😀".repeat(10000)); },
+};
+"#,
+        )],
+    );
+    let runner = start_runner(&dir);
+    let error = runner
+        .call(
+            &NullStore,
+            "fails",
+            FnType::Action,
+            serde_json::json!({}),
+            auth(),
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "TEST_ERROR");
+    assert_eq!(error.message, "文😀".repeat(10000));
+    let traces = runner.trace_log.recent(1);
+    assert_eq!(traces.len(), 1);
+    let saved = serde_json::to_value(&traces[0]).unwrap();
+    assert_eq!(saved["outcome"]["code"], "TEST_ERROR");
+    let message = saved["outcome"]["message"].as_str().unwrap();
+    assert!(message.len() <= 4096);
+    assert!(message.ends_with(" [truncated]"));
+    drop(runner);
+    std::fs::remove_dir_all(dir).unwrap();
+}

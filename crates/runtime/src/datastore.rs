@@ -546,6 +546,28 @@ impl DataStore for Runtime {
         Runtime::manifest(self)
     }
 
+    fn has_private_crdt_history(&self, entity: &str) -> bool {
+        if self.crdt_private_entities.contains(entity) {
+            return true;
+        }
+        if self.is_postgres() {
+            return self.pg_data_store().is_none_or(|store| {
+                store.with_client(|client| {
+                    client.query_one(
+                        "SELECT EXISTS(SELECT 1 FROM _pylon_crdt_private_entities WHERE entity = $1)",
+                        &[&entity],
+                    ).map(|row| row.get::<_, bool>(0)).map_err(|error| DataError {
+                        code: "CRDT_PRIVACY_READ_FAILED".into(),
+                        message: error.to_string(),
+                    })
+                }).unwrap_or(true)
+            });
+        }
+        self.lock_read_conn()
+            .map(|conn| crate::crdt_privacy::sqlite_has_private_history(&conn, entity))
+            .unwrap_or(true)
+    }
+
     fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, DataError> {
         Runtime::insert(self, entity, data).map_err(into_data_error)
     }
@@ -607,6 +629,10 @@ impl DataStore for Runtime {
 
     fn unlink(&self, entity: &str, id: &str, relation: &str) -> Result<bool, DataError> {
         Runtime::unlink(self, entity, id, relation).map_err(into_data_error)
+    }
+
+    fn count_filtered(&self, entity: &str, filter: &serde_json::Value) -> Result<usize, DataError> {
+        Runtime::count_filtered(self, entity, filter).map_err(into_data_error)
     }
 
     fn query_filtered(
@@ -886,7 +912,7 @@ impl DataStore for Runtime {
                 message: e.message,
             })?
         } else {
-            let conn = self.lock_conn_pub().map_err(into_data_error)?;
+            let conn = self.lock_read_conn().map_err(into_data_error)?;
             pylon_storage::vector::scan_topk(
                 &conn,
                 entity,
@@ -902,19 +928,11 @@ impl DataStore for Runtime {
             })?
         };
 
-        let mut hits = Vec::with_capacity(scored.len());
-        for (id, score) in scored {
-            // A row deleted between scan and fetch just drops out.
-            let Some(mut doc) = self.get_by_id(entity, &id).map_err(|e| DataError {
-                code: e.code,
-                message: e.message,
-            })?
-            else {
-                continue;
-            };
-            pylon_storage::vector::strip_vector_fields(ent, &mut doc);
-            hits.push(serde_json::json!({ "id": id, "score": score, "doc": doc }));
-        }
+        let ids: Vec<String> = scored.iter().map(|(id, _)| id.clone()).collect();
+        let documents = self
+            .vector_documents(entity, &ids)
+            .map_err(into_data_error)?;
+        let hits = pylon_storage::vector::ranked_hits(scored, documents);
         Ok(serde_json::json!({
             "hits": hits,
             "tookMs": t0.elapsed().as_millis() as u64,
@@ -1588,29 +1606,15 @@ impl WsSseNotifier {
 
 impl pylon_router::ChangeNotifier for WsSseNotifier {
     fn notify(&self, event: &pylon_sync::ChangeEvent) {
-        // Project User rows before fanout so unprojected secrets never
-        // hit the wire. The router's pull route does this same
-        // projection on `/api/sync/pull`; doing it here closes the WS
-        // / SSE leg of the parity gap. Non-User events pass through
-        // `maybe_project_user_row` unchanged (it short-circuits on
-        // entity name).
-        //
-        // Cluster publish carries the SAME projected event the local
-        // hubs receive — peers must never see the raw row either.
-        //
-        // Reactive registry hand-off happens on the UNPROJECTED event:
-        // dep matching is by (entity, row_id) only — no row data is
-        // read — so the User projection is irrelevant. Forwarding the
-        // raw event saves the registry from re-considering projection
-        // when it diffs deps.
+        // Dependency matching uses entity and row identifiers.
         if let Some(reactive) = &self.reactive {
             reactive.on_change(event);
         }
         // Pass the RAW event through to WS / SSE / cluster bus.
         //
-        // Projection happens inside each hub's broadcast at the
-        // wire-serialization step, AFTER the per-client policy
-        // check has run against the raw row. Pre-fix this method
+        // Each hub prepares a projected frame. Its worker checks the
+        // raw row against each client's policy before sending that frame.
+        // Pre-fix this method
         // projected upfront and the projected event was what the
         // policy check saw — a read policy that referenced a
         // `serverOnly` field (e.g. `auth.userId == data.ownerId`
@@ -1687,17 +1691,9 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
     /// every connected client a write happened, so non-subscribed
     /// clients can re-fetch via the regular query path if they care.
     ///
-    /// Authz: the policy check happens at SUBSCRIBE TIME (in
-    /// `start_ws_server`'s SnapshotFetcher closure) — clients on the
-    /// subscriber list have already passed `check_entity_read` for
-    /// the row at that moment. We don't re-check on every broadcast
-    /// because the broadcast hot path runs from the write thread
-    /// without per-client auth context. A consequence: if a client is
-    /// already subscribed and their permissions change mid-session
-    /// (e.g. they're removed from a private channel), they'll keep
-    /// receiving CRDT frames for that row until they disconnect.
-    /// Future work: index subscribers by auth context so the broadcast
-    /// can re-check, or invalidate subscriptions on policy changes.
+    /// Subscription bootstrap checks row policy. Local and peer delivery
+    /// also check the current client policy and persistent privacy rules.
+    /// Denied clients lose their row subscription.
     ///
     /// Frame-encode failure (entity / row_id over the 16-bit length
     /// header) gets logged and dropped — the row's regular JSON change
@@ -1711,20 +1707,9 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
         row: Option<&serde_json::Value>,
         seq: u64,
     ) {
-        // P0 leak guard: never ship raw CRDT snapshots for the User
-        // entity. CRDT frames carry the full Loro doc state, which
-        // includes every non-id field on the row — `passwordHash`,
-        // `_secret`-prefixed columns, anything the JSON broadcast
-        // path's User projection strips. Defaulting `crdt: true` on
-        // every entity (see `pylon_kernel::default_crdt_enabled`)
-        // means a User row update would otherwise expose credentials
-        // to every client that subscribed to that row's CRDT. The
-        // JSON change-event broadcast already told subscribers a
-        // write happened with the safe projected fields; a missing
-        // CRDT binary frame just means clients refetch via the JSON
-        // path instead of merging the Loro delta — exactly what
-        // non-CRDT entities do anyway.
-        if entity == self.auth_user.entity {
+        // Raw CRDT history cannot redact private fields. Keep these entities
+        // on projected JSON replication, including old stored documents.
+        if entity == self.auth_user.entity || !self.ws.supports_crdt_replication(entity) {
             return;
         }
         // Cross-machine: ship the raw snapshot bytes BEFORE the local
@@ -1929,9 +1914,12 @@ pub fn install_cluster_bus_subscriber(
             return;
         }
         // CRDT binary: re-encode the wire frame and fan to local
-        // subscribers. The User short-circuit happens implicitly —
-        // the originating machine never publishes User CRDT frames.
+        // subscribers. Check the local schema independently: a peer may run
+        // an older schema that still permits private CRDT history.
         if let Some(crdt) = envelope.as_crdt() {
+            if !ws_handler.supports_crdt_replication(&crdt.entity) {
+                return;
+            }
             let subs = ws_handler
                 .subscriptions()
                 .subscribers(&crdt.entity, &crdt.row_id);
@@ -3372,6 +3360,11 @@ impl<'a> DataStore for TxStore<'a> {
         self.runtime.manifest()
     }
 
+    fn has_private_crdt_history(&self, entity: &str) -> bool {
+        self.runtime.crdt_private_entities.contains(entity)
+            || crate::crdt_privacy::sqlite_has_private_history(self.conn, entity)
+    }
+
     fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, DataError> {
         let id = self
             .runtime
@@ -3710,21 +3703,12 @@ impl<'a> DataStore for TxStore<'a> {
             code: e.code,
             message: e.message,
         })?;
-        let mut hits = Vec::with_capacity(scored.len());
-        for (id, score) in scored {
-            let Some(mut doc) = self
-                .runtime
-                .get_by_id_with_conn(self.conn, entity, &id)
-                .map_err(|e| DataError {
-                    code: e.code,
-                    message: e.message,
-                })?
-            else {
-                continue;
-            };
-            pylon_storage::vector::strip_vector_fields(ent, &mut doc);
-            hits.push(serde_json::json!({ "id": id, "score": score, "doc": doc }));
-        }
+        let ids: Vec<String> = scored.iter().map(|(id, _)| id.clone()).collect();
+        let documents = self
+            .runtime
+            .vector_documents_with_conn(self.conn, entity, &ids)
+            .map_err(into_data_error)?;
+        let hits = pylon_storage::vector::ranked_hits(scored, documents);
         Ok(serde_json::json!({
             "hits": hits,
             "tookMs": t0.elapsed().as_millis() as u64,
@@ -3838,6 +3822,14 @@ impl<'a> DataStore for HookEnforcingDataStore<'a> {
 
     fn manifest(&self) -> &pylon_kernel::AppManifest {
         self.inner.manifest()
+    }
+
+    fn has_private_crdt_history(&self, entity: &str) -> bool {
+        self.inner.has_private_crdt_history(entity)
+    }
+
+    fn count_filtered(&self, entity: &str, filter: &serde_json::Value) -> Result<usize, DataError> {
+        self.inner.count_filtered(entity, filter)
     }
 
     fn set_op_admin(&self, admin: bool) {
@@ -4295,6 +4287,14 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
         self.inner.manifest()
     }
 
+    fn has_private_crdt_history(&self, entity: &str) -> bool {
+        self.inner.has_private_crdt_history(entity)
+    }
+
+    fn count_filtered(&self, entity: &str, filter: &serde_json::Value) -> Result<usize, DataError> {
+        self.inner.count_filtered(entity, filter)
+    }
+
     fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, DataError> {
         self.validate_write(entity, data)?;
         let data = self.encrypt_for_write(entity, data, true)?;
@@ -4662,6 +4662,14 @@ impl<'a> AutoBroadcastStore<'a> {
 impl<'a> DataStore for AutoBroadcastStore<'a> {
     fn manifest(&self) -> &pylon_kernel::AppManifest {
         self.inner.manifest()
+    }
+
+    fn has_private_crdt_history(&self, entity: &str) -> bool {
+        self.inner.has_private_crdt_history(entity)
+    }
+
+    fn count_filtered(&self, entity: &str, filter: &serde_json::Value) -> Result<usize, DataError> {
+        self.inner.count_filtered(entity, filter)
     }
 
     fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, DataError> {
@@ -5268,7 +5276,7 @@ impl FnOpsImpl {
                                     fn_type,
                                     auth.user_id.clone(),
                                 )
-                                .finish_ok(Some(value.clone()));
+                                .finish_ok_ref(&value);
                                 return Ok((value, trace, Vec::new()));
                             }
                         }
@@ -5424,7 +5432,7 @@ impl FnOpsImpl {
                         def.fn_type,
                         auth.user_id.clone(),
                     )
-                    .finish_ok(Some(value.clone()));
+                    .finish_ok_ref(&value);
                     return Ok((value, trace));
                 }
                 let result = runner
@@ -6012,7 +6020,51 @@ fn policy_auth_ctx(auth: &pylon_functions::protocol::AuthInfo) -> pylon_auth::Au
     }
 }
 
+struct PolicyReadMemo {
+    _memo: pylon_policy::ExistsMemo,
+}
+
+impl pylon_functions::runner::PolicyReadScope for PolicyReadMemo {}
+
 impl pylon_functions::runner::PolicyGate for PolicyGateAdapter {
+    fn begin_read(&self) -> Option<Box<dyn pylon_functions::runner::PolicyReadScope>> {
+        Some(Box::new(PolicyReadMemo {
+            _memo: pylon_policy::ExistsMemo::fresh_scope(),
+        }))
+    }
+
+    fn check_read_scan(
+        &self,
+        entity: &str,
+        auth: &pylon_functions::protocol::AuthInfo,
+    ) -> Result<(), (String, String)> {
+        match self
+            .engine
+            .check_entity_scan(entity, &policy_auth_ctx(auth))
+        {
+            pylon_policy::PolicyResult::Allowed => Ok(()),
+            pylon_policy::PolicyResult::Denied { reason, .. } => {
+                Err(("POLICY_DENIED".into(), reason))
+            }
+        }
+    }
+
+    fn check_read_aggregate(
+        &self,
+        entity: &str,
+        auth: &pylon_functions::protocol::AuthInfo,
+    ) -> Result<(), (String, String)> {
+        match self
+            .engine
+            .check_entity_read_aggregate(entity, &policy_auth_ctx(auth))
+        {
+            pylon_policy::PolicyResult::Allowed => Ok(()),
+            pylon_policy::PolicyResult::Denied { reason, .. } => {
+                Err(("SEARCH_REQUIRES_ROW_INDEPENDENT_POLICY".into(), reason))
+            }
+        }
+    }
+
     fn check_op(
         &self,
         op: pylon_functions::runner::PolicyOp,
@@ -6088,25 +6140,7 @@ impl pylon_functions::runner::PolicyGate for PolicyGateAdapter {
         mut result: serde_json::Value,
     ) -> Result<serde_json::Value, (String, String)> {
         let auth_ctx = policy_auth_ctx(auth);
-        // Aggregate safety — identical to the entity search route: a
-        // row-DEPENDENT read policy is rejected because faceted counts /
-        // `total` aggregate over EVERY match and would leak "how many rows
-        // exist" even after per-hit filtering. Probe with `None` (no row) to
-        // detect row-dependence.
-        if !matches!(
-            self.engine.check_entity_read(entity, &auth_ctx, None),
-            pylon_policy::PolicyResult::Allowed
-        ) {
-            return Err((
-                "SEARCH_REQUIRES_ROW_INDEPENDENT_POLICY".to_string(),
-                format!(
-                    "serverData.search on \"{entity}\" has a row-dependent read policy; faceted \
-                     search would leak aggregate counts for rows you can't read. Make the read \
-                     policy row-independent, disable search in the manifest, or use \
-                     serverData.unsafe.search from a trusted server context."
-                ),
-            ));
-        }
+        self.check_read_aggregate(entity, auth)?;
         // Belt-and-suspenders per-hit filter + wire projection.
         let auth_user = &self.manifest.auth.user;
         if let Some(hits) = result.get_mut("hits").and_then(|v| v.as_array_mut()) {
@@ -6134,24 +6168,7 @@ impl pylon_functions::runner::PolicyGate for PolicyGateAdapter {
         mut result: serde_json::Value,
     ) -> Result<serde_json::Value, (String, String)> {
         let auth_ctx = policy_auth_ctx(auth);
-        // Aggregate safety — top-k similarity ranks over EVERY row in the
-        // table, so even after per-hit filtering the k slots + scores would
-        // leak proximity information about rows the caller can't read.
-        // Same probe + code as faceted search.
-        if !matches!(
-            self.engine.check_entity_read(entity, &auth_ctx, None),
-            pylon_policy::PolicyResult::Allowed
-        ) {
-            return Err((
-                "SEARCH_REQUIRES_ROW_INDEPENDENT_POLICY".to_string(),
-                format!(
-                    "serverData.vectorSearch on \"{entity}\" has a row-dependent read policy; \
-                     top-k similarity would leak proximity of rows you can't read. Make the read \
-                     policy row-independent or use serverData.unsafe.vectorSearch from a trusted \
-                     server context."
-                ),
-            ));
-        }
+        self.check_read_aggregate(entity, auth)?;
         // Per-hit fence + wire projection on each hit's `doc`.
         let auth_user = &self.manifest.auth.user;
         if let Some(hits) = result.get_mut("hits").and_then(|v| v.as_array_mut()) {
@@ -6442,6 +6459,8 @@ pub fn try_spawn_functions(
     // Per-runner nested-call hooks. Has to be done AFTER
     // FnOpsImpl is built because the closures upgrade a Weak<ops>
     // to reach the runtime/notifier/plugins.
+    let files_storage: Arc<dyn pylon_storage::files::FileStorage> =
+        Arc::from(pylon_storage::files::select_from_env());
     for runner in ops.pool.runners() {
         install_nested_call_hook(&ops, runner);
         // `ctx.files.signedUrl` — the runtime owns the signing secret, the
@@ -6454,10 +6473,10 @@ pub fn try_spawn_functions(
         }));
         // `ctx.files.store` / `ctx.files.delete` — through the configured
         // storage backend, the same one `/api/files` uses.
-        runner.set_files_op_hook(Box::new(|op, auth| {
-            let storage = pylon_storage::files::select_from_env();
+        let files_storage = Arc::clone(&files_storage);
+        runner.set_files_op_hook(Box::new(move |op, auth| {
             let max = FILES_STORE_MAX_BYTES.min(crate::server::upload_max_bytes());
-            run_files_op(storage.as_ref(), op, auth, max)
+            run_files_op(files_storage.as_ref(), op, auth, max)
         }));
         // `ctx.shards.ticket` — same pattern: the runtime owns the secret.
         runner.set_shard_ticket_signer(Box::new(
@@ -7092,7 +7111,9 @@ fn install_connection_hook(
                             )
                         })?;
                     let id = crate::connections::stable_id(user_id, name);
-                    let _ = runtime.delete("_Connection", &id);
+                    mgr.disconnect(user_id, name, || {
+                        runtime.delete("_Connection", &id).map(|_| ()).map_err(|e| e.message)
+                    }).map_err(|e| (e.code().to_string(), e.to_string()))?;
                     Ok(serde_json::json!({ "disconnected": true }))
                 }
                 other => Err((
@@ -8741,7 +8762,15 @@ mod cluster_crdt_relay_tests {
         Arc<SseHub>,
         pylon_kernel::ManifestAuthUserConfig,
     ) {
-        let m = pylon_kernel::AppManifest::default();
+        let m = pylon_kernel::AppManifest {
+            entities: vec![pylon_kernel::ManifestEntity {
+                name: "Doc".into(),
+                crdt: true,
+                sync: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
         let auth_user = m.auth.user.clone();
         let pe = Arc::new(pylon_policy::PolicyEngine::from_manifest(&m));
         let m = Arc::new(m);
@@ -10051,6 +10080,145 @@ mod ssr_client_read_fence_tests {
             serde_json::json!({"id": "1", "owner": "u1", "secret": "s1"}),
             serde_json::json!({"id": "2", "owner": "u2", "secret": "s2"}),
         ]
+    }
+
+    #[test]
+    fn read_scope_reuses_membership_queries_but_rechecks_the_next_read() {
+        use pylon_functions::runner::PolicyOp;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        struct Membership {
+            calls: AtomicUsize,
+            active: AtomicBool,
+        }
+        impl pylon_policy::PolicyDataResolver for Membership {
+            fn entity_exists(
+                &self,
+                _: &str,
+                conditions: &[(Vec<String>, serde_json::Value)],
+            ) -> bool {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.active.load(Ordering::SeqCst)
+                    && conditions
+                        .iter()
+                        .any(|(path, value)| path == &["orgId"] && value == "org-a")
+                    && conditions
+                        .iter()
+                        .any(|(path, value)| path == &["userId"] && value == "u1")
+            }
+        }
+        let mut m = note_manifest();
+        m.policies[0].allow_read =
+            Some("exists(Member where orgId == data.orgId and userId == auth.userId)".into());
+        let gate = adapter(&m);
+        let membership = Arc::new(Membership {
+            calls: AtomicUsize::new(0),
+            active: AtomicBool::new(true),
+        });
+        gate.engine.set_resolver(membership.clone());
+        let own = serde_json::json!({"orgId": "org-a"});
+        let foreign = serde_json::json!({"orgId": "org-b"});
+        {
+            let _scope = gate.begin_read();
+            for _ in 0..500 {
+                assert!(gate
+                    .check_op(PolicyOp::Read, "Note", &user("u1"), None, Some(&own))
+                    .is_ok());
+                assert!(gate
+                    .check_op(PolicyOp::Read, "Note", &user("u1"), None, Some(&foreign))
+                    .is_err());
+            }
+            assert!(gate
+                .check_op(PolicyOp::Read, "Note", &user("u2"), None, Some(&own))
+                .is_err());
+            assert_eq!(membership.calls.load(Ordering::SeqCst), 3);
+        }
+        membership.active.store(false, Ordering::SeqCst);
+        {
+            let _scope = gate.begin_read();
+            assert!(gate
+                .check_op(PolicyOp::Read, "Note", &user("u1"), None, Some(&own))
+                .is_err());
+        }
+        assert_eq!(membership.calls.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn strict_read_checks_use_real_rows_and_allow_owned_rows() {
+        use pylon_functions::runner::PolicyOp;
+        let m = note_manifest();
+        let gate = adapter(&m);
+        assert!(gate.check_read_scan("Note", &user("u1")).is_ok());
+        assert!(gate
+            .check_op(PolicyOp::Read, "Note", &user("u1"), None, Some(&rows()[0]))
+            .is_ok());
+        assert!(gate
+            .check_op(PolicyOp::Read, "Note", &user("u1"), None, Some(&rows()[1]))
+            .is_err());
+        let mut m = m;
+        m.policies[0].allow_read = Some("data.private != true".into());
+        let gate = adapter(&m);
+        assert!(gate.check_read_scan("Note", &user("u1")).is_ok());
+        assert!(gate
+            .check_op(
+                PolicyOp::Read,
+                "Note",
+                &user("u1"),
+                None,
+                Some(&serde_json::json!({"private": true}))
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn strict_read_scopes_admins_with_an_active_tenant() {
+        use pylon_functions::runner::PolicyOp;
+        let mut m = note_manifest();
+        m.policies[0].allow_read = Some("data.orgId == auth.tenantId".into());
+        let gate = adapter(&m);
+        let mut auth = user("admin");
+        auth.is_admin = true;
+        auth.tenant_id = Some("org-a".into());
+        assert!(gate.check_read_scan("Note", &auth).is_ok());
+        let own = serde_json::json!({"orgId": "org-a"});
+        let foreign = serde_json::json!({"orgId": "org-b"});
+        assert!(gate
+            .check_op(PolicyOp::Read, "Note", &auth, None, Some(&own))
+            .is_ok());
+        assert!(gate
+            .check_op(PolicyOp::Read, "Note", &auth, None, Some(&foreign))
+            .is_err());
+        auth.tenant_id = None;
+        assert!(gate
+            .check_op(PolicyOp::Read, "Note", &auth, None, Some(&foreign))
+            .is_ok());
+    }
+
+    #[test]
+    fn search_rejects_row_rules_even_when_missing_data_would_allow() {
+        for expr in [
+            "data.private != true",
+            "existing.private != true",
+            "len(data.title) != 3",
+            "auth.userId != null || data.private == false",
+        ] {
+            let mut m = note_manifest();
+            m.policies[0].allow_read = Some(expr.into());
+            let gate = adapter(&m);
+            assert!(
+                gate.check_read_aggregate("Note", &user("u1")).is_err(),
+                "{expr}"
+            );
+            assert!(gate
+                .filter_client_search(
+                    "Note",
+                    &user("u1"),
+                    serde_json::json!({"hits": [], "total": 99})
+                )
+                .is_err());
+            assert!(gate
+                .filter_client_vector_search("Note", &user("u1"), serde_json::json!({"hits": []}))
+                .is_err());
+        }
     }
 
     #[test]

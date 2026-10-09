@@ -208,13 +208,17 @@ export default action({
 
 By default, `ctx.db.*` inside a function bypasses entity policies because server code is trusted. This remains the default for compatibility.
 
-Strict mode flips the default: every `ctx.db.get/query/insert/update/delete/lookup/search` runs through the policy engine using the function's caller auth, exactly as if the same operation came in through `/api/entities/*`. Enable per deploy:
+Strict mode checks database operations with the caller's identity. It checks each returned row, including graph relations. Enable it per deployment:
 
 ```sh
 PYLON_STRICT_FN_POLICIES=1 pylon dev
 ```
 
-When strict mode is on, the canonical Pylon-shaped IDOR ("I wrote `getRecording.ts` that does `ctx.db.get('Recording', args.id)` and forgot to check tenant ownership") becomes impossible. The policy on Recording fires, sees that the caller isn't a member of the row's org, and the call returns `POLICY_DENIED` before the row leaves the database.
+A `get` or `lookup` of a forbidden row returns `POLICY_DENIED`. List, query, pagination, and graph results exclude forbidden rows. Graph reads check policies on included entities too. Admin callers with an active tenant must pass read policies.
+
+Search and vector search require read policies that do not depend on row data. This prevents search counts or rankings from revealing forbidden rows.
+
+Strict function reads retain server-only fields on permitted rows. Select the fields that the function can return to clients. Server-rendered `serverData` reads remove protected fields. Graph reads remain unavailable during page rendering.
 
 For the legitimate cross-tenant cases (admin tools, webhook receivers post signature verification, scheduled cron sweeps), use the explicit escape hatch:
 
@@ -662,6 +666,14 @@ if (msg.length > 2000) {
 ```
 
 The client receives `{ code, message }` and can render different UI for each code.
+
+## Function traces
+
+Successful function traces store small return values. A trace omits the return value if it exceeds the 4 KiB content and value-size budget, 128 JSON values, or 16 nesting levels. The client still receives the complete response.
+
+Each trace stores up to 128 DB operations and 128 scheduled calls. Their names and row IDs share a 32 KiB limit. Entries that exceed these limits are omitted. `ops_omitted` and `schedules_omitted` report the omitted counts. Add each count to its stored array length to get the total.
+
+Stored error codes and messages have a 4 KiB limit each. Shortened text ends with ` [truncated]`. The caller still receives the full error. Trace result values also have size and depth limits. These limits do not change function responses.
 
 ## Next
 

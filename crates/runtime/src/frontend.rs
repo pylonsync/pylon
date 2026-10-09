@@ -435,60 +435,81 @@ pub(crate) fn respond_static_file(
     cache: &str,
     cors_origin: &str,
 ) {
-    let total = bytes.len() as u64;
-    let range = request.headers().iter().find_map(|h| {
-        let field = h.field.as_str();
-        if field == "Range" || field == "range" {
-            Some(h.value.as_str().to_string())
-        } else {
-            None
-        }
-    });
+    let total = bytes.len();
+    respond_static_reader(
+        request,
+        std::io::Cursor::new(bytes),
+        total,
+        content_type,
+        cache,
+        cors_origin,
+    );
+}
 
+fn open_static_file(path: &Path) -> std::io::Result<(std::fs::File, usize)> {
+    let file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    let length = usize::try_from(metadata.len())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "file is too large"))?;
+    Ok((file, length))
+}
+
+fn respond_static_reader<R: std::io::Read + std::io::Seek + Send + 'static>(
+    request: Request,
+    mut reader: R,
+    total: usize,
+    content_type: &str,
+    cache: &str,
+    cors_origin: &str,
+) {
+    let spec = request
+        .headers()
+        .iter()
+        .find_map(|header| {
+            let field = header.field.as_str();
+            (field == "Range" || field == "range")
+                .then(|| parse_byte_range(header.value.as_str(), total as u64))
+        })
+        .unwrap_or(RangeSpec::Full);
     let ct = Header::from_bytes("Content-Type", content_type.as_bytes()).unwrap();
-    let cors = Header::from_bytes(
-        "Access-Control-Allow-Origin",
-        cors_origin.as_bytes().to_vec(),
-    )
-    .unwrap();
+    let cors = Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes()).unwrap();
     let cache_h = Header::from_bytes("Cache-Control", cache).unwrap();
     let accept_ranges = Header::from_bytes("Accept-Ranges", "bytes").unwrap();
-
-    let spec = range
-        .as_deref()
-        .map(|r| parse_byte_range(r, total))
-        .unwrap_or(RangeSpec::Full);
-
-    let response = match spec {
+    let (status, length, headers) = match spec {
         RangeSpec::Partial(start, end) => {
-            let slice = bytes[start as usize..=end as usize].to_vec();
+            if reader.seek(std::io::SeekFrom::Start(start)).is_err() {
+                let _ = request.respond(Response::empty(500));
+                return;
+            }
             let content_range =
                 Header::from_bytes("Content-Range", format!("bytes {start}-{end}/{total}"))
                     .unwrap();
-            Response::from_data(slice)
-                .with_status_code(206)
-                .with_header(ct)
-                .with_header(cors)
-                .with_header(cache_h)
-                .with_header(accept_ranges)
-                .with_header(content_range)
+            (
+                206,
+                (end - start + 1) as usize,
+                vec![ct, cors, cache_h, accept_ranges, content_range],
+            )
         }
         RangeSpec::Unsatisfiable => {
             let content_range =
                 Header::from_bytes("Content-Range", format!("bytes */{total}")).unwrap();
-            Response::from_data(Vec::new())
-                .with_status_code(416)
-                .with_header(cors)
-                .with_header(accept_ranges)
-                .with_header(content_range)
+            (416, 0, vec![cors, accept_ranges, content_range])
         }
-        RangeSpec::Full => Response::from_data(bytes)
-            .with_status_code(200)
-            .with_header(ct)
-            .with_header(cors)
-            .with_header(cache_h)
-            .with_header(accept_ranges),
+        RangeSpec::Full => (200, total, vec![ct, cors, cache_h, accept_ranges]),
     };
+    let response = Response::new(
+        tiny_http::StatusCode(status),
+        headers,
+        reader.take(length as u64),
+        Some(length),
+        None,
+    );
     let _ = request.respond(response);
 }
 
@@ -1278,14 +1299,14 @@ pub fn try_handle(
             && path_only != "/.well-known/openid-configuration"
         {
             if let Some(file_path) = resolve_safe(&public_dir(), path_only) {
-                if let Ok(bytes) = std::fs::read(&file_path) {
+                if let Ok((file, length)) = open_static_file(&file_path) {
                     let ct = content_type_for(&file_path);
                     let cache = if is_dev_mode() {
                         "no-cache, must-revalidate"
                     } else {
                         "public, max-age=3600"
                     };
-                    respond_static_file(request, bytes, ct, cache, cors_origin);
+                    respond_static_reader(request, file, length, ct, cache, cors_origin);
                     return Ok(());
                 }
             }
@@ -1462,14 +1483,14 @@ pub fn try_handle(
             if let Some(file_path) =
                 dynamic_match_public_override(&public_dir(), &matched.params, path_only)
             {
-                if let Ok(bytes) = std::fs::read(&file_path) {
+                if let Ok((file, length)) = open_static_file(&file_path) {
                     let ct = content_type_for(&file_path);
                     let cache = if is_dev_mode() {
                         "no-cache, must-revalidate"
                     } else {
                         "public, max-age=3600"
                     };
-                    respond_static_file(request, bytes, ct, cache, cors_origin);
+                    respond_static_reader(request, file, length, ct, cache, cors_origin);
                     return Ok(());
                 }
             }
@@ -1526,7 +1547,7 @@ pub fn try_handle(
                         crate::ssr_cache::get(&matched.route.path, cache_path, &cache_vary)
                     {
                         if entry.fresh {
-                            tracing::debug!(url = %url, "SSR cache hit (disk, anon)");
+                            tracing::debug!(path = %crate::metrics::request_log_path(&url), "SSR cache hit (disk, anon)");
                             return serve_cached_ssr(
                                 entry,
                                 cors_origin,
@@ -1549,7 +1570,7 @@ pub fn try_handle(
                     crate::ssr_cache::get(&matched.route.path, cache_path, &bucket_vary)
                 {
                     if entry.fresh {
-                        tracing::debug!(url = %url, session = session_present, "SSR cache hit (disk, bucket)");
+                        tracing::debug!(path = %crate::metrics::request_log_path(&url), session = session_present, "SSR cache hit (disk, bucket)");
                         return serve_cached_bucket_ssr(
                             entry,
                             cors_origin,
@@ -1582,19 +1603,19 @@ pub fn try_handle(
         // with no GET export answers 405 (Allow lists the methods it does have).
         if matches!(request.method(), Method::Get) {
             if let Some(matched) = match_form_route(&url, &cfg.ssr_routes) {
-                tracing::debug!(url = %url, route = %matched.route.path, "SSR raw GET route");
+                tracing::debug!(path = %crate::metrics::request_log_path(&url), route = %matched.route.path, "SSR raw GET route");
                 // Same `public/`-beats-dynamic-segments rule as pages.
                 if let Some(file_path) =
                     dynamic_match_public_override(&public_dir(), &matched.params, path_only)
                 {
-                    if let Ok(bytes) = std::fs::read(&file_path) {
+                    if let Ok((file, length)) = open_static_file(&file_path) {
                         let ct = content_type_for(&file_path);
                         let cache = if is_dev_mode() {
                             "no-cache, must-revalidate"
                         } else {
                             "public, max-age=3600"
                         };
-                        respond_static_file(request, bytes, ct, cache, cors_origin);
+                        respond_static_reader(request, file, length, ct, cache, cors_origin);
                         return Ok(());
                     }
                 }
@@ -1613,7 +1634,7 @@ pub fn try_handle(
         // the recovery links instead of an opaque JSON error.
         if looks_like_document_nav(&match_url) {
             if let Some(nf) = find_not_found_route(&match_url, &cfg.ssr_routes) {
-                tracing::debug!(url = %url, boundary = %nf.path, "SSR not-found");
+                tracing::debug!(path = %crate::metrics::request_log_path(&url), boundary = %nf.path, "SSR not-found");
                 let matched = SsrMatch {
                     route: nf.clone(),
                     params: std::collections::HashMap::new(),
@@ -1654,7 +1675,7 @@ pub fn try_handle(
     // symlink escapes, and non-files all return None).
     {
         if let Some(file_path) = resolve_safe(&public_dir(), path_only) {
-            if let Ok(bytes) = std::fs::read(&file_path) {
+            if let Ok((file, length)) = open_static_file(&file_path) {
                 let ct = content_type_for(&file_path);
                 let cache = if is_dev_mode() {
                     // Dev: always revalidate so edits show up.
@@ -1664,7 +1685,7 @@ pub fn try_handle(
                 };
                 // Range-aware: emits 206 for a `Range` request (iOS Safari
                 // <video> needs it) + `Accept-Ranges: bytes` on every response.
-                respond_static_file(request, bytes, ct, cache, cors_origin);
+                respond_static_reader(request, file, length, ct, cache, cors_origin);
                 return Ok(());
             }
         }
@@ -1860,8 +1881,8 @@ fn serve_from_disk(
     // Direct file hit. `resolve_safe` returns Some only when the path
     // points to a regular file inside the dir.
     if let Some(file_path) = resolve_safe(dir, path_only) {
-        let bytes = match std::fs::read(&file_path) {
-            Ok(b) => b,
+        let (file, length) = match open_static_file(&file_path) {
+            Ok(file) => file,
             Err(_) => return Err(request),
         };
         let ct = content_type_for(&file_path);
@@ -1869,7 +1890,14 @@ fn serve_from_disk(
         // (Vite emits ?v= and chunk-hash filenames) can be cached aggressively,
         // but keep a conservative one-hour public cache as the default so a
         // deploy bump is picked up on the next load; operators can front a CDN.
-        respond_static_file(request, bytes, ct, "public, max-age=3600", cors_origin);
+        respond_static_reader(
+            request,
+            file,
+            length,
+            ct,
+            "public, max-age=3600",
+            cors_origin,
+        );
         return Ok(());
     }
 
@@ -4933,8 +4961,8 @@ fn serve_pylon_client_bundle(
         }
     }
 
-    let bytes = match std::fs::read(&file_path) {
-        Ok(b) => b,
+    let (file, length) = match open_static_file(&file_path) {
+        Ok(file) => file,
         Err(_) => {
             // 404 — no such bundle file. Don't invalidate the
             // outdir cache; just this one file is missing.
@@ -4962,17 +4990,22 @@ fn serve_pylon_client_bundle(
         "no-cache"
     };
 
-    let response = Response::from_data(bytes)
-        .with_status_code(200u16)
-        .with_header(Header::from_bytes("Content-Type", bundle_content_type_for(suffix)).unwrap())
-        .with_header(Header::from_bytes("Cache-Control", cache_control).unwrap())
-        .with_header(
-            Header::from_bytes(
-                "Access-Control-Allow-Origin",
-                cors_origin.as_bytes().to_vec(),
-            )
-            .unwrap(),
-        );
+    let response = Response::new(
+        tiny_http::StatusCode(200),
+        Vec::new(),
+        file,
+        Some(length),
+        None,
+    )
+    .with_header(Header::from_bytes("Content-Type", bundle_content_type_for(suffix)).unwrap())
+    .with_header(Header::from_bytes("Cache-Control", cache_control).unwrap())
+    .with_header(
+        Header::from_bytes(
+            "Access-Control-Allow-Origin",
+            cors_origin.as_bytes().to_vec(),
+        )
+        .unwrap(),
+    );
     let _ = request.respond(response);
     Ok(())
 }
@@ -5201,6 +5234,145 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn static_range_responses_preserve_bytes_lengths_and_headers() {
+        use std::io::{Read, Write};
+        let cases = [
+            (None, 200, 0..128, None),
+            (Some("bytes=10-19"), 206, 10..20, Some("bytes 10-19/128")),
+            (Some("bytes=-5"), 206, 123..128, Some("bytes 123-127/128")),
+            (
+                Some("bytes=125-999"),
+                206,
+                125..128,
+                Some("bytes 125-127/128"),
+            ),
+            (Some("bytes=128-"), 416, 0..0, Some("bytes */128")),
+            (Some("bytes=0-1,5-6"), 200, 0..128, None),
+        ];
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        let worker = std::thread::spawn(move || {
+            for _ in 0..6 {
+                let request = server
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap()
+                    .unwrap();
+                respond_static_file(
+                    request,
+                    (0..128).collect(),
+                    "application/octet-stream",
+                    "private, max-age=0",
+                    "https://example.test",
+                );
+            }
+        });
+        for (range, status, expected, content_range) in cases {
+            let mut client = std::net::TcpStream::connect(addr).unwrap();
+            client
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let range = range
+                .map(|value| format!("Range: {value}\r\n"))
+                .unwrap_or_default();
+            write!(
+                client,
+                "GET /file HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{range}\r\n"
+            )
+            .unwrap();
+            let mut wire = Vec::new();
+            client.read_to_end(&mut wire).unwrap();
+            let header_end = wire
+                .windows(4)
+                .position(|bytes| bytes == b"\r\n\r\n")
+                .unwrap();
+            let headers = std::str::from_utf8(&wire[..header_end])
+                .unwrap()
+                .to_ascii_lowercase();
+            assert!(
+                headers.starts_with(&format!("http/1.1 {status}")),
+                "{headers}"
+            );
+            let body: Vec<u8> = expected.collect();
+            assert_eq!(&wire[header_end + 4..], body);
+            assert!(headers.contains(&format!("content-length: {}", body.len())));
+            assert!(headers.contains("accept-ranges: bytes"));
+            assert!(headers.contains("access-control-allow-origin: https://example.test"));
+            if status != 416 {
+                assert!(headers.contains("cache-control: private, max-age=0"));
+                assert!(headers.contains("content-type: application/octet-stream"));
+            }
+            if let Some(value) = content_range {
+                assert!(headers.contains(&format!("content-range: {value}")));
+            }
+        }
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn a_small_range_reads_only_requested_bytes_from_a_large_file() {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct CountedFile {
+            file: std::fs::File,
+            read: Arc<AtomicUsize>,
+        }
+        impl Read for CountedFile {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                let count = self.file.read(buffer)?;
+                self.read.fetch_add(count, Ordering::SeqCst);
+                Ok(count)
+            }
+        }
+        impl Seek for CountedFile {
+            fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+                self.file.seek(position)
+            }
+        }
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("large.bin");
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.set_len(64 * 1024 * 1024).unwrap();
+        let start = 32 * 1024 * 1024;
+        file.seek(SeekFrom::Start(start)).unwrap();
+        file.write_all(b"range bytes").unwrap();
+        drop(file);
+        let (file, length) = open_static_file(&path).unwrap();
+        assert_eq!(length, 64 * 1024 * 1024);
+        let read = Arc::new(AtomicUsize::new(0));
+        let reader = CountedFile {
+            file,
+            read: Arc::clone(&read),
+        };
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        let worker = std::thread::spawn(move || {
+            let request = server
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            respond_static_reader(
+                request,
+                reader,
+                length,
+                "application/octet-stream",
+                "public, max-age=3600",
+                "https://example.test",
+            );
+        });
+        let mut client = std::net::TcpStream::connect(addr).unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        write!(client, "GET /large.bin HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nRange: bytes={start}-{}\r\n\r\n", start + 10).unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        worker.join().unwrap();
+        assert!(response.starts_with("HTTP/1.1 206"));
+        assert_eq!(response.split_once("\r\n\r\n").unwrap().1, "range bytes");
+        assert_eq!(read.load(Ordering::SeqCst), 11);
+    }
 
     #[test]
     fn parse_byte_range_forms() {

@@ -456,10 +456,7 @@ impl JobQueue {
         {
             let mut pending = self.pending.lock().unwrap();
             // Insert in priority order (higher priority closer to front).
-            let pos = pending
-                .iter()
-                .position(|j| (j.priority as u8) < (priority as u8))
-                .unwrap_or(pending.len());
+            let pos = pending.partition_point(|j| (j.priority as u8) >= (priority as u8));
             pending.insert(pos, job);
         }
         self.notify.notify_one();
@@ -640,10 +637,7 @@ impl JobQueue {
                 self.persist(&job);
                 let mut pending = self.pending.lock().unwrap();
                 let priority = job.priority as u8;
-                let pos = pending
-                    .iter()
-                    .position(|j| (j.priority as u8) < priority)
-                    .unwrap_or(pending.len());
+                let pos = pending.partition_point(|j| (j.priority as u8) >= priority);
                 pending.insert(pos, job);
                 drop(pending);
                 self.notify.notify_one();
@@ -721,10 +715,7 @@ impl JobQueue {
             .retain(|j| !(j.id == original.id && j.status == JobStatus::Cancelled));
         let priority = original.priority as u8;
         let mut pending = self.pending.lock().unwrap();
-        let pos = pending
-            .iter()
-            .position(|j| (j.priority as u8) < priority)
-            .unwrap_or(pending.len());
+        let pos = pending.partition_point(|j| (j.priority as u8) >= priority);
         pending.insert(pos, original);
         drop(pending);
         self.notify.notify_one();
@@ -877,10 +868,7 @@ impl JobQueue {
 
             let priority = job.priority as u8;
             let mut pending = self.pending.lock().unwrap();
-            let insert_pos = pending
-                .iter()
-                .position(|j| (j.priority as u8) < priority)
-                .unwrap_or(pending.len());
+            let insert_pos = pending.partition_point(|j| (j.priority as u8) >= priority);
             pending.insert(insert_pos, job);
             drop(pending);
             drop(dead);
@@ -1024,10 +1012,7 @@ impl JobQueue {
 
             // Insert in priority order.
             let priority = job.priority as u8;
-            let pos = pending
-                .iter()
-                .position(|j| (j.priority as u8) < priority)
-                .unwrap_or(pending.len());
+            let pos = pending.partition_point(|j| (j.priority as u8) >= priority);
             pending.insert(pos, job);
         }
 
@@ -1312,6 +1297,144 @@ mod tests {
         assert_eq!(j2.name, "high");
         assert_eq!(j3.name, "normal");
         assert_eq!(j4.name, "low");
+    }
+
+    #[test]
+    #[ignore = "release-mode performance benchmark"]
+    fn benchmark_priority_insertion() {
+        use std::hint::black_box;
+        let q = JobQueue::new(100);
+        let jobs: Vec<_> = (0..10_000)
+            .map(|_| {
+                q.new_job(
+                    "work",
+                    serde_json::json!({}),
+                    Priority::Normal,
+                    0,
+                    0,
+                    "default",
+                    None,
+                )
+            })
+            .collect();
+        for binary in [false, true] {
+            let mut samples = Vec::new();
+            for _ in 0..7 {
+                let inputs = jobs.clone();
+                let mut pending: VecDeque<Job> = VecDeque::with_capacity(inputs.len());
+                let start = std::time::Instant::now();
+                for job in inputs {
+                    let priority = black_box(job.priority as u8);
+                    let index = if binary {
+                        pending.partition_point(|j| (j.priority as u8) >= priority)
+                    } else {
+                        pending
+                            .iter()
+                            .position(|j| (j.priority as u8) < priority)
+                            .unwrap_or(pending.len())
+                    };
+                    pending.insert(index, job);
+                }
+                samples.push(start.elapsed().as_secs_f64() * 1000.0);
+                assert_eq!(black_box(pending.len()), 10_000);
+            }
+            samples.sort_by(f64::total_cmp);
+            println!(
+                "10000 equal-priority job insertions, binary={binary}: {:.3} ms median",
+                samples[3]
+            );
+        }
+    }
+
+    #[test]
+    fn priority_insertion_preserves_fifo_after_retries_and_restore() {
+        let q = JobQueue::new(100);
+        q.set_retry_backoff_base_secs(0);
+        let mut expected: Vec<(String, Priority)> = Vec::new();
+        let insert_expected =
+            |expected: &mut Vec<(String, Priority)>, id: String, priority: Priority| {
+                let index = expected
+                    .iter()
+                    .position(|(_, p)| (*p as u8) < (priority as u8))
+                    .unwrap_or(expected.len());
+                expected.insert(index, (id, priority));
+            };
+        let assert_order = |q: &JobQueue, expected: &[(String, Priority)]| {
+            let pending = q.pending.lock().unwrap();
+            assert_eq!(
+                pending
+                    .iter()
+                    .map(|job| (&job.id, job.priority))
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|(id, priority)| (id, *priority))
+                    .collect::<Vec<_>>()
+            );
+        };
+        for i in 0..128 {
+            let priority = [
+                Priority::Low,
+                Priority::High,
+                Priority::Normal,
+                Priority::Critical,
+            ][i % 4];
+            let id = q.enqueue_with_options(
+                "work",
+                serde_json::json!({"i":i}),
+                priority,
+                0,
+                1,
+                "default",
+            );
+            insert_expected(&mut expected, id, priority);
+            if i % 7 == 6 {
+                let job = q.dequeue(Duration::ZERO).unwrap();
+                assert_eq!(job.id, expected.remove(0).0);
+                q.complete(&job.id);
+            }
+            assert_order(&q, &expected);
+        }
+        let job = q.dequeue(Duration::ZERO).unwrap();
+        assert_eq!(job.id, expected.remove(0).0);
+        q.fail(&job.id, "retry");
+        insert_expected(&mut expected, job.id.clone(), job.priority);
+        assert_order(&q, &expected);
+        let cancelled = q.cancel_pending_local(&job.id).unwrap().unwrap();
+        expected.retain(|(id, _)| id != &job.id);
+        q.restore_cancelled(cancelled);
+        insert_expected(&mut expected, job.id, job.priority);
+        assert_order(&q, &expected);
+
+        let dead_id = q.enqueue_with_options(
+            "dead",
+            serde_json::json!({}),
+            Priority::Critical,
+            0,
+            0,
+            "default",
+        );
+        insert_expected(&mut expected, dead_id.clone(), Priority::Critical);
+        while let Some(job) = q.dequeue(Duration::ZERO) {
+            assert_eq!(job.id, expected.remove(0).0);
+            if job.id == dead_id {
+                q.fail(&job.id, "dead");
+                break;
+            }
+            q.complete(&job.id);
+        }
+        assert!(q.retry_dead(&dead_id));
+        insert_expected(&mut expected, dead_id, Priority::Critical);
+        assert_order(&q, &expected);
+
+        let store = crate::job_store::JobStore::in_memory().unwrap();
+        let mut restored = q.pending.lock().unwrap().front().unwrap().clone();
+        restored.id = "restored-priority-job".into();
+        restored.priority = Priority::Normal;
+        store.save(&restored).unwrap();
+        assert_eq!(q.restore_from(&store), 1);
+        insert_expected(&mut expected, restored.id, restored.priority);
+        assert_order(&q, &expected);
     }
 
     #[test]

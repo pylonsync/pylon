@@ -38,11 +38,10 @@ pub(crate) fn handle(
         Ok(v) => v,
         Err((status, message)) => return Some((status, message)),
     };
-    // Aggregate safety — see the module docs. Probe with `None` to
-    // detect a row-dependent read policy.
+    // Aggregate safety requires a policy with no row dependencies.
     let aggregate_safe = matches!(
         ctx.policy_engine
-            .check_entity_read(entity_name, ctx.auth_ctx, None),
+            .check_entity_read_aggregate(entity_name, ctx.auth_ctx),
         pylon_policy::PolicyResult::Allowed
     );
     if !aggregate_safe {
@@ -58,6 +57,12 @@ pub(crate) fn handle(
                 ),
             ),
         ));
+    }
+    if let Some(filter) = query_json.get("filter") {
+        if let Err(error) = crate::validate_public_filter(ctx.store.manifest(), entity_name, filter)
+        {
+            return Some(error);
+        }
     }
     Some(match ctx.store.vector_search(entity_name, &query_json) {
         Ok(mut result) => {

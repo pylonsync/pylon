@@ -47,8 +47,9 @@ pub fn ensure_sqlite(conn: &rusqlite::Connection) -> Result<(), String> {
 /// The hash stored with a keyed call's result: SHA-256 of the arguments'
 /// JSON text, hex.
 pub fn args_hash(args: &serde_json::Value) -> String {
-    let digest = Sha256::digest(args.to_string().as_bytes());
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    let mut hasher = Sha256::new();
+    serde_json::to_writer(&mut hasher, args).expect("hashing JSON arguments cannot fail");
+    format!("{:x}", hasher.finalize())
 }
 
 /// The answer to a keyed call whose key has a stored result: that result
@@ -204,6 +205,55 @@ mod tests {
 
     /// A stored call answers a call with the same arguments and refuses one
     /// with others.
+    #[test]
+    #[ignore = "release-mode performance benchmark"]
+    fn benchmark_argument_hash() {
+        use std::hint::black_box;
+        for bytes in [32, 1024 * 1024] {
+            let value = serde_json::json!({"text": "x".repeat(bytes)});
+            for streaming in [false, true] {
+                let mut samples = Vec::new();
+                for _ in 0..7 {
+                    let start = std::time::Instant::now();
+                    for _ in 0..100 {
+                        let hash: String = if streaming {
+                            args_hash(black_box(&value))
+                        } else {
+                            Sha256::digest(black_box(&value).to_string().as_bytes())
+                                .iter()
+                                .map(|b| format!("{b:02x}"))
+                                .collect()
+                        };
+                        black_box(hash);
+                    }
+                    samples.push(start.elapsed().as_secs_f64() * 1e6 / 100.0);
+                }
+                samples.sort_by(f64::total_cmp);
+                println!(
+                    "{bytes}-byte arguments, streaming={streaming}: {:.3} us/hash median",
+                    samples[3]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_argument_hash_matches_stored_hash_format() {
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!([0, -1, u64::MAX, 1.25, -0.0, 1e100]),
+            serde_json::json!({"a": "\"\\\n\t日本語", "b": [true, false, {"x": []}]}),
+            serde_json::json!({"text": "large".repeat(200_000)}),
+        ] {
+            let previous: String = Sha256::digest(value.to_string().as_bytes())
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            assert_eq!(args_hash(&value), previous);
+        }
+    }
+
     #[test]
     fn a_key_answers_only_the_same_arguments() {
         let same = args_hash(&serde_json::json!({ "a": 1 }));

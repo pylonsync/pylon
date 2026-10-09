@@ -9,6 +9,7 @@ pub mod change_log_store;
 pub mod config;
 pub mod connections;
 pub mod crdt_cache;
+mod crdt_privacy;
 pub mod cron;
 pub mod datastore;
 pub mod db_copy;
@@ -20,6 +21,7 @@ pub mod file_urls;
 pub mod fn_calls;
 pub mod frontend;
 pub mod image_optim;
+mod io_runtime;
 pub mod ip_limit;
 pub mod job_store;
 pub mod jobs;
@@ -522,16 +524,24 @@ pub(crate) fn is_secret_field(
         return true;
     }
     let user = &manifest.auth.user;
-    entity.name == user.entity && (name == "passwordHash" || user.hide.iter().any(|h| h == name))
+    entity.name == user.entity
+        && (name == "passwordHash"
+            || user.hide.iter().any(|h| h == name)
+            || (!user.expose.is_empty() && !user.expose.iter().any(|field| field == name)))
 }
 
-/// An explicit `search.text` / `search.facets` list must not name a secret
+/// Search text, facet, and sort lists must not name a secret
 /// field (see [`is_secret_field`]). Fails boot instead of indexing it.
 fn validate_search_fields(manifest: &AppManifest) -> Result<(), RuntimeError> {
     let mut problems = Vec::new();
     for ent in &manifest.entities {
         let Some(search) = &ent.search else { continue };
-        for name in search.text.iter().chain(search.facets.iter()) {
+        for name in search
+            .text
+            .iter()
+            .chain(search.facets.iter())
+            .chain(search.sortable.iter())
+        {
             if let Some(f) = ent.fields.iter().find(|f| &f.name == name) {
                 if is_secret_field(manifest, ent, f) {
                     problems.push(format!(
@@ -539,6 +549,8 @@ fn validate_search_fields(manifest: &AppManifest) -> Result<(), RuntimeError> {
                         ent.name
                     ));
                 }
+            } else if name != "id" {
+                problems.push(format!("{}.{name}: search field is not declared", ent.name));
             }
         }
     }
@@ -817,6 +829,8 @@ pub struct Runtime {
     /// `&AppManifest`.
     manifest: Arc<AppManifest>,
     entities: HashMap<String, ManifestEntity>,
+    crdt_fields: HashMap<String, Result<Vec<pylon_crdt::CrdtField>, RuntimeError>>,
+    crdt_private_entities: std::collections::HashSet<String>,
     /// True only for the SQLite in-memory variant. Postgres mode reports false.
     /// Gates the test-reset endpoint — a false positive here would let
     /// `/api/__test__/reset` truncate real tables.
@@ -910,6 +924,100 @@ fn data_err_to_runtime(e: pylon_http::DataError) -> RuntimeError {
         code: e.code,
         message: e.message,
     }
+}
+
+fn resolve_crdt_fields(ent: &ManifestEntity) -> Result<Vec<pylon_crdt::CrdtField>, RuntimeError> {
+    let mut out = Vec::with_capacity(ent.fields.len());
+    for f in &ent.fields {
+        // Skip the implicit `id` column — it's the row key, not a
+        // CRDT-managed value. SQLite's PRIMARY KEY constraint owns it.
+        if f.name == "id" {
+            continue;
+        }
+        // Skip vector fields entirely: embeddings are server-only,
+        // and the LoroDoc is a client-syncing structure — including
+        // them would ship multi-KB vectors in every binary CRDT
+        // frame AND let a peer's merge projection overwrite the
+        // packed column. The embedding lives in the SQL column
+        // only; CRDT merges never touch it.
+        if pylon_storage::vector::vector_dims(&f.field_type).is_some() {
+            continue;
+        }
+        let kind = pylon_crdt::field_kind(&f.field_type, f.crdt).map_err(|e| RuntimeError {
+            code: "INVALID_CRDT_FIELD".into(),
+            message: format!(
+                "{}.{}: {e} (declared type={}, crdt={:?})",
+                ent.name, f.name, f.field_type, f.crdt
+            ),
+        })?;
+        out.push(pylon_crdt::CrdtField {
+            name: f.name.clone(),
+            kind,
+        });
+    }
+    Ok(out)
+}
+
+// Conservative encoded-size bounds keep PostgreSQL batch buffers small.
+// Stop counting once a single event reaches the budget; that event runs alone.
+fn pg_change_batch_len(events: &[pylon_sync::ChangeEvent]) -> usize {
+    const BYTE_BUDGET: usize = 1024 * 1024;
+    fn json_bytes(value: &serde_json::Value, budget: usize) -> usize {
+        use serde_json::Value;
+        if budget == 0 {
+            return 0;
+        }
+        match value {
+            Value::Null | Value::Bool(_) => 5.min(budget),
+            Value::Number(_) => 32.min(budget),
+            Value::String(value) => value.len().saturating_mul(6).saturating_add(2).min(budget),
+            Value::Array(values) => {
+                let mut bytes = 2.min(budget);
+                for value in values {
+                    bytes = bytes.saturating_add(1).min(budget);
+                    bytes += json_bytes(value, budget - bytes);
+                    if bytes == budget {
+                        break;
+                    }
+                }
+                bytes
+            }
+            Value::Object(values) => {
+                let mut bytes = 2.min(budget);
+                for (key, value) in values {
+                    bytes = bytes
+                        .saturating_add(key.len().saturating_mul(6).saturating_add(4))
+                        .min(budget);
+                    bytes += json_bytes(value, budget - bytes);
+                    if bytes == budget {
+                        break;
+                    }
+                }
+                bytes
+            }
+        }
+    }
+    let mut bytes = 0usize;
+    let mut count = 0;
+    for event in events.iter().take(256) {
+        let mut size = 128usize
+            .saturating_add(event.entity.len())
+            .saturating_add(event.row_id.len())
+            .saturating_add(event.timestamp.len())
+            .min(BYTE_BUDGET);
+        for value in [&event.data, &event.prev_data].into_iter().flatten() {
+            size += json_bytes(value, BYTE_BUDGET - size);
+        }
+        if count > 0 && bytes.saturating_add(size) > BYTE_BUDGET {
+            break;
+        }
+        count += 1;
+        bytes += size;
+        if bytes >= BYTE_BUDGET {
+            break;
+        }
+    }
+    count
 }
 
 /// Map a `pylon_sync::ChangeKind` to the string form persisted in
@@ -1078,9 +1186,14 @@ impl Runtime {
             .iter()
             .map(|e| (e.name.clone(), e.clone()))
             .collect();
+        let crdt_fields = entities
+            .iter()
+            .map(|(name, entity)| (name.clone(), resolve_crdt_fields(entity)))
+            .collect();
         let encrypted_fields = encryption_field_map(&entities);
         let encryption_key = load_encryption_key()?;
         validate_connection_encryption_present(&manifest, &encryption_key)?;
+        let crdt_private_entities = crdt_privacy::postgres(&store, &manifest)?;
         Ok(Self {
             backend: RuntimeBackend::Postgres(PgBackend {
                 store,
@@ -1088,6 +1201,8 @@ impl Runtime {
             }),
             manifest: Arc::new(manifest),
             entities,
+            crdt_fields,
+            crdt_private_entities,
             is_in_memory: false,
             studio_config_path: RwLock::new(None),
             studio_entry_path: RwLock::new(None),
@@ -1228,7 +1343,7 @@ impl Runtime {
 
     /// Persist a batch of events to `pylon_change_log`. Postgres
     /// analog of `sqlite_change_log_persist_batch`. Uses a single
-    /// transaction + a prepared statement for batched INSERT.
+    /// transaction with bounded multi-row INSERT statements.
     pub fn pg_change_log_persist_batch(
         &self,
         events: &[pylon_sync::ChangeEvent],
@@ -1245,36 +1360,56 @@ impl Runtime {
                     code: "PG_CHANGE_LOG_TX_BEGIN_FAILED".into(),
                     message: e.to_string(),
                 })?;
-                let stmt = tx
-                    .prepare(
+                // Keep parameter count and temporary buffers bounded. Each chunk
+                // uses one INSERT instead of one database round trip per event.
+                let mut remaining = events;
+                while !remaining.is_empty() {
+                    let (chunk, rest) = remaining.split_at(pg_change_batch_len(remaining));
+                    remaining = rest;
+                    let mut sql = String::from(
                         "INSERT INTO pylon_change_log \
-                         (seq, entity, row_id, kind, data, prev_data, ts) \
-                         VALUES ($1, $2, $3, $4, $5, $6, $7) \
-                         ON CONFLICT (seq) DO NOTHING",
-                    )
-                    .map_err(|e| pylon_http::DataError {
-                        code: "PG_CHANGE_LOG_PREPARE_FAILED".into(),
-                        message: e.to_string(),
-                    })?;
-                for event in events {
-                    let data = event.data.clone();
-                    let prev_data = event.prev_data.clone();
-                    tx.execute(
-                        &stmt,
-                        &[
-                            &(event.seq as i64),
+                         (seq, entity, row_id, kind, data, prev_data, ts) VALUES ",
+                    );
+                    for index in 0..chunk.len() {
+                        if index > 0 {
+                            sql.push(',');
+                        }
+                        let base = index * 7;
+                        sql.push_str(&format!(
+                            "(${},${},${},${},${},${},${})",
+                            base + 1,
+                            base + 2,
+                            base + 3,
+                            base + 4,
+                            base + 5,
+                            base + 6,
+                            base + 7,
+                        ));
+                    }
+                    sql.push_str(" ON CONFLICT (seq) DO NOTHING");
+                    let seqs: Vec<i64> = chunk.iter().map(|event| event.seq as i64).collect();
+                    let kinds: Vec<&str> = chunk
+                        .iter()
+                        .map(|event| change_kind_to_str(event.kind.clone()))
+                        .collect();
+                    let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> =
+                        Vec::with_capacity(chunk.len() * 7);
+                    for (index, event) in chunk.iter().enumerate() {
+                        params.extend_from_slice(&[
+                            &seqs[index],
                             &event.entity,
                             &event.row_id,
-                            &change_kind_to_str(event.kind.clone()),
-                            &data,
-                            &prev_data,
+                            &kinds[index],
+                            &event.data,
+                            &event.prev_data,
                             &event.timestamp,
-                        ],
-                    )
-                    .map_err(|e| pylon_http::DataError {
-                        code: "PG_CHANGE_LOG_INSERT_FAILED".into(),
-                        message: format!("INSERT seq={}: {e}", event.seq),
-                    })?;
+                        ]);
+                    }
+                    tx.execute(sql.as_str(), &params)
+                        .map_err(|e| pylon_http::DataError {
+                            code: "PG_CHANGE_LOG_INSERT_FAILED".into(),
+                            message: format!("INSERT batch starting seq={}: {e}", chunk[0].seq),
+                        })?;
                 }
                 tx.commit().map_err(|e| pylon_http::DataError {
                     code: "PG_CHANGE_LOG_COMMIT_FAILED".into(),
@@ -1615,11 +1750,7 @@ impl Runtime {
     /// never got Insert events into the log. Per-entity gating closes
     /// that gap.
     pub fn sqlite_change_log_has_entity(&self, entity: &str) -> bool {
-        let sb = match self.sqlite_backend() {
-            Ok(s) => s,
-            Err(_) => return false,
-        };
-        let conn = match sb.write_conn.lock() {
+        let conn = match self.lock_read_conn() {
             Ok(c) => c,
             Err(_) => return false,
         };
@@ -1635,11 +1766,7 @@ impl Runtime {
     /// oldest-first. Used at boot to hydrate the in-memory ring
     /// buffer.
     pub fn sqlite_change_log_load_recent(&self, limit: usize) -> Vec<pylon_sync::ChangeEvent> {
-        let sb = match self.sqlite_backend() {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        let conn = match sb.write_conn.lock() {
+        let conn = match self.lock_read_conn() {
             Ok(c) => c,
             Err(_) => return Vec::new(),
         };
@@ -1673,8 +1800,7 @@ impl Runtime {
         since: u64,
         limit: usize,
     ) -> Option<Vec<pylon_sync::ChangeEvent>> {
-        let sb = self.sqlite_backend().ok()?;
-        let conn = sb.write_conn.lock().ok()?;
+        let conn = self.lock_read_conn().ok()?;
         let mut stmt = conn
             .prepare(
                 "SELECT seq, entity, row_id, kind, data, prev_data, timestamp \
@@ -2082,8 +2208,13 @@ impl Runtime {
             message: format!("create _pylon_fn_calls: {e}"),
         })?;
 
+        let crdt_fields = entities
+            .iter()
+            .map(|(name, entity)| (name.clone(), resolve_crdt_fields(entity)))
+            .collect();
         let encrypted_fields = encryption_field_map(&entities);
         let encryption_key = encryption_key_early;
+        let crdt_private_entities = crdt_privacy::sqlite(&conn, &manifest)?;
         let rt = Self {
             backend: RuntimeBackend::Sqlite(SqliteBackend {
                 write_conn: Mutex::new(conn),
@@ -2093,6 +2224,8 @@ impl Runtime {
             }),
             manifest: Arc::new(manifest),
             entities,
+            crdt_fields,
+            crdt_private_entities,
             is_in_memory,
             studio_config_path: RwLock::new(None),
             studio_entry_path: RwLock::new(None),
@@ -3279,43 +3412,21 @@ impl Runtime {
     // CRDT helpers
     // -----------------------------------------------------------------------
 
-    /// Map an entity's manifest fields → the [`pylon_crdt::CrdtField`] vec
-    /// the LoroStore needs. Resolves each field's CRDT shape from the
-    /// (type, annotation) pair via `pylon_crdt::field_kind`. Caches
-    /// nothing yet — called per write, fine at our entity counts.
+    /// Borrow the resolved mapping for this runtime's immutable entity schema.
+    /// Invalid annotations keep their original error until a caller uses them.
     pub(crate) fn crdt_fields_for(
         &self,
         ent: &ManifestEntity,
-    ) -> Result<Vec<pylon_crdt::CrdtField>, RuntimeError> {
-        let mut out = Vec::with_capacity(ent.fields.len());
-        for f in &ent.fields {
-            // Skip the implicit `id` column — it's the row key, not a
-            // CRDT-managed value. SQLite's PRIMARY KEY constraint owns it.
-            if f.name == "id" {
-                continue;
-            }
-            // Skip vector fields entirely: embeddings are server-only,
-            // and the LoroDoc is a client-syncing structure — including
-            // them would ship multi-KB vectors in every binary CRDT
-            // frame AND let a peer's merge projection overwrite the
-            // packed column. The embedding lives in the SQL column
-            // only; CRDT merges never touch it.
-            if pylon_storage::vector::vector_dims(&f.field_type).is_some() {
-                continue;
-            }
-            let kind = pylon_crdt::field_kind(&f.field_type, f.crdt).map_err(|e| RuntimeError {
-                code: "INVALID_CRDT_FIELD".into(),
-                message: format!(
-                    "{}.{}: {e} (declared type={}, crdt={:?})",
-                    ent.name, f.name, f.field_type, f.crdt
-                ),
-            })?;
-            out.push(pylon_crdt::CrdtField {
-                name: f.name.clone(),
-                kind,
-            });
-        }
-        Ok(out)
+    ) -> Result<&[pylon_crdt::CrdtField], RuntimeError> {
+        self.crdt_fields
+            .get(&ent.name)
+            .ok_or_else(|| RuntimeError {
+                code: "ENTITY_NOT_FOUND".into(),
+                message: format!("Entity '{}' not found", ent.name),
+            })?
+            .as_ref()
+            .map(Vec::as_slice)
+            .map_err(Clone::clone)
     }
 
     /// Roll back the write transaction on the SQLite write connection
@@ -3581,15 +3692,83 @@ impl Runtime {
             message: format!("Failed to prepare query: {e}"),
         })?;
 
-        let fields = ent.fields.clone();
+        let fields = ent.fields.as_slice();
 
         let mut result = stmt
-            .query_row(rusqlite::params![id], |row| Ok(row_to_json(row, &fields)))
+            .query_row(rusqlite::params![id], |row| Ok(row_to_json(row, fields)))
             .ok();
         if let Some(r) = result.as_mut() {
             self.normalize_row_on_read(entity, r);
         }
         Ok(result)
+    }
+
+    /// Read vector result documents without loading embeddings.
+    fn vector_documents(
+        &self,
+        entity: &str,
+        ids: &[String],
+    ) -> Result<Vec<serde_json::Value>, RuntimeError> {
+        let ent = self.require_entity(entity)?;
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some(pg) = self.pg_backend() {
+            let mut rows = pg
+                .store
+                .vector_documents(ent, ids)
+                .map_err(data_err_to_runtime)?;
+            for row in &mut rows {
+                self.normalize_row_on_read(entity, row);
+            }
+            return Ok(rows);
+        }
+        let conn = self.lock_read_conn()?;
+        self.vector_documents_with_conn(&conn, entity, ids)
+    }
+
+    fn vector_documents_with_conn(
+        &self,
+        conn: &Connection,
+        entity: &str,
+        ids: &[String],
+    ) -> Result<Vec<serde_json::Value>, RuntimeError> {
+        let ent = self.require_entity(entity)?;
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let columns = pylon_storage::vector::document_columns(ent)
+            .into_iter()
+            .map(quote_ident)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let marks = vec!["?"; ids.len()].join(", ");
+        let sql = format!(
+            "SELECT {columns} FROM {} WHERE \"id\" IN ({marks})",
+            quote_ident(entity)
+        );
+        let mut stmt = conn.prepare_cached(&sql).map_err(|e| RuntimeError {
+            code: "QUERY_FAILED".into(),
+            message: e.to_string(),
+        })?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(ids), |row| {
+                Ok(row_to_json(row, &ent.fields))
+            })
+            .map_err(|e| RuntimeError {
+                code: "QUERY_FAILED".into(),
+                message: e.to_string(),
+            })?;
+        let mut documents = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| RuntimeError {
+                code: "QUERY_FAILED".into(),
+                message: e.to_string(),
+            })?;
+        for row in &mut documents {
+            self.normalize_row_on_read(entity, row);
+        }
+        Ok(documents)
     }
 
     /// List all rows for an entity.
@@ -3611,10 +3790,10 @@ impl Runtime {
             message: format!("Failed to prepare query: {e}"),
         })?;
 
-        let fields = ent.fields.clone();
+        let fields = ent.fields.as_slice();
 
         let rows = stmt
-            .query_map([], |row| Ok(row_to_json(row, &fields)))
+            .query_map([], |row| Ok(row_to_json(row, fields)))
             .map_err(|e| RuntimeError {
                 code: "QUERY_FAILED".into(),
                 message: format!("Query failed: {e}"),
@@ -3648,7 +3827,7 @@ impl Runtime {
         let ent = self.require_entity(entity)?;
         let conn = self.lock_read_conn()?;
 
-        let fields = ent.fields.clone();
+        let fields = ent.fields.as_slice();
         let table = quote_ident(entity);
 
         let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match after {
@@ -3674,7 +3853,7 @@ impl Runtime {
         })?;
 
         let rows = stmt
-            .query_map(param_refs.as_slice(), |row| Ok(row_to_json(row, &fields)))
+            .query_map(param_refs.as_slice(), |row| Ok(row_to_json(row, fields)))
             .map_err(|e| RuntimeError {
                 code: "QUERY_FAILED".into(),
                 message: format!("Query failed: {e}"),
@@ -3715,7 +3894,7 @@ impl Runtime {
         }
         let ent = self.require_entity(entity)?;
         let conn = self.lock_read_conn()?;
-        let fields = ent.fields.clone();
+        let fields = ent.fields.as_slice();
         let table = quote_ident(entity);
 
         let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match before {
@@ -3739,7 +3918,7 @@ impl Runtime {
             message: format!("Failed to prepare query: {e}"),
         })?;
         let rows = stmt
-            .query_map(param_refs.as_slice(), |row| Ok(row_to_json(row, &fields)))
+            .query_map(param_refs.as_slice(), |row| Ok(row_to_json(row, fields)))
             .map_err(|e| RuntimeError {
                 code: "QUERY_FAILED".into(),
                 message: format!("Query failed: {e}"),
@@ -4174,13 +4353,11 @@ impl Runtime {
             quote_ident(entity),
             quote_ident(field)
         );
-        let fields = ent.fields.clone();
+        let fields = ent.fields.as_slice();
 
         let mut result = conn.prepare_cached(&sql).ok().and_then(|mut stmt| {
-            stmt.query_row(rusqlite::params![value], |row| {
-                Ok(row_to_json(row, &fields))
-            })
-            .ok()
+            stmt.query_row(rusqlite::params![value], |row| Ok(row_to_json(row, fields)))
+                .ok()
         });
         if let Some(r) = result.as_mut() {
             self.normalize_row_on_read(entity, r);
@@ -4248,193 +4425,8 @@ impl Runtime {
         let ent = self.require_entity(entity)?;
         let conn = self.lock_read_conn()?;
 
-        let fields = ent.fields.clone();
-        let obj = filter
-            .as_object()
-            .unwrap_or(&serde_json::Map::new())
-            .clone();
-
-        let mut where_clauses = Vec::new();
-        let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-        let mut order_clause = String::new();
-        let mut limit_clause = String::new();
-        // Captured raw, then bounded after the loop (see query_max_limit):
-        // a client $limit is clamped to the cap and a missing one defaults
-        // to it, so an uncapped SELECT can't materialize a whole table.
-        let mut client_limit: Option<u64> = None;
-        let mut client_offset: Option<u64> = None;
-        let mut join_clause = String::new();
-        let mut fts_order = false;
-        let mut idx = 1;
-
-        for (key, val) in &obj {
-            match key.as_str() {
-                "$order" => {
-                    if let Some(order_obj) = val.as_object() {
-                        let mut parts: Vec<String> = Vec::new();
-                        for (col, dir) in order_obj {
-                            validate_column_name(col, ent)?;
-                            let d = match dir.as_str().unwrap_or("asc") {
-                                "desc" | "DESC" => "DESC",
-                                _ => "ASC",
-                            };
-                            parts.push(format!("{} {d}", quote_ident(col)));
-                        }
-                        if !parts.is_empty() {
-                            order_clause = format!(" ORDER BY {}", parts.join(", "));
-                        }
-                    }
-                }
-                "$limit" => {
-                    if let Some(n) = val.as_u64() {
-                        client_limit = Some(n);
-                    }
-                }
-                "$offset" => {
-                    if let Some(n) = val.as_u64() {
-                        client_offset = Some(n);
-                    }
-                }
-                "$search" => {
-                    if let Some(q) = val.as_str() {
-                        // Join against the entity's FTS5 virtual table.
-                        let fts = format!("{}_fts", entity);
-                        join_clause = format!(
-                            " JOIN {fts} ON {ent}.rowid = {fts}.rowid",
-                            fts = quote_ident(&fts),
-                            ent = quote_ident(entity),
-                        );
-                        where_clauses.push(format!("{} MATCH ?{idx}", quote_ident(&fts)));
-                        values.push(Box::new(q.to_string()));
-                        fts_order = true;
-                        idx += 1;
-                    }
-                }
-                _ => {
-                    validate_column_name(key, ent)?;
-                    let quoted_key = quote_ident(key);
-
-                    // A json-typed column filtered with a plain object
-                    // (no $-operators) is a WHOLE-VALUE equality match
-                    // on the serialized form — otherwise the object
-                    // would be misread as an operator map and silently
-                    // match everything.
-                    if entity_field_is_json(ent, key)
-                        && val
-                            .as_object()
-                            .is_some_and(|o| !o.keys().any(|k| k.starts_with('$')))
-                    {
-                        where_clauses.push(format!("{quoted_key} = ?{idx}"));
-                        values.push(json_to_sql_typed(ent, key, val));
-                        idx += 1;
-                    } else if let Some(op_obj) = val.as_object() {
-                        for (op, op_val) in op_obj {
-                            match op.as_str() {
-                                "$not" => {
-                                    where_clauses.push(format!("{quoted_key} != ?{idx}"));
-                                    values.push(json_to_sql_typed(ent, key, op_val));
-                                    idx += 1;
-                                }
-                                "$gt" => {
-                                    where_clauses.push(format!("{quoted_key} > ?{idx}"));
-                                    values.push(json_to_sql_typed(ent, key, op_val));
-                                    idx += 1;
-                                }
-                                "$gte" => {
-                                    where_clauses.push(format!("{quoted_key} >= ?{idx}"));
-                                    values.push(json_to_sql_typed(ent, key, op_val));
-                                    idx += 1;
-                                }
-                                "$lt" => {
-                                    where_clauses.push(format!("{quoted_key} < ?{idx}"));
-                                    values.push(json_to_sql_typed(ent, key, op_val));
-                                    idx += 1;
-                                }
-                                "$lte" => {
-                                    where_clauses.push(format!("{quoted_key} <= ?{idx}"));
-                                    values.push(json_to_sql_typed(ent, key, op_val));
-                                    idx += 1;
-                                }
-                                "$like" => {
-                                    where_clauses.push(format!("{quoted_key} LIKE ?{idx}"));
-                                    let pattern = format!("%{}%", op_val.as_str().unwrap_or(""));
-                                    values.push(Box::new(pattern));
-                                    idx += 1;
-                                }
-                                "$in" => {
-                                    if let Some(arr) = op_val.as_array() {
-                                        if arr.is_empty() {
-                                            // Empty $in matches nothing.
-                                            // Previously SQLite SKIPPED the
-                                            // predicate (returning ALL rows)
-                                            // while PG short-circuited to
-                                            // FALSE — a real cross-backend
-                                            // drift bug codex caught. Both
-                                            // now emit `0` (false) so empty
-                                            // $in returns an empty set.
-                                            where_clauses.push("0".into());
-                                        } else {
-                                            let placeholders: Vec<String> = arr
-                                                .iter()
-                                                .map(|v| {
-                                                    let p = format!("?{idx}");
-                                                    values.push(json_to_sql_typed(ent, key, v));
-                                                    idx += 1;
-                                                    p
-                                                })
-                                                .collect();
-                                            where_clauses.push(format!(
-                                                "{quoted_key} IN ({})",
-                                                placeholders.join(", ")
-                                            ));
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    } else {
-                        // Simple equality.
-                        where_clauses.push(format!("{quoted_key} = ?{idx}"));
-                        values.push(json_to_sql_typed(ent, key, val));
-                        idx += 1;
-                    }
-                }
-            }
-        }
-
-        let where_sql = if where_clauses.is_empty() {
-            String::new()
-        } else {
-            format!(" WHERE {}", where_clauses.join(" AND "))
-        };
-
-        if order_clause.is_empty() {
-            order_clause = if fts_order {
-                // FTS joins default-order by bm25 relevance.
-                " ORDER BY bm25(".to_string() + &quote_ident(&format!("{}_fts", entity)) + ")"
-            } else {
-                format!(" ORDER BY {}.\"id\"", quote_ident(entity))
-            };
-        }
-
-        // Bound the result set: clamp a client $limit and default a missing
-        // one to the cap, so `{}` can't stream the whole table into memory.
-        let effective_limit = pylon_kernel::util::effective_query_limit(client_limit);
-        limit_clause = match client_offset {
-            Some(off) => format!(" LIMIT {effective_limit} OFFSET {off}"),
-            None => format!(" LIMIT {effective_limit}"),
-        };
-        let select_prefix = format!("{}.*", quote_ident(entity));
-        let sql = format!(
-            "SELECT {} FROM {}{}{}{}{}",
-            select_prefix,
-            quote_ident(entity),
-            join_clause,
-            where_sql,
-            order_clause,
-            limit_clause
-        );
+        let fields = ent.fields.as_slice();
+        let (sql, values) = build_filtered_query_sql(entity, ent, filter)?;
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             values.iter().map(|v| v.as_ref()).collect();
 
@@ -4444,7 +4436,7 @@ impl Runtime {
         })?;
 
         let rows = stmt
-            .query_map(param_refs.as_slice(), |row| Ok(row_to_json(row, &fields)))
+            .query_map(param_refs.as_slice(), |row| Ok(row_to_json(row, fields)))
             .map_err(|e| RuntimeError {
                 code: "QUERY_FAILED".into(),
                 message: format!("Filtered query failed: {e}"),
@@ -4461,6 +4453,30 @@ impl Runtime {
             }
         }
         Ok(result)
+    }
+
+    /// Count the same bounded result set as query_filtered without decoding rows.
+    pub fn count_filtered(
+        &self,
+        entity: &str,
+        filter: &serde_json::Value,
+    ) -> Result<usize, RuntimeError> {
+        if let Some(pg) = self.pg_backend() {
+            return pylon_http::DataStore::count_filtered(&pg.store, entity, filter)
+                .map_err(data_err_to_runtime);
+        }
+        let definition = self.require_entity(entity)?;
+        let (sql, values) = build_filtered_query_sql(entity, definition, filter)?;
+        let params: Vec<&dyn rusqlite::types::ToSql> =
+            values.iter().map(|value| value.as_ref()).collect();
+        let conn = self.lock_read_conn()?;
+        let result = conn
+            .prepare_cached(&format!("SELECT COUNT(*) FROM ({sql}) AS pylon_count"))
+            .and_then(|mut statement| statement.query_row(params.as_slice(), |row| row.get(0)));
+        result.map_err(|error| RuntimeError {
+            code: "QUERY_FAILED".into(),
+            message: format!("Filtered count failed: {error}"),
+        })
     }
 
     /// Execute a graph-style query.
@@ -4482,10 +4498,7 @@ impl Runtime {
             let _ent = self.require_entity(entity_name)?;
 
             // Apply where clause if present.
-            let filter = query_opts
-                .get("where")
-                .cloned()
-                .unwrap_or(serde_json::json!({}));
+            let filter = pylon_storage::graph::parent_filter(query_opts);
             let rows = self.query_filtered(entity_name, &filter)?;
 
             // Apply includes (relations) if present.
@@ -4512,8 +4525,9 @@ impl Runtime {
                 // query LIMIT across ALL parents (vs. a per-parent limit
                 // before), so an include that fans out to more than
                 // `query_max_limit` total children is now capped in aggregate.
-                // That bounds a graph query's response rather than letting it
-                // balloon, and only affects pathological fan-outs.
+                // Only selected parents consume this cap. Parent limits apply
+                // before expansion, so discarded parents cannot consume child
+                // capacity. Child ordering remains the query's default order.
                 let mut rows = rows;
                 for (rel_name, _sub_query) in include {
                     let Some(rel) = ent.relations.iter().find(|r| r.name == *rel_name) else {
@@ -4524,13 +4538,25 @@ impl Runtime {
                     let mut fks: Vec<String> = Vec::new();
                     let mut seen: std::collections::HashSet<String> =
                         std::collections::HashSet::new();
-                    for row in rows.iter() {
-                        if let Some(fk) = row.get(&rel.field).and_then(|v| v.as_str()) {
-                            if seen.insert(fk.to_string()) {
-                                fks.push(fk.to_string());
+                    let parent_keys: Vec<Option<String>> = rows
+                        .iter_mut()
+                        .map(|row| {
+                            let key = row
+                                .get(&rel.field)
+                                .and_then(|value| value.as_str())
+                                .map(str::to_owned);
+                            // A retained SQL column must never impersonate a relation.
+                            if let Some(object) = row.as_object_mut() {
+                                object.remove(rel_name);
                             }
-                        }
-                    }
+                            if let Some(key) = &key {
+                                if seen.insert(key.clone()) {
+                                    fks.push(key.clone());
+                                }
+                            }
+                            key
+                        })
+                        .collect();
                     if fks.is_empty() {
                         continue;
                     }
@@ -4553,14 +4579,10 @@ impl Runtime {
                                 buckets.entry(k).or_default().push(child);
                             }
                         }
-                        for row in rows.iter_mut() {
-                            if let Some(fk) = row
-                                .get(&rel.field)
-                                .and_then(|v| v.as_str())
-                                .map(String::from)
-                            {
-                                let mine = buckets.get(&fk).cloned().unwrap_or_default();
-                                row[rel_name.as_str()] = serde_json::json!(mine);
+                        for (row, fk) in rows.iter_mut().zip(&parent_keys) {
+                            if let Some(fk) = fk {
+                                let mine = buckets.get(fk).cloned().unwrap_or_default();
+                                row[rel_name.as_str()] = serde_json::Value::Array(mine);
                             }
                         }
                     } else {
@@ -4578,8 +4600,8 @@ impl Runtime {
                                 by_id.insert(id, child);
                             }
                         }
-                        for row in rows.iter_mut() {
-                            if let Some(fk) = row.get(&rel.field).and_then(|v| v.as_str()) {
+                        for (row, fk) in rows.iter_mut().zip(&parent_keys) {
+                            if let Some(fk) = fk {
                                 if let Some(child) = by_id.get(fk) {
                                     // Only assign on a match — same as the old
                                     // get_by_id, which left the field unset on None.
@@ -4594,14 +4616,7 @@ impl Runtime {
                 rows
             };
 
-            // Apply limit if present.
-            let rows = if let Some(limit) = query_opts.get("limit").and_then(|v| v.as_u64()) {
-                rows.into_iter().take(limit as usize).collect()
-            } else {
-                rows
-            };
-
-            results.insert(entity_name.clone(), serde_json::json!(rows));
+            results.insert(entity_name.clone(), serde_json::Value::Array(rows));
         }
 
         Ok(serde_json::Value::Object(results))
@@ -4882,9 +4897,9 @@ impl Runtime {
             code: "QUERY_FAILED".into(),
             message: format!("Failed to prepare query: {e}"),
         })?;
-        let fields = ent.fields.clone();
+        let fields = ent.fields.as_slice();
         let mut row = stmt
-            .query_row(rusqlite::params![id], |row| Ok(row_to_json(row, &fields)))
+            .query_row(rusqlite::params![id], |row| Ok(row_to_json(row, fields)))
             .ok();
         if let Some(r) = row.as_mut() {
             self.normalize_row_on_read(entity, r);
@@ -4904,9 +4919,9 @@ impl Runtime {
             code: "QUERY_FAILED".into(),
             message: format!("Failed to prepare query: {e}"),
         })?;
-        let fields = ent.fields.clone();
+        let fields = ent.fields.as_slice();
         let rows = stmt
-            .query_map([], |row| Ok(row_to_json(row, &fields)))
+            .query_map([], |row| Ok(row_to_json(row, fields)))
             .map_err(|e| RuntimeError {
                 code: "QUERY_FAILED".into(),
                 message: format!("Query failed: {e}"),
@@ -4927,7 +4942,7 @@ impl Runtime {
         limit: usize,
     ) -> Result<Vec<serde_json::Value>, RuntimeError> {
         let ent = self.require_entity(entity)?;
-        let fields = ent.fields.clone();
+        let fields = ent.fields.as_slice();
         let table = quote_ident(entity);
         let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match after {
             Some(cursor) => (
@@ -4946,7 +4961,7 @@ impl Runtime {
             message: format!("Failed to prepare: {e}"),
         })?;
         let rows = stmt
-            .query_map(param_refs.as_slice(), |row| Ok(row_to_json(row, &fields)))
+            .query_map(param_refs.as_slice(), |row| Ok(row_to_json(row, fields)))
             .map_err(|e| RuntimeError {
                 code: "QUERY_FAILED".into(),
                 message: format!("Query failed: {e}"),
@@ -4973,12 +4988,10 @@ impl Runtime {
             quote_ident(entity),
             quote_ident(field)
         );
-        let fields = ent.fields.clone();
+        let fields = ent.fields.as_slice();
         let mut row = conn.prepare_cached(&sql).ok().and_then(|mut stmt| {
-            stmt.query_row(rusqlite::params![value], |row| {
-                Ok(row_to_json(row, &fields))
-            })
-            .ok()
+            stmt.query_row(rusqlite::params![value], |row| Ok(row_to_json(row, fields)))
+                .ok()
         });
         if let Some(r) = row.as_mut() {
             self.normalize_row_on_read(entity, r);
@@ -5040,14 +5053,13 @@ impl Runtime {
         filter: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, RuntimeError> {
         let ent = self.require_entity(entity)?;
-        let fields = ent.fields.clone();
+        let fields = ent.fields.as_slice();
         let empty = serde_json::Map::new();
         let obj = filter.as_object().unwrap_or(&empty);
 
         let mut where_clauses = Vec::new();
         let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         let mut order_clause = String::new();
-        let mut limit_clause = String::new();
         // Captured raw, then bounded after the loop (see query_max_limit):
         // a client $limit is clamped to the cap and a missing one defaults
         // to it, so an uncapped SELECT can't materialize a whole table.
@@ -5171,7 +5183,7 @@ impl Runtime {
         // Bound the result set: clamp a client $limit and default a missing
         // one to the cap, so `{}` can't stream the whole table into memory.
         let effective_limit = pylon_kernel::util::effective_query_limit(client_limit);
-        limit_clause = match client_offset {
+        let limit_clause = match client_offset {
             Some(off) => format!(" LIMIT {effective_limit} OFFSET {off}"),
             None => format!(" LIMIT {effective_limit}"),
         };
@@ -5189,7 +5201,7 @@ impl Runtime {
             message: format!("Failed to prepare: {e}"),
         })?;
         let rows = stmt
-            .query_map(param_refs.as_slice(), |row| Ok(row_to_json(row, &fields)))
+            .query_map(param_refs.as_slice(), |row| Ok(row_to_json(row, fields)))
             .map_err(|e| RuntimeError {
                 code: "QUERY_FAILED".into(),
                 message: format!("Query failed: {e}"),
@@ -5215,13 +5227,28 @@ impl Runtime {
         })?;
         let mut results = serde_json::Map::new();
         for (entity_name, query_opts) in obj {
-            let _ent = self.require_entity(entity_name)?;
-            let filter = query_opts
-                .get("where")
-                .cloned()
-                .unwrap_or(serde_json::json!({}));
-            let rows = self.query_filtered_with_conn(conn, entity_name, &filter)?;
-            results.insert(entity_name.clone(), serde_json::json!(rows));
+            let entity = self.require_entity(entity_name)?;
+            let filter = pylon_storage::graph::parent_filter(query_opts);
+            let mut rows = self.query_filtered_with_conn(conn, entity_name, &filter)?;
+            // This adapter does not expand includes. Do not return retained
+            // SQL columns as if they were relation results.
+            if let Some(includes) = query_opts
+                .get("include")
+                .and_then(|value| value.as_object())
+            {
+                for relation in entity
+                    .relations
+                    .iter()
+                    .filter(|relation| includes.contains_key(&relation.name))
+                {
+                    for row in &mut rows {
+                        if let Some(object) = row.as_object_mut() {
+                            object.remove(&relation.name);
+                        }
+                    }
+                }
+            }
+            results.insert(entity_name.clone(), serde_json::Value::Array(rows));
         }
         Ok(serde_json::Value::Object(results))
     }
@@ -6305,6 +6332,197 @@ fn no_rows_after(last_id: &str, conn: &Connection, page: &str) -> Result<bool, R
     Ok(!more)
 }
 
+fn build_filtered_query_sql(
+    entity: &str,
+    ent: &ManifestEntity,
+    filter: &serde_json::Value,
+) -> Result<(String, Vec<Box<dyn rusqlite::types::ToSql>>), RuntimeError> {
+    let empty = serde_json::Map::new();
+    let obj = filter.as_object().unwrap_or(&empty);
+
+    let mut where_clauses = Vec::new();
+    let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut order_clause = String::new();
+    // Captured raw, then bounded after the loop (see query_max_limit):
+    // a client $limit is clamped to the cap and a missing one defaults
+    // to it, so an uncapped SELECT can't materialize a whole table.
+    let mut client_limit: Option<u64> = None;
+    let mut client_offset: Option<u64> = None;
+    let mut join_clause = String::new();
+    let mut fts_order = false;
+    let mut idx = 1;
+
+    for (key, val) in obj {
+        match key.as_str() {
+            "$order" => {
+                if let Some(order_obj) = val.as_object() {
+                    let mut parts: Vec<String> = Vec::new();
+                    for (col, dir) in order_obj {
+                        validate_column_name(col, ent)?;
+                        let d = match dir.as_str().unwrap_or("asc") {
+                            "desc" | "DESC" => "DESC",
+                            _ => "ASC",
+                        };
+                        parts.push(format!("{} {d}", quote_ident(col)));
+                    }
+                    if !parts.is_empty() {
+                        order_clause = format!(" ORDER BY {}", parts.join(", "));
+                    }
+                }
+            }
+            "$limit" => {
+                if let Some(n) = val.as_u64() {
+                    client_limit = Some(n);
+                }
+            }
+            "$offset" => {
+                if let Some(n) = val.as_u64() {
+                    client_offset = Some(n);
+                }
+            }
+            "$search" => {
+                if let Some(q) = val.as_str() {
+                    // Join against the entity's FTS5 virtual table.
+                    let fts = format!("{}_fts", entity);
+                    join_clause = format!(
+                        " JOIN {fts} ON {ent}.rowid = {fts}.rowid",
+                        fts = quote_ident(&fts),
+                        ent = quote_ident(entity),
+                    );
+                    where_clauses.push(format!("{} MATCH ?{idx}", quote_ident(&fts)));
+                    values.push(Box::new(q.to_string()));
+                    fts_order = true;
+                    idx += 1;
+                }
+            }
+            _ => {
+                validate_column_name(key, ent)?;
+                let quoted_key = quote_ident(key);
+
+                // A json-typed column filtered with a plain object
+                // (no $-operators) is a WHOLE-VALUE equality match
+                // on the serialized form — otherwise the object
+                // would be misread as an operator map and silently
+                // match everything.
+                if entity_field_is_json(ent, key)
+                    && val
+                        .as_object()
+                        .is_some_and(|o| !o.keys().any(|k| k.starts_with('$')))
+                {
+                    where_clauses.push(format!("{quoted_key} = ?{idx}"));
+                    values.push(json_to_sql_typed(ent, key, val));
+                    idx += 1;
+                } else if let Some(op_obj) = val.as_object() {
+                    for (op, op_val) in op_obj {
+                        match op.as_str() {
+                            "$not" => {
+                                where_clauses.push(format!("{quoted_key} != ?{idx}"));
+                                values.push(json_to_sql_typed(ent, key, op_val));
+                                idx += 1;
+                            }
+                            "$gt" => {
+                                where_clauses.push(format!("{quoted_key} > ?{idx}"));
+                                values.push(json_to_sql_typed(ent, key, op_val));
+                                idx += 1;
+                            }
+                            "$gte" => {
+                                where_clauses.push(format!("{quoted_key} >= ?{idx}"));
+                                values.push(json_to_sql_typed(ent, key, op_val));
+                                idx += 1;
+                            }
+                            "$lt" => {
+                                where_clauses.push(format!("{quoted_key} < ?{idx}"));
+                                values.push(json_to_sql_typed(ent, key, op_val));
+                                idx += 1;
+                            }
+                            "$lte" => {
+                                where_clauses.push(format!("{quoted_key} <= ?{idx}"));
+                                values.push(json_to_sql_typed(ent, key, op_val));
+                                idx += 1;
+                            }
+                            "$like" => {
+                                where_clauses.push(format!("{quoted_key} LIKE ?{idx}"));
+                                let pattern = format!("%{}%", op_val.as_str().unwrap_or(""));
+                                values.push(Box::new(pattern));
+                                idx += 1;
+                            }
+                            "$in" => {
+                                if let Some(arr) = op_val.as_array() {
+                                    if arr.is_empty() {
+                                        // Empty $in matches nothing.
+                                        // Previously SQLite SKIPPED the
+                                        // predicate (returning ALL rows)
+                                        // while PG short-circuited to
+                                        // FALSE — a real cross-backend
+                                        // drift bug codex caught. Both
+                                        // now emit `0` (false) so empty
+                                        // $in returns an empty set.
+                                        where_clauses.push("0".into());
+                                    } else {
+                                        let placeholders: Vec<String> = arr
+                                            .iter()
+                                            .map(|v| {
+                                                let p = format!("?{idx}");
+                                                values.push(json_to_sql_typed(ent, key, v));
+                                                idx += 1;
+                                                p
+                                            })
+                                            .collect();
+                                        where_clauses.push(format!(
+                                            "{quoted_key} IN ({})",
+                                            placeholders.join(", ")
+                                        ));
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                } else {
+                    // Simple equality.
+                    where_clauses.push(format!("{quoted_key} = ?{idx}"));
+                    values.push(json_to_sql_typed(ent, key, val));
+                    idx += 1;
+                }
+            }
+        }
+    }
+
+    let where_sql = if where_clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", where_clauses.join(" AND "))
+    };
+
+    if order_clause.is_empty() {
+        order_clause = if fts_order {
+            // FTS joins default-order by bm25 relevance.
+            " ORDER BY bm25(".to_string() + &quote_ident(&format!("{}_fts", entity)) + ")"
+        } else {
+            format!(" ORDER BY {}.\"id\"", quote_ident(entity))
+        };
+    }
+
+    // Bound the result set: clamp a client $limit and default a missing
+    // one to the cap, so `{}` can't stream the whole table into memory.
+    let effective_limit = pylon_kernel::util::effective_query_limit(client_limit);
+    let limit_clause = match client_offset {
+        Some(off) => format!(" LIMIT {effective_limit} OFFSET {off}"),
+        None => format!(" LIMIT {effective_limit}"),
+    };
+    let select_prefix = format!("{}.*", quote_ident(entity));
+    let sql = format!(
+        "SELECT {} FROM {}{}{}{}{}",
+        select_prefix,
+        quote_ident(entity),
+        join_clause,
+        where_sql,
+        order_clause,
+        limit_clause
+    );
+    Ok((sql, values))
+}
+
 fn row_to_json(row: &rusqlite::Row<'_>, fields: &[ManifestField]) -> serde_json::Value {
     let mut obj = serde_json::Map::new();
 
@@ -6318,43 +6536,37 @@ fn row_to_json(row: &rusqlite::Row<'_>, fields: &[ManifestField]) -> serde_json:
             Ok(n) => n.to_string(),
             Err(_) => continue,
         };
-        let is_bool = fields
-            .iter()
-            .any(|f| f.name == name && f.field_type == "bool");
-        let value = if let Ok(s) = row.get::<_, String>(i) {
-            serde_json::Value::String(s)
-        } else if let Ok(n) = row.get::<_, i64>(i) {
-            // SQLite stores bool columns as INTEGER 0/1. Serving that raw
-            // breaks every typed client (Swift's `0 → Bool` decode throws,
-            // strict JS `=== false` checks fail) — map back to real JSON
-            // booleans per the schema. Postgres is unaffected (native
-            // BOOLEAN decodes to Value::Bool already).
-            if is_bool {
-                serde_json::Value::Bool(n != 0)
-            } else {
-                serde_json::Value::Number(serde_json::Number::from(n))
+        let value = match row.get_ref(i) {
+            Ok(rusqlite::types::ValueRef::Text(text)) => std::str::from_utf8(text)
+                .map(|text| serde_json::Value::String(text.to_owned()))
+                .unwrap_or(serde_json::Value::Null),
+            Ok(rusqlite::types::ValueRef::Integer(number)) => {
+                // Only integer columns need the SQLite boolean conversion.
+                let is_bool = fields
+                    .iter()
+                    .any(|field| field.name == name && field.field_type == "bool");
+                if is_bool {
+                    serde_json::Value::Bool(number != 0)
+                } else {
+                    serde_json::Value::Number(number.into())
+                }
             }
-        } else if let Ok(f) = row.get::<_, f64>(i) {
-            serde_json::Number::from_f64(f)
+            Ok(rusqlite::types::ValueRef::Real(number)) => serde_json::Number::from_f64(number)
                 .map(serde_json::Value::Number)
-                .unwrap_or(serde_json::Value::Null)
-        } else if let Ok(b) = row.get::<_, Vec<u8>>(i) {
-            // BLOB columns only come from `vector(dims)` fields — decode
-            // the packed LE f32 array back to a number array. (TEXT and
-            // numeric columns were caught by the branches above, so a
-            // Vec<u8> read here really is a blob.)
-            let is_vector = fields
-                .iter()
-                .any(|f| f.name == name && f.field_type.starts_with("vector("));
-            if is_vector {
-                pylon_storage::vector::unpack_f32(&b)
-                    .map(|v| pylon_storage::vector::f32s_to_json(&v))
-                    .unwrap_or(serde_json::Value::Null)
-            } else {
-                serde_json::Value::Null
+                .unwrap_or(serde_json::Value::Null),
+            Ok(rusqlite::types::ValueRef::Blob(bytes)) => {
+                let is_vector = fields
+                    .iter()
+                    .any(|field| field.name == name && field.field_type.starts_with("vector("));
+                if is_vector {
+                    pylon_storage::vector::unpack_f32(bytes)
+                        .map(|values| pylon_storage::vector::f32s_to_json(&values))
+                        .unwrap_or(serde_json::Value::Null)
+                } else {
+                    serde_json::Value::Null
+                }
             }
-        } else {
-            serde_json::Value::Null
+            _ => serde_json::Value::Null,
         };
         obj.insert(name, value);
     }
@@ -6366,6 +6578,64 @@ fn row_to_json(row: &rusqlite::Row<'_>, fields: &[ManifestField]) -> serde_json:
 mod tests {
     use super::*;
     use pylon_kernel::{ManifestField, ManifestIndex};
+
+    #[test]
+    fn crdt_field_mappings_are_shared_and_keep_validation_and_exclusions() {
+        let manifest = AppManifest {
+            entities: vec![
+                ManifestEntity {
+                    name: "Record".into(),
+                    fields: vec![
+                        ManifestField {
+                            name: "title".into(),
+                            field_type: "string".into(),
+                            ..Default::default()
+                        },
+                        ManifestField {
+                            name: "embedding".into(),
+                            field_type: "vector(3)".into(),
+                            optional: true,
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+                ManifestEntity {
+                    name: "Invalid".into(),
+                    fields: vec![ManifestField {
+                        name: "flag".into(),
+                        field_type: "bool".into(),
+                        crdt: Some(pylon_kernel::CrdtAnnotation::Text),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let rt = Runtime::in_memory(manifest).unwrap();
+        let ent = rt.require_entity("Record").unwrap();
+        let first = rt.crdt_fields_for(ent).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].name, "title");
+        let mut with_id = ent.clone();
+        with_id.fields.push(ManifestField {
+            name: "id".into(),
+            field_type: "string".into(),
+            ..Default::default()
+        });
+        assert_eq!(resolve_crdt_fields(&with_id).unwrap().len(), 1);
+        for _ in 0..1000 {
+            assert!(std::ptr::eq(first, rt.crdt_fields_for(ent).unwrap()));
+        }
+        let invalid = rt.require_entity("Invalid").unwrap();
+        let expected = resolve_crdt_fields(invalid).unwrap_err();
+        for _ in 0..2 {
+            let error = rt.crdt_fields_for(invalid).unwrap_err();
+            assert_eq!(error.code, expected.code);
+            assert_eq!(error.message, expected.message);
+        }
+    }
 
     fn test_manifest() -> AppManifest {
         AppManifest {
@@ -6737,6 +7007,35 @@ mod tests {
     /// and vice versa). row_to_json now reads by column name from the
     /// row's own metadata, so the bug can't recur regardless of
     /// migration order.
+    #[test]
+    fn row_decoding_preserves_sqlite_types_and_invalid_value_behavior() {
+        let conn = Connection::open_in_memory().unwrap();
+        let fields: Vec<_> = [
+            ("flag", "bool"),
+            ("real_flag", "bool"),
+            ("vector", "vector(2)"),
+            ("bad_vector", "vector(2)"),
+        ]
+        .into_iter()
+        .map(|(name, field_type)| ManifestField {
+            name: name.into(),
+            field_type: field_type.into(),
+            ..Default::default()
+        })
+        .collect();
+        let sql = "SELECT 1 AS flag, 0.5 AS real_flag, 7 AS unknown_integer, 'text' AS text, NULL AS empty, CAST(x'ff' AS TEXT) AS invalid_text, x'0102' AS blob, x'0000803f00000040' AS vector, x'01' AS bad_vector";
+        let value = conn
+            .query_row(sql, [], |row| Ok(row_to_json(row, &fields)))
+            .unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "flag": true, "real_flag": 0.5, "unknown_integer": 7, "text": "text", "empty": null,
+                "invalid_text": null, "blob": null, "vector": [1.0, 2.0], "bad_vector": null,
+            })
+        );
+    }
+
     #[test]
     fn row_to_json_handles_columns_added_out_of_manifest_order() {
         // Manifest: id, email, displayName, avatarColor, createdAt
@@ -7807,7 +8106,7 @@ mod tests {
         let fields = rt
             .crdt_fields_for(rt.require_entity("Doc").unwrap())
             .unwrap();
-        (id, fields)
+        (id, fields.to_vec())
     }
 
     /// An update made on an empty doc (a client that cached one from an
@@ -9477,6 +9776,127 @@ mod tests {
     }
 
     #[test]
+    fn graph_relation_drops_retained_private_column_with_no_join_key() {
+        let runtime = Runtime::in_memory(AppManifest {
+            entities: vec![ManifestEntity {
+                name: "Doc".into(),
+                fields: vec![ManifestField {
+                    name: "parentId".into(),
+                    field_type: "string".into(),
+                    optional: true,
+                    ..Default::default()
+                }],
+                relations: vec![pylon_kernel::ManifestRelation {
+                    name: "parent".into(),
+                    target: "Doc".into(),
+                    field: "parentId".into(),
+                    many: false,
+                }],
+                crdt: false,
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        {
+            let conn = runtime.lock_conn_pub().unwrap();
+            conn.execute_batch("ALTER TABLE Doc ADD COLUMN parent TEXT; INSERT INTO Doc (id, parentId, parent) VALUES ('row', NULL, 'removed-private-value');").unwrap();
+        }
+        let result = runtime
+            .query_graph(&serde_json::json!({"Doc":{"include":{"parent":{}}}}))
+            .unwrap();
+        assert_eq!(result["Doc"].as_array().unwrap().len(), 1);
+        assert!(result["Doc"][0].get("parent").is_none());
+        let conn = runtime.lock_conn_pub().unwrap();
+        let result = runtime
+            .query_graph_with_conn(&conn, &serde_json::json!({"Doc":{"include":{"parent":{}}}}))
+            .unwrap();
+        assert!(result["Doc"][0].get("parent").is_none());
+    }
+
+    #[test]
+    fn query_graph_limits_parents_before_include_reads() {
+        use serde_json::json;
+        let mut manifest = test_manifest();
+        manifest.entities[0].crdt = false;
+        let mut child = manifest.entities[0].clone();
+        child.name = "Child".into();
+        child.indexes.clear();
+        manifest.entities[0]
+            .relations
+            .push(pylon_kernel::ManifestRelation {
+                name: "children".into(),
+                target: "Child".into(),
+                field: "displayName".into(),
+                many: true,
+            });
+        manifest.entities.push(child);
+        let dir = tempfile::tempdir().unwrap();
+        let rt = Runtime::open(dir.path().join("graph.db").to_str().unwrap(), manifest).unwrap();
+        for key in ["A", "B", "C"] {
+            rt.insert("User", &json!({"email": key, "displayName": key}))
+                .unwrap();
+        }
+        // Discarded parent A has enough children to consume the whole child cap.
+        // Its children must not take capacity from selected parent B.
+        {
+            let conn = rt.lock_write_conn().unwrap();
+            conn.execute_batch("BEGIN").unwrap();
+            for i in 0..pylon_kernel::util::query_max_limit() {
+                conn.execute(
+                    "INSERT INTO Child (id, email, displayName) VALUES (?1, ?1, 'A')",
+                    [format!("a{i}")],
+                )
+                .unwrap();
+            }
+            conn.execute(
+                "INSERT INTO Child (id, email, displayName) VALUES ('b', 'b', 'B')",
+                [],
+            )
+            .unwrap();
+            conn.execute_batch("COMMIT").unwrap();
+        }
+        let query = json!({"User": {
+            "where": {"$order": {"displayName": "desc"}, "$offset": 1, "$limit": 2},
+            "limit": 1,
+            "include": {"children": {}}
+        }});
+        let counter = &rt.sqlite_backend().unwrap().read_counter;
+        let before = counter.load(Ordering::Relaxed);
+        let graph = rt.query_graph(&query).unwrap();
+        assert_eq!(counter.load(Ordering::Relaxed) - before, 2);
+        assert_eq!(graph["User"].as_array().unwrap().len(), 1);
+        assert_eq!(graph["User"][0]["displayName"], "B");
+        assert_eq!(graph["User"][0]["children"].as_array().unwrap().len(), 1);
+        assert_eq!(graph["User"][0]["children"][0]["id"], "b");
+
+        let mut zero = query.clone();
+        zero["User"]["limit"] = json!(0);
+        let before = counter.load(Ordering::Relaxed);
+        assert_eq!(rt.query_graph(&zero).unwrap(), json!({"User": []}));
+        assert_eq!(counter.load(Ordering::Relaxed) - before, 1);
+
+        // A larger outer limit cannot relax the inner limit.
+        let mut nested = query.clone();
+        nested["User"]["where"]["$limit"] = json!(1);
+        nested["User"]["limit"] = json!(3);
+        assert_eq!(rt.query_graph(&nested).unwrap(), graph);
+
+        // Transaction reads retain order and offset and use the same bounds.
+        // This path does not support relation expansion.
+        let conn = rt.lock_write_conn().unwrap();
+        assert_eq!(
+            rt.query_graph_with_conn(&conn, &zero).unwrap(),
+            json!({"User": []})
+        );
+        for bounded in [&query, &nested] {
+            let tx_graph = rt.query_graph_with_conn(&conn, bounded).unwrap();
+            assert_eq!(tx_graph["User"].as_array().unwrap().len(), 1);
+            assert_eq!(tx_graph["User"][0]["displayName"], "B");
+        }
+    }
+
+    #[test]
     fn in_memory_has_no_read_pool() {
         let rt = Runtime::in_memory(test_manifest()).unwrap();
         assert_eq!(rt.read_pool_size(), 0);
@@ -9974,6 +10394,58 @@ mod search_secret_field_tests {
         assert_eq!(fts_columns(&rt, "User"), vec!["email", "bio"]);
         drop(rt);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undeclared_search_fields_fail_boot() {
+        for search in [
+            pylon_kernel::ManifestSearchConfig {
+                text: vec!["removedSecret".into()],
+                ..Default::default()
+            },
+            pylon_kernel::ManifestSearchConfig {
+                facets: vec!["removedSecret".into()],
+                ..Default::default()
+            },
+            pylon_kernel::ManifestSearchConfig {
+                sortable: vec!["removedSecret".into()],
+                ..Default::default()
+            },
+        ] {
+            let mut schema = manifest();
+            schema.entities[0].search = Some(search);
+            assert_eq!(
+                Runtime::in_memory(schema).err().unwrap().code,
+                "SEARCH_MANIFEST_INVALID"
+            );
+        }
+    }
+
+    #[test]
+    fn private_sort_fields_and_user_expose_exclusions_fail_boot() {
+        let mut schema = manifest();
+        schema.entities[1].search = Some(pylon_kernel::ManifestSearchConfig {
+            sortable: vec!["note".into()],
+            ..Default::default()
+        });
+        assert_eq!(
+            Runtime::in_memory(schema).err().unwrap().code,
+            "SEARCH_MANIFEST_INVALID"
+        );
+        let mut schema = manifest();
+        schema.auth.user.expose = vec!["email".into()];
+        schema.entities[0].search = Some(pylon_kernel::ManifestSearchConfig {
+            text: vec!["bio".into()],
+            ..Default::default()
+        });
+        assert_eq!(
+            Runtime::in_memory(schema).err().unwrap().code,
+            "SEARCH_MANIFEST_INVALID"
+        );
+        let mut schema = manifest();
+        schema.auth.user.expose = vec!["email".into()];
+        let runtime = Runtime::in_memory(schema).unwrap();
+        assert_eq!(fts_columns(&runtime, "User"), vec!["email"]);
     }
 
     #[test]

@@ -19,3 +19,6 @@ pylon-auth = { path = "../auth", version = "0.22.25" }  # x-release-please-versi
 serde_json = { workspace = true }
 chrono = { workspace = true }
 
+[[bench]]
+name = "evaluation"
+harness = false

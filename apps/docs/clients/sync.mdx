@@ -205,6 +205,14 @@ The reconnect backoff matches the WebSocket path.
 
 ## CRDT subscriptions
 
+Binary CRDT replication is available only for synced entities with public fields. It is disabled for the configured User entity and for entities with `serverOnly`, `syncOmit`, or vector fields. Raw CRDT history cannot apply field-level projection. This rule also protects documents stored before a field became private.
+
+The server records this restriction in the database. Removing a private field from the schema does not enable binary replication of its old history. Running servers check the shared restriction before sending binary data.
+
+On the first upgrade that adds this record, all entities with stored CRDT snapshots become restricted. The server cannot prove that their old history has no private fields. New public entities can use binary replication. Existing restricted entities can use JSON updates and filtered JSON sync.
+
+These entities still use projected JSON sync. Use the JSON update API for client writes. To use collaborative text with private data, store the private fields in a separate entity.
+
 For collaborative rows backed by Loro CRDTs:
 
 ```typescript

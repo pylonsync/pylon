@@ -1,12 +1,13 @@
 //! Shared Postgres persistence and leases for workflow instances.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use pylon_storage::pg_datastore::PgPool;
 
 use crate::workflows::{
-    BufferedEvent, EventDelivery, StatusFilter, StepResult, StepStatus, WorkflowFilter,
-    WorkflowInstance, WorkflowStatus,
+    BufferedEvent, EventDelivery, StatusFilter, StepResult, StepStatus, WorkflowCounts,
+    WorkflowFilter, WorkflowInstance, WorkflowStatus,
 };
 
 const WORKFLOW_COLUMNS: &str = "id,name,input,status,output,error,created_at,started_at,\
@@ -199,9 +200,7 @@ impl PgWorkflowStore {
                 "DELETE FROM _pylon_workflow_steps WHERE workflow_id=$1",
                 &[&workflow.id],
             )?;
-            for (index, step) in workflow.steps.iter().enumerate() {
-                insert_step(&mut tx, &workflow.id, index, step)?;
-            }
+            insert_steps(&mut tx, &workflow.id, &workflow.steps)?;
             // Buffered events consumed by this transition. Other processes
             // insert into the inbox without the lease, so only the consumed
             // rows are deleted; the inbox is never rewritten from memory.
@@ -238,6 +237,10 @@ impl PgWorkflowStore {
         })
     }
 
+    pub fn status_counts(&self) -> Result<WorkflowCounts, String> {
+        self.pool.with_client(load_status_counts)
+    }
+
     pub fn list(&self, status: Option<&str>) -> Result<Vec<WorkflowInstance>, String> {
         self.pool.with_client(|client| {
             let rows = client.query(
@@ -248,12 +251,8 @@ impl PgWorkflowStore {
                 ),
                 &[&status],
             )?;
-            let mut workflows = Vec::with_capacity(rows.len());
-            for row in rows {
-                let mut workflow = row_to_workflow(&row);
-                workflow.steps = load_steps(client, &workflow.id)?;
-                workflows.push(workflow);
-            }
+            let mut workflows: Vec<_> = rows.iter().map(row_to_workflow).collect();
+            load_history(client, &mut workflows, true, false)?;
             Ok(workflows)
         })
     }
@@ -449,15 +448,8 @@ impl PgWorkflowStore {
                 ),
                 &[&status, &active, &filter.name, &filter.key, &limit],
             )?;
-            let mut workflows = Vec::with_capacity(rows.len());
-            for row in rows {
-                let mut workflow = row_to_workflow(&row);
-                if include_steps {
-                    workflow.steps = load_steps(client, &workflow.id)?;
-                }
-                workflow.pending_events = load_events(client, &workflow.id)?;
-                workflows.push(workflow);
-            }
+            let mut workflows: Vec<_> = rows.iter().map(row_to_workflow).collect();
+            load_history(client, &mut workflows, include_steps, true)?;
             Ok(workflows)
         })
     }
@@ -591,37 +583,181 @@ impl PgWorkflowStore {
     }
 }
 
-fn insert_step(
-    tx: &mut postgres::Transaction<'_>,
+const STEP_BATCH_ROWS: usize = 256;
+const STEP_BATCH_BYTES: usize = 1024 * 1024;
+
+fn load_status_counts<C: pylon_storage::pg_exec::PgConn>(
+    client: &mut C,
+) -> Result<WorkflowCounts, postgres::Error> {
+    let mut counts = WorkflowCounts::default();
+    for row in client.query(
+        "SELECT status, COUNT(*) FROM _pylon_workflows GROUP BY status",
+        &[],
+    )? {
+        counts.add(
+            &workflow_status_from_str(row.get(0)),
+            row.get::<_, i64>(1) as u64,
+        );
+    }
+    Ok(counts)
+}
+
+fn insert_steps<C: pylon_storage::pg_exec::PgConn>(
+    tx: &mut C,
     workflow_id: &str,
-    index: usize,
-    step: &StepResult,
+    steps: &[StepResult],
 ) -> Result<(), postgres::Error> {
-    let index = index.min(i64::MAX as usize) as i64;
-    let status = step_status_to_str(&step.status);
-    let started_at = step.started_at.as_deref().map(parse_stamp_i64);
-    let completed_at = step.completed_at.as_deref().map(parse_stamp_i64);
-    let duration_ms = step.duration_ms.map(|v| v.min(i64::MAX as u64) as i64);
-    let retry_count = step.retry_count.min(i32::MAX as u32) as i32;
-    tx.execute(
+    let mut start = 0;
+    let mut bytes = 0usize;
+    for (index, step) in steps.iter().enumerate() {
+        struct CountBytes(usize);
+        impl std::io::Write for CountBytes {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0 = self.0.saturating_add(bytes.len());
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut size = CountBytes(
+            workflow_id
+                .len()
+                .saturating_add(step.step_id.len())
+                .saturating_add(step.name.len())
+                .saturating_add(step.error.as_ref().map_or(0, String::len))
+                .saturating_add(128),
+        );
+        if let Some(output) = &step.output {
+            serde_json::to_writer(&mut size, output).expect("counting JSON bytes cannot fail");
+        }
+        if index > start
+            && (index - start == STEP_BATCH_ROWS || bytes.saturating_add(size.0) > STEP_BATCH_BYTES)
+        {
+            insert_step_batch(tx, workflow_id, start, &steps[start..index])?;
+            start = index;
+            bytes = 0;
+        }
+        bytes = bytes.saturating_add(size.0);
+    }
+    if start < steps.len() {
+        insert_step_batch(tx, workflow_id, start, &steps[start..])?;
+    }
+    Ok(())
+}
+
+fn insert_step_batch<C: pylon_storage::pg_exec::PgConn>(
+    tx: &mut C,
+    workflow_id: &str,
+    start: usize,
+    steps: &[StepResult],
+) -> Result<(), postgres::Error> {
+    use std::fmt::Write;
+    let converted: Vec<_> = steps
+        .iter()
+        .enumerate()
+        .map(|(i, step)| {
+            (
+                start.saturating_add(i).min(i64::MAX as usize) as i64,
+                step_status_to_str(&step.status),
+                step.started_at.as_deref().map(parse_stamp_i64),
+                step.completed_at.as_deref().map(parse_stamp_i64),
+                step.duration_ms.map(|v| v.min(i64::MAX as u64) as i64),
+                step.retry_count.min(i32::MAX as u32) as i32,
+            )
+        })
+        .collect();
+    let mut sql = String::from(
         "INSERT INTO _pylon_workflow_steps
          (workflow_id,step_index,step_id,name,status,output,error,started_at,
-          completed_at,duration_ms,retry_count)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
-        &[
+          completed_at,duration_ms,retry_count) VALUES ",
+    );
+    let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> =
+        Vec::with_capacity(steps.len() * 11);
+    for (i, (step, (index, status, started_at, completed_at, duration_ms, retry_count))) in
+        steps.iter().zip(&converted).enumerate()
+    {
+        if i > 0 {
+            sql.push(',');
+        }
+        sql.push('(');
+        for column in 0..11 {
+            if column > 0 {
+                sql.push(',');
+            }
+            write!(sql, "${}", i * 11 + column + 1).unwrap();
+        }
+        sql.push(')');
+        params.extend_from_slice(&[
             &workflow_id,
-            &index,
+            index,
             &step.step_id,
             &step.name,
-            &status,
+            status,
             &step.output,
             &step.error,
-            &started_at,
-            &completed_at,
-            &duration_ms,
-            &retry_count,
-        ],
-    )?;
+            started_at,
+            completed_at,
+            duration_ms,
+            retry_count,
+        ]);
+    }
+    tx.execute(&sql, &params)?;
+    Ok(())
+}
+
+fn load_history<C: pylon_storage::pg_exec::PgConn>(
+    client: &mut C,
+    workflows: &mut [WorkflowInstance],
+    include_steps: bool,
+    include_events: bool,
+) -> Result<(), postgres::Error> {
+    // Bound recovery reads as well as the paginated list path.
+    for workflows in workflows.chunks_mut(1000) {
+        let ids: Vec<_> = workflows
+            .iter()
+            .map(|workflow| workflow.id.clone())
+            .collect();
+        let indexes: HashMap<_, _> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.as_str(), i))
+            .collect();
+        if include_steps {
+            for workflow in workflows.iter_mut() {
+                workflow.steps.clear();
+            }
+            client.query_each(
+                "SELECT step_id,name,status,output,error,started_at,completed_at,
+                    duration_ms,retry_count,workflow_id
+             FROM _pylon_workflow_steps WHERE workflow_id = ANY($1::text[])
+             ORDER BY workflow_id,step_index",
+                &[&ids],
+                &mut |row| {
+                    let id: &str = row.get(9);
+                    if let Some(&index) = indexes.get(id) {
+                        workflows[index].steps.push(row_to_step(&row));
+                    }
+                },
+            )?;
+        }
+        if include_events {
+            for workflow in workflows.iter_mut() {
+                workflow.pending_events.clear();
+            }
+            client.query_each(
+                "SELECT seq,event,data,received_at,workflow_id FROM _pylon_workflow_events
+             WHERE workflow_id = ANY($1::text[]) ORDER BY workflow_id,seq",
+                &[&ids],
+                &mut |row| {
+                    let id: &str = row.get(4);
+                    if let Some(&index) = indexes.get(id) {
+                        workflows[index].pending_events.push(row_to_event(&row));
+                    }
+                },
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -649,16 +785,16 @@ fn load_events(
              WHERE workflow_id=$1 ORDER BY seq",
             &[&workflow_id],
         )
-        .map(|rows| {
-            rows.iter()
-                .map(|row| BufferedEvent {
-                    seq: row.get::<_, i64>(0).max(0) as u64,
-                    event: row.get(1),
-                    data: row.get(2),
-                    received_at: stamp(row.get(3)),
-                })
-                .collect()
-        })
+        .map(|rows| rows.iter().map(row_to_event).collect())
+}
+
+fn row_to_event(row: &postgres::Row) -> BufferedEvent {
+    BufferedEvent {
+        seq: row.get::<_, i64>(0).max(0) as u64,
+        event: row.get(1),
+        data: row.get(2),
+        received_at: stamp(row.get(3)),
+    }
 }
 
 fn now_secs_i64() -> i64 {
@@ -808,6 +944,343 @@ mod tests {
             cancel_reason: None,
             consumed_events: Vec::new(),
         }
+    }
+
+    struct CountingReads<'a> {
+        client: &'a mut postgres::Client,
+        queries: usize,
+    }
+
+    impl pylon_storage::pg_exec::PgConn for CountingReads<'_> {
+        fn execute(
+            &mut self,
+            _: &str,
+            _: &[&(dyn postgres::types::ToSql + Sync)],
+        ) -> Result<u64, postgres::Error> {
+            panic!("history reads must not write");
+        }
+        fn query(
+            &mut self,
+            _: &str,
+            _: &[&(dyn postgres::types::ToSql + Sync)],
+        ) -> Result<Vec<postgres::Row>, postgres::Error> {
+            panic!("history reads must stream rows");
+        }
+        fn query_opt(
+            &mut self,
+            _: &str,
+            _: &[&(dyn postgres::types::ToSql + Sync)],
+        ) -> Result<Option<postgres::Row>, postgres::Error> {
+            panic!("history reads must use a batch");
+        }
+        fn query_each(
+            &mut self,
+            sql: &str,
+            params: &[&(dyn postgres::types::ToSql + Sync)],
+            visit: &mut dyn FnMut(postgres::Row),
+        ) -> Result<(), postgres::Error> {
+            self.queries += 1;
+            pylon_storage::pg_exec::PgConn::query_each(self.client, sql, params, visit)
+        }
+    }
+
+    #[test]
+    fn list_batches_history_and_preserves_child_order() {
+        let Some(pool) = test_pool() else {
+            return;
+        };
+        let suffix = pylon_cluster::new_instance_id();
+        let store = PgWorkflowStore::open(Arc::clone(&pool), format!("list_{suffix}")).unwrap();
+        let name = format!("list_{suffix}");
+        let mut ids = Vec::new();
+        for i in 0..12 {
+            let mut workflow = test_workflow(format!("wf_{suffix}_{i:02}"));
+            workflow.name = name.clone();
+            workflow.created_at = format!("{}Z", i / 2);
+            let step = workflow.steps[0].clone();
+            workflow.steps = (0..i % 3)
+                .map(|n| StepResult {
+                    step_id: format!("step_{n}"),
+                    output: Some(serde_json::json!({"workflow":i,"step":n})),
+                    ..step.clone()
+                })
+                .collect();
+            store.save(&workflow).unwrap();
+            ids.push(workflow.id);
+        }
+        for round in 0..3 {
+            for (i, id) in ids.iter().enumerate() {
+                if i % 4 > round {
+                    store
+                        .restore_events(
+                            id,
+                            &[BufferedEvent {
+                                seq: 0,
+                                event: format!("event_{round}"),
+                                data: serde_json::json!({"workflow":i,"round":round}),
+                                received_at: format!("{round}Z"),
+                            }],
+                        )
+                        .unwrap();
+                }
+            }
+        }
+        for include_steps in [false, true] {
+            let rows = store
+                .list_filtered(
+                    &WorkflowFilter {
+                        name: Some(name.clone()),
+                        ..Default::default()
+                    },
+                    8,
+                    include_steps,
+                )
+                .unwrap();
+            assert_eq!(
+                rows.iter().map(|row| &row.id).collect::<Vec<_>>(),
+                ids.iter().rev().take(8).collect::<Vec<_>>()
+            );
+            for row in &rows {
+                let mut expected = store.load(&row.id).unwrap().unwrap();
+                if !include_steps {
+                    expected.steps.clear();
+                }
+                assert_eq!(
+                    serde_json::to_value(row).unwrap(),
+                    serde_json::to_value(expected).unwrap()
+                );
+            }
+            pool.with_client(|client| {
+                let mut counter = CountingReads { client, queries: 0 };
+                let mut copies = rows.clone();
+                load_history(&mut counter, &mut copies, include_steps, true)?;
+                assert_eq!(counter.queries, 1 + usize::from(include_steps));
+                assert_eq!(
+                    serde_json::to_value(copies).unwrap(),
+                    serde_json::to_value(&rows).unwrap()
+                );
+                load_history(&mut counter, &mut [], include_steps, true)?;
+                assert_eq!(counter.queries, 1 + usize::from(include_steps));
+                Ok(())
+            })
+            .unwrap();
+        }
+        let recovery_rows: Vec<_> = store
+            .list(Some("Running"))
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.name == name)
+            .collect();
+        assert_eq!(recovery_rows.len(), ids.len());
+        for row in recovery_rows {
+            let mut expected = store.load(&row.id).unwrap().unwrap();
+            expected.pending_events.clear();
+            assert_eq!(
+                serde_json::to_value(row).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
+        }
+        pool.with_client(|client| {
+            let mut missing: Vec<_> = (0..1001)
+                .map(|i| test_workflow(format!("missing_{suffix}_{i}")))
+                .collect();
+            let mut counter = CountingReads { client, queries: 0 };
+            load_history(&mut counter, &mut missing, true, true)?;
+            assert_eq!(counter.queries, 4);
+            assert!(missing
+                .iter()
+                .all(|workflow| workflow.steps.is_empty() && workflow.pending_events.is_empty()));
+            counter.client.execute(
+                "DELETE FROM _pylon_workflows WHERE id = ANY($1::text[])",
+                &[&ids],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn status_counts_need_only_the_status_column() {
+        let Some(pool) = test_pool() else {
+            return;
+        };
+        pool.with_client(|client| {
+            let mut tx = client.transaction()?;
+            tx.batch_execute("CREATE TEMP TABLE _pylon_workflows (status TEXT NOT NULL) ON COMMIT DROP")?;
+            assert_eq!(load_status_counts(&mut tx)?, WorkflowCounts::default());
+            for (i, status) in ["Pending", "Running", "WaitingForEvent", "Sleeping", "Completed", "Failed", "Cancelled"].iter().enumerate() {
+                tx.execute("INSERT INTO _pylon_workflows (status) SELECT $1 FROM generate_series(1, $2)", &[status, &((i + 1) as i32)])?;
+            }
+            assert_eq!(serde_json::to_value(load_status_counts(&mut tx)?).unwrap(), serde_json::json!({"pending":1,"running":2,"waiting":3,"sleeping":4,"completed":5,"failed":6,"cancelled":7}));
+            tx.rollback()
+        }).unwrap();
+    }
+
+    #[test]
+    fn step_batches_bound_rows_and_payloads() {
+        #[derive(Default)]
+        struct BatchSizes(Vec<usize>);
+        impl pylon_storage::pg_exec::PgConn for BatchSizes {
+            fn execute(
+                &mut self,
+                _: &str,
+                params: &[&(dyn postgres::types::ToSql + Sync)],
+            ) -> Result<u64, postgres::Error> {
+                let rows = params.len() / 11;
+                self.0.push(rows);
+                Ok(rows as u64)
+            }
+            fn query(
+                &mut self,
+                _: &str,
+                _: &[&(dyn postgres::types::ToSql + Sync)],
+            ) -> Result<Vec<postgres::Row>, postgres::Error> {
+                panic!("unexpected read")
+            }
+            fn query_opt(
+                &mut self,
+                _: &str,
+                _: &[&(dyn postgres::types::ToSql + Sync)],
+            ) -> Result<Option<postgres::Row>, postgres::Error> {
+                panic!("unexpected read")
+            }
+        }
+        let step = test_workflow("batch".into()).steps.remove(0);
+        let mut sizes = BatchSizes::default();
+        insert_steps(&mut sizes, "batch", &[]).unwrap();
+        assert!(sizes.0.is_empty());
+        insert_steps(
+            &mut sizes,
+            "batch",
+            &vec![step.clone(); STEP_BATCH_ROWS + 1],
+        )
+        .unwrap();
+        assert_eq!(sizes.0, [STEP_BATCH_ROWS, 1]);
+        sizes.0.clear();
+        let mut large = step.clone();
+        large.output = Some(serde_json::json!("x".repeat(STEP_BATCH_BYTES / 2)));
+        insert_steps(&mut sizes, "batch", &[large.clone(), large]).unwrap();
+        assert_eq!(sizes.0, [1, 1]);
+        sizes.0.clear();
+        let mut oversized = step.clone();
+        oversized.output = Some(serde_json::json!("x".repeat(STEP_BATCH_BYTES * 2)));
+        insert_steps(&mut sizes, "batch", &[step.clone(), oversized, step]).unwrap();
+        assert_eq!(sizes.0, [1, 1, 1]);
+    }
+
+    #[test]
+    fn step_batches_preserve_updates_and_rollback_later_failures() {
+        let Some(pool) = test_pool() else {
+            return;
+        };
+        let suffix = pylon_cluster::new_instance_id();
+        let id = format!("wf_batch_{suffix}");
+        let store = PgWorkflowStore::open(pool.clone(), suffix).unwrap();
+        let mut workflow = test_workflow(id.clone());
+        let template = workflow.steps[0].clone();
+        workflow.steps = (0..STEP_BATCH_ROWS + 3)
+            .map(|i| {
+                let mut step = template.clone();
+                step.step_id = format!("step-{i}");
+                step.name = format!("step {i}");
+                step.retry_count = i as u32;
+                step.output = if i % 2 == 0 {
+                    Some(serde_json::json!({"index": i}))
+                } else {
+                    None
+                };
+                step.error = if i % 3 == 0 {
+                    Some("retry error".into())
+                } else {
+                    None
+                };
+                step.started_at = if i % 2 == 0 {
+                    Some(format!("{i}Z"))
+                } else {
+                    None
+                };
+                step.completed_at = None;
+                step.duration_ms = Some(i as u64);
+                step
+            })
+            .collect();
+        store.save(&workflow).unwrap();
+        let original = store.load(&id).unwrap().unwrap();
+        assert_eq!(
+            serde_json::to_value(&original).unwrap(),
+            serde_json::to_value(&workflow).unwrap()
+        );
+        let mut bad = workflow.clone();
+        bad.output = Some(serde_json::json!("must roll back"));
+        bad.steps[STEP_BATCH_ROWS].name = "invalid\0text".into();
+        assert!(store.save(&bad).is_err());
+        assert_eq!(
+            serde_json::to_value(store.load(&id).unwrap().unwrap()).unwrap(),
+            serde_json::to_value(&original).unwrap()
+        );
+        workflow.steps[0].retry_count += 1;
+        workflow.steps[0].output = Some(serde_json::json!({"retried": true}));
+        workflow.steps.truncate(2);
+        store.save(&workflow).unwrap();
+        assert_eq!(
+            serde_json::to_value(store.load(&id).unwrap().unwrap()).unwrap(),
+            serde_json::to_value(&workflow).unwrap()
+        );
+        workflow.steps.clear();
+        store.save(&workflow).unwrap();
+        assert!(store.load(&id).unwrap().unwrap().steps.is_empty());
+        pool.with_client(|client| {
+            client.execute("DELETE FROM _pylon_workflows WHERE id=$1", &[&id])?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    #[ignore = "release-mode performance benchmark with local PostgreSQL"]
+    fn benchmark_step_batches() {
+        let Some(pool) = test_pool() else {
+            return;
+        };
+        let suffix = pylon_cluster::new_instance_id();
+        let id = format!("wf_bench_{suffix}");
+        let store = PgWorkflowStore::open(pool.clone(), suffix).unwrap();
+        let workflow = test_workflow(id.clone());
+        store.save(&workflow).unwrap();
+        let steps = vec![workflow.steps[0].clone(); 512];
+        for batched in [false, true] {
+            let mut samples = Vec::new();
+            for _ in 0..7 {
+                pool.with_client(|client| {
+                    let mut tx = client.transaction()?;
+                    tx.execute(
+                        "DELETE FROM _pylon_workflow_steps WHERE workflow_id=$1",
+                        &[&id],
+                    )?;
+                    let start = std::time::Instant::now();
+                    if batched {
+                        insert_steps(&mut tx, &id, &steps)?;
+                    } else {
+                        for (i, step) in steps.iter().enumerate() {
+                            insert_step_batch(&mut tx, &id, i, std::slice::from_ref(step))?;
+                        }
+                    }
+                    samples.push(start.elapsed().as_secs_f64() * 1000.0);
+                    tx.rollback()
+                })
+                .unwrap();
+            }
+            samples.sort_by(f64::total_cmp);
+            println!(
+                "512 workflow steps, batched={batched}: {:.3} ms median",
+                samples[3]
+            );
+        }
+        pool.with_client(|client| {
+            client.execute("DELETE FROM _pylon_workflows WHERE id=$1", &[&id])?;
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[test]

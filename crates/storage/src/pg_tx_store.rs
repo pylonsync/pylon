@@ -463,6 +463,21 @@ impl<'a> DataStore for PgTxStore<'a> {
         self.manifest
     }
 
+    fn has_private_crdt_history(&self, entity: &str) -> bool {
+        self.with_tx(|tx| {
+            tx.query_one(
+                "SELECT EXISTS(SELECT 1 FROM _pylon_crdt_private_entities WHERE entity = $1)",
+                &[&entity],
+            )
+            .map(|row| row.get::<_, bool>(0))
+            .map_err(|error| DataError {
+                code: "CRDT_PRIVACY_READ_FAILED".into(),
+                message: error.to_string(),
+            })
+        })
+        .unwrap_or(true)
+    }
+
     fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, DataError> {
         let manifest = self.manifest;
         if self.entity_is_crdt(entity) {
@@ -526,14 +541,14 @@ impl<'a> DataStore for PgTxStore<'a> {
                 message: e.message,
             })
         })?;
-        let mut hits = Vec::with_capacity(scored.len());
-        for (id, score) in scored {
-            let Some(mut doc) = self.with_tx(|tx| tx_get_by_id(tx, entity, &id))? else {
-                continue;
-            };
-            crate::vector::strip_vector_fields(ent, &mut doc);
-            hits.push(serde_json::json!({ "id": id, "score": score, "doc": doc }));
-        }
+        let ids: Vec<String> = scored.iter().map(|(id, _)| id.clone()).collect();
+        let documents = self.with_tx(|tx| {
+            crate::pg_vector::fetch_documents(tx, ent, &ids).map_err(|e| DataError {
+                code: e.code,
+                message: e.message,
+            })
+        })?;
+        let hits = crate::vector::ranked_hits(scored, documents);
         Ok(serde_json::json!({
             "hits": hits,
             "tookMs": t0.elapsed().as_millis() as u64,
@@ -761,45 +776,18 @@ impl<'a> DataStore for PgTxStore<'a> {
                     code: "ENTITY_NOT_FOUND".into(),
                     message: format!("Unknown entity: \"{entity_name}\""),
                 })?;
-            let filter = opts.get("where").cloned().unwrap_or(serde_json::json!({}));
+            let filter = crate::graph::parent_filter(opts);
             let rows = self.query_filtered(entity_name, &filter)?;
             let rows = if let Some(include) = opts.get("include").and_then(|v| v.as_object()) {
-                rows.into_iter()
-                    .map(|mut row| {
-                        for (rel_name, _sub_query) in include {
-                            if let Some(rel) = ent.relations.iter().find(|r| r.name == *rel_name) {
-                                let fk_value = row
-                                    .get(&rel.field)
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string());
-                                if let Some(fk) = fk_value {
-                                    if rel.many {
-                                        let sub_filter = serde_json::json!({ &rel.field: &fk });
-                                        if let Ok(related) =
-                                            self.query_filtered(&rel.target, &sub_filter)
-                                        {
-                                            row[rel_name] = serde_json::json!(related);
-                                        }
-                                    } else if let Ok(Some(related)) =
-                                        self.get_by_id(&rel.target, &fk)
-                                    {
-                                        row[rel_name] = related;
-                                    }
-                                }
-                            }
-                        }
-                        row
+                crate::pg_graph::expand_includes(rows, ent, include, |relation, keys| {
+                    self.with_tx(|tx| {
+                        crate::pg_graph::fetch_relation(tx, self.manifest, relation, keys)
                     })
-                    .collect()
+                })
             } else {
                 rows
             };
-            let rows = if let Some(limit) = opts.get("limit").and_then(|v| v.as_u64()) {
-                rows.into_iter().take(limit as usize).collect()
-            } else {
-                rows
-            };
-            results.insert(entity_name.clone(), serde_json::json!(rows));
+            results.insert(entity_name.clone(), serde_json::Value::Array(rows));
         }
         Ok(serde_json::Value::Object(results))
     }

@@ -18,8 +18,8 @@
 //! AND no Set-Cookie was emitted — so a personalized/authed response can never
 //! be stored or replayed.
 
+use hashlink::LinkedHashMap;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -134,13 +134,11 @@ struct MemEntry {
     body: Arc<Vec<u8>>,
     rendered_at: u64,
     revalidate_secs: u64,
-    seq: u64,
 }
 
 struct MemInner {
-    map: HashMap<String, Arc<MemEntry>>,
+    map: LinkedHashMap<String, Arc<MemEntry>>,
     bytes: usize,
-    seq: u64,
 }
 
 struct MemCache {
@@ -167,34 +165,23 @@ impl MemCache {
         if body.len() > self.budget_bytes {
             return;
         }
-        let mut g = self.inner.write().unwrap();
-        g.seq += 1;
+        // Copy the response before taking the write lock so readers can proceed.
         let entry = Arc::new(MemEntry {
             status,
             headers: headers.to_vec(),
             body: Arc::new(body.to_vec()),
             rendered_at,
             revalidate_secs,
-            seq: g.seq,
         });
-        if let Some(old) = g.map.insert(key.to_string(), Arc::clone(&entry)) {
+        let mut g = self.inner.write().unwrap();
+        if let Some(old) = g.map.insert(key.to_string(), entry) {
             g.bytes = g.bytes.saturating_sub(old.body.len());
         }
-        g.bytes += entry.body.len();
-        // Evict oldest-inserted (FIFO) until under budget. The map is small
-        // (budget / page-size) so the min-scan on the rare overflow is cheap.
+        g.bytes += body.len();
+        // Replacing a key moves it to the back. Reads leave its position intact.
         while g.bytes > self.budget_bytes {
-            let victim = g
-                .map
-                .iter()
-                .min_by_key(|(_, v)| v.seq)
-                .map(|(k, _)| k.clone());
-            match victim {
-                Some(k) => {
-                    if let Some(v) = g.map.remove(&k) {
-                        g.bytes = g.bytes.saturating_sub(v.body.len());
-                    }
-                }
+            match g.map.pop_front() {
+                Some((_, v)) => g.bytes = g.bytes.saturating_sub(v.body.len()),
                 None => break,
             }
         }
@@ -219,9 +206,8 @@ fn mem_cache() -> Option<&'static MemCache> {
         }
         Some(MemCache {
             inner: RwLock::new(MemInner {
-                map: HashMap::new(),
+                map: LinkedHashMap::new(),
                 bytes: 0,
-                seq: 0,
             }),
             budget_bytes: budget,
         })
@@ -520,12 +506,33 @@ mod tests {
     fn fresh_mem(budget: usize) -> MemCache {
         MemCache {
             inner: RwLock::new(MemInner {
-                map: HashMap::new(),
+                map: LinkedHashMap::new(),
                 bytes: 0,
-                seq: 0,
             }),
             budget_bytes: budget,
         }
+    }
+
+    /// Run with `cargo test -p pylon-runtime --lib bench_mem_eviction -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn bench_mem_eviction() {
+        let mut samples = Vec::new();
+        for _ in 0..9 {
+            let m = fresh_mem(2048 * 128);
+            for id in 0..2048 {
+                m.put(&id.to_string(), 200, &[], &[0; 128], 1, 600);
+            }
+            let body = vec![1; 1024 * 128];
+            let start = std::time::Instant::now();
+            m.put("large", 200, &[], &body, 1, 600);
+            samples.push(start.elapsed());
+            assert!(m.get("0").is_none());
+            assert!(m.get("1024").is_some());
+            assert_eq!(m.inner.read().unwrap().bytes, 2048 * 128);
+        }
+        samples.sort_unstable();
+        eprintln!("evict 1024 of 2048 SSR entries: {:?} median", samples[4]);
     }
 
     #[test]
@@ -564,6 +571,30 @@ mod tests {
         assert!(survivors <= 3, "budget enforced (survivors={survivors})");
         assert!(m2.get("k4").is_some(), "newest survives");
         assert!(m2.get("k0").is_none(), "oldest evicted first");
+    }
+
+    #[test]
+    fn memory_reads_preserve_fifo_and_replacements_update_order_and_bytes() {
+        let m = fresh_mem(12);
+        m.put("a", 200, &[], b"aaaa", 1, 600);
+        m.put("b", 200, &[], b"bbbb", 1, 600);
+        m.put("c", 200, &[], b"cccc", 1, 600);
+        let a = m.get("a").unwrap();
+        m.put("d", 200, &[], b"dddd", 1, 600);
+        assert!(m.get("a").is_none(), "reads do not change FIFO order");
+        assert_eq!(&*a.body, b"aaaa", "in-flight readers retain their response");
+        m.put("b", 201, &[], b"BB", 2, 300);
+        assert_eq!(m.inner.read().unwrap().bytes, 10);
+        m.put("large", 200, &[], b"12345678", 2, 600);
+        assert!(m.get("c").is_none());
+        assert!(m.get("d").is_none());
+        let b = m.get("b").unwrap();
+        assert_eq!((b.status, b.rendered_at, b.revalidate_secs), (201, 2, 300));
+        assert_eq!(&*b.body, b"BB");
+        assert_eq!(m.inner.read().unwrap().bytes, 10);
+        m.clear();
+        assert!(m.inner.read().unwrap().map.is_empty());
+        assert_eq!(m.inner.read().unwrap().bytes, 0);
     }
 
     #[test]

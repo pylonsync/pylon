@@ -20,6 +20,32 @@ pub enum WorkflowStatus {
     Cancelled,
 }
 
+#[derive(Debug, Default, PartialEq, Eq, Serialize)]
+pub struct WorkflowCounts {
+    pub pending: u64,
+    pub running: u64,
+    pub waiting: u64,
+    pub sleeping: u64,
+    pub completed: u64,
+    pub failed: u64,
+    pub cancelled: u64,
+}
+
+impl WorkflowCounts {
+    pub(crate) fn add(&mut self, status: &WorkflowStatus, count: u64) {
+        let total = match status {
+            WorkflowStatus::Pending => &mut self.pending,
+            WorkflowStatus::Running => &mut self.running,
+            WorkflowStatus::WaitingForEvent => &mut self.waiting,
+            WorkflowStatus::Sleeping => &mut self.sleeping,
+            WorkflowStatus::Completed => &mut self.completed,
+            WorkflowStatus::Failed => &mut self.failed,
+            WorkflowStatus::Cancelled => &mut self.cancelled,
+        };
+        *total += count;
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StepStatus {
     Pending,
@@ -176,6 +202,34 @@ impl WorkflowStatus {
 }
 
 impl WorkflowInstance {
+    fn clone_for_list(&self, include_steps: bool) -> Self {
+        Self {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            input: self.input.clone(),
+            status: self.status.clone(),
+            steps: if include_steps {
+                self.steps.clone()
+            } else {
+                Vec::new()
+            },
+            output: self.output.clone(),
+            error: self.error.clone(),
+            created_at: self.created_at.clone(),
+            started_at: self.started_at.clone(),
+            completed_at: self.completed_at.clone(),
+            wake_at: self.wake_at,
+            waiting_for: self.waiting_for.clone(),
+            current_step: self.current_step,
+            max_retries: self.max_retries,
+            key: self.key.clone(),
+            wait_deadline: self.wait_deadline,
+            pending_events: self.pending_events.clone(),
+            cancel_reason: self.cancel_reason.clone(),
+            consumed_events: self.consumed_events.clone(),
+        }
+    }
+
     /// The run's state without step history or buffered event payloads.
     pub fn summary(&self) -> serde_json::Value {
         serde_json::json!({
@@ -1053,8 +1107,24 @@ impl WorkflowEngine {
             .collect()
     }
 
+    /// Count statuses without loading or copying workflow payloads.
+    pub fn status_counts(&self) -> WorkflowCounts {
+        if let Some(store) = self.pg_store() {
+            return store.status_counts().unwrap_or_else(|e| {
+                tracing::warn!("[workflows] Postgres status count failed: {e}");
+                WorkflowCounts::default()
+            });
+        }
+        let instances = self.instances.lock().unwrap();
+        let mut counts = WorkflowCounts::default();
+        for instance in instances.values() {
+            counts.add(&instance.status, 1);
+        }
+        counts
+    }
+
     /// List runs matching `filter`, newest first. `include_steps: false`
-    /// skips loading step history (Postgres reads it per row).
+    /// skips loading step history.
     pub fn list_filtered(
         &self,
         filter: &WorkflowFilter,
@@ -1068,7 +1138,7 @@ impl WorkflowEngine {
             return store.list_filtered(filter, limit, include_steps);
         }
         let instances = self.instances.lock().unwrap();
-        let mut rows: Vec<WorkflowInstance> = instances
+        let mut rows: Vec<_> = instances
             .values()
             .filter(|i| filter.status.as_ref().is_none_or(|s| s.matches(&i.status)))
             .filter(|i| filter.name.as_deref().is_none_or(|n| i.name == n))
@@ -1078,21 +1148,21 @@ impl WorkflowEngine {
                     .as_deref()
                     .is_none_or(|k| i.key.as_deref() == Some(k))
             })
-            .cloned()
+            .map(|instance| (stamp_secs(&instance.created_at), instance))
             .collect();
-        drop(instances);
-        rows.sort_by(|a, b| {
-            stamp_secs(&b.created_at)
-                .cmp(&stamp_secs(&a.created_at))
-                .then_with(|| b.id.cmp(&a.id))
-        });
-        rows.truncate(limit);
-        if !include_steps {
-            for row in &mut rows {
-                row.steps.clear();
-            }
+        let newest_first = |a: &(Option<u64>, &WorkflowInstance),
+                            b: &(Option<u64>, &WorkflowInstance)| {
+            b.0.cmp(&a.0).then_with(|| b.1.id.cmp(&a.1.id))
+        };
+        if rows.len() > limit {
+            rows.select_nth_unstable_by(limit, newest_first);
+            rows.truncate(limit);
         }
-        Ok(rows)
+        rows.sort_unstable_by(newest_first);
+        Ok(rows
+            .into_iter()
+            .map(|(_, row)| row.clone_for_list(include_steps))
+            .collect())
     }
 
     /// Load the Postgres inbox for `workflow_id` into the in-memory copy.
@@ -2804,6 +2874,108 @@ mod tests {
             .unwrap();
         assert!(none.is_empty());
         assert_eq!(StatusFilter::parse("bogus"), None);
+    }
+
+    #[test]
+    fn status_counts_cover_every_state_without_returning_payloads() {
+        let e = engine();
+        assert_eq!(e.status_counts(), WorkflowCounts::default());
+        for (i, status) in [
+            WorkflowStatus::Pending,
+            WorkflowStatus::Running,
+            WorkflowStatus::WaitingForEvent,
+            WorkflowStatus::Sleeping,
+            WorkflowStatus::Completed,
+            WorkflowStatus::Failed,
+            WorkflowStatus::Cancelled,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for _ in 0..=i {
+                let id = e
+                    .start(
+                        "onboarding",
+                        serde_json::json!({"large": "x".repeat(16384)}),
+                    )
+                    .unwrap();
+                e.instances.lock().unwrap().get_mut(&id).unwrap().status = status.clone();
+            }
+        }
+        assert_eq!(
+            serde_json::to_value(e.status_counts()).unwrap(),
+            serde_json::json!({"pending":1,"running":2,"waiting":3,"sleeping":4,"completed":5,"failed":6,"cancelled":7})
+        );
+    }
+
+    #[test]
+    fn list_limits_before_copying_and_preserves_ties_filters_and_steps() {
+        let e = engine();
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
+        e.advance_with_response(
+            &id,
+            serde_json::json!({
+                "action":"step_complete", "step_name":"work", "output":{"value":42},
+            }),
+        )
+        .unwrap();
+        let template = e.get(&id).unwrap();
+        {
+            let mut instances = e.instances.lock().unwrap();
+            instances.clear();
+            for i in 0..1003 {
+                let mut instance = template.clone();
+                instance.id = format!("wf_{i:04}");
+                instance.created_at = format!("{}Z", i / 2);
+                instance.name = if i % 3 == 0 { "onboarding" } else { "other" }.into();
+                instance.key = Some(format!("key_{}", i % 2));
+                instance.status = if i % 2 == 0 {
+                    WorkflowStatus::Running
+                } else {
+                    WorkflowStatus::Completed
+                };
+                instance.consumed_events = vec![i as u64];
+                instances.insert(instance.id.clone(), instance);
+            }
+        }
+        for filtered in [false, true] {
+            for limit in [0, 1, 25, 1000, usize::MAX] {
+                let filter = WorkflowFilter {
+                    limit,
+                    name: filtered.then(|| "onboarding".into()),
+                    key: filtered.then(|| "key_0".into()),
+                    status: filtered.then_some(StatusFilter::Active),
+                };
+                let expected: Vec<_> = (0..1003)
+                    .rev()
+                    .filter(|i| !filtered || i % 6 == 0)
+                    .take(if limit == 0 {
+                        DEFAULT_LIST_LIMIT
+                    } else {
+                        limit.min(MAX_LIST_LIMIT)
+                    })
+                    .map(|i| format!("wf_{i:04}"))
+                    .collect();
+                for include_steps in [false, true] {
+                    let rows = e.list_filtered(&filter, include_steps).unwrap();
+                    assert_eq!(
+                        rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>(),
+                        expected
+                    );
+                    for row in rows {
+                        let mut original = e.get(&row.id).unwrap();
+                        if !include_steps {
+                            original.steps.clear();
+                        }
+                        assert_eq!(row.consumed_events, original.consumed_events);
+                        assert_eq!(
+                            serde_json::to_value(row).unwrap(),
+                            serde_json::to_value(original).unwrap()
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

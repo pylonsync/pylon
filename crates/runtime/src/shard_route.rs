@@ -541,6 +541,19 @@ fn reason_phrase(status: u16) -> &'static str {
     }
 }
 
+fn forward_agent() -> ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT
+        .get_or_init(|| {
+            ureq::AgentBuilder::new()
+                .timeout_connect(Duration::from_secs(3))
+                .timeout(Duration::from_secs(10))
+                .redirects(0)
+                .build()
+        })
+        .clone()
+}
+
 fn forward_http(mut request: Request, machine_id: &str, address: &str, client_ip: &str) -> u16 {
     let url = request.url().to_string();
     let method = request.method().as_str().to_string();
@@ -569,11 +582,7 @@ fn forward_http(mut request: Request, machine_id: &str, address: &str, client_ip
             "this machine is not in the shard directory",
         );
     };
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(3))
-        .timeout(Duration::from_secs(10))
-        .redirects(0)
-        .build();
+    let agent = forward_agent();
     let mut call = agent
         .request(&method, &format!("{address}{url}"))
         .set(FORWARDED_HEADER, &forwarded);
@@ -604,6 +613,11 @@ fn forward_http(mut request: Request, machine_id: &str, address: &str, client_ip
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forwarding_reuses_connections_and_keeps_signatures_per_request() {
+        crate::shard_cluster::tests::assert_shared_agent(forward_agent, FORWARDED_HEADER);
+    }
 
     #[test]
     fn the_shard_of_a_request() {

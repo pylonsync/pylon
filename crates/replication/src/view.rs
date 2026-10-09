@@ -147,9 +147,12 @@ impl ViewHistory {
             for s in spawned {
                 self.spawn(s.id, tick, pos(s.q));
             }
-            if updated.windows(2).all(|w| w[0].id < w[1].id) {
-                // Ascending ids (what the replicator sends): one walk of the
-                // map in place of a lookup per update.
+            // Use lookups for sparse updates. Reserve the map walk for
+            // frames that update at least one in eight stored entities.
+            if updated.len() >= self.lives.len().div_ceil(8)
+                && updated.windows(2).all(|w| w[0].id < w[1].id)
+            {
+                // Dense ascending ids: one walk instead of repeated lookups.
                 let mut lives = self.lives.iter_mut().peekable();
                 for s in updated {
                     while lives.next_if(|(id, _)| **id < s.id).is_some() {}
@@ -177,14 +180,7 @@ impl ViewHistory {
     /// when the subscriber did not draw it then (not spawned yet, despawned,
     /// or never sent).
     pub fn position_at(&self, id: EntityId, render_tick: f64) -> Option<[f64; 3]> {
-        let lives = self.lives.get(&id)?;
-        let life = lives
-            .iter()
-            .find(|l| l.despawn_tick.is_none_or(|d| (d as f64) > render_tick))?;
-        if (life.spawn_tick as f64) > render_tick {
-            return None;
-        }
-        Some(place(&life.samples, render_tick))
+        place_entity(self.lives.get(&id)?, render_tick)
     }
 
     /// Every entity the subscriber drew at `render_tick` within `radius` of
@@ -197,8 +193,8 @@ impl ViewHistory {
     ) -> Vec<(EntityId, [f64; 3])> {
         let r2 = radius * radius;
         let mut out = Vec::new();
-        for id in self.lives.keys() {
-            if let Some(p) = self.position_at(*id, render_tick) {
+        for (id, lives) in &self.lives {
+            if let Some(p) = place_entity(lives, render_tick) {
                 let d = [p[0] - center[0], p[1] - center[1], p[2] - center[2]];
                 if d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= r2 {
                     out.push((*id, p));
@@ -287,6 +283,16 @@ impl ViewHistory {
             !lives.is_empty()
         });
     }
+}
+
+fn place_entity(lives: &[Life], render_tick: f64) -> Option<[f64; 3]> {
+    let life = lives
+        .iter()
+        .find(|l| l.despawn_tick.is_none_or(|d| (d as f64) > render_tick))?;
+    if (life.spawn_tick as f64) > render_tick {
+        return None;
+    }
+    Some(place(&life.samples, render_tick))
 }
 
 /// The client interpolators' rule: between the last sample at or before
@@ -453,5 +459,68 @@ mod tests {
             v.entities_near([0.0, 0.0, 0.0], 20.0, 2.0),
             vec![(1, [0.0, 0.0, 0.0]), (2, [10.0, 0.0, 0.0])]
         );
+    }
+
+    #[test]
+    fn sparse_and_dense_updates_match_individual_lookups() {
+        let spawned: Vec<_> = (0..256).map(|id| s(id, [id as i64, 0, 0])).collect();
+        let mut history = ViewHistory::new(10);
+        history.record(1, 0.5, true, &spawned, &[], &[]);
+        let mut expected = history.clone();
+        for tick in 2..=40 {
+            // Include both sides of the density threshold and a missing id.
+            let count = [1, 2, 31, 32, 33, 128, 256][tick as usize % 7];
+            let updated: Vec<_> = (0..count)
+                .map(|i| Sent {
+                    components_changed: tick % 3 == 0,
+                    ..s(256 - count + i, [i as i64, tick as i64, -1])
+                })
+                .chain([s(999, [0; 3])])
+                .collect();
+            let despawned = if tick == 5 { vec![255] } else { vec![] };
+            let respawned = if tick == 10 {
+                vec![s(255, [0; 3])]
+            } else {
+                vec![]
+            };
+            history.record(tick, 0.5, false, &respawned, &updated, &despawned);
+            // Reverse order forces the lookup path, including for dense frames.
+            let reversed: Vec<_> = updated.iter().rev().copied().collect();
+            expected.record(tick, 0.5, false, &respawned, &reversed, &despawned);
+            assert_eq!(
+                history.ids().collect::<Vec<_>>(),
+                expected.ids().collect::<Vec<_>>()
+            );
+            for (id, lives) in &history.lives {
+                let wanted = &expected.lives[id];
+                assert_eq!(lives.len(), wanted.len());
+                for (actual, expected) in lives.iter().zip(wanted) {
+                    assert_eq!(actual.spawn_tick, expected.spawn_tick);
+                    assert_eq!(actual.despawn_tick, expected.despawn_tick);
+                    assert_eq!(actual.samples, expected.samples);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nearby_queries_match_positions_across_entity_lifetimes() {
+        let mut history = ViewHistory::new(20);
+        history.record(1, 1.0, true, &[s(1, [0; 3]), s(2, [10, 0, 0])], &[], &[]);
+        history.record(3, 1.0, false, &[], &[s(2, [0, 10, 0])], &[1]);
+        history.record(5, 1.0, false, &[s(1, [0, 0, 10]), s(3, [20; 3])], &[], &[]);
+        for tick in [0.0, 1.0, 2.5, 3.0, 4.0, 5.0, 6.0] {
+            for radius in [0.0, 10.0, 30.0, -10.0, f64::INFINITY, f64::NAN] {
+                let expected: Vec<_> = history
+                    .ids()
+                    .filter_map(|id| {
+                        let p = history.position_at(id, tick)?;
+                        let distance = p[0] * p[0] + p[1] * p[1] + p[2] * p[2];
+                        (distance <= radius * radius).then_some((id, p))
+                    })
+                    .collect();
+                assert_eq!(history.entities_near([0.0; 3], radius, tick), expected);
+            }
+        }
     }
 }

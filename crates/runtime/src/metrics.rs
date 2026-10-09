@@ -126,7 +126,7 @@ pub struct Metrics {
 /// response site threading them in. Set at request receive in
 /// `server.rs`, consumed on `record_request`.
 struct CurrentRequest {
-    url: String,
+    path: String,
     started: std::time::Instant,
     /// Request body size in bytes — stamped by `set_current_request_bytes`
     /// after the body read in the central dispatch loop. Pre-fix the
@@ -143,15 +143,17 @@ thread_local! {
     static CURRENT_REQUEST: std::cell::Cell<Option<CurrentRequest>> = const { std::cell::Cell::new(None) };
 }
 
-/// Stash the in-flight request URL + start time so the next
-/// `record_request` call on this thread can emit a complete access
-/// log line. Pass `None` for paths we want to skip in the log
-/// (currently /health + /metrics — they're called by liveness probes
-/// and Prometheus scrapers and would drown out real traffic).
+/// Remove query strings and fragments, which can contain credentials.
+pub(crate) fn request_log_path(url: &str) -> &str {
+    url.split(['?', '#']).next().unwrap_or(url)
+}
+
+/// Store the request path and start time for the response log.
+/// Discard query strings before storing the context.
 pub fn set_current_request(url: &str, started: std::time::Instant) {
     CURRENT_REQUEST.with(|cell| {
         cell.set(Some(CurrentRequest {
-            url: url.to_string(),
+            path: request_log_path(url).to_string(),
             started,
             request_bytes: 0,
             response_bytes: 0,
@@ -249,12 +251,11 @@ impl Metrics {
         match ctx {
             Some(c) => {
                 let dur_ms = c.started.elapsed().as_millis();
-                tracing::info!("← {} {} {} in {}ms", method, c.url, status, dur_ms);
-                let path = c.url.split('?').next().unwrap_or(&c.url);
+                tracing::info!("← {} {} {} in {}ms", method, c.path, status, dur_ms);
                 let cpu_ms = u32::try_from(dur_ms).unwrap_or(u32::MAX);
                 record_log_row(
                     method,
-                    path,
+                    &c.path,
                     status,
                     cpu_ms,
                     c.request_bytes,
@@ -361,6 +362,7 @@ pub fn record_log_row(
     bytes_out: u32,
     error: Option<&str>,
 ) {
+    let path = request_log_path(path);
     // Fire-and-forget into the shipper's background channel. `record()`
     // returns at once even on backpressure (it drops the event), so the cost
     // on the hot path is one channel try_send.
@@ -392,6 +394,24 @@ pub fn record_log_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_context_discards_query_credentials() {
+        for (url, expected) in [
+            (
+                "/auth/callback?code=synthetic-secret&state=private",
+                "/auth/callback",
+            ),
+            ("/login#access_token=synthetic-secret", "/login"),
+            ("/api/items?filter%5Bkey%5D=secret#fragment", "/api/items"),
+            ("/api/items", "/api/items"),
+        ] {
+            assert_eq!(request_log_path(url), expected);
+            set_current_request(url, Instant::now());
+            let context = CURRENT_REQUEST.take().unwrap();
+            assert_eq!(context.path, expected);
+        }
+    }
 
     #[test]
     fn new_metrics_are_zero() {

@@ -275,6 +275,7 @@ export class EntityTable {
       this.datagramFrames.clear();
       this.spawnTicks.clear();
     }
+    const precisionChanged = precision !== this.precision;
     this.precision = precision;
     const summary: ReplicationSummary = { full, spawned: [], updated: [], despawned: [] };
 
@@ -324,15 +325,20 @@ export class EntityTable {
       if (mask & MASK_Y) e.qy = toSafe(BigInt(e.qy) + r.zigzag(), "position");
       if (mask & MASK_Z) e.qz = toSafe(BigInt(e.qz) + r.zigzag(), "position");
       if (mask & MASK_COMPONENTS) readComponents(r, e.components);
+      e.x = e.qx * precision;
+      e.y = e.qy * precision;
+      e.z = e.qz * precision;
       summary.updated.push(last);
     }
     if (!r.done) throw new ReplicationError("trailing bytes");
 
-    // Positions follow the frame's precision (a full frame may change it).
-    for (const e of this.entities.values()) {
-      e.x = e.qx * precision;
-      e.y = e.qy * precision;
-      e.z = e.qz * precision;
+    // A precision change also affects entities absent from this frame.
+    if (precisionChanged) {
+      for (const e of this.entities.values()) {
+        e.x = e.qx * precision;
+        e.y = e.qy * precision;
+        e.z = e.qz * precision;
+      }
     }
     if (tick !== undefined) this.streamTick = tick;
     return summary;

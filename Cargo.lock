@@ -3301,6 +3301,7 @@ name = "pylon-plugin"
 version = "0.22.25"
 dependencies = [
  "argon2",
+ "hashlink",
  "hmac 0.12.1",
  "pylon-auth",
  "pylon-kernel",
@@ -3378,6 +3379,7 @@ dependencies = [
  "chrono",
  "fast_image_resize",
  "futures-util",
+ "hashlink",
  "hmac 0.12.1",
  "htmd",
  "image",

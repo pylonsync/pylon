@@ -833,12 +833,12 @@ impl LoroStore {
     ) -> Result<(), LoroStoreError> {
         let snap = encode_snapshot(doc);
         let now = chrono_now_iso();
-        conn.execute(
+        conn.prepare_cached(
             "INSERT OR REPLACE INTO _pylon_crdt_snapshots
                 (entity, row_id, snapshot, updated_at)
              VALUES (?1, ?2, ?3, ?4)",
-            params![entity, row_id, snap, now],
         )
+        .and_then(|mut statement| statement.execute(params![entity, row_id, snap, now]))
         .map(|_| ())
         .map_err(|e| LoroStoreError::Storage(format!("persist snapshot: {e}")))
     }
@@ -979,11 +979,10 @@ impl LoroStore {
         entity: &str,
         row_id: &str,
     ) -> Result<bool, LoroStoreError> {
-        conn.query_row(
+        conn.prepare_cached(
             "SELECT EXISTS (SELECT 1 FROM _pylon_crdt_snapshots WHERE entity = ?1 AND row_id = ?2)",
-            params![entity, row_id],
-            |r| r.get(0),
         )
+        .and_then(|mut statement| statement.query_row(params![entity, row_id], |r| r.get(0)))
         .map_err(|e| LoroStoreError::Storage(format!("read snapshot: {e}")))
     }
 
@@ -1163,6 +1162,43 @@ mod tests {
                 kind: CrdtFieldKind::LwwNumber,
             },
         ]
+    }
+
+    #[test]
+    fn cached_snapshot_statements_observe_replacement_and_rollback() {
+        let conn = open_test_db();
+        let store = LoroStore::new();
+        assert!(!store.has_snapshot(&conn, "Doc", "row").unwrap());
+        let doc = LoroDoc::new();
+        pylon_crdt::root_map(&doc).insert("title", "first").unwrap();
+        store.persist_snapshot(&conn, "Doc", "row", &doc).unwrap();
+        assert!(store.has_snapshot(&conn, "Doc", "row").unwrap());
+        let before: Vec<u8> = conn
+            .query_row("SELECT snapshot FROM _pylon_crdt_snapshots", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let tx = conn.unchecked_transaction().unwrap();
+        pylon_crdt::root_map(&doc)
+            .insert("title", "second")
+            .unwrap();
+        store.persist_snapshot(&tx, "Doc", "row", &doc).unwrap();
+        let during: Vec<u8> = tx
+            .query_row("SELECT snapshot FROM _pylon_crdt_snapshots", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_ne!(before, during);
+        tx.execute("DELETE FROM _pylon_crdt_snapshots", []).unwrap();
+        assert!(!store.has_snapshot(&tx, "Doc", "row").unwrap());
+        tx.rollback().unwrap();
+        assert!(store.has_snapshot(&conn, "Doc", "row").unwrap());
+        let after: Vec<u8> = conn
+            .query_row("SELECT snapshot FROM _pylon_crdt_snapshots", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(before, after);
     }
 
     #[test]

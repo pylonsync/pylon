@@ -15,8 +15,33 @@ use postgres::types::ToSql;
 
 use crate::pg_exec::PgConn;
 use crate::postgres::quote_ident_pub as quote_ident;
-use crate::vector::{score, unpack_f32, TopK, VectorMetric};
+use crate::vector::{decode_candidate, Scorer, TopK, VectorMetric};
 use crate::StorageError;
+
+/// Fetch vector hit documents in one query without embedding columns.
+pub fn fetch_documents<C: PgConn>(
+    conn: &mut C,
+    entity: &pylon_kernel::ManifestEntity,
+    ids: &[String],
+) -> Result<Vec<serde_json::Value>, StorageError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let columns = crate::vector::document_columns(entity)
+        .into_iter()
+        .map(quote_ident)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT {columns} FROM {} WHERE \"id\" = ANY($1)",
+        quote_ident(&entity.name)
+    );
+    let rows = conn.query(&sql, &[&ids]).map_err(|e| StorageError {
+        code: "VECTOR_FETCH_FAILED".into(),
+        message: e.to_string(),
+    })?;
+    Ok(rows.iter().map(crate::postgres::row_to_json_pub).collect())
+}
 
 /// Exact k-NN scan; returns `(id, score)` best-first, at most `limit`.
 /// Filter keys are already validated against the manifest by the
@@ -72,40 +97,39 @@ pub fn scan_topk<C: PgConn>(
         clauses.join(" AND ")
     );
     let param_refs: Vec<&(dyn ToSql + Sync)> = params.iter().map(|b| b.as_ref() as _).collect();
-    let rows = conn.query(&sql, &param_refs).map_err(|e| StorageError {
-        code: "VECTOR_SCAN_FAILED".into(),
-        message: format!("vector scan on {entity}.{field}: {e}"),
-    })?;
-
     let mut topk = TopK::new(metric, limit);
+    let mut candidate = Vec::with_capacity(query_vec.len());
+    let scorer = Scorer::new(metric, query_vec);
     let mut skipped = 0usize;
-    for row in rows {
-        let id: String = match row.try_get(0) {
+    conn.query_each(&sql, &param_refs, &mut |row| {
+        let id: &str = match row.try_get(0) {
             Ok(v) => v,
-            Err(_) => continue,
+            Err(_) => return,
         };
-        let blob: Vec<u8> = match row.try_get(1) {
+        let blob: &[u8] = match row.try_get(1) {
             Ok(v) => v,
             Err(_) => {
                 skipped += 1;
-                continue;
+                return;
             }
         };
-        let Some(candidate) = unpack_f32(&blob) else {
+        if !decode_candidate(blob, query_vec.len(), &mut candidate) {
             skipped += 1;
-            continue;
-        };
-        if candidate.len() != query_vec.len() {
-            skipped += 1;
-            continue;
+            return;
         }
-        let s = score(metric, query_vec, &candidate);
+        let s = scorer.score(&candidate);
         if s.is_nan() {
             skipped += 1;
-            continue;
+            return;
         }
-        topk.push(id, s);
-    }
+        if topk.accepts(s) {
+            topk.push(id.to_owned(), s);
+        }
+    })
+    .map_err(|e| StorageError {
+        code: "VECTOR_SCAN_FAILED".into(),
+        message: format!("vector scan on {entity}.{field}: {e}"),
+    })?;
     if skipped > 0 {
         tracing::warn!(
             "[vector] pg scan on {entity}.{field} skipped {skipped} rows with undecodable, wrong-dimension, or non-finite embeddings"

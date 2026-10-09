@@ -53,13 +53,6 @@ const OWN_TAB = "__self__";
 export interface SubscriptionCoordinatorContext {
   isLeader(): boolean;
   broadcastToTabs(payload: unknown): void;
-  /** Leader-side replay of the cached CRDT snapshot for a row (see
-   *  SyncEngine.lastCrdtFrames). Called when a follower registers
-   *  interest in a row whose WS subscription is ALREADY alive — the
-   *  server only ships its catch-up snapshot on a fresh
-   *  `crdt-subscribe`, so without the replay the new tab's doc stays
-   *  empty until the next live edit. */
-  replayCrdtFrame?(entity: string, rowId: string): void;
 }
 
 interface ReactiveSpec {
@@ -124,8 +117,8 @@ export class SubscriptionCoordinator {
     this.crdtSubscribers.set(key, prev + 1);
     if (prev !== 0) return;
     if (this.ctx.isLeader()) {
-      // Leader: only send the WS subscribe if no follower had already
-      // forwarded one (in which case the WS sub is already alive).
+      // A first local consumer also needs a full document if only
+      // followers held the existing subscription.
       const hasFwd = (this.crdtForwarders.get(key)?.size ?? 0) > 0;
       if (!hasFwd) {
         this.serverSubs.register(key, {
@@ -133,6 +126,8 @@ export class SubscriptionCoordinator {
           entity,
           rowId,
         });
+      } else {
+        this.serverSubs.refresh(key);
       }
     } else {
       // Follower: ask the leader to subscribe on our behalf. The leader
@@ -279,6 +274,7 @@ export class SubscriptionCoordinator {
         fwd = new Set();
         this.crdtForwarders.set(key, fwd);
       }
+      if (fwd.has(fromTabId)) return;
       fwd.add(fromTabId);
       // Register if nothing else owned this key — local count and
       // forwarder set together gate the WS subscribe.
@@ -290,11 +286,9 @@ export class SubscriptionCoordinator {
           rowId,
         });
       } else {
-        // Subscription already alive → the server won't send a fresh
-        // catch-up snapshot. Replay the leader's cached one so the
-        // follower converges immediately instead of staying empty
-        // until the next live edit.
-        this.ctx.replayCrdtFrame?.(entity, rowId);
+        // Incremental frames cannot bootstrap a new document. Ask the
+        // server for a full snapshot and a fresh authorization check.
+        this.serverSubs.refresh(key);
       }
       return;
     }
@@ -473,6 +467,10 @@ export class SubscriptionCoordinator {
    *  binary frames to every tab when no follower cares about CRDT. */
   hasCrdtForwarders(): boolean {
     return this.crdtForwarders.size > 0;
+  }
+
+  hasCrdtForwardersFor(entity: string, rowId: string): boolean {
+    return (this.crdtForwarders.get(crdtKey(entity, rowId))?.size ?? 0) > 0;
   }
 }
 

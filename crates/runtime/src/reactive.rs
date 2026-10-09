@@ -159,6 +159,7 @@ pub struct ReactiveRegistry {
 struct RegistryInner {
     subs: HashMap<SubKey, Subscription>,
     by_entity: HashMap<String, HashSet<SubKey>>,
+    by_entity_read: HashMap<String, HashSet<SubKey>>,
     by_row: HashMap<(String, String), HashSet<SubKey>>,
     by_client: HashMap<u64, HashSet<SubKey>>,
     /// Sub keys waiting to be run (initial or re-run). VecDeque so
@@ -205,6 +206,7 @@ impl ReactiveRegistry {
             inner: Mutex::new(RegistryInner {
                 subs: HashMap::new(),
                 by_entity: HashMap::new(),
+                by_entity_read: HashMap::new(),
                 by_row: HashMap::new(),
                 by_client: HashMap::new(),
                 dirty: VecDeque::new(),
@@ -561,22 +563,16 @@ impl ReactiveRegistry {
             }
         }
 
-        // Entity-level matches: subs that opted into entity-only
-        // mode (no precise row deps) get matched here. Subs with
-        // precise row deps that didn't cover this row are skipped
-        // EXCEPT on Delete (the deleted row may not have been read
-        // individually but the handler still listed the entity).
-        if let Some(entity_subs) = inner.by_entity.get(&event.entity) {
-            let candidates: Vec<SubKey> = entity_subs.iter().cloned().collect();
-            for k in candidates {
-                if let Some(sub) = inner.subs.get(&k) {
-                    if sub.deps.entity_only() {
-                        to_mark.push(k);
-                    } else if matches!(event.kind, ChangeKind::Delete) {
-                        to_mark.push(k);
-                    }
-                }
-            }
+        // List/query reads depend on every row in their entity, including
+        // when the handler also reads individual rows. Deletes retain the
+        // conservative invalidation of all subscriptions for the entity.
+        let entity_index = if matches!(event.kind, ChangeKind::Delete) {
+            &inner.by_entity
+        } else {
+            &inner.by_entity_read
+        };
+        if let Some(entity_subs) = entity_index.get(&event.entity) {
+            to_mark.extend(entity_subs.iter().cloned());
         }
 
         // In-flight runs: any sub whose handler is currently
@@ -607,137 +603,128 @@ impl ReactiveRegistry {
     /// (initial or re-run) and pushing changed results.
     fn runner_loop(self: Arc<Self>) {
         loop {
-            // Take a snapshot of dirty work + their sub specs. Run
-            // outside the lock so FnOps::call doesn't block the
-            // change-event hot path. Mark each as `running` so
-            // on_change knows to re-dirty if a write lands during
-            // execution.
-            let batch: Vec<Subscription> = {
+            // Leave queued subscriptions pending until their handler starts.
+            // Only the active handler needs the concurrent-change guard.
+            let sub = {
                 let mut inner = self.inner.lock().unwrap();
-                while inner.dirty.is_empty() {
-                    inner = self
-                        .dirty_notify
-                        .wait_timeout(inner, Duration::from_secs(5))
-                        .unwrap()
-                        .0;
-                    if self.definitions_changed() {
-                        drop(inner);
-                        self.revalidate_all();
-                        inner = self.inner.lock().unwrap();
-                    }
-                    self.prune_limits();
-                }
-                // Coalesce: drain at most N at a time so a flood
-                // doesn't starve fresh subscribes. 64 is enough for
-                // any realistic per-tick burst.
-                let mut take = Vec::new();
-                for _ in 0..64 {
-                    match inner.dirty.pop_front() {
-                        Some(k) => {
-                            inner.pending.remove(&k);
-                            if let Some(sub) = inner.subs.get(&k).cloned() {
-                                inner.running.insert(k);
-                                take.push(sub);
-                            }
+                loop {
+                    while inner.dirty.is_empty() {
+                        inner = self
+                            .dirty_notify
+                            .wait_timeout(inner, Duration::from_secs(5))
+                            .unwrap()
+                            .0;
+                        if self.definitions_changed() {
+                            drop(inner);
+                            self.revalidate_all();
+                            inner = self.inner.lock().unwrap();
                         }
-                        None => break,
+                        self.prune_limits();
                     }
-                }
-                take
-            };
-
-            for sub in batch {
-                let key = sub.key();
-                // Every run passes the subscribe-time gate again: a reload
-                // may have removed the function or tightened its `auth`
-                // mode since the subscription was checked.
-                if let Some(fn_ops) = self.current_fn_ops() {
-                    if let Err((code, message)) =
-                        fn_gate(fn_ops.as_ref(), &sub.fn_name, &auth_context(&sub.auth))
-                    {
-                        if self.remove_if_current(&key, sub.version) {
-                            self.push_error(&sub.sub_id, sub.client_id, &code, &message);
-                        }
+                    let key = inner.dirty.pop_front().unwrap();
+                    // Unsubscribe leaves stale queue entries. A later
+                    // registration can reuse the same key, so consume it
+                    // only while pending to avoid a duplicate run.
+                    if !inner.pending.remove(&key) {
                         continue;
                     }
+                    if let Some(sub) = inner.subs.get(&key).cloned() {
+                        inner.running.insert(key);
+                        break sub;
+                    }
                 }
-                let outcome = self.run_handler(&sub.fn_name, sub.args.clone(), sub.auth.clone());
-                match outcome {
-                    HandlerResult::Ok(outcome) => {
-                        // Re-check that the sub still exists AND has
-                        // the same version we ran against. A stale
-                        // run (unsubscribed mid-run, or re-registered
-                        // with new args mid-run) must NOT push its
-                        // result — it would deliver the OLD answer
-                        // to either nobody or, worse, to the NEW
-                        // logical sub. Codex P1.2.
-                        let mut inner = self.inner.lock().unwrap();
-                        inner.running.remove(&key);
-                        let still_current = inner
-                            .subs
-                            .get(&key)
-                            .map(|s| s.version == sub.version)
-                            .unwrap_or(false);
-                        if !still_current {
-                            drop(inner);
-                            continue;
-                        }
-                        let prev_hash = sub.last_hash;
-                        let should_push = prev_hash.map(|h| h != outcome.hash).unwrap_or(true);
-                        // Update state INSIDE the lock so the new
-                        // deps are visible to the next on_change.
-                        update_deps_and_hash_locked(&mut inner, &key, &outcome);
-                        drop(inner);
-                        if should_push {
-                            self.push_result(&sub.sub_id, &outcome.value, sub.client_id);
-                        }
+            };
+
+            let key = sub.key();
+            // Every run passes the subscribe-time gate again: a reload
+            // may have removed the function or tightened its `auth`
+            // mode since the subscription was checked.
+            if let Some(fn_ops) = self.current_fn_ops() {
+                if let Err((code, message)) =
+                    fn_gate(fn_ops.as_ref(), &sub.fn_name, &auth_context(&sub.auth))
+                {
+                    if self.remove_if_current(&key, sub.version) {
+                        self.push_error(&sub.sub_id, sub.client_id, &code, &message);
                     }
-                    HandlerResult::Err { code, message } => {
-                        // Same version + currency check before
-                        // pushing an error frame — don't surface a
-                        // stale error to a freshly re-registered sub.
-                        let mut inner = self.inner.lock().unwrap();
-                        inner.running.remove(&key);
-                        let still_current = inner
-                            .subs
-                            .get(&key)
-                            .map(|s| s.version == sub.version)
-                            .unwrap_or(false);
+                    continue;
+                }
+            }
+            let outcome = self.run_handler(&sub.fn_name, sub.args.clone(), sub.auth.clone());
+            match outcome {
+                HandlerResult::Ok(outcome) => {
+                    // Re-check that the sub still exists AND has
+                    // the same version we ran against. A stale
+                    // run (unsubscribed mid-run, or re-registered
+                    // with new args mid-run) must NOT push its
+                    // result — it would deliver the OLD answer
+                    // to either nobody or, worse, to the NEW
+                    // logical sub. Codex P1.2.
+                    let mut inner = self.inner.lock().unwrap();
+                    inner.running.remove(&key);
+                    let still_current = inner
+                        .subs
+                        .get(&key)
+                        .map(|s| s.version == sub.version)
+                        .unwrap_or(false);
+                    if !still_current {
                         drop(inner);
-                        if !still_current {
-                            continue;
-                        }
-                        // Initial-run errors get surfaced as a
-                        // reactive-error frame so the React hook can
-                        // stop spinning. Re-run errors (where we'd
-                        // already pushed a successful result) get
-                        // logged + dropped — the client keeps showing
-                        // the last good value rather than flipping to
-                        // an error state on a transient handler glitch.
-                        if sub.last_hash.is_none() {
-                            self.push_error(&sub.sub_id, sub.client_id, &code, &message);
-                        }
+                        continue;
                     }
-                    HandlerResult::RuntimeUnavailable => {
-                        let mut inner = self.inner.lock().unwrap();
-                        inner.running.remove(&key);
-                        let still_current = inner
-                            .subs
-                            .get(&key)
-                            .map(|s| s.version == sub.version)
-                            .unwrap_or(false);
-                        drop(inner);
-                        if !still_current {
-                            continue;
-                        }
-                        if sub.last_hash.is_none() {
-                            self.push_error(
-                                &sub.sub_id,
-                                sub.client_id,
-                                "REACTIVE_UNAVAILABLE",
-                                "function runtime not configured",
-                            );
-                        }
+                    let prev_hash = sub.last_hash;
+                    let should_push = prev_hash.map(|h| h != outcome.hash).unwrap_or(true);
+                    // Update state INSIDE the lock so the new
+                    // deps are visible to the next on_change.
+                    update_deps_and_hash_locked(&mut inner, &key, &outcome);
+                    drop(inner);
+                    if should_push {
+                        self.push_result(&sub.sub_id, &outcome.value, sub.client_id);
+                    }
+                }
+                HandlerResult::Err { code, message } => {
+                    // Same version + currency check before
+                    // pushing an error frame — don't surface a
+                    // stale error to a freshly re-registered sub.
+                    let mut inner = self.inner.lock().unwrap();
+                    inner.running.remove(&key);
+                    let still_current = inner
+                        .subs
+                        .get(&key)
+                        .map(|s| s.version == sub.version)
+                        .unwrap_or(false);
+                    drop(inner);
+                    if !still_current {
+                        continue;
+                    }
+                    // Initial-run errors get surfaced as a
+                    // reactive-error frame so the React hook can
+                    // stop spinning. Re-run errors (where we'd
+                    // already pushed a successful result) get
+                    // logged + dropped — the client keeps showing
+                    // the last good value rather than flipping to
+                    // an error state on a transient handler glitch.
+                    if sub.last_hash.is_none() {
+                        self.push_error(&sub.sub_id, sub.client_id, &code, &message);
+                    }
+                }
+                HandlerResult::RuntimeUnavailable => {
+                    let mut inner = self.inner.lock().unwrap();
+                    inner.running.remove(&key);
+                    let still_current = inner
+                        .subs
+                        .get(&key)
+                        .map(|s| s.version == sub.version)
+                        .unwrap_or(false);
+                    drop(inner);
+                    if !still_current {
+                        continue;
+                    }
+                    if sub.last_hash.is_none() {
+                        self.push_error(
+                            &sub.sub_id,
+                            sub.client_id,
+                            "REACTIVE_UNAVAILABLE",
+                            "function runtime not configured",
+                        );
                     }
                 }
             }
@@ -775,12 +762,7 @@ impl ReactiveRegistry {
     }
 
     fn push_result(&self, sub_id: &str, value: &serde_json::Value, client_id: u64) {
-        let frame = serde_json::json!({
-            "type": "reactive-result",
-            "sub_id": sub_id,
-            "result": value,
-        })
-        .to_string();
+        let frame = result_frame(sub_id, value);
         self.ws_hub.send_text_to(client_id, &frame);
     }
 
@@ -900,7 +882,13 @@ fn update_deps_and_hash_locked(inner: &mut RegistryInner, key: &SubKey, outcome:
     let Some(sub_cloned) = inner.subs.get(key).cloned() else {
         return;
     };
+    // A change during execution can already have queued another run.
+    // Replacing dependency indexes must keep that pending work.
+    let pending = inner.pending.contains(key);
     remove_locked(inner, key);
+    if pending {
+        inner.pending.insert(key.clone());
+    }
     let new_sub = Subscription {
         deps: outcome.deps.clone(),
         last_hash: Some(outcome.hash),
@@ -918,6 +906,13 @@ fn index_locked(inner: &mut RegistryInner, sub: &Subscription) {
             .entry(entity.clone())
             .or_default()
             .insert(key.clone());
+        if sub.deps.reads_entity(entity) {
+            inner
+                .by_entity_read
+                .entry(entity.clone())
+                .or_default()
+                .insert(key.clone());
+        }
     }
     for row in &sub.deps.rows {
         inner
@@ -938,6 +933,12 @@ fn remove_locked(inner: &mut RegistryInner, key: &SubKey) {
         return;
     };
     for entity in &sub.deps.entities {
+        if let Some(subs) = inner.by_entity_read.get_mut(entity) {
+            subs.remove(key);
+            if subs.is_empty() {
+                inner.by_entity_read.remove(entity);
+            }
+        }
         if let Some(s) = inner.by_entity.get_mut(entity) {
             s.remove(key);
             if s.is_empty() {
@@ -960,16 +961,42 @@ fn remove_locked(inner: &mut RegistryInner, key: &SubKey) {
         }
     }
     inner.pending.remove(key);
-    // dirty VecDeque keeps the stale entry; the runner skips it
-    // when subs.get returns None.
+    // Leave the queue entry in place. The runner skips it when this
+    // key is no longer pending.
 }
 
 fn hash_value(value: &serde_json::Value) -> u64 {
     use std::hash::Hasher;
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    let s = value.to_string();
-    h.write(s.as_bytes());
-    h.finish()
+    struct HashWriter(std::collections::hash_map::DefaultHasher);
+    impl std::io::Write for HashWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.write(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = HashWriter(std::collections::hash_map::DefaultHasher::new());
+    serde_json::to_writer(&mut writer, value).expect("JSON hashing cannot fail");
+    writer.0.finish()
+}
+
+fn result_frame(sub_id: &str, value: &serde_json::Value) -> String {
+    #[derive(serde::Serialize)]
+    struct ResultFrame<'a> {
+        result: &'a serde_json::Value,
+        sub_id: &'a str,
+        #[serde(rename = "type")]
+        kind: &'static str,
+    }
+    serde_json::to_string(&ResultFrame {
+        result: value,
+        sub_id,
+        kind: "reactive-result",
+    })
+    .expect("JSON result serialization cannot fail")
 }
 
 // ---------------------------------------------------------------------------
@@ -980,6 +1007,28 @@ fn hash_value(value: &serde_json::Value) -> u64 {
 mod tests {
     use super::*;
     use pylon_policy::PolicyEngine;
+
+    #[test]
+    fn result_hash_and_frame_preserve_serialized_bytes() {
+        use std::hash::Hasher;
+        let values = [
+            serde_json::Value::Null,
+            serde_json::json!(true),
+            serde_json::json!([0, -1, u64::MAX, 1.25, -0.0, 1e100]),
+            serde_json::json!({"text": "\"\\\n\tこんにちは", "nested": [{"a": [], "b": {}}]}),
+            serde_json::json!({"rows": (0..1024).map(|i| serde_json::json!({"id": i, "body": "x".repeat(2048)})).collect::<Vec<_>>()}),
+        ];
+        for value in values {
+            let mut previous = std::collections::hash_map::DefaultHasher::new();
+            previous.write(value.to_string().as_bytes());
+            assert_eq!(hash_value(&value), previous.finish());
+            let sub_id = "subscription\"\\\nα";
+            let expected =
+                serde_json::json!({"type": "reactive-result", "sub_id": sub_id, "result": &value})
+                    .to_string();
+            assert_eq!(result_frame(sub_id, &value), expected);
+        }
+    }
 
     fn make_hub() -> Arc<WsHub> {
         let manifest = pylon_kernel::AppManifest::default();
@@ -1202,6 +1251,8 @@ mod tests {
                     duration_ms: 0.0,
                     outcome: pylon_functions::trace::FnOutcome::Ok { value: None },
                     ops: vec![],
+                    ops_omitted: 0,
+                    schedules_omitted: 0,
                     stream_bytes: 0,
                     stream_chunks: 0,
                     schedules: vec![],
@@ -1239,6 +1290,163 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "timed out: {what}");
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    struct BlockingFns {
+        base: Arc<ReloadableFns>,
+        calls: Mutex<Vec<serde_json::Value>>,
+        entered: std::sync::mpsc::Sender<()>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl pylon_router::FnOps for BlockingFns {
+        fn get_fn(&self, name: &str) -> Option<pylon_functions::registry::FnDef> {
+            pylon_router::FnOps::get_fn(self.base.as_ref(), name)
+        }
+
+        fn list_fns(&self) -> Vec<pylon_functions::registry::FnDef> {
+            pylon_router::FnOps::list_fns(self.base.as_ref())
+        }
+
+        fn call(
+            &self,
+            fn_name: &str,
+            args: serde_json::Value,
+            auth: AuthInfo,
+            on_stream: Option<pylon_functions::runner::StreamCallback>,
+            request: Option<pylon_functions::protocol::RequestInfo>,
+            stream_id: Option<String>,
+        ) -> Result<
+            (serde_json::Value, pylon_functions::trace::FnTrace),
+            pylon_functions::runner::FnCallError,
+        > {
+            let first = {
+                let mut calls = self.calls.lock().unwrap();
+                calls.push(args.clone());
+                calls.len() == 1
+            };
+            if first {
+                self.entered.send(()).unwrap();
+                self.release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("release blocked handler");
+            }
+            pylon_router::FnOps::call(
+                self.base.as_ref(),
+                fn_name,
+                args,
+                auth,
+                on_stream,
+                request,
+                stream_id,
+            )
+        }
+
+        fn recent_traces(&self, _limit: usize) -> Vec<pylon_functions::trace::FnTrace> {
+            vec![]
+        }
+    }
+
+    fn blocking_fns() -> (
+        Arc<BlockingFns>,
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let fns = Arc::new(BlockingFns {
+            base: ReloadableFns::new(vec![def(
+                "feed",
+                pylon_functions::protocol::FnType::Query,
+                pylon_functions::registry::FnAuthMode::Public,
+                false,
+            )]),
+            calls: Mutex::new(Vec::new()),
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
+        });
+        (fns, entered_rx, release_tx)
+    }
+
+    fn wait_for_idle(reg: &ReactiveRegistry) {
+        wait_until("reactive queue drained", || {
+            let inner = reg.inner.lock().unwrap();
+            inner.dirty.is_empty() && inner.pending.is_empty() && inner.running.is_empty()
+        });
+    }
+
+    #[test]
+    fn unrelated_change_reruns_only_the_active_handler() {
+        let reg = ReactiveRegistry::new(make_hub());
+        let (fns, entered, release) = blocking_fns();
+        reg.set_fn_ops(fns.clone());
+        for i in 0..64 {
+            assert_eq!(
+                reg.register_pending(
+                    format!("s{i}"),
+                    "feed".into(),
+                    serde_json::json!(i),
+                    make_auth(),
+                    7,
+                ),
+                RegisterOutcome::Queued,
+            );
+        }
+        reg.start_runner();
+        entered.recv_timeout(Duration::from_secs(10)).unwrap();
+        {
+            let inner = reg.inner.lock().unwrap();
+            assert_eq!(inner.running.len(), 1);
+            assert_eq!(inner.pending.len(), 63);
+        }
+        // Repeated changes must coalesce while preserving the active
+        // handler's rerun, even before its first dependencies are known.
+        for _ in 0..3 {
+            reg.on_change(&dummy_change("Unrelated", "r1", ChangeKind::Insert));
+        }
+        release.send(()).unwrap();
+        wait_for_idle(&reg);
+        let calls = fns.calls.lock().unwrap();
+        assert_eq!(calls.len(), 65);
+        assert_eq!(
+            &calls[..64],
+            &(0..64).map(|i| serde_json::json!(i)).collect::<Vec<_>>()
+        );
+        assert_eq!(calls[64], serde_json::json!(0));
+    }
+
+    #[test]
+    fn queued_subscriptions_use_current_registration_and_skip_unsubscribed_work() {
+        let reg = ReactiveRegistry::new(make_hub());
+        let (fns, entered, release) = blocking_fns();
+        reg.set_fn_ops(fns.clone());
+        for i in 0..3 {
+            reg.register_pending(
+                format!("s{i}"),
+                "feed".into(),
+                serde_json::json!(i),
+                make_auth(),
+                7,
+            );
+        }
+        reg.start_runner();
+        entered.recv_timeout(Duration::from_secs(10)).unwrap();
+        reg.unsubscribe(7, "s1");
+        reg.register_pending(
+            "s2".into(),
+            "feed".into(),
+            serde_json::json!("replacement"),
+            make_auth(),
+            7,
+        );
+        release.send(()).unwrap();
+        wait_for_idle(&reg);
+        assert_eq!(
+            *fns.calls.lock().unwrap(),
+            vec![serde_json::json!(0), serde_json::json!("replacement")],
+        );
     }
 
     /// A public query subscribed anonymously, whose function then turns
@@ -1385,6 +1593,60 @@ mod tests {
     }
 
     #[test]
+    fn mixed_list_and_row_reads_match_changes_in_either_read_order() {
+        for row_entity in ["A", "B"] {
+            for list_first in [false, true] {
+                for kind in [ChangeKind::Insert, ChangeKind::Update, ChangeKind::Delete] {
+                    let reg = ReactiveRegistry::new(make_hub());
+                    let mut deps = DepSet::new();
+                    if list_first {
+                        deps.record_read("A", None);
+                    }
+                    deps.record_read(row_entity, Some("1"));
+                    if !list_first {
+                        deps.record_read("A", None);
+                    }
+                    install_sub_with_deps(&reg, 42, "mixed", deps);
+                    reg.on_change(&dummy_change("A", "unread-row", kind));
+                    assert!(reg
+                        .inner
+                        .lock()
+                        .unwrap()
+                        .pending
+                        .contains(&(42, "mixed".into())));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn replacing_dependencies_removes_old_entity_read_indexes() {
+        let reg = ReactiveRegistry::new(make_hub());
+        let key: SubKey = (42, "mixed".into());
+        let mut deps = DepSet::new();
+        deps.record_read("A", None);
+        deps.record_read("B", Some("1"));
+        install_sub_with_deps(&reg, key.0, &key.1, deps);
+        let mut next = DepSet::new();
+        next.record_read("A", Some("1"));
+        next.record_read("B", None);
+        update_deps_and_hash_locked(
+            &mut reg.inner.lock().unwrap(),
+            &key,
+            &make_outcome(next, serde_json::Value::Null),
+        );
+        reg.on_change(&dummy_change("A", "2", ChangeKind::Update));
+        assert!(!reg.inner.lock().unwrap().pending.contains(&key));
+        reg.on_change(&dummy_change("B", "2", ChangeKind::Update));
+        assert!(reg.inner.lock().unwrap().pending.contains(&key));
+        reg.unsubscribe(key.0, &key.1);
+        let inner = reg.inner.lock().unwrap();
+        assert!(inner.by_entity_read.is_empty());
+        assert!(inner.by_row.is_empty());
+        assert!(inner.by_entity.is_empty());
+    }
+
+    #[test]
     fn precise_row_sub_skips_unrelated_row_change() {
         let reg = ReactiveRegistry::new(make_hub());
         install_sub_with_deps(
@@ -1396,6 +1658,85 @@ mod tests {
         reg.on_change(&dummy_change("Recording", "r_2", ChangeKind::Update));
         let inner = reg.inner.lock().unwrap();
         assert!(!inner.pending.contains(&(42, "s1".to_string())));
+    }
+
+    #[test]
+    #[ignore = "release-mode performance benchmark"]
+    fn benchmark_result_serialization() {
+        use std::hash::Hasher;
+        use std::hint::black_box;
+        for count in [1, 1000] {
+            let value = serde_json::json!((0..count)
+                .map(|i| serde_json::json!({"id": i, "body": "x".repeat(2048)}))
+                .collect::<Vec<_>>());
+            for operation in ["old hash", "hash", "old frame", "frame"] {
+                let mut samples = Vec::new();
+                for _ in 0..7 {
+                    let start = std::time::Instant::now();
+                    for _ in 0..100 {
+                        match operation {
+                            "old hash" => {
+                                let mut h = std::collections::hash_map::DefaultHasher::new();
+                                h.write(black_box(&value).to_string().as_bytes());
+                                black_box(h.finish());
+                            }
+                            "hash" => {
+                                black_box(hash_value(black_box(&value)));
+                            }
+                            "old frame" => {
+                                black_box(serde_json::json!({"type": "reactive-result", "sub_id": "test", "result": black_box(&value)}).to_string());
+                            }
+                            _ => {
+                                black_box(result_frame("test", black_box(&value)));
+                            }
+                        }
+                    }
+                    samples.push(start.elapsed().as_secs_f64() * 1e6 / 100.0);
+                }
+                samples.sort_by(f64::total_cmp);
+                println!("{count} rows, {operation}: {:.3} us median", samples[3]);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "release-mode performance benchmark"]
+    fn benchmark_unrelated_row_change() {
+        use std::hint::black_box;
+        for count in [100, 10_000] {
+            let reg = ReactiveRegistry::new(make_hub());
+            for i in 0..count {
+                install_sub_with_deps(&reg, i, "row", dep_set(&["A"], &[("A", &i.to_string())]));
+            }
+            let event = dummy_change("A", "unrelated", ChangeKind::Update);
+            for indexed in [false, true] {
+                let mut samples = Vec::new();
+                for _ in 0..7 {
+                    let start = std::time::Instant::now();
+                    for _ in 0..100 {
+                        if indexed {
+                            reg.on_change(black_box(&event));
+                        } else {
+                            // The previous entity-wide candidate scan.
+                            let inner = reg.inner.lock().unwrap();
+                            let candidates: Vec<_> = inner.by_entity["A"].iter().cloned().collect();
+                            let matches: Vec<_> = candidates
+                                .into_iter()
+                                .filter(|key| inner.subs[key].deps.entity_only())
+                                .collect();
+                            black_box(matches);
+                        }
+                    }
+                    samples.push(start.elapsed().as_secs_f64() * 1e6 / 100.0);
+                }
+                samples.sort_by(f64::total_cmp);
+                println!(
+                    "{count} row subscriptions, indexed={indexed}: {:.3} us/change median",
+                    samples[3]
+                );
+            }
+            assert!(reg.inner.lock().unwrap().pending.is_empty());
+        }
     }
 
     #[test]

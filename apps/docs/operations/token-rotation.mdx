@@ -13,6 +13,11 @@ description: "Rotate PYLON_ADMIN_TOKEN without downtime, or in an emergency afte
 - Jobs / workflows / scheduler control planes
 - `/studio` in non-dev
 
+Bulk backup routes (`GET /api/export`, `GET /api/export/<entity>`, and
+`POST /api/import`) require admin access without an active tenant.
+These routes read or write raw data across tenants. An admin session with
+an active tenant cannot use them.
+
 Treat the token like an SSH key:
 
 - minimum 32 bytes of randomness

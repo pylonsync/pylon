@@ -100,6 +100,10 @@ const Org = entity("Org", {
 
 **`.serverOnly()`** — the field is stripped from every public response shape: `GET /api/entities/<entity>`, `GET /api/entities/<entity>/<id>`, the session-projection `/api/auth/session`, and sync push deltas. It stays readable from inside server functions via `ctx.db.*` so your handler can do internal work with it (e.g. webhook receivers look up `stripeCustomerId` from the Stripe customer id without leaking the value to clients).
 
+Public entity queries cannot use private fields for filters, lookups, sorting, or aggregates. These requests return `403 FIELD_NOT_PUBLIC`. The same rule applies to fields hidden by the User `expose` and `hide` settings. Search configuration must name declared public fields.
+
+Entity responses contain only `id` and current public schema fields. Removing a field from the schema hides any old SQL column with that name. Removed entities also stop sending sync events. Binary CRDT history has [additional restrictions](/clients/sync).
+
 **`.syncOmit()`** — the field is stripped from replication only: snapshot pulls, delta change events, WS fanout, and the reconcile's `sync=1` fetches. Direct reads keep it: `db.get`, entity lists, queries, SSR `serverData`. Use it for heavy-but-not-secret columns (multi-KB JSON blobs, render plans, generated markdown) that would otherwise ride into every browser's replica on every sync:
 
 ```ts

@@ -39,10 +39,10 @@ pub(crate) fn handle(
     // totals are computed across the full match-set via bitmap
     // intersection — exposing aggregates for row-scoped data leaks
     // "how many X does tenant Y have" even if individual hits were
-    // filtered. Probe with `None` to detect row-independence.
+    // filtered. Check the policy expression for row dependencies.
     let aggregate_safe = matches!(
         ctx.policy_engine
-            .check_entity_read(entity_name, ctx.auth_ctx, None),
+            .check_entity_read_aggregate(entity_name, ctx.auth_ctx),
         pylon_policy::PolicyResult::Allowed
     );
     if !aggregate_safe {

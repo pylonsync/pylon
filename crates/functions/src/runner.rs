@@ -189,11 +189,10 @@ pub type FileUrlSigner =
 /// Callback for `ctx.files.store` / `ctx.files.delete`. Takes the op and the
 /// calling user's auth; returns the JSON result or an error pair. Installed
 /// by the runtime, which owns the storage backend.
-pub type FilesOpHook = Box<
-    dyn Fn(&crate::protocol::FilesOp, &AuthInfo) -> Result<serde_json::Value, (String, String)>
-        + Send
-        + Sync,
->;
+pub type FilesOpHookFn = dyn Fn(&crate::protocol::FilesOp, &AuthInfo) -> Result<serde_json::Value, (String, String)>
+    + Send
+    + Sync;
+pub type FilesOpHook = Box<FilesOpHookFn>;
 
 /// Callback for `ctx.shards.ticket(...)`. Takes the request and the calling
 /// user's id, returns the signed ticket (or an error pair). Installed by the
@@ -222,7 +221,8 @@ pub type ShardOpHookFn = dyn Fn(&crate::protocol::ShardOpMessage) -> Result<serd
 /// about PYLON_EMAIL_PROVIDER + credentials). Without this hook installed,
 /// `ctx.email.send` returns a "transport not configured" error instead
 /// of silently no-op'ing — apps shouldn't think email sent when it didn't.
-pub type EmailHook = Box<dyn Fn(&pylon_kernel::EmailMessage) -> Result<(), String> + Send + Sync>;
+pub type EmailHookFn = dyn Fn(&pylon_kernel::EmailMessage) -> Result<(), String> + Send + Sync;
+pub type EmailHook = Box<EmailHookFn>;
 
 /// Hard cap on the total base64 attachment payload of one email (bytes of
 /// base64 text, ≈ 11MB of raw file data after the 4/3 inflation). Enforced
@@ -243,11 +243,10 @@ pub const EMAIL_MAX_ATTACHMENTS: usize = 20;
 /// Returns the full Anthropic-style response body (model + content +
 /// stop_reason + usage) on success; Err with a code + message that
 /// surfaces to the TS handler as a thrown error from `ctx.llm.complete`.
-pub type LlmHook = Box<
-    dyn Fn(&serde_json::Value, &AuthInfo) -> Result<serde_json::Value, (String, String)>
-        + Send
-        + Sync,
->;
+pub type LlmHookFn = dyn Fn(&serde_json::Value, &AuthInfo) -> Result<serde_json::Value, (String, String)>
+    + Send
+    + Sync;
+pub type LlmHook = Box<LlmHookFn>;
 
 /// Callback for `ctx.llm.stream(...)`. Same contract as [`LlmHook`],
 /// plus an `on_event` sink the host calls for each provider event as
@@ -277,11 +276,10 @@ pub type LlmStreamHook = Box<LlmStreamHookFn>;
 /// Callback for `ctx.llm.embed(texts)`. Same contract as [`LlmHook`]
 /// but routed to the embeddings provider (a separate config axis:
 /// PYLON_EMBEDDINGS_PROVIDER openai|voyage).
-pub type LlmEmbedHook = Box<
-    dyn Fn(&serde_json::Value, &AuthInfo) -> Result<serde_json::Value, (String, String)>
-        + Send
-        + Sync,
->;
+pub type LlmEmbedHookFn = dyn Fn(&serde_json::Value, &AuthInfo) -> Result<serde_json::Value, (String, String)>
+    + Send
+    + Sync;
+pub type LlmEmbedHook = Box<LlmEmbedHookFn>;
 
 /// Callback for `ctx.rooms.broadcast(room, topic, data)`. Returns
 /// whether the event reached a live room — `false` means the room had
@@ -317,11 +315,10 @@ pub type WorkflowOpHook = Box<
 /// Returns the JSON body to ship back to the TS handler on
 /// success; `Err((code, message))` propagates as a typed
 /// throwable with `err.code`.
-pub type ConnectionHook = Box<
-    dyn Fn(&str, &serde_json::Value, &AuthInfo) -> Result<serde_json::Value, (String, String)>
-        + Send
-        + Sync,
->;
+pub type ConnectionHookFn = dyn Fn(&str, &serde_json::Value, &AuthInfo) -> Result<serde_json::Value, (String, String)>
+    + Send
+    + Sync;
+pub type ConnectionHook = Box<ConnectionHookFn>;
 
 // ---------------------------------------------------------------------------
 // Function runner
@@ -337,14 +334,22 @@ pub type ConnectionHook = Box<
 /// take that dep (which would form a cycle through router →
 /// functions → policy → router). Runtime supplies a small
 /// adapter that calls into `pylon_policy::PolicyEngine`.
+/// Keeps read-local policy state alive until the database operation completes.
+pub trait PolicyReadScope {}
+
 pub trait PolicyGate: Send + Sync {
+    /// A read scope must not keep authorization answers across database operations.
+    fn begin_read(&self) -> Option<Box<dyn PolicyReadScope>> {
+        None
+    }
+
     /// Decide whether `op` on `entity` is allowed for the
     /// caller described by `auth`.
     ///
     /// - `existing` is the stored row for Update and Delete (None when
     ///   the row doesn't exist, and for Read and Insert).
     /// - `data` is the new row for Insert and the patch for Update
-    ///   (None for Read and Delete).
+    ///   or the returned row for Read (None for Delete).
     ///
     /// Returns `Ok(())` to allow, or `Err((code, reason))` to deny.
     /// The runner surfaces the denial as a `DataError` with the
@@ -359,11 +364,21 @@ pub trait PolicyGate: Send + Sync {
         data: Option<&serde_json::Value>,
     ) -> Result<(), (String, String)>;
 
+    /// Check access before a scan. Row rules are checked on the results.
+    fn check_read_scan(&self, entity: &str, auth: &AuthInfo) -> Result<(), (String, String)> {
+        self.check_op(PolicyOp::Read, entity, auth, None, None)
+    }
+
+    /// Reject searches whose aggregates can include forbidden rows.
+    fn check_read_aggregate(&self, entity: &str, auth: &AuthInfo) -> Result<(), (String, String)> {
+        self.check_op(PolicyOp::Read, entity, auth, None, None)
+    }
+
     /// Post-process the rows returned by a CLIENT-VISIBLE read (SSR
     /// `serverData.*`, whose results are serialized into the browser-visible
     /// `__PYLON_DATA__` hydration blob) so they get the SAME treatment as the
     /// entity/sync read API: drop rows the caller can't read per the entity's
-    /// read policy (per-ROW fence — `check_op` is only a coarse op-level gate),
+    /// read policy,
     /// and strip `server_only` / `passwordHash` fields before they cross to the
     /// client. Server-function `ctx.db.*` reads never call this (server-trust);
     /// neither does `serverData.unsafe.*`.
@@ -461,7 +476,7 @@ pub struct FnRunner {
     /// `ctx.runMutation`), and concurrent calls must not serialize here.
     nested_call_hook: Mutex<Option<Arc<NestedCallHookFn>>>,
     file_url_signer: Mutex<Option<FileUrlSigner>>,
-    files_op_hook: Mutex<Option<FilesOpHook>>,
+    files_op_hook: Mutex<Option<Arc<FilesOpHookFn>>>,
     shard_ticket_signer: Mutex<Option<ShardTicketSigner>>,
     /// An `Arc` so a call runs after the lock is released: a hook that
     /// panics must not poison it for every later `ctx.shards` call.
@@ -470,11 +485,11 @@ pub struct FnRunner {
     /// an email transport see `ctx.email.send` reject with an explicit
     /// error so silently-dropped invite emails surface in the action's
     /// error response.
-    email_hook: Mutex<Option<EmailHook>>,
+    email_hook: Mutex<Option<Arc<EmailHookFn>>>,
     /// Optional handler for `ctx.llm.complete(...)`. When unset, the
     /// hook returns an explicit "LLM_NOT_CONFIGURED" error so authors
     /// see the gap instead of getting a silent no-op.
-    llm_hook: Mutex<Option<LlmHook>>,
+    llm_hook: Mutex<Option<Arc<LlmHookFn>>>,
     /// Optional handler for `ctx.llm.stream(...)`. Unset behaves like
     /// `llm_hook` — an explicit LLM_NOT_CONFIGURED error. An `Arc` so a
     /// stream runs on its own thread without holding this lock (holding
@@ -482,7 +497,7 @@ pub struct FnRunner {
     llm_stream_hook: Mutex<Option<Arc<LlmStreamHookFn>>>,
     /// Optional handler for `ctx.llm.embed(...)`. Unset returns an
     /// explicit EMBEDDINGS_NOT_CONFIGURED error.
-    llm_embed_hook: Mutex<Option<LlmEmbedHook>>,
+    llm_embed_hook: Mutex<Option<Arc<LlmEmbedHookFn>>>,
     /// Hook for `ctx.rooms.broadcast(...)`. Wires server-originated
     /// room events to the runtime's RoomManager + presence notifier.
     room_broadcast_hook: Mutex<Option<RoomBroadcastHook>>,
@@ -490,7 +505,7 @@ pub struct FnRunner {
     audit_op_hook: Mutex<Option<AuditOpHook>>,
     /// Hook for `ctx.connections.*`. Wires authorize-url / get /
     /// list / disconnect calls to the runtime's ConnectionManager.
-    connection_hook: Mutex<Option<ConnectionHook>>,
+    connection_hook: Mutex<Option<Arc<ConnectionHookFn>>>,
     /// Timeout for `recv()` between protocol messages. A handler that doesn't
     /// reply within this window is treated as stuck.
     call_timeout: Mutex<Duration>,
@@ -620,10 +635,8 @@ impl FnRunner {
     /// crate stays free of that dep so the trait + indirection
     /// is the public seam.
     ///
-    /// Only consulted when `PYLON_STRICT_FN_POLICIES=1` is set in
-    /// the runner's environment. Without the env, the gate is a
-    /// no-op even if installed — letting operators opt in per
-    /// deploy without redeploying the binary.
+    /// Function database operations use this gate when
+    /// `PYLON_STRICT_FN_POLICIES=1`. Safe SSR reads always use it.
     pub fn set_policy_gate(&self, gate: std::sync::Arc<dyn PolicyGate>) {
         *self.policy_gate.lock().unwrap() = Some(gate);
     }
@@ -663,7 +676,7 @@ impl FnRunner {
     }
 
     pub fn set_files_op_hook(&self, hook: FilesOpHook) {
-        *self.files_op_hook.lock().unwrap() = Some(hook);
+        *self.files_op_hook.lock().unwrap() = Some(Arc::from(hook));
     }
 
     pub fn set_file_url_signer(&self, hook: FileUrlSigner) {
@@ -676,7 +689,7 @@ impl FnRunner {
     /// "EMAIL_TRANSPORT_NOT_CONFIGURED" error so authors see the gap
     /// instead of getting a silent no-op.
     pub fn set_email_hook(&self, hook: EmailHook) {
-        *self.email_hook.lock().unwrap() = Some(hook);
+        *self.email_hook.lock().unwrap() = Some(Arc::from(hook));
     }
 
     /// Install a callback for `ctx.llm.complete(...)` from any handler
@@ -685,7 +698,7 @@ impl FnRunner {
     /// the provider via the LlmClient + applies model-allowlist gating.
     /// When unset, `ctx.llm.complete` rejects with `LLM_NOT_CONFIGURED`.
     pub fn set_llm_hook(&self, hook: LlmHook) {
-        *self.llm_hook.lock().unwrap() = Some(hook);
+        *self.llm_hook.lock().unwrap() = Some(Arc::from(hook));
     }
 
     /// Install a callback for `ctx.llm.stream(...)`. Same gating as
@@ -698,7 +711,7 @@ impl FnRunner {
     /// Install a callback for `ctx.llm.embed(texts)`. When unset, the
     /// call rejects with `EMBEDDINGS_NOT_CONFIGURED`.
     pub fn set_llm_embed_hook(&self, hook: LlmEmbedHook) {
-        *self.llm_embed_hook.lock().unwrap() = Some(hook);
+        *self.llm_embed_hook.lock().unwrap() = Some(Arc::from(hook));
     }
 
     /// Install a callback for `ctx.rooms.broadcast(room, topic, data)`.
@@ -721,7 +734,7 @@ impl FnRunner {
     /// Install the `ctx.connections.*` hook. Without it, calls
     /// reject with `CONNECTIONS_NOT_CONFIGURED`.
     pub fn set_connection_hook(&self, hook: ConnectionHook) {
-        *self.connection_hook.lock().unwrap() = Some(hook);
+        *self.connection_hook.lock().unwrap() = Some(Arc::from(hook));
     }
 
     /// Start the TypeScript process and complete the startup handshake.
@@ -1930,7 +1943,7 @@ impl FnRunner {
                             ..auth_for_hooks.clone()
                         };
                         let result = {
-                            let hook = self.files_op_hook.lock().unwrap();
+                            let hook = self.files_op_hook.lock().unwrap().clone();
                             hook.as_ref().map(|cb| cb(&req.op, &auth_now))
                         };
                         match result {
@@ -2196,8 +2209,8 @@ impl FnRunner {
                     // enforce per-user model gating / spend accounting.
                     let auth_snapshot = current_auth_snapshot(&gate_auth, caller_is_admin);
                     let result: Result<serde_json::Value, (String, String)> = {
-                        let hook = self.llm_hook.lock().unwrap();
-                        match *hook {
+                        let hook = self.llm_hook.lock().unwrap().clone();
+                        match hook {
                             Some(ref cb) => cb(&req.request, &auth_snapshot),
                             None => Err((
                                 "LLM_NOT_CONFIGURED".into(),
@@ -2229,8 +2242,8 @@ impl FnRunner {
                     }
                     let auth_snapshot = current_auth_snapshot(&gate_auth, caller_is_admin);
                     let result: Result<serde_json::Value, (String, String)> = {
-                        let hook = self.llm_embed_hook.lock().unwrap();
-                        match *hook {
+                        let hook = self.llm_embed_hook.lock().unwrap().clone();
+                        match hook {
                             Some(ref cb) => cb(&req.request, &auth_snapshot),
                             None => Err((
                                 "EMBEDDINGS_NOT_CONFIGURED".into(),
@@ -2392,8 +2405,8 @@ impl FnRunner {
                     }
                     let auth_snapshot = current_auth_snapshot(&gate_auth, caller_is_admin);
                     let result: Result<serde_json::Value, (String, String)> = {
-                        let hook = self.connection_hook.lock().unwrap();
-                        match *hook {
+                        let hook = self.connection_hook.lock().unwrap().clone();
+                        match hook {
                             Some(ref cb) => cb(&req.op, &req.payload, &auth_snapshot),
                             None => Err((
                                 "CONNECTIONS_NOT_CONFIGURED".into(),
@@ -2442,8 +2455,8 @@ impl FnRunner {
                         attachments: req.attachments.clone(),
                     };
                     let result: Result<(), String> = {
-                        let hook = self.email_hook.lock().unwrap();
-                        match *hook {
+                        let hook = self.email_hook.lock().unwrap().clone();
+                        match hook {
                             Some(ref cb) => cb(&message),
                             None => Err(
                                 "ctx.email.send: no email transport configured (set PYLON_EMAIL_PROVIDER)".into(),
@@ -2460,14 +2473,14 @@ impl FnRunner {
                 }
 
                 TsMessage::Return(ret) if ret.call_id == call_id => {
-                    let fn_trace = trace.finish_ok(Some(ret.value.clone()));
+                    let fn_trace = trace.finish_ok_ref(&ret.value);
                     self.trace_log.push(fn_trace.clone());
                     return Ok((ret.value, fn_trace));
                 }
 
                 TsMessage::Error(err) if err.call_id == call_id => {
-                    let fn_trace = trace.finish_error(err.code.clone(), err.message.clone());
-                    self.trace_log.push(fn_trace.clone());
+                    let fn_trace = trace.finish_error_ref(&err.code, &err.message);
+                    self.trace_log.push(fn_trace);
                     return Err(FnCallError {
                         code: err.code,
                         message: err.message,
@@ -2974,21 +2987,32 @@ fn execute_db_op(
     Result<serde_json::Value, pylon_http::DataError>,
     Option<usize>,
 ) {
-    // Caller-aware policy gate. Three guards before consulting:
-    //   1. Gate must be installed (runtime wires the adapter at
-    //      startup; older embeddings / wasm leave it None).
-    //   2. Strict mode must be on (PYLON_STRICT_FN_POLICIES=1).
-    //   3. The op must NOT carry unsafe_op — `ctx.db.unsafe.*`
-    //      explicitly opts out of the gate.
-    //
-    // Admin callers bypass too — same convention as policy
-    // engine + function-level auth gate. Ops scripts + the
-    // `auth.elevate({ admin: true })` path inside webhooks
-    // need the bypass to work everywhere without wildcard
-    // policy expressions on every entity.
-    if let Some(gate) = policy_gate {
-        if strict_policies && !msg.unsafe_op && !auth.is_admin {
-            if let Some(op) = policy_op_for(msg.op) {
+    let strict_gate = policy_gate.filter(|_| {
+        strict_policies && !msg.unsafe_op && !(auth.is_admin && auth.tenant_id.is_none())
+    });
+    let is_read = policy_op_for(msg.op) == Some(PolicyOp::Read) || msg.op == DbOp::QueryGraph;
+    let read_gate = if msg.ssr_read && !msg.unsafe_op {
+        policy_gate
+    } else {
+        strict_gate
+    };
+    let _read_scope = if is_read {
+        read_gate.and_then(|gate| gate.begin_read())
+    } else {
+        None
+    };
+    if let Some(gate) = strict_gate {
+        if let Some(op) = policy_op_for(msg.op) {
+            if op == PolicyOp::Read {
+                let access = if matches!(msg.op, DbOp::Search | DbOp::VectorSearch) {
+                    gate.check_read_aggregate(&msg.entity, auth)
+                } else {
+                    gate.check_read_scan(&msg.entity, auth)
+                };
+                if let Err((code, message)) = access {
+                    return (Err(pylon_http::DataError { code, message }), None);
+                }
+            } else {
                 // Link/Unlink write the relation's FK column: `{fk: target}`
                 // or `{fk: null}`. An unknown relation yields no patch; the
                 // store call then fails with RELATION_NOT_FOUND.
@@ -3138,10 +3162,29 @@ fn execute_db_op(
         }
         DbOp::QueryGraph => {
             let query = msg.data.as_ref().cloned().unwrap_or(serde_json::json!({}));
-            match store.query_graph(&query) {
-                Ok(result) => (Ok(result), None),
-                Err(e) => (Err(e), None),
-            }
+            let graph_gate = if msg.ssr_read && !msg.unsafe_op {
+                policy_gate
+            } else {
+                strict_gate
+            };
+            let result = (|| {
+                if let Some(gate) = graph_gate {
+                    check_graph_access(store.manifest(), &query, gate, auth, 0)?;
+                }
+                let mut result = store.query_graph(&query)?;
+                if let Some(gate) = graph_gate {
+                    filter_graph_result(
+                        store.manifest(),
+                        &query,
+                        &mut result,
+                        gate,
+                        auth,
+                        msg.ssr_read,
+                    )?;
+                }
+                Ok(result)
+            })();
+            (result, None)
         }
         DbOp::Link => {
             let id = msg.id.as_deref().unwrap_or("");
@@ -3202,11 +3245,226 @@ fn execute_db_op(
             }
         }
     };
+    let outcome = if !msg.ssr_read {
+        if let Some(gate) = strict_gate {
+            filter_strict_read(msg, gate, auth, outcome)
+        } else {
+            outcome
+        }
+    } else {
+        outcome
+    };
     // SSR `serverData.*` reads are client-visible (serialized into
     // `__PYLON_DATA__`), so they get the entity/sync read treatment: per-row
     // policy filtering + `server_only`/`passwordHash` projection. `ctx.db.*`
     // (server-trust) and `serverData.unsafe.*` skip this.
     project_ssr_read(msg, policy_gate, auth, outcome)
+}
+
+fn policy_data_error((code, message): (String, String)) -> pylon_http::DataError {
+    pylon_http::DataError { code, message }
+}
+
+fn invalid_graph(message: &str) -> pylon_http::DataError {
+    pylon_http::DataError {
+        code: "INVALID_QUERY".into(),
+        message: message.into(),
+    }
+}
+
+/// Check every entity in the query, including empty relation results.
+fn check_graph_access(
+    manifest: &pylon_kernel::AppManifest,
+    query: &serde_json::Value,
+    gate: &dyn PolicyGate,
+    auth: &AuthInfo,
+    depth: usize,
+) -> Result<(), pylon_http::DataError> {
+    if depth > 32 {
+        return Err(invalid_graph("Graph includes exceed the depth limit"));
+    }
+    let entities = query
+        .as_object()
+        .ok_or_else(|| invalid_graph("Expected a graph query object"))?;
+    for (name, options) in entities {
+        let entity = manifest
+            .entities
+            .iter()
+            .find(|e| e.name == *name)
+            .ok_or_else(|| invalid_graph("Unknown graph entity"))?;
+        gate.check_read_scan(name, auth)
+            .map_err(policy_data_error)?;
+        crate::deps::record_read(name, None);
+        if let Some(includes) = options.get("include").and_then(|v| v.as_object()) {
+            for (name, options) in includes {
+                let relation = entity
+                    .relations
+                    .iter()
+                    .find(|r| r.name == *name)
+                    .ok_or_else(|| invalid_graph("Unknown graph relation"))?;
+                check_graph_access(
+                    manifest,
+                    &serde_json::json!({&relation.target: options}),
+                    gate,
+                    auth,
+                    depth + 1,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn filter_graph_result(
+    manifest: &pylon_kernel::AppManifest,
+    query: &serde_json::Value,
+    result: &mut serde_json::Value,
+    gate: &dyn PolicyGate,
+    auth: &AuthInfo,
+    client_visible: bool,
+) -> Result<(), pylon_http::DataError> {
+    let entries = result
+        .as_object_mut()
+        .ok_or_else(|| invalid_graph("Expected a graph result object"))?;
+    for (entity, value) in entries {
+        let options = query
+            .get(entity)
+            .ok_or_else(|| invalid_graph("Unexpected graph result entity"))?;
+        filter_graph_rows(manifest, entity, options, value, gate, auth, client_visible)?;
+    }
+    Ok(())
+}
+
+/// Preserve relation cardinality while checking each returned row.
+fn filter_graph_rows(
+    manifest: &pylon_kernel::AppManifest,
+    entity: &str,
+    options: &serde_json::Value,
+    value: &mut serde_json::Value,
+    gate: &dyn PolicyGate,
+    auth: &AuthInfo,
+    client_visible: bool,
+) -> Result<(), pylon_http::DataError> {
+    let definition = manifest
+        .entities
+        .iter()
+        .find(|e| e.name == entity)
+        .ok_or_else(|| invalid_graph("Unknown graph result entity"))?;
+    let is_many = value.is_array();
+    let rows = match value.take() {
+        serde_json::Value::Array(rows) => rows,
+        row @ serde_json::Value::Object(_) => vec![row],
+        serde_json::Value::Null => return Ok(()),
+        _ => return Err(invalid_graph("Expected graph rows")),
+    };
+    let mut rows: Vec<_> = rows
+        .into_iter()
+        .filter(|row| {
+            gate.check_op(PolicyOp::Read, entity, auth, None, Some(row))
+                .is_ok()
+        })
+        .collect();
+    for row in &mut rows {
+        if let Some(includes) = options.get("include").and_then(|v| v.as_object()) {
+            for (name, options) in includes {
+                let relation = definition
+                    .relations
+                    .iter()
+                    .find(|r| r.name == *name)
+                    .ok_or_else(|| invalid_graph("Unknown graph relation"))?;
+                if let Some(child) = row.get_mut(name) {
+                    filter_graph_rows(
+                        manifest,
+                        &relation.target,
+                        options,
+                        child,
+                        gate,
+                        auth,
+                        client_visible,
+                    )?;
+                }
+            }
+        }
+    }
+    if client_visible {
+        rows = rows
+            .into_iter()
+            .filter_map(|mut row| {
+                let mut related = serde_json::Map::new();
+                if let Some(includes) = options.get("include").and_then(|value| value.as_object()) {
+                    if let Some(object) = row.as_object_mut() {
+                        for name in includes.keys() {
+                            if let Some(child) = object.remove(name) {
+                                related.insert(name.clone(), child);
+                            }
+                        }
+                    }
+                }
+                let mut projected = gate
+                    .filter_client_read(entity, auth, vec![row])
+                    .into_iter()
+                    .next()?;
+                if let Some(object) = projected.as_object_mut() {
+                    object.extend(related);
+                }
+                Some(projected)
+            })
+            .collect();
+    }
+    *value = if is_many {
+        serde_json::Value::Array(rows)
+    } else {
+        rows.into_iter().next().unwrap_or(serde_json::Value::Null)
+    };
+    Ok(())
+}
+
+/// Strict function reads keep server fields but must obey row policies.
+fn filter_strict_read(
+    msg: &DbOpMessage,
+    gate: &dyn PolicyGate,
+    auth: &AuthInfo,
+    outcome: (
+        Result<serde_json::Value, pylon_http::DataError>,
+        Option<usize>,
+    ),
+) -> (
+    Result<serde_json::Value, pylon_http::DataError>,
+    Option<usize>,
+) {
+    let (Ok(mut value), count) = outcome else {
+        return outcome;
+    };
+    let check =
+        |row: &serde_json::Value| gate.check_op(PolicyOp::Read, &msg.entity, auth, None, Some(row));
+    match msg.op {
+        DbOp::Get | DbOp::Lookup if !value.is_null() => {
+            if let Err(error) = check(&value) {
+                return (Err(policy_data_error(error)), None);
+            }
+        }
+        DbOp::List | DbOp::Query | DbOp::Paginate | DbOp::Search | DbOp::VectorSearch => {
+            let rows = match msg.op {
+                DbOp::Paginate => value.get_mut("page"),
+                DbOp::Search | DbOp::VectorSearch => value.get_mut("hits"),
+                _ => Some(&mut value),
+            };
+            if let Some(rows) = rows.and_then(|v| v.as_array_mut()) {
+                rows.retain(|row| {
+                    let row = if msg.op == DbOp::VectorSearch {
+                        &row["doc"]
+                    } else {
+                        row
+                    };
+                    check(row).is_ok()
+                });
+                let count = rows.len();
+                return (Ok(value), Some(count));
+            }
+        }
+        _ => {}
+    }
+    (Ok(value), count)
 }
 
 /// Apply the client-visible read fence (per-row policy filter + wire field
@@ -3288,9 +3546,7 @@ fn project_ssr_read(
             Ok(filtered) => (Ok(filtered), None),
             Err((code, message)) => (Err(pylon_http::DataError { code, message }), None),
         },
-        // QueryGraph returns a nested include tree (not a flat row list); its
-        // include-level read policy is enforced inside the query engine, so it
-        // isn't reshaped here. Every write op also passes through unchanged.
+        // Graph results were checked in execute_db_op. Writes pass through.
         _ => (Ok(value), None),
     }
 }
@@ -3858,6 +4114,339 @@ mod tests {
             (PolicyOp::Update, Some(stored.clone()), Some(patch))
         );
         assert_eq!(seen[1], (PolicyOp::Delete, Some(stored), None));
+    }
+
+    struct RowGate;
+    impl PolicyGate for RowGate {
+        fn check_read_scan(&self, entity: &str, _: &AuthInfo) -> Result<(), (String, String)> {
+            if entity == "Org" {
+                Err(("POLICY_DENIED".into(), "Org reads are forbidden".into()))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn check_op(
+            &self,
+            _: PolicyOp,
+            _: &str,
+            auth: &AuthInfo,
+            _: Option<&serde_json::Value>,
+            row: Option<&serde_json::Value>,
+        ) -> Result<(), (String, String)> {
+            if row.and_then(|r| r.get("owner")).and_then(|v| v.as_str()) == auth.user_id.as_deref()
+            {
+                Ok(())
+            } else {
+                Err(("POLICY_DENIED".into(), "Row belongs to another user".into()))
+            }
+        }
+
+        fn filter_client_read(
+            &self,
+            entity: &str,
+            auth: &AuthInfo,
+            rows: Vec<serde_json::Value>,
+        ) -> Vec<serde_json::Value> {
+            FilterGate.filter_client_read(entity, auth, rows)
+        }
+    }
+
+    #[test]
+    fn strict_reads_filter_rows_without_removing_server_fields() {
+        for op in [
+            DbOp::List,
+            DbOp::Query,
+            DbOp::Paginate,
+            DbOp::Search,
+            DbOp::VectorSearch,
+        ] {
+            let value = match op {
+                DbOp::Paginate => {
+                    serde_json::json!({"page": two_rows(), "nextCursor": "2", "isDone": false})
+                }
+                DbOp::Search => serde_json::json!({"hits": two_rows()}),
+                DbOp::VectorSearch => serde_json::json!({"hits": [
+                    {"doc": two_rows()[0], "score": 0.9},
+                    {"doc": two_rows()[1], "score": 0.8}
+                ]}),
+                _ => two_rows(),
+            };
+            let (result, count) = filter_strict_read(
+                &db_msg(op, "Doc", false),
+                &RowGate,
+                &user_auth(),
+                (Ok(value), Some(2)),
+            );
+            let result = result.unwrap();
+            let rows = match op {
+                DbOp::Paginate => &result["page"],
+                DbOp::Search | DbOp::VectorSearch => &result["hits"],
+                _ => &result,
+            };
+            assert_eq!(rows.as_array().unwrap().len(), 1, "{op:?}");
+            let row = if op == DbOp::VectorSearch {
+                &rows[0]["doc"]
+            } else {
+                &rows[0]
+            };
+            assert_eq!(row["secret"], "s1");
+            assert_eq!(count, Some(1));
+        }
+        for op in [DbOp::Get, DbOp::Lookup] {
+            let msg = db_msg(op, "Doc", false);
+            let (result, _) = filter_strict_read(
+                &msg,
+                &RowGate,
+                &user_auth(),
+                (Ok(two_rows()[1].clone()), Some(1)),
+            );
+            assert_eq!(result.unwrap_err().code, "POLICY_DENIED");
+            let (result, _) = filter_strict_read(
+                &msg,
+                &RowGate,
+                &user_auth(),
+                (Ok(two_rows()[0].clone()), Some(1)),
+            );
+            assert_eq!(result.unwrap()["secret"], "s1");
+        }
+    }
+
+    #[test]
+    fn graph_reads_filter_nested_relations_and_project_client_fields() {
+        use pylon_kernel::{AppManifest, ManifestEntity, ManifestRelation};
+        struct PublicFieldsGate;
+        impl PolicyGate for PublicFieldsGate {
+            fn check_op(
+                &self,
+                op: PolicyOp,
+                entity: &str,
+                auth: &AuthInfo,
+                input: Option<&serde_json::Value>,
+                row: Option<&serde_json::Value>,
+            ) -> Result<(), (String, String)> {
+                RowGate.check_op(op, entity, auth, input, row)
+            }
+            fn filter_client_read(
+                &self,
+                entity: &str,
+                auth: &AuthInfo,
+                rows: Vec<serde_json::Value>,
+            ) -> Vec<serde_json::Value> {
+                RowGate
+                    .filter_client_read(entity, auth, rows)
+                    .into_iter()
+                    .map(|mut row| {
+                        row.as_object_mut()
+                            .unwrap()
+                            .retain(|key, _| key == "id" || key == "owner");
+                        row
+                    })
+                    .collect()
+            }
+        }
+        let manifest = AppManifest {
+            entities: vec![ManifestEntity {
+                name: "Doc".into(),
+                relations: vec![
+                    ManifestRelation {
+                        name: "children".into(),
+                        target: "Doc".into(),
+                        field: "id".into(),
+                        many: true,
+                    },
+                    ManifestRelation {
+                        name: "parent".into(),
+                        target: "Doc".into(),
+                        field: "parentId".into(),
+                        many: false,
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let query = serde_json::json!({"Doc": {"include": {"children": {"include": {"parent": {}}}, "parent": {}}}});
+        let raw = serde_json::json!({"Doc": [
+            {"id": "1", "owner": "u1", "secret": "root-secret",
+             "parent": {"id": "2", "owner": "u2", "secret": "foreign-secret"},
+             "children": [
+                 {"id": "3", "owner": "u1", "secret": "child-secret",
+                  "parent": {"id": "4", "owner": "u2", "secret": "nested-secret"}},
+                 {"id": "5", "owner": "u2", "secret": "foreign-child-secret"}
+             ]},
+            {"id": "6", "owner": "u2", "secret": "foreign-root-secret"}
+        ]});
+        check_graph_access(&manifest, &query, &RowGate, &user_auth(), 0).unwrap();
+        for client_visible in [false, true] {
+            let mut result = raw.clone();
+            filter_graph_result(
+                &manifest,
+                &query,
+                &mut result,
+                &PublicFieldsGate,
+                &user_auth(),
+                client_visible,
+            )
+            .unwrap();
+            let rows = result["Doc"].as_array().unwrap();
+            assert_eq!(rows.len(), 1);
+            assert!(rows[0]["parent"].is_null());
+            let children = rows[0]["children"].as_array().unwrap();
+            assert_eq!(children.len(), 1);
+            assert!(children[0]["parent"].is_null());
+            assert_eq!(rows[0].get("secret").is_none(), client_visible);
+            assert_eq!(children[0].get("secret").is_none(), client_visible);
+        }
+    }
+
+    #[test]
+    fn graph_reads_check_included_entities_before_loading() {
+        let mut manifest = pylon_http::DataStore::manifest(&AlwaysOkStore).clone();
+        manifest.entities.push(pylon_kernel::ManifestEntity {
+            name: "Org".into(),
+            ..Default::default()
+        });
+        let query = serde_json::json!({"Project": {"include": {"org": {}}}});
+        let error = check_graph_access(&manifest, &query, &RowGate, &user_auth(), 0).unwrap_err();
+        assert_eq!(error.code, "POLICY_DENIED");
+    }
+
+    #[test]
+    fn graph_trusted_reads_keep_the_explicit_bypass() {
+        for (strict, unsafe_op, auth) in [
+            (false, false, user_auth()),
+            (true, true, user_auth()),
+            (true, false, admin_auth()),
+        ] {
+            let gate = deny_gate();
+            let mut msg = db_msg(DbOp::QueryGraph, "", unsafe_op);
+            msg.data = Some(serde_json::json!({"Project": {}}));
+            let (result, _) = execute_db_op(&AlwaysOkStore, &msg, Some(&gate), &auth, strict);
+            assert!(result.is_ok());
+            assert!(gate.calls.lock().unwrap().is_empty());
+        }
+    }
+
+    struct ReadScopeGuard(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+    impl PolicyReadScope for ReadScopeGuard {}
+    impl Drop for ReadScopeGuard {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    struct ReadScopeGate {
+        active: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        deny: bool,
+    }
+    impl PolicyGate for ReadScopeGate {
+        fn begin_read(&self) -> Option<Box<dyn PolicyReadScope>> {
+            self.active.fetch_add(1, Ordering::SeqCst);
+            Some(Box::new(ReadScopeGuard(self.active.clone())))
+        }
+        fn check_op(
+            &self,
+            op: PolicyOp,
+            _: &str,
+            _: &AuthInfo,
+            _: Option<&serde_json::Value>,
+            _: Option<&serde_json::Value>,
+        ) -> Result<(), (String, String)> {
+            assert_eq!(
+                self.active.load(Ordering::SeqCst),
+                usize::from(op == PolicyOp::Read)
+            );
+            if self.deny {
+                Err(("POLICY_DENIED".into(), "denied".into()))
+            } else {
+                Ok(())
+            }
+        }
+        fn filter_client_read(
+            &self,
+            _: &str,
+            _: &AuthInfo,
+            rows: Vec<serde_json::Value>,
+        ) -> Vec<serde_json::Value> {
+            assert_eq!(self.active.load(Ordering::SeqCst), 1);
+            rows
+        }
+    }
+
+    #[test]
+    fn read_scope_covers_checks_and_ends_on_success_or_denial() {
+        for deny in [false, true] {
+            let gate = ReadScopeGate {
+                active: Default::default(),
+                deny,
+            };
+            for op in [
+                DbOp::Get,
+                DbOp::List,
+                DbOp::QueryGraph,
+                DbOp::Insert,
+                DbOp::Update,
+            ] {
+                let mut msg = db_msg(op, "Project", false);
+                msg.id = Some("stored-1".into());
+                if op == DbOp::QueryGraph {
+                    msg.data = Some(serde_json::json!({"Project": {}}));
+                }
+                let (result, _) =
+                    execute_db_op(&AlwaysOkStore, &msg, Some(&gate), &user_auth(), true);
+                assert_eq!(result.is_err(), deny);
+                assert_eq!(gate.active.load(Ordering::SeqCst), 0);
+            }
+        }
+        let gate = ReadScopeGate {
+            active: Default::default(),
+            deny: false,
+        };
+        let mut msg = db_msg(DbOp::Get, "Project", false);
+        msg.id = Some("stored-1".into());
+        msg.ssr_read = true;
+        assert!(
+            execute_db_op(&AlwaysOkStore, &msg, Some(&gate), &user_auth(), false)
+                .0
+                .is_ok()
+        );
+        assert_eq!(gate.active.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn strict_read_checks_the_returned_row() {
+        let gate = RecordingGate::default();
+        let mut msg = db_msg(DbOp::Get, "Project", false);
+        msg.id = Some("stored-1".into());
+        let (result, _) = execute_db_op(&AlwaysOkStore, &msg, Some(&gate), &user_auth(), true);
+        let row = result.unwrap();
+        assert!(row.is_object());
+        assert!(gate
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(op, _, data)| { *op == PolicyOp::Read && data.as_ref() == Some(&row) }));
+    }
+
+    #[test]
+    fn strict_graph_read_cannot_skip_a_deny_policy() {
+        let gate = deny_gate();
+        let mut msg = db_msg(DbOp::QueryGraph, "", false);
+        msg.data = Some(serde_json::json!({"Project": {}}));
+        let (result, _) = execute_db_op(&AlwaysOkStore, &msg, Some(&gate), &user_auth(), true);
+        assert_eq!(result.unwrap_err().code, "POLICY_DENIED");
+    }
+
+    #[test]
+    fn strict_tenant_admin_cannot_skip_a_deny_policy() {
+        let gate = deny_gate();
+        let mut auth = admin_auth();
+        auth.tenant_id = Some("tenant-a".into());
+        let msg = db_msg(DbOp::Get, "Project", false);
+        let (result, _) = execute_db_op(&AlwaysOkStore, &msg, Some(&gate), &auth, true);
+        assert_eq!(result.unwrap_err().code, "POLICY_DENIED");
     }
 
     #[test]

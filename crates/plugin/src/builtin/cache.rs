@@ -3,6 +3,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::Plugin;
+use hashlink::LinkedHashMap;
 use serde::Serialize;
 
 // ---------------------------------------------------------------------------
@@ -55,47 +56,31 @@ impl CacheEntry {
 
 /// The cache engine -- a Redis-like in-memory data structure store.
 pub struct CachePlugin {
-    /// (store, lru) live behind the same mutex so they cannot drift.
-    /// `lru` is ordered front=least-recently-used, back=most-recently-used.
-    /// Every key in `store` is present exactly once in `lru`, and vice versa.
+    /// The store is ordered from least to most recently used.
     inner: Mutex<CacheInner>,
     max_keys: usize,
     stats: Mutex<CacheStats>,
 }
 
 struct CacheInner {
-    store: HashMap<String, CacheEntry>,
-    lru: VecDeque<String>,
+    store: LinkedHashMap<String, CacheEntry>,
 }
 
 impl CacheInner {
     fn new() -> Self {
         Self {
-            store: HashMap::new(),
-            lru: VecDeque::new(),
+            store: LinkedHashMap::new(),
         }
     }
 
-    /// Mark `key` as most-recently-used. O(N) on the lru deque (find + remove +
-    /// push_back), but it never scans the store HashMap. For the common
-    /// hot-path (`mset` against a full cache) this isn't called -- eviction
-    /// uses `pop_front` directly.
+    /// Move an existing key to the back without scanning or copying its name.
     fn touch_lru(&mut self, key: &str) {
-        if let Some(pos) = self.lru.iter().position(|k| k == key) {
-            self.lru.remove(pos);
-        }
-        self.lru.push_back(key.to_string());
+        self.store.to_back(key);
     }
 
-    /// Drop `key` from both store and lru. Returns the removed entry, if any.
+    /// Remove a key and its position in the access order.
     fn remove(&mut self, key: &str) -> Option<CacheEntry> {
-        let entry = self.store.remove(key);
-        if entry.is_some() {
-            if let Some(pos) = self.lru.iter().position(|k| k == key) {
-                self.lru.remove(pos);
-            }
-        }
-        entry
+        self.store.remove(key)
     }
 }
 
@@ -183,13 +168,8 @@ impl CachePlugin {
         let needed = projected - max;
         let mut evicted = 0usize;
         while evicted < needed {
-            match inner.lru.pop_front() {
-                Some(victim) => {
-                    if inner.store.remove(&victim).is_some() {
-                        evicted += 1;
-                    }
-                    // Stale lru entry (shouldn't happen) -- skip and continue.
-                }
+            match inner.store.pop_front() {
+                Some(_) => evicted += 1,
                 None => break,
             }
         }
@@ -222,18 +202,10 @@ impl CachePlugin {
         let mut inner = self.inner.lock().unwrap();
         let incoming = if inner.store.contains_key(key) { 0 } else { 1 };
         self.evict_lru(&mut inner, incoming);
-        let was_present = inner
-            .store
-            .insert(
-                key.to_string(),
-                CacheEntry::new(CacheValue::String(value.to_string()), ttl),
-            )
-            .is_some();
-        if was_present {
-            inner.touch_lru(key);
-        } else {
-            inner.lru.push_back(key.to_string());
-        }
+        inner.store.insert(
+            key.to_string(),
+            CacheEntry::new(CacheValue::String(value.to_string()), ttl),
+        );
         self.stats.lock().unwrap().sets += 1;
     }
 
@@ -330,7 +302,6 @@ impl CachePlugin {
                 key.to_string(),
                 CacheEntry::new(CacheValue::Int(amount), None),
             );
-            inner.lru.push_back(key.to_string());
             Ok(amount)
         }
     }
@@ -349,7 +320,6 @@ impl CachePlugin {
             key.to_string(),
             CacheEntry::new(CacheValue::String(value.to_string()), ttl),
         );
-        inner.lru.push_back(key.to_string());
         self.stats.lock().unwrap().sets += 1;
         true
     }
@@ -368,18 +338,10 @@ impl CachePlugin {
 
         let incoming = if inner.store.contains_key(key) { 0 } else { 1 };
         self.evict_lru(&mut inner, incoming);
-        let was_present = inner
-            .store
-            .insert(
-                key.to_string(),
-                CacheEntry::new(CacheValue::String(value.to_string()), None),
-            )
-            .is_some();
-        if was_present {
-            inner.touch_lru(key);
-        } else {
-            inner.lru.push_back(key.to_string());
-        }
+        inner.store.insert(
+            key.to_string(),
+            CacheEntry::new(CacheValue::String(value.to_string()), None),
+        );
         self.stats.lock().unwrap().sets += 1;
         old
     }
@@ -451,27 +413,10 @@ impl CachePlugin {
                     CacheEntry::new(CacheValue::String(value.to_string()), None),
                 )
                 .is_some();
-            if was_present {
-                inner.touch_lru(key);
-            } else {
-                inner.lru.push_back(key.to_string());
-                // If the batch was larger than the cache, displace earlier
-                // entries one-by-one. This is still O(1) per insert (a single
-                // pop_front + HashMap remove); the costly O(N) scan is gone.
-                if max > 0 && inner.store.len() > max {
-                    while let Some(victim) = inner.lru.pop_front() {
-                        // Don't evict the key we just inserted -- can happen
-                        // only if the lru had a stale duplicate, but guard
-                        // against it anyway.
-                        if victim == *key {
-                            inner.lru.push_front(victim);
-                            break;
-                        }
-                        if inner.store.remove(&victim).is_some() {
-                            local_evictions += 1;
-                            break;
-                        }
-                    }
+            // A batch larger than the cache displaces its earliest entries.
+            if !was_present && max > 0 && inner.store.len() > max {
+                if inner.store.pop_front().is_some() {
+                    local_evictions += 1;
                 }
             }
         }
@@ -595,7 +540,6 @@ impl CachePlugin {
                 key.to_string(),
                 CacheEntry::new(CacheValue::List(list), None),
             );
-            inner.lru.push_back(key.to_string());
             1
         }
     }
@@ -630,7 +574,6 @@ impl CachePlugin {
                 key.to_string(),
                 CacheEntry::new(CacheValue::List(list), None),
             );
-            inner.lru.push_back(key.to_string());
             1
         }
     }
@@ -766,7 +709,6 @@ impl CachePlugin {
             inner
                 .store
                 .insert(key.to_string(), CacheEntry::new(CacheValue::Set(set), None));
-            inner.lru.push_back(key.to_string());
             true
         }
     }
@@ -861,7 +803,7 @@ impl CachePlugin {
 
         let set1 = match inner.store.get(key1) {
             Some(entry) => match &entry.value {
-                CacheValue::Set(s) => s.clone(),
+                CacheValue::Set(s) => s,
                 _ => return vec![],
             },
             None => return vec![],
@@ -883,19 +825,20 @@ impl CachePlugin {
         self.remove_if_expired(&mut inner, key1);
         self.remove_if_expired(&mut inner, key2);
 
+        let empty = HashSet::new();
         let set1 = match inner.store.get(key1) {
             Some(entry) => match &entry.value {
-                CacheValue::Set(s) => s.clone(),
-                _ => HashSet::new(),
+                CacheValue::Set(s) => s,
+                _ => &empty,
             },
-            None => HashSet::new(),
+            None => &empty,
         };
         let set2 = match inner.store.get(key2) {
             Some(entry) => match &entry.value {
                 CacheValue::Set(s) => s,
-                _ => return set1.into_iter().collect(),
+                _ => &empty,
             },
-            None => return set1.into_iter().collect(),
+            None => &empty,
         };
 
         set1.union(set2).cloned().collect()
@@ -931,7 +874,6 @@ impl CachePlugin {
                 key.to_string(),
                 CacheEntry::new(CacheValue::Hash(hash), None),
             );
-            inner.lru.push_back(key.to_string());
         }
     }
 
@@ -1101,7 +1043,6 @@ impl CachePlugin {
                 key.to_string(),
                 CacheEntry::new(CacheValue::Hash(hash), None),
             );
-            inner.lru.push_back(key.to_string());
             Ok(amount)
         }
     }
@@ -1136,7 +1077,6 @@ impl CachePlugin {
                 key.to_string(),
                 CacheEntry::new(CacheValue::SortedSet(zset), None),
             );
-            inner.lru.push_back(key.to_string());
         }
     }
 
@@ -1234,18 +1174,32 @@ impl CachePlugin {
             Some(entry) => {
                 entry.touch();
                 if let CacheValue::SortedSet(zset) = &entry.value {
-                    let mut members: Vec<(String, f64)> =
-                        zset.iter().map(|(m, s)| (m.clone(), *s)).collect();
-                    members.sort_by(|a, b| {
-                        a.1.partial_cmp(&b.1)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                            .then_with(|| a.0.cmp(&b.0))
-                    });
-                    let end = stop.min(members.len().saturating_sub(1));
-                    if start > end {
+                    let end = stop.min(zset.len().saturating_sub(1));
+                    if start > end || zset.is_empty() {
                         (vec![], true)
                     } else {
-                        (members[start..=end].to_vec(), true)
+                        let mut members: Vec<_> = zset.iter().collect();
+                        let compare = |a: &(&String, &f64), b: &(&String, &f64)| {
+                            a.1.partial_cmp(b.1)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                                .then_with(|| a.0.cmp(b.0))
+                        };
+                        // A small page only needs its prefix in score order.
+                        // Keep the existing full sort for NaN scores, whose
+                        // comparison does not define a total order.
+                        if end < members.len() / 2 && members.iter().all(|(_, s)| !s.is_nan()) {
+                            members.select_nth_unstable_by(end, compare);
+                            members[..=end].sort_by(compare);
+                        } else {
+                            members.sort_by(compare);
+                        }
+                        (
+                            members[start..=end]
+                                .iter()
+                                .map(|(m, s)| ((*m).clone(), **s))
+                                .collect(),
+                            true,
+                        )
                     }
                 } else {
                     (vec![], false)
@@ -1291,7 +1245,6 @@ impl CachePlugin {
     pub fn flushall(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.store.clear();
-        inner.lru.clear();
         let mut stats = self.stats.lock().unwrap();
         *stats = CacheStats::default();
     }

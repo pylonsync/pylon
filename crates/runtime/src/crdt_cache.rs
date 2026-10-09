@@ -275,13 +275,16 @@ impl DocCache {
         // Down to 90% of capacity, oldest first.
         let target = self.capacity - self.capacity / 10;
         let excess = inner.map.len() - target;
-        let mut by_age: Vec<(u64, Key)> = inner
-            .map
-            .iter()
-            .map(|(k, e)| (e.last_used, k.clone()))
-            .collect();
+        let mut by_age: Vec<(u64, &Key)> =
+            inner.map.iter().map(|(k, e)| (e.last_used, k)).collect();
         by_age.select_nth_unstable_by_key(excess - 1, |(t, _)| *t);
-        for (_, k) in by_age.into_iter().take(excess) {
+        // Copy only the keys selected for removal, then release the map borrows.
+        let victims: Vec<Key> = by_age
+            .into_iter()
+            .take(excess)
+            .map(|(_, k)| k.clone())
+            .collect();
+        for k in victims {
             inner.map.remove(&k);
         }
     }
@@ -293,6 +296,28 @@ mod tests {
 
     fn doc() -> DocHandle {
         Arc::new(Mutex::new(LoroDoc::new()))
+    }
+
+    /// Run with `cargo test -p pylon-runtime --lib bench_trim -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn bench_trim() {
+        let mut samples = Vec::new();
+        let shared = doc();
+        for _ in 0..9 {
+            let cache = DocCache::with_capacity(10_000);
+            for id in 0..10_000 {
+                cache.insert("Document", &format!("row-{id:08}"), Arc::clone(&shared));
+            }
+            let start = std::time::Instant::now();
+            cache.insert("Document", "new", Arc::clone(&shared));
+            samples.push(start.elapsed());
+            assert_eq!(cache.len(), 9_000);
+            assert!(cache.get("Document", "row-00000000").is_none());
+            assert!(cache.get("Document", "new").is_some());
+        }
+        samples.sort_unstable();
+        eprintln!("trim 10,000 document entries: {:?} median", samples[4]);
     }
 
     #[test]

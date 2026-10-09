@@ -49,6 +49,12 @@ export class ServerSubscriptions {
     return this.specs.has(key);
   }
 
+  /** Request fresh state for an existing subscription. */
+  refresh(key: string): void {
+    const message = this.specs.get(key);
+    if (message !== undefined) this.sendWs(message);
+  }
+
   /** Re-send every registered subscribe message. Called from
    *  `ws.onopen` after the socket reconnects — the server purges
    *  per-client subscription state on disconnect, so without this

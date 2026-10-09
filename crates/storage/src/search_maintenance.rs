@@ -68,7 +68,7 @@ pub fn apply_update(
 
     // If the update touched any text field, rebuild the FTS row. FTS5
     // doesn't have a cheap in-place column update; the pattern is
-    // DELETE + INSERT addressed by the `entity_id UNINDEXED` column.
+    // DELETE + INSERT addressed by the FTS rowid, which matches the entity rowid.
     // Merge old_row + patch so the rebuilt FTS row reflects the new
     // state across all declared text fields.
     let touches_text = config.text.iter().any(|f| patch.get(f).is_some());
@@ -184,7 +184,7 @@ fn write_fts_row(
 }
 
 fn delete_fts_row(conn: &Connection, entity: &str, rowid: u32) -> Result<(), StorageError> {
-    let sql = format!("DELETE FROM \"_fts_{entity}\" WHERE entity_id = ?1;");
+    let sql = format!("DELETE FROM \"_fts_{entity}\" WHERE rowid = ?1;");
     conn.execute(&sql, [rowid as i64])
         .map(|_| ())
         .map_err(|e| StorageError::new("FTS_DELETE_FAILED", &e.to_string()))
@@ -319,6 +319,79 @@ mod tests {
             )
             .unwrap();
         assert_eq!(row_count, 1);
+    }
+
+    #[test]
+    fn sparse_fts_rowids_survive_updates_and_targeted_deletes() {
+        let conn = open_test_db();
+        let cfg = SearchConfig {
+            text: vec!["name".into()],
+            facets: vec![],
+            sortable: vec![],
+            language: None,
+        };
+        for (rowid, id, name) in [(10, "early", "alpha"), (50_000, "late", "omega")] {
+            conn.execute(
+                "INSERT INTO Product (rowid, id, name) VALUES (?1, ?2, ?3)",
+                rusqlite::params![rowid, id, name],
+            )
+            .unwrap();
+            apply_insert(
+                &conn,
+                "Product",
+                id,
+                &serde_json::json!({"name":name}),
+                &cfg,
+            )
+            .unwrap();
+        }
+        for name in ["updated", "final"] {
+            conn.execute("UPDATE Product SET name = ?1 WHERE id = 'late'", [name])
+                .unwrap();
+            apply_update(
+                &conn,
+                "Product",
+                "late",
+                &serde_json::json!({"name":"omega"}),
+                &serde_json::json!({"name":name}),
+                &cfg,
+            )
+            .unwrap();
+            let ids: Vec<i64> = conn
+                .prepare("SELECT rowid FROM _fts_Product ORDER BY rowid")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            assert_eq!(ids, [10, 50_000]);
+            let matched: i64 = conn
+                .query_row(
+                    "SELECT entity_id FROM _fts_Product WHERE _fts_Product MATCH ?1",
+                    [name],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(matched, 50_000);
+        }
+        apply_delete(
+            &conn,
+            "Product",
+            "late",
+            &serde_json::json!({"name":"final"}),
+            &cfg,
+        )
+        .unwrap();
+        let left: (i64, String) = conn
+            .query_row("SELECT rowid, name FROM _fts_Product", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(left, (10, "alpha".into()));
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM _fts_Product", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]

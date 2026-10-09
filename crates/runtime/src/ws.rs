@@ -387,6 +387,25 @@ const WS_READ_TIMEOUT: Duration = Duration::from_millis(200);
 /// at this rate are probably misconfigured.
 const PER_CLIENT_OUTBOUND_DEPTH: usize = 256;
 
+/// A queued payload. Shared data becomes an owned WebSocket message only
+/// when the writer removes it from the queue.
+#[derive(Debug)]
+pub enum OutboundMessage {
+    Text(Arc<str>),
+    Binary(Arc<[u8]>),
+    Control(Message),
+}
+
+impl OutboundMessage {
+    fn into_message(self) -> Message {
+        match self {
+            Self::Text(text) => Message::Text(text.to_string()),
+            Self::Binary(bytes) => Message::Binary(bytes.to_vec()),
+            Self::Control(message) => message,
+        }
+    }
+}
+
 pub struct WsClient {
     /// The WebSocket struct itself, behind a per-client mutex. Reader
     /// thread holds this during `ws.read()`. Direct-send paths that
@@ -399,13 +418,13 @@ pub struct WsClient {
     /// `ws.read()` with no client traffic) can't starve broadcasts the
     /// way it did pre-refactor. The reader drains this queue between
     /// reads under the same lock it already holds.
-    pub outbound_tx: mpsc::SyncSender<Message>,
+    pub outbound_tx: mpsc::SyncSender<OutboundMessage>,
     /// Receiver half of the outbound queue, parked here so the reader
     /// thread can take ownership during `run_authenticated_session`.
     /// `mpsc::Receiver` is `!Sync`, so we hand it out once via `take()`
     /// rather than try to share it. After the reader takes the Receiver
     /// this slot is `None`; broadcasters only use `outbound_tx`.
-    pub outbound_rx: Mutex<Option<mpsc::Receiver<Message>>>,
+    pub outbound_rx: Mutex<Option<mpsc::Receiver<OutboundMessage>>>,
     pub auth: RwLock<AuthContext>,
     /// The bearer token the connection authenticated with. Re-resolved
     /// when a session of this user ends (see [`WsHub::revalidate_user`]).
@@ -482,7 +501,7 @@ impl Shard {
         for (id, handle) in handles {
             match handle
                 .outbound_tx
-                .try_send(Message::Text((**msg).to_string()))
+                .try_send(OutboundMessage::Text(Arc::clone(msg)))
             {
                 Ok(()) => {}
                 Err(mpsc::TrySendError::Disconnected(_)) => dead.push(id),
@@ -580,7 +599,7 @@ impl Shard {
             // never contend.
             match handle
                 .outbound_tx
-                .try_send(Message::Text((**payload).to_string()))
+                .try_send(OutboundMessage::Text(Arc::clone(payload)))
             {
                 Ok(()) => delivered += 1,
                 Err(mpsc::TrySendError::Disconnected(_)) => dead.push(id),
@@ -675,7 +694,10 @@ impl Shard {
         };
         let mut dead: Vec<u64> = Vec::new();
         for (id, handle) in handles {
-            match handle.outbound_tx.try_send(Message::Binary(msg.to_vec())) {
+            match handle
+                .outbound_tx
+                .try_send(OutboundMessage::Binary(Arc::clone(msg)))
+            {
                 Ok(()) => {}
                 Err(mpsc::TrySendError::Disconnected(_)) => dead.push(id),
                 Err(mpsc::TrySendError::Full(_)) => {
@@ -699,7 +721,7 @@ impl Shard {
     /// push path: re-runner calls this with the new JSON result
     /// envelope. No-op if the id has already been swept out (dead
     /// connection) — caller doesn't need to know about delivery.
-    fn send_text_to_one(&self, client_id: u64, text: &str) {
+    fn send_text_to_one(&self, client_id: u64, text: &Arc<str>) {
         let handle = {
             let clients = self.clients.lock().unwrap();
             clients.get(&client_id).map(Arc::clone)
@@ -707,7 +729,10 @@ impl Shard {
         let Some(handle) = handle else {
             return;
         };
-        match handle.outbound_tx.try_send(Message::Text(text.to_string())) {
+        match handle
+            .outbound_tx
+            .try_send(OutboundMessage::Text(Arc::clone(text)))
+        {
             Ok(()) => {}
             Err(mpsc::TrySendError::Disconnected(_)) => {
                 let mut clients = self.clients.lock().unwrap();
@@ -722,11 +747,48 @@ impl Shard {
         }
     }
 
+    fn send_text_to_many(&self, ids: &[u64], text: &Arc<str>) {
+        if ids.is_empty() {
+            return;
+        }
+        let handles: Vec<_> = {
+            let clients = self.clients.lock().unwrap();
+            ids.iter()
+                .filter_map(|id| clients.get(id).map(|handle| (*id, Arc::clone(handle))))
+                .collect()
+        };
+        let mut dead = Vec::new();
+        for (id, handle) in handles {
+            match handle
+                .outbound_tx
+                .try_send(OutboundMessage::Text(Arc::clone(text)))
+            {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Disconnected(_)) => dead.push((id, handle)),
+                Err(mpsc::TrySendError::Full(_)) => {
+                    tracing::error!(
+                        client_id = id,
+                        "[ws] per-client outbound full — dropping room frame"
+                    );
+                }
+            }
+        }
+        if !dead.is_empty() {
+            let mut clients = self.clients.lock().unwrap();
+            for (id, handle) in dead {
+                if clients
+                    .get(&id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &handle))
+                {
+                    clients.remove(&id);
+                }
+            }
+        }
+    }
+
     /// Binary fanout for CRDT updates. Same per-client outbound-queue
-    /// pattern as `broadcast` above; the only difference is
-    /// `Message::Binary` and the payload is `Arc<[u8]>` so a single
-    /// Loro snapshot allocates once and the per-client send pays a
-    /// refcount bump + the tungstenite-required Vec clone.
+    /// pattern as `broadcast` above. Queues share the payload; the writer
+    /// copies it into the owned buffer required by tungstenite.
     fn broadcast_binary(&self, msg: &Arc<[u8]>) {
         let handles: Vec<(u64, ClientSocket)> = {
             let clients = self.clients.lock().unwrap();
@@ -734,7 +796,10 @@ impl Shard {
         };
         let mut dead: Vec<u64> = Vec::new();
         for (id, handle) in handles {
-            match handle.outbound_tx.try_send(Message::Binary(msg.to_vec())) {
+            match handle
+                .outbound_tx
+                .try_send(OutboundMessage::Binary(Arc::clone(msg)))
+            {
                 Ok(()) => {}
                 Err(mpsc::TrySendError::Disconnected(_)) => dead.push(id),
                 Err(mpsc::TrySendError::Full(_)) => {
@@ -778,7 +843,7 @@ impl Shard {
         for (id, handle) in handles {
             match handle
                 .outbound_tx
-                .try_send(Message::Text((**msg).to_string()))
+                .try_send(OutboundMessage::Text(Arc::clone(msg)))
             {
                 Ok(()) => {}
                 Err(mpsc::TrySendError::Disconnected(_)) => dead.push(id),
@@ -939,13 +1004,12 @@ pub struct WsHub {
     /// Policy engine for per-client read checks on every change-event
     /// broadcast. Wrapped in Arc so worker threads can clone cheaply.
     policy: Arc<PolicyEngine>,
-    /// Manifest snapshot for wire projection. Held here (not on the
-    /// notifier) so projection happens at the final serialization
-    /// step AFTER the per-client policy check — policies that
-    /// reference `serverOnly` fields evaluate against the raw row.
+    /// Manifest snapshot for client wire projection. Workers check the
+    /// raw row against each client's policy before sending the projected frame.
     /// Pre-fix the notifier projected before broadcast, stripping
     /// fields from the policy check input.
     manifest: Arc<pylon_kernel::AppManifest>,
+    crdt_private_entities: std::sync::OnceLock<Arc<dyn Fn(&str) -> bool + Send + Sync>>,
     /// Auth-user manifest config, used by `maybe_project_user_row`
     /// inside the wire projection.
     auth_user: pylon_kernel::ManifestAuthUserConfig,
@@ -1025,6 +1089,7 @@ impl WsHub {
             queue_depth: BROADCAST_QUEUE_DEPTH,
             policy,
             manifest,
+            crdt_private_entities: std::sync::OnceLock::new(),
             auth_user,
             auth_enricher: Mutex::new(None),
             auth_resolver: Mutex::new(None),
@@ -1051,28 +1116,16 @@ impl WsHub {
         if subscribers.is_empty() {
             return;
         }
-        // Route each id to its shard. The send path drops the client
-        // from the shard on Disconnected, but we also need to drop the
-        // room subscription entry — otherwise the next push retries the
-        // dead id. `send_text_to_one` returns no list because it's a
-        // best-effort single-id send, so do the cleanup here by routing
-        // and tracking failures manually via a Disconnected sentinel.
+        // Resolve all recipients in each shard under one lock.
         let mut by_shard: Vec<Vec<u64>> = (0..NUM_SHARDS).map(|_| Vec::new()).collect();
         for id in &subscribers {
             by_shard[(*id as usize) % NUM_SHARDS].push(*id);
         }
+        let shared: Arc<str> = Arc::from(text);
         for (idx, ids) in by_shard.iter().enumerate() {
-            for id in ids {
-                self.shards[idx].send_text_to_one(*id, text);
-            }
+            self.shards[idx].send_text_to_many(ids, &shared);
         }
-        // We can't tell from `send_text_to_one` which sends were
-        // Disconnected — the function silently sweeps the dead client
-        // from the shard map but doesn't report the id. That's fine:
-        // the WS reader thread for that client runs `unsubscribe_all`
-        // on its room_subscriptions slot the moment the read loop
-        // observes EOF, so the room registry self-heals within the
-        // 200ms read timeout window. No leak.
+        // The reader removes room subscriptions when it observes EOF.
     }
 
     /// Push a `room-snapshot` envelope to a single client. Used at
@@ -1119,6 +1172,21 @@ impl WsHub {
         }
     }
 
+    pub(crate) fn set_crdt_private_history(&self, check: Arc<dyn Fn(&str) -> bool + Send + Sync>) {
+        assert!(
+            self.crdt_private_entities.set(check).is_ok(),
+            "CRDT privacy history is set once before accepting clients"
+        );
+    }
+
+    pub(crate) fn supports_crdt_replication(&self, entity: &str) -> bool {
+        pylon_router::supports_crdt_replication(&self.manifest, &self.auth_user, entity)
+            && !self
+                .crdt_private_entities
+                .get()
+                .is_some_and(|check| check(entity))
+    }
+
     /// Access the per-client CRDT subscription registry. The notifier
     /// looks up subscribers via `subscriptions().subscribers(entity, row)`
     /// and feeds them to `broadcast_binary_to`.
@@ -1151,16 +1219,20 @@ impl WsHub {
         // JSON: User-entity allowlist + serverOnly field strip +
         // prev_data stripped (since prev_data is server-internal
         // only).
-        let projected_data = pylon_router::project_row_for_replication_opt(
+        let projected_data = pylon_router::project_row_for_replication_opt_ref(
             self.manifest.as_ref(),
             &self.auth_user,
             &event.entity,
-            event.data.clone(),
+            event.data.as_ref(),
         );
         let wire_event_for_clients = ChangeEvent {
+            seq: event.seq,
+            entity: event.entity.clone(),
+            row_id: event.row_id.clone(),
+            kind: event.kind.clone(),
             data: projected_data,
             prev_data: None,
-            ..event.clone()
+            timestamp: event.timestamp.clone(),
         };
         let json = match serde_json::to_string(&wire_event_for_clients) {
             Ok(j) => j,
@@ -1175,11 +1247,11 @@ impl WsHub {
         // fields on the pre-row don't leak via the tombstone path.
         let synth_delete_arc: Option<Arc<str>> =
             if matches!(event.kind, ChangeKind::Update) && event.prev_data.is_some() {
-                let projected_prev = pylon_router::project_row_for_replication_opt(
+                let projected_prev = pylon_router::project_row_for_replication_opt_ref(
                     self.manifest.as_ref(),
                     &self.auth_user,
                     &event.entity,
-                    event.prev_data.clone(),
+                    event.prev_data.as_ref(),
                 );
                 let synth = ChangeEvent {
                     seq: event.seq,
@@ -1322,7 +1394,7 @@ impl WsHub {
         seq: u64,
         policy: &PolicyEngine,
     ) {
-        if client_ids.is_empty() {
+        if !self.supports_crdt_replication(entity) || client_ids.is_empty() {
             return;
         }
         let shared: Arc<[u8]> = Arc::from(bytes.into_boxed_slice());
@@ -1567,13 +1639,14 @@ impl WsHub {
         // holds the room bridge that announces the leaves.
         self.subscriptions.unsubscribe_all(id);
         self.remove_client(id);
-        let _ =
-            handle
-                .outbound_tx
-                .try_send(Message::Close(Some(tungstenite::protocol::CloseFrame {
+        let _ = handle
+            .outbound_tx
+            .try_send(OutboundMessage::Control(Message::Close(Some(
+                tungstenite::protocol::CloseFrame {
                     code: tungstenite::protocol::frame::coding::CloseCode::Policy,
                     reason: "session ended".into(),
-                })));
+                },
+            ))));
     }
 
     /// Install the identity-completion hook used when a connection's
@@ -1588,7 +1661,7 @@ impl WsHub {
 
     pub fn send_text_to(&self, client_id: u64, text: &str) {
         let shard_idx = (client_id as usize) % NUM_SHARDS;
-        self.shards[shard_idx].send_text_to_one(client_id, text);
+        self.shards[shard_idx].send_text_to_one(client_id, &Arc::from(text));
     }
 
     /// Assign a client to a shard via round-robin and register it.
@@ -1688,21 +1761,6 @@ pub trait RoomBridge: Send + Sync {
 /// `crdt-subscribe`, so the new tab sees the latest converged state
 /// without waiting for the next write. When absent, subscribe is still
 /// recorded but the catch-up frame is skipped.
-/// Serialize a `ChangeEvent` for the client wire. Strips the
-/// in-memory-only `prev_data` field so the pre-update row never
-/// leaks to a subscriber whose post policy allowed them. Used by
-/// both WS and SSE broadcast paths.
-pub(crate) fn serialize_wire_event(event: &ChangeEvent) -> Option<String> {
-    if event.prev_data.is_none() {
-        return serde_json::to_string(event).ok();
-    }
-    let wire = ChangeEvent {
-        prev_data: None,
-        ..event.clone()
-    };
-    serde_json::to_string(&wire).ok()
-}
-
 pub fn start_ws_server(
     hub: Arc<WsHub>,
     auth: Arc<AuthResolver>,
@@ -2021,9 +2079,7 @@ fn run_authenticated_session(
     // cloned stream — no shared mutex with the reader, so broadcasts
     // wake the writer instantly via `recv()` instead of waiting for the
     // reader's drain block to run between blocking reads.
-    let outbound_rx_for_reader: Option<mpsc::Receiver<Message>> = if let Some(write_stream) =
-        dual_write_stream
-    {
+    let outbound_rx_for_reader = if let Some(write_stream) = dual_write_stream {
         // Take the receiver out of WsClient and into the writer
         // thread's exclusive ownership.
         let outbound_rx = socket_handle
@@ -2058,7 +2114,7 @@ fn run_authenticated_session(
                 // broadcaster pushes via `try_send`. No mutex
                 // contention; no ping-bounded latency; no polling.
                 while let Ok(msg) = outbound_rx.recv() {
-                    if writer_ws.send(msg).is_err() {
+                    if writer_ws.send(msg.into_message()).is_err() {
                         break;
                     }
                 }
@@ -2096,7 +2152,7 @@ fn run_authenticated_session(
                     Err(poisoned) => poisoned.into_inner(),
                 };
                 while let Ok(out_msg) = outbound_rx.try_recv() {
-                    if guard.send(out_msg).is_err() {
+                    if guard.send(out_msg.into_message()).is_err() {
                         break;
                     }
                 }
@@ -2113,7 +2169,7 @@ fn run_authenticated_session(
                 Err(poisoned) => poisoned.into_inner(),
             };
             while let Ok(out_msg) = outbound_rx.try_recv() {
-                if guard.send(out_msg).is_err() {
+                if guard.send(out_msg.into_message()).is_err() {
                     // Socket dead. Drop the guard, sweep the client,
                     // and exit the session. The remaining queued
                     // messages will be discarded when the channel
@@ -2291,7 +2347,9 @@ fn run_authenticated_session(
                 // here under socket.lock would race with the writer
                 // thread on dual-thread connections and interleave
                 // partial frames on the underlying TCP stream.
-                let _ = socket_handle.outbound_tx.try_send(Message::Pong(data));
+                let _ = socket_handle
+                    .outbound_tx
+                    .try_send(OutboundMessage::Control(Message::Pong(data)));
             }
             Ok(Message::Close(_)) => {
                 end_session(&hub, client_id, reactive.as_ref(), rooms.as_ref());
@@ -2388,6 +2446,9 @@ fn handle_crdt_control(
 
     match kind {
         "crdt-subscribe" => {
+            if !hub.supports_crdt_replication(entity) {
+                return;
+            }
             // Authz check happens INSIDE the fetcher (it has access to
             // the policy engine + DataStore). When a fetcher is wired
             // and returns None, the caller is either denied or the row
@@ -2428,6 +2489,10 @@ fn handle_crdt_control(
                 // (because it ran before this refetch). Both cases
                 // converge — no update is silently lost.
                 let snapshot = snapshot_fetcher.and_then(|f| f(auth_ctx, entity, row_id));
+                if !hub.supports_crdt_replication(entity) {
+                    hub.subscriptions.unsubscribe(client_id, entity, row_id);
+                    return;
+                }
                 if let Some(bytes) = snapshot {
                     hub.send_binary_to_one(client_id, bytes);
                 }
@@ -2924,6 +2989,281 @@ impl Write for ReadHalfStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn queued_client(shard: &Shard, id: u64) -> ClientSocket {
+        let stream: Box<dyn WsStream> = Box::new(std::io::Cursor::new(Vec::<u8>::new()));
+        shard.add(
+            id,
+            WebSocket::from_raw_socket(stream, Role::Server, None),
+            AuthContext::admin(),
+            None,
+        )
+    }
+
+    #[test]
+    fn privacy_change_during_snapshot_fetch_blocks_bootstrap() {
+        use std::sync::atomic::Ordering;
+        let manifest = Arc::new(pylon_kernel::AppManifest {
+            entities: vec![pylon_kernel::ManifestEntity {
+                name: "Doc".into(),
+                crdt: true,
+                sync: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let hub = WsHub::new(
+            Arc::new(PolicyEngine::from_manifest(&manifest)),
+            manifest.clone(),
+            manifest.auth.user.clone(),
+        );
+        let restricted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let check = restricted.clone();
+        hub.set_crdt_private_history(Arc::new(move |_| check.load(Ordering::SeqCst)));
+        let client = queued_client(&hub.shards[0], 0);
+        let rx = client.outbound_rx.lock().unwrap().take().unwrap();
+        let fetches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls = fetches.clone();
+        let fetcher: SnapshotFetcher = Arc::new(move |_, _, _| {
+            if calls.fetch_add(1, Ordering::SeqCst) == 1 {
+                restricted.store(true, Ordering::SeqCst);
+            }
+            Some(b"private-history".to_vec())
+        });
+        handle_crdt_control(
+            &hub,
+            0,
+            &AuthContext::admin(),
+            "crdt-subscribe",
+            &serde_json::json!({"entity":"Doc","rowId":"row"}),
+            Some(&fetcher),
+        );
+        assert_eq!(fetches.load(Ordering::SeqCst), 2);
+        assert!(hub.subscriptions.subscribers("Doc", "row").is_empty());
+        assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn private_crdt_history_is_denied_on_subscribe_and_incoming_cluster_frames() {
+        use pylon_kernel::{AppManifest, ManifestEntity, ManifestField};
+        struct Bus(Mutex<Option<pylon_cluster::SubscriberHandler>>);
+        impl pylon_cluster::ClusterBus for Bus {
+            fn publish(&self, _: &pylon_cluster::Envelope) {}
+            fn subscribe(&self, handler: pylon_cluster::SubscriberHandler) {
+                *self.0.lock().unwrap() = Some(handler);
+            }
+            fn instance_id(&self) -> &str {
+                "local"
+            }
+            fn is_active(&self) -> bool {
+                true
+            }
+        }
+        let manifest = Arc::new(AppManifest {
+            entities: vec![
+                ManifestEntity {
+                    name: "Restricted".into(),
+                    crdt: true,
+                    sync: true,
+                    fields: vec![ManifestField {
+                        name: "secret".into(),
+                        field_type: "string".into(),
+                        server_only: true,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                ManifestEntity {
+                    name: "FormerlyPrivate".into(),
+                    crdt: true,
+                    sync: true,
+                    ..Default::default()
+                },
+                ManifestEntity {
+                    name: "Public".into(),
+                    crdt: true,
+                    sync: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+        let policy = Arc::new(PolicyEngine::from_manifest(&manifest));
+        let hub = WsHub::new(policy.clone(), manifest.clone(), manifest.auth.user.clone());
+        hub.set_crdt_private_history(Arc::new(|entity| entity == "FormerlyPrivate"));
+        let client = queued_client(&hub.shards[0], 0);
+        let rx = client.outbound_rx.lock().unwrap().take().unwrap();
+        let bus = Arc::new(Bus(Mutex::new(None)));
+        let dyn_bus: Arc<dyn pylon_cluster::ClusterBus> = bus.clone();
+        let sse = crate::sse::SseHub::new(policy, manifest.clone(), manifest.auth.user.clone());
+        crate::datastore::install_cluster_bus_subscriber(
+            &dyn_bus,
+            hub.clone(),
+            sse,
+            Arc::new(pylon_sync::ChangeLog::new()),
+            manifest.auth.user.clone(),
+            manifest,
+            None,
+            None,
+        );
+        let handler = bus.0.lock().unwrap().clone().unwrap();
+        for entity in ["Restricted", "FormerlyPrivate", "User", "Unknown"] {
+            handle_crdt_control(
+                &hub,
+                0,
+                &AuthContext::admin(),
+                "crdt-subscribe",
+                &serde_json::json!({"entity":entity,"rowId":"row"}),
+                None,
+            );
+            assert!(hub.subscriptions.subscribers(entity, "row").is_empty());
+            // Simulate a subscription registered before the restriction.
+            hub.subscriptions.subscribe(0, entity, "row");
+            handler(pylon_cluster::Envelope::crdt(
+                "peer",
+                entity,
+                "row",
+                b"private-history",
+            ));
+            assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        }
+        hub.subscriptions.subscribe(0, "Public", "row");
+        handler(pylon_cluster::Envelope::crdt(
+            "peer",
+            "Public",
+            "row",
+            b"public-history",
+        ));
+        assert!(
+            rx.try_recv().is_ok(),
+            "public peer frames must still reach the client"
+        );
+    }
+
+    #[test]
+    fn slow_clients_share_queued_payload_allocations() {
+        let shard = Shard::new();
+        let clients: Vec<_> = (0..16).map(|id| queued_client(&shard, id)).collect();
+        let text: Arc<str> = Arc::from("x".repeat(32 * 1024));
+        let binary: Arc<[u8]> = Arc::from(vec![42; 32 * 1024]);
+        // Leave every receiver idle until all queues reach their limit.
+        for _ in 0..PER_CLIENT_OUTBOUND_DEPTH / 2 {
+            shard.broadcast(&text);
+            shard.broadcast_binary(&binary);
+        }
+        let copies = clients.len() * (PER_CLIENT_OUTBOUND_DEPTH / 2);
+        assert_eq!(Arc::strong_count(&text), copies + 1);
+        assert_eq!(Arc::strong_count(&binary), copies + 1);
+        for client in clients {
+            let rx = client.outbound_rx.lock().unwrap().take().unwrap();
+            for _ in 0..PER_CLIENT_OUTBOUND_DEPTH / 2 {
+                match rx.try_recv().unwrap() {
+                    OutboundMessage::Text(queued) => assert!(Arc::ptr_eq(&text, &queued)),
+                    other => panic!("expected text, got {other:?}"),
+                }
+                match rx.try_recv().unwrap() {
+                    OutboundMessage::Binary(queued) => assert!(Arc::ptr_eq(&binary, &queued)),
+                    other => panic!("expected binary, got {other:?}"),
+                }
+            }
+            assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        }
+        assert_eq!(Arc::strong_count(&text), 1);
+        assert_eq!(Arc::strong_count(&binary), 1);
+    }
+
+    #[test]
+    fn targeted_text_batch_preserves_recipients_and_queue_behavior() {
+        let shard = Shard::new();
+        let healthy = queued_client(&shard, 1);
+        let full = queued_client(&shard, 2);
+        let disconnected = queued_client(&shard, 3);
+        let other = queued_client(&shard, 4);
+        drop(disconnected.outbound_rx.lock().unwrap().take().unwrap());
+        let text: Arc<str> = Arc::from("room update");
+        for _ in 0..PER_CLIENT_OUTBOUND_DEPTH {
+            full.outbound_tx
+                .try_send(OutboundMessage::Text(text.clone()))
+                .unwrap();
+        }
+        shard.send_text_to_many(&[1, 2, 3, 999], &text);
+        let rx = healthy.outbound_rx.lock().unwrap().take().unwrap();
+        match rx.try_recv().unwrap() {
+            OutboundMessage::Text(queued) => assert!(Arc::ptr_eq(&text, &queued)),
+            message => panic!("unexpected message: {message:?}"),
+        }
+        assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        assert!(matches!(
+            other
+                .outbound_rx
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        let clients = shard.clients.lock().unwrap();
+        assert!(clients.contains_key(&1));
+        assert!(clients.contains_key(&2));
+        assert!(!clients.contains_key(&3));
+        assert!(clients.contains_key(&4));
+    }
+
+    #[test]
+    fn full_queue_returns_shared_payload_without_conversion() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        tx.try_send(OutboundMessage::Control(Message::Pong(vec![1])))
+            .unwrap();
+        let text: Arc<str> = Arc::from("queued text");
+        let binary: Arc<[u8]> = Arc::from(vec![2; 32 * 1024]);
+        match tx.try_send(OutboundMessage::Text(Arc::clone(&text))) {
+            Err(mpsc::TrySendError::Full(OutboundMessage::Text(rejected))) => {
+                assert!(Arc::ptr_eq(&text, &rejected));
+            }
+            other => panic!("expected full text queue, got {other:?}"),
+        }
+        match tx.try_send(OutboundMessage::Binary(Arc::clone(&binary))) {
+            Err(mpsc::TrySendError::Full(OutboundMessage::Binary(rejected))) => {
+                assert!(Arc::ptr_eq(&binary, &rejected));
+            }
+            other => panic!("expected full binary queue, got {other:?}"),
+        }
+        assert_eq!(Arc::strong_count(&text), 1);
+        assert_eq!(Arc::strong_count(&binary), 1);
+        assert_eq!(rx.recv().unwrap().into_message(), Message::Pong(vec![1]));
+    }
+
+    #[test]
+    fn queued_data_and_control_frames_keep_order_and_contents() {
+        let shard = Shard::new();
+        let client = queued_client(&shard, 1);
+        let text: Arc<str> = Arc::from("hello");
+        let binary: Arc<[u8]> = Arc::from(vec![2, 3]);
+        shard.send_text_to_one(1, &text);
+        client
+            .outbound_tx
+            .try_send(OutboundMessage::Control(Message::Pong(vec![4])))
+            .unwrap();
+        shard.send_binary_to(&[1], &binary);
+        let close = Message::Close(Some(tungstenite::protocol::CloseFrame {
+            code: tungstenite::protocol::frame::coding::CloseCode::Policy,
+            reason: "session ended".into(),
+        }));
+        client
+            .outbound_tx
+            .try_send(OutboundMessage::Control(close.clone()))
+            .unwrap();
+        let rx = client.outbound_rx.lock().unwrap().take().unwrap();
+        for expected in [
+            Message::Text("hello".into()),
+            Message::Pong(vec![4]),
+            Message::Binary(vec![2, 3]),
+            close,
+        ] {
+            assert_eq!(rx.recv().unwrap().into_message(), expected);
+        }
+    }
 
     #[test]
     fn shard_count_starts_at_zero() {

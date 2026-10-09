@@ -27,6 +27,37 @@ use serde::{Deserialize, Serialize};
 
 use crate::StorageError;
 
+/// Columns needed for vector hit documents. Embeddings stay in the database.
+pub fn document_columns(entity: &pylon_kernel::ManifestEntity) -> Vec<&str> {
+    std::iter::once("id")
+        .chain(
+            entity
+                .fields
+                .iter()
+                .filter(|f| f.name != "id" && !f.field_type.starts_with("vector("))
+                .map(|f| f.name.as_str()),
+        )
+        .collect()
+}
+
+/// Restore score order after a batch read. Rows deleted since the scan are absent.
+pub fn ranked_hits(
+    scored: Vec<(String, f64)>,
+    documents: Vec<serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    let mut by_id: HashMap<String, serde_json::Value> = documents
+        .into_iter()
+        .filter_map(|doc| Some((doc.get("id")?.as_str()?.to_owned(), doc)))
+        .collect();
+    scored
+        .into_iter()
+        .filter_map(|(id, score)| {
+            let doc = by_id.remove(&id)?;
+            Some(serde_json::json!({ "id": id, "score": score, "doc": doc }))
+        })
+        .collect()
+}
+
 /// Matches the SDK-side guard in `field.vector(dims)`.
 pub const MAX_VECTOR_DIMS: u32 = 8192;
 
@@ -235,6 +266,20 @@ pub fn unpack_f32(bytes: &[u8]) -> Option<Vec<f32>> {
     )
 }
 
+/// Decode a candidate into reusable storage after checking its dimensions.
+pub(crate) fn decode_candidate(bytes: &[u8], dims: usize, out: &mut Vec<f32>) -> bool {
+    if bytes.len() % 4 != 0 || bytes.len() / 4 != dims {
+        return false;
+    }
+    out.clear();
+    out.extend(
+        bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])),
+    );
+    true
+}
+
 /// Convert a JSON value (as written by app code) into an f32 vector,
 /// enforcing the declared dims and rejecting non-finite elements.
 pub fn json_to_f32s(value: &serde_json::Value, dims: u32) -> Result<Vec<f32>, String> {
@@ -289,6 +334,52 @@ fn type_name(v: &serde_json::Value) -> &'static str {
 // ---------------------------------------------------------------------------
 // Scoring + top-k
 // ---------------------------------------------------------------------------
+
+/// Scoring state shared by candidates with the query's dimensions.
+pub(crate) struct Scorer<'a> {
+    metric: VectorMetric,
+    query: &'a [f32],
+    query_norm: f64,
+}
+
+impl<'a> Scorer<'a> {
+    pub(crate) fn new(metric: VectorMetric, query: &'a [f32]) -> Self {
+        let query_norm = if metric == VectorMetric::Cosine {
+            query
+                .iter()
+                .map(|v| (*v as f64) * (*v as f64))
+                .sum::<f64>()
+                .sqrt()
+        } else {
+            0.0
+        };
+        Self {
+            metric,
+            query,
+            query_norm,
+        }
+    }
+
+    pub(crate) fn score(&self, candidate: &[f32]) -> f64 {
+        debug_assert_eq!(self.query.len(), candidate.len());
+        if self.metric != VectorMetric::Cosine {
+            return score(self.metric, self.query, candidate);
+        }
+        let mut dot = 0.0;
+        let mut norm = 0.0;
+        for (a, b) in self.query.iter().zip(candidate) {
+            let (a, b) = (*a as f64, *b as f64);
+            dot += a * b;
+            norm += b * b;
+        }
+        let denom = self.query_norm * norm.sqrt();
+        if denom == 0.0 {
+            0.0
+        } else {
+            dot / denom
+        }
+    }
+}
 
 /// Score a candidate against the query under `metric`. f64 accumulation
 /// keeps long dot products stable.
@@ -355,18 +446,21 @@ impl TopK {
         }
     }
 
+    pub(crate) fn accepts(&self, score: f64) -> bool {
+        self.k != 0
+            && !score.is_nan()
+            && (self.entries.len() < self.k || self.better(score, self.entries[0].1))
+    }
+
     pub fn push(&mut self, id: String, score: f64) {
         // NaN is unordered: it would lodge as an unevictable "worst"
         // entry and block every later candidate. Scan sites also skip
         // NaN — this is the backstop.
-        if self.k == 0 || score.is_nan() {
+        if !self.accepts(score) {
             return;
         }
         if self.entries.len() >= self.k {
             // entries[0] is the current worst kept score.
-            if !self.better(score, self.entries[0].1) {
-                return;
-            }
             self.entries.remove(0);
         }
         let idx = self
@@ -481,6 +575,8 @@ pub fn scan_topk(
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
 
     let mut topk = TopK::new(metric, limit);
+    let mut candidate = Vec::with_capacity(query_vec.len());
+    let scorer = Scorer::new(metric, query_vec);
     let mut skipped = 0usize;
     let mut rows = stmt
         .query(param_refs.as_slice())
@@ -492,33 +588,30 @@ pub fn scan_topk(
         code: "VECTOR_SCAN_FAILED".into(),
         message: format!("vector scan row on {entity}.{field}: {e}"),
     })? {
-        let id: String = match row.get(0) {
-            Ok(v) => v,
-            Err(_) => continue,
+        let Some(id) = row.get_ref(0).ok().and_then(|v| v.as_str().ok()) else {
+            continue;
         };
-        let blob: Vec<u8> = match row.get(1) {
-            Ok(v) => v,
-            Err(_) => {
+        let blob = match row.get_ref(1).ok().and_then(|v| v.as_blob().ok()) {
+            Some(v) => v,
+            None => {
                 skipped += 1;
                 continue;
             }
         };
-        let Some(candidate) = unpack_f32(&blob) else {
-            skipped += 1;
-            continue;
-        };
-        if candidate.len() != query_vec.len() {
+        if !decode_candidate(blob, query_vec.len(), &mut candidate) {
             skipped += 1;
             continue;
         }
-        let s = score(metric, query_vec, &candidate);
+        let s = scorer.score(&candidate);
         if s.is_nan() {
             // Legacy/hostile rows with non-finite components — never
             // let NaN into the ranking.
             skipped += 1;
             continue;
         }
-        topk.push(id, s);
+        if topk.accepts(s) {
+            topk.push(id.to_owned(), s);
+        }
     }
     if skipped > 0 {
         tracing::warn!(
@@ -538,6 +631,93 @@ mod tests {
         assert_eq!(unpack_f32(&pack_f32(&v)), Some(v));
         assert_eq!(unpack_f32(&[1, 2, 3]), None);
         assert_eq!(unpack_f32(&[]), Some(vec![]));
+    }
+
+    #[test]
+    fn reusable_decode_matches_owned_decode_after_invalid_rows() {
+        let mut out = vec![99.0; 4];
+        for values in [
+            vec![1.0, -2.0],
+            vec![0.0, f32::INFINITY],
+            vec![-0.0, f32::MIN_POSITIVE],
+        ] {
+            assert!(!decode_candidate(&[1, 2, 3], 2, &mut out));
+            assert!(!decode_candidate(&pack_f32(&[1.0]), 2, &mut out));
+            assert!(decode_candidate(&pack_f32(&values), 2, &mut out));
+            assert_eq!(out, values);
+        }
+        assert!(decode_candidate(&[], 0, &mut out));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn prepared_scorer_matches_reference_scores() {
+        let mut state = 42u64;
+        for dims in [0, 1, 3, 384, 1536] {
+            let mut next = || {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                ((state >> 32) as i32) as f32 / 10_000.0
+            };
+            let query: Vec<_> = (0..dims).map(|_| next()).collect();
+            let random: Vec<_> = (0..dims).map(|_| next()).collect();
+            for candidate in [
+                random,
+                vec![0.0; dims],
+                vec![f32::INFINITY; dims],
+                vec![f32::NAN; dims],
+            ] {
+                for metric in [VectorMetric::Cosine, VectorMetric::Dot, VectorMetric::L2] {
+                    let expected = score(metric, &query, &candidate);
+                    let actual = Scorer::new(metric, &query).score(&candidate);
+                    assert!(actual == expected || (actual.is_nan() && expected.is_nan()));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reusable_scan_matches_owned_scoring_for_all_metrics_and_limits() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE Doc (id TEXT PRIMARY KEY, embedding BLOB)")
+            .unwrap();
+        let mut rows = Vec::new();
+        for i in 0..128 {
+            let values = match i % 17 {
+                0 => vec![f32::NAN, 1.0, 2.0],
+                1 => vec![f32::INFINITY, 1.0, 2.0],
+                2 => vec![0.0; 3],
+                _ => vec![i as f32 - 64.0, (i % 7) as f32, 0.5],
+            };
+            let id = format!("row-{i:03}");
+            let blob = pack_f32(&values);
+            conn.execute(
+                "INSERT INTO Doc VALUES (?1, ?2)",
+                rusqlite::params![id, blob],
+            )
+            .unwrap();
+            rows.push((id, values));
+        }
+        conn.execute_batch("INSERT INTO Doc VALUES ('bad', X'010203'), ('short', X'00000000'), ('text', 'wrong type')").unwrap();
+        let query = [0.5, -2.0, 1.0];
+        for metric in [VectorMetric::Cosine, VectorMetric::Dot, VectorMetric::L2] {
+            for limit in [0, 1, 7, 200] {
+                let mut expected = TopK::new(metric, limit);
+                for (id, values) in &rows {
+                    expected.push(id.clone(), score(metric, &query, values));
+                }
+                let actual = scan_topk(
+                    &conn,
+                    "Doc",
+                    "embedding",
+                    &query,
+                    metric,
+                    limit,
+                    &HashMap::new(),
+                )
+                .unwrap();
+                assert_eq!(actual, expected.into_sorted());
+            }
+        }
     }
 
     #[test]
@@ -696,5 +876,30 @@ mod tests {
         .unwrap();
         assert_eq!(hits.len(), 3);
         assert_eq!(hits[0].0, "d1");
+    }
+}
+
+#[cfg(test)]
+mod document_tests {
+    #[test]
+    fn ranked_documents_keep_score_order_and_skip_deleted_rows() {
+        let hits = super::ranked_hits(
+            vec![
+                ("b".into(), 0.9),
+                ("deleted".into(), 0.8),
+                ("a".into(), 0.7),
+            ],
+            vec![
+                serde_json::json!({"id": "a", "title": "A"}),
+                serde_json::json!({"id": "b", "title": "B"}),
+            ],
+        );
+        assert_eq!(
+            hits,
+            vec![
+                serde_json::json!({"id": "b", "score": 0.9, "doc": {"id": "b", "title": "B"}}),
+                serde_json::json!({"id": "a", "score": 0.7, "doc": {"id": "a", "title": "A"}}),
+            ]
+        );
     }
 }

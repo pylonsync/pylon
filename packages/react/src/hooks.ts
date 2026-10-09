@@ -105,7 +105,23 @@ export function useQuery<T = Row>(
   // unrelated update happened to re-render the component.
   const [error, setError] = useState<Error | null>(null);
   const [refetching, setRefetching] = useState(false);
-  const optionsKey = JSON.stringify(options || {});
+  // JSON drops undefined/functions and maps non-finite numbers to null.
+  // Keep the original recompute behavior when it cannot identify a filter.
+  let cacheableOptions = !hasReferenceFilter(options?.where);
+  const optionsKey = JSON.stringify(options || {}, function (key, value) {
+    const original = this[key];
+    const prototype = original !== null && typeof original === "object"
+      ? Object.getPrototypeOf(original) : null;
+    if (
+      original === undefined || typeof original === "function" || typeof original === "symbol" ||
+      (typeof original === "number" && !Number.isFinite(original)) ||
+      (original !== null && typeof original === "object" && (
+        typeof original.toJSON === "function" ||
+        (!Array.isArray(original) && prototype !== null && prototype !== Object.prototype)
+      ))
+    ) cacheableOptions = false;
+    return value;
+  });
 
   // Subscribe function stable across the lifetime of this entity/options combo.
   const subscribe = useMemo(
@@ -114,27 +130,44 @@ export function useQuery<T = Row>(
         if (!changedEntity || changedEntity === entity) {
           onChange();
         }
-      });
+      }, entity);
     },
     [sync, entity]
   );
 
   // Cache the filtered snapshot so getSnapshot returns a stable reference
   // while the underlying data is unchanged.
-  const snapshotCache = useRef<{ rows: T[]; sig: string }>({
-    rows: [],
-    sig: "__init__",
-  });
+  const snapshotCache = useRef<{
+    rows: T[];
+    sig: string;
+    sync?: SyncEngine;
+    entity?: string;
+    version?: number;
+    optionsKey?: string;
+  }>({ rows: [], sig: "__init__" });
 
   const getSnapshot = useCallback((): T[] => {
-    const rows = sync.store.list(entity) as Row[];
+    const version = sync.store.version(entity);
+    const cached = snapshotCache.current;
+    if (
+      cacheableOptions && cached.sync === sync && cached.entity === entity &&
+      cached.version === version && cached.optionsKey === optionsKey
+    ) {
+      return cached.rows;
+    }
+    const rows = canStopAtLimit(options) ? sync.store.rows(entity) : sync.store.list(entity);
     const filtered = applyClientFilter(rows, options);
     const sig = optionsKey + ":" + JSON.stringify(filtered);
-    if (sig !== snapshotCache.current.sig) {
-      snapshotCache.current = { rows: filtered as T[], sig };
-    }
+    snapshotCache.current = {
+      rows: sig === cached.sig ? cached.rows : filtered as T[],
+      sig,
+      sync,
+      entity,
+      version: cacheableOptions ? version : undefined,
+      optionsKey,
+    };
     return snapshotCache.current.rows;
-  }, [sync, entity, optionsKey, options]);
+  }, [sync, entity, optionsKey, options, cacheableOptions]);
 
   const getServerSnapshot = useCallback((): T[] => EMPTY_SNAPSHOT as T[], []);
 
@@ -232,22 +265,39 @@ export function useQueryOne<T = Row>(
         if (!changedEntity || changedEntity === entity) {
           onChange();
         }
-      });
+      }, entity);
     },
     [sync, entity]
   );
 
-  const snapshotCache = useRef<{ row: T | null; sig: string }>({
-    row: null,
-    sig: "__init__",
-  });
+  const snapshotCache = useRef<{
+    row: T | null;
+    sig: string;
+    sync?: SyncEngine;
+    entity?: string;
+    id?: string;
+    version?: number;
+  }>({ row: null, sig: "__init__" });
 
   const getSnapshot = useCallback((): T | null => {
+    const version = sync.store.rowVersion(entity, id);
+    const cached = snapshotCache.current;
+    if (
+      cached.sync === sync && cached.entity === entity &&
+      cached.id === id && cached.version === version
+    ) {
+      return cached.row;
+    }
     const row = sync.store.get(entity, id) as Row | null;
     const sig = JSON.stringify(row);
-    if (sig !== snapshotCache.current.sig) {
-      snapshotCache.current = { row: (row as T) ?? null, sig };
-    }
+    snapshotCache.current = {
+      row: sig === cached.sig ? cached.row : (row as T) ?? null,
+      sig,
+      sync,
+      entity,
+      id,
+      version,
+    };
     return snapshotCache.current.row;
   }, [sync, entity, id]);
 
@@ -378,68 +428,118 @@ export function useReactiveQuery<T = unknown>(
 // Client-side filter application (matches the server's operator set)
 // ---------------------------------------------------------------------------
 
-function applyClientFilter(rows: Row[], options?: QueryOptions): Row[] {
-  if (!options) return rows;
-
-  let out = rows.slice();
-  if (options.where) {
-    out = out.filter((row) => matchesWhere(row, options.where!));
-  }
-  if (options.orderBy) {
-    for (const [field, dir] of Object.entries(options.orderBy)) {
-      out.sort((a, b) => compare(a[field], b[field], dir));
+// JSON cannot distinguish equal-content objects used as reference operands.
+function hasReferenceFilter(where?: QueryFilter): boolean {
+  if (!where) return false;
+  for (const value of Object.values(where)) {
+    if (Array.isArray(value)) return true;
+    if (value === null || typeof value !== "object") continue;
+    for (const [op, operand] of Object.entries(value)) {
+      if (op === "$not" && operand !== null && typeof operand === "object") return true;
+      if (op === "$in" && Array.isArray(operand)) {
+        for (const member of operand) {
+          if (member !== null && typeof member === "object") return true;
+        }
+      }
     }
   }
-  if (typeof options.limit === "number") {
-    out = out.slice(0, options.limit);
+  return false;
+}
+
+function canStopAtLimit(options?: QueryOptions): boolean {
+  return (!options?.orderBy || Object.keys(options.orderBy).length === 0) &&
+    typeof options?.limit === "number" && Number.isFinite(options.limit) && options.limit >= 0;
+}
+
+function applyClientFilter(rows: Iterable<Row>, options?: QueryOptions): Row[] {
+  if (!options) return Array.isArray(rows) ? rows : Array.from(rows);
+
+  const matches = options.where ? compileWhere(options.where) : undefined;
+  const order = options.orderBy ? Object.entries(options.orderBy) : [];
+  const limit = options.limit;
+  // Without ordering, the first matching rows are already the final page.
+  if (order.length === 0 && typeof limit === "number" && Number.isFinite(limit) && limit >= 0) {
+    const count = Math.trunc(limit);
+    if (count === 0) return [];
+    const out: Row[] = [];
+    for (const row of rows) {
+      if (!matches || matches(row)) {
+        out.push(row);
+        if (out.length === count) break;
+      }
+    }
+    return out;
+  }
+
+  const out: Row[] = [];
+  for (const row of rows) {
+    if (!matches || matches(row)) out.push(row);
+  }
+  for (const [field, dir] of order) {
+    out.sort((a, b) => compare(a[field], b[field], dir));
+  }
+  if (typeof limit === "number") {
+    return out.slice(0, limit);
   }
   return out;
 }
 
-function matchesWhere(row: Row, where: QueryFilter): boolean {
-  for (const [key, val] of Object.entries(where)) {
-    if (key === "$order" || key === "$limit") continue;
-    const rowVal = row[key];
-
-    if (val !== null && typeof val === "object" && !Array.isArray(val)) {
-      // Operator object.
-      for (const [op, opVal] of Object.entries(val as Record<string, unknown>)) {
-        switch (op) {
-          case "$not":
-            if (rowVal === opVal) return false;
-            break;
-          case "$gt":
-            if (!(typeof rowVal === "number" && typeof opVal === "number" && rowVal > opVal))
-              return false;
-            break;
-          case "$gte":
-            if (!(typeof rowVal === "number" && typeof opVal === "number" && rowVal >= opVal))
-              return false;
-            break;
-          case "$lt":
-            if (!(typeof rowVal === "number" && typeof opVal === "number" && rowVal < opVal))
-              return false;
-            break;
-          case "$lte":
-            if (!(typeof rowVal === "number" && typeof opVal === "number" && rowVal <= opVal))
-              return false;
-            break;
-          case "$like":
-            if (
-              !(typeof rowVal === "string" && typeof opVal === "string" && rowVal.includes(opVal))
-            )
-              return false;
-            break;
-          case "$in":
-            if (!Array.isArray(opVal) || !(opVal as unknown[]).includes(rowVal)) return false;
-            break;
+function compileWhere(where: QueryFilter): (row: Row) => boolean {
+  const fields = Object.entries(where)
+    .filter(([key]) => key !== "$order" && key !== "$limit")
+    .map(([key, val]) => ({
+      key,
+      val,
+      operators: val !== null && typeof val === "object" && !Array.isArray(val)
+        ? Object.entries(val as Record<string, unknown>).map(([op, opVal]) => ({
+            op,
+            opVal,
+            members: op === "$in" && Array.isArray(opVal) ? new Set(opVal) : undefined,
+          }))
+        : undefined,
+    }));
+  return (row) => {
+    for (const { key, val, operators } of fields) {
+      const rowVal = row[key];
+      if (operators) {
+        for (const { op, opVal, members } of operators) {
+          switch (op) {
+            case "$not":
+              if (rowVal === opVal) return false;
+              break;
+            case "$gt":
+              if (!(typeof rowVal === "number" && typeof opVal === "number" && rowVal > opVal))
+                return false;
+              break;
+            case "$gte":
+              if (!(typeof rowVal === "number" && typeof opVal === "number" && rowVal >= opVal))
+                return false;
+              break;
+            case "$lt":
+              if (!(typeof rowVal === "number" && typeof opVal === "number" && rowVal < opVal))
+                return false;
+              break;
+            case "$lte":
+              if (!(typeof rowVal === "number" && typeof opVal === "number" && rowVal <= opVal))
+                return false;
+              break;
+            case "$like":
+              if (
+                !(typeof rowVal === "string" && typeof opVal === "string" && rowVal.includes(opVal))
+              )
+                return false;
+              break;
+            case "$in":
+              if (!members?.has(rowVal)) return false;
+              break;
+          }
         }
+      } else {
+        if (rowVal !== val) return false;
       }
-    } else {
-      if (rowVal !== val) return false;
     }
-  }
-  return true;
+    return true;
+  };
 }
 
 function compare(a: unknown, b: unknown, dir: "asc" | "desc"): number {
@@ -825,9 +925,13 @@ export function usePaginatedQuery<T = Row>(
 export function useQueryRaw(sync: SyncEngine, entity: string) {
   let cache: Row[] = sync.store.list(entity);
   let cacheKey = JSON.stringify(cache);
+  let version = sync.store.version(entity);
 
   const subscribe = (callback: () => void) => {
     return sync.store.subscribe(() => {
+      const nextVersion = sync.store.version(entity);
+      if (nextVersion === version) return;
+      version = nextVersion;
       const next = sync.store.list(entity);
       const nextKey = JSON.stringify(next);
       if (nextKey !== cacheKey) {
@@ -835,7 +939,7 @@ export function useQueryRaw(sync: SyncEngine, entity: string) {
         cacheKey = nextKey;
         callback();
       }
-    });
+    }, entity);
   };
 
   const getSnapshot = () => cache;
@@ -847,9 +951,13 @@ export function useQueryRaw(sync: SyncEngine, entity: string) {
 export function useQueryOneRaw(sync: SyncEngine, entity: string, id: string) {
   let cache: Row | null = sync.store.get(entity, id);
   let cacheKey = JSON.stringify(cache);
+  let version = sync.store.rowVersion(entity, id);
 
   const subscribe = (callback: () => void) => {
     return sync.store.subscribe(() => {
+      const nextVersion = sync.store.rowVersion(entity, id);
+      if (nextVersion === version) return;
+      version = nextVersion;
       const next = sync.store.get(entity, id);
       const nextKey = JSON.stringify(next);
       if (nextKey !== cacheKey) {
@@ -857,7 +965,7 @@ export function useQueryOneRaw(sync: SyncEngine, entity: string, id: string) {
         cacheKey = nextKey;
         callback();
       }
-    });
+    }, entity);
   };
 
   const getSnapshot = () => cache;
@@ -1045,7 +1153,7 @@ export function useAggregate<Row = Record<string, unknown>>(
       pending = setTimeout(() => {
         void run();
       }, 150);
-    });
+    }, entity);
     return () => {
       if (pending) clearTimeout(pending);
       unsub();
@@ -1202,7 +1310,7 @@ export function useSearch<T = Row>(
       pending = setTimeout(() => {
         void run();
       }, 150);
-    });
+    }, entity);
     return () => {
       if (pending) clearTimeout(pending);
       unsub();

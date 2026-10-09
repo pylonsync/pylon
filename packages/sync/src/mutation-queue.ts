@@ -73,12 +73,14 @@ export interface PendingMutation {
 
 /**
  * Optional persistence backend. The default IndexedDB persistence
- * layer provides `savePending`/`loadPending`. Callers can supply a
- * custom backend for tests or alternative storage.
+ * layer supports incremental writes with `saveChanges`. Custom backends
+ * can keep the full-snapshot `saveAll` contract.
  */
 export interface MutationQueuePersistence {
   saveAll(mutations: PendingMutation[]): Promise<void>;
   loadAll(): Promise<PendingMutation[]>;
+  /** Optional ordered, atomic delta write. Unchanged entries stay on disk. */
+  saveChanges?(upserts: PendingMutation[], removedIds: string[]): Promise<void>;
 }
 
 interface OutcomeWaiter {
@@ -87,7 +89,7 @@ interface OutcomeWaiter {
 }
 
 export class MutationQueue {
-  private queue: PendingMutation[] = [];
+  private queue = new Map<string, PendingMutation>();
   private persistence?: MutationQueuePersistence;
   /** Callers waiting for a mutation's outcome, by op id. Memory-only:
    *  a promise cannot outlive the page that created it. */
@@ -116,11 +118,10 @@ export class MutationQueue {
       // hydrate was awaiting `loadAll()` will already have flushed a
       // snapshot that didn't include the loaded rows — re-flush
       // after merge so disk matches memory again.
-      const existingIds = new Set(this.queue.map((m) => m.id));
       let mergedAny = false;
       for (const m of loaded) {
-        if (!existingIds.has(m.id)) {
-          this.queue.push(m);
+        if (!this.queue.has(m.id)) {
+          this.queue.set(m.id, m);
           mergedAny = true;
         }
       }
@@ -150,25 +151,29 @@ export class MutationQueue {
       typeof change.op_id === "string" && change.op_id.length > 0
         ? change.op_id
         : `mut_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-    if (this.queue.some((m) => m.id === id)) return id;
+    if (this.queue.has(id)) return id;
     const changeWithOp: ClientChange = { ...change, op_id: id };
     const entry: PendingMutation = { id, change: changeWithOp, status: "pending", prevRow };
     if (owner !== undefined) entry.owner = owner;
     if (ownerPending) entry.ownerPending = true;
-    this.queue.push(entry);
-    this.flush();
+    this.queue.set(id, entry);
+    this.flush([entry]);
     return id;
   }
 
   pending(): PendingMutation[] {
-    return this.queue.filter((m) => m.status === "pending");
+    const pending: PendingMutation[] = [];
+    for (const mutation of this.queue.values()) {
+      if (mutation.status === "pending") pending.push(mutation);
+    }
+    return pending;
   }
 
   /** Look up a queued mutation by op id (any status). Used by the
    *  follower's mutations-failed handler to reach the captured
    *  `prevRow` for rollback. */
   get(id: string): PendingMutation | undefined {
-    return this.queue.find((m) => m.id === id);
+    return this.queue.get(id);
   }
 
   /**
@@ -186,7 +191,7 @@ export class MutationQueue {
    */
   pendingRowKeys(): Set<string> {
     const out = new Set<string>();
-    for (const m of this.queue) {
+    for (const m of this.queue.values()) {
       if (m.status === "pending" || m.status === "failed") {
         out.add(`${m.change.entity}/${m.change.row_id}`);
       }
@@ -219,20 +224,31 @@ export class MutationQueue {
   }
 
   markApplied(id: string): void {
-    const m = this.queue.find((m) => m.id === id);
-    if (m) m.status = "applied";
-    this.flush();
-    this.resolveWaiters(id);
+    this.markAppliedMany([id]);
+  }
+
+  /** Persist one response batch once, then settle each caller. */
+  markAppliedMany(ids: string[]): void {
+    const changed: PendingMutation[] = [];
+    for (const id of new Set(ids)) {
+      const m = this.queue.get(id);
+      if (m) {
+        m.status = "applied";
+        changed.push(m);
+      }
+    }
+    if (changed.length > 0) this.flush(changed);
+    for (const id of ids) this.resolveWaiters(id);
   }
 
   markFailed(id: string, error: string, errorCode?: string): void {
-    const m = this.queue.find((m) => m.id === id);
+    const m = this.queue.get(id);
     if (m) {
       m.status = "failed";
       m.error = error;
       if (errorCode) m.errorCode = errorCode;
     }
-    this.flush();
+    if (m) this.flush([m]);
     const waiters = this.waiters.get(id);
     if (!waiters) return;
     this.waiters.delete(id);
@@ -260,24 +276,28 @@ export class MutationQueue {
    * surface them to the user and so retries are possible.
    */
   clear(): void {
-    this.queue = this.queue.filter(
-      (m) => m.status === "pending" || m.status === "failed",
-    );
-    this.flush();
+    const removedIds: string[] = [];
+    for (const [id, m] of this.queue) {
+      if (m.status === "applied") {
+        this.queue.delete(id);
+        removedIds.push(id);
+      }
+    }
+    if (removedIds.length > 0) this.flush([], removedIds);
   }
 
   /** Stamp every write whose owner was pending with the user the first
    *  resolved session names. */
   stampPendingOwner(owner: string | null): void {
-    let changed = false;
-    for (const m of this.queue) {
+    const changed: PendingMutation[] = [];
+    for (const m of this.queue.values()) {
       if (m.ownerPending) {
         m.owner = owner;
         delete m.ownerPending;
-        changed = true;
+        changed.push(m);
       }
     }
-    if (changed) this.flush();
+    if (changed.length > 0) this.flush(changed);
   }
 
   /** Drop one mutation that must never be pushed (it belongs to another
@@ -285,8 +305,8 @@ export class MutationQueue {
    *  touch the local store. */
   discard(id: string): void {
     const m = this.get(id);
-    this.queue = this.queue.filter((q) => q.id !== id);
-    this.flush();
+    this.queue.delete(id);
+    this.flush([], [id]);
     const waiters = this.waiters.get(id);
     if (!waiters) return;
     this.waiters.delete(id);
@@ -306,8 +326,8 @@ export class MutationQueue {
   /** Remove a specific mutation by id. Used by the UI after user
    *  ack of failures. */
   remove(id: string): void {
-    this.queue = this.queue.filter((m) => m.id !== id);
-    this.flush();
+    this.queue.delete(id);
+    this.flush([], [id]);
   }
 
   /**
@@ -323,11 +343,11 @@ export class MutationQueue {
    */
   clearAll(): void {
     const dropped = this.queue;
-    this.queue = [];
+    this.queue = new Map();
     this.flush();
     // Nobody will push these writes any more. Reject their waiters so a
     // caller awaiting the outcome does not hang.
-    for (const m of dropped) {
+    for (const m of dropped.values()) {
       const waiters = this.waiters.get(m.id);
       if (!waiters) continue;
       this.waiters.delete(m.id);
@@ -346,10 +366,13 @@ export class MutationQueue {
   }
 
   /** Fire-and-forget persistence write. */
-  private flush(): void {
+  private flush(upserts?: PendingMutation[], removedIds: string[] = []): void {
     if (!this.persistence) return;
-    const snapshot = this.queue.slice();
-    this.persistence.saveAll(snapshot).catch((err) => {
+    // Copy mutable status/owner fields before handing data to an async backend.
+    const write = upserts && this.persistence.saveChanges
+      ? this.persistence.saveChanges(upserts.map((m) => ({ ...m })), removedIds)
+      : this.persistence.saveAll(Array.from(this.queue.values(), (m) => ({ ...m })));
+    write.catch((err) => {
       console.warn("[sync] mutation-queue persist failed:", err);
     });
   }

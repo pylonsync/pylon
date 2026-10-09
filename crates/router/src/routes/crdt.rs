@@ -113,6 +113,18 @@ pub(crate) fn handle(
             ),
         ));
     }
+    let manifest = ctx.store.manifest();
+    if ctx.store.has_private_crdt_history(entity)
+        || !crate::supports_crdt_replication(manifest, &manifest.auth.user, entity)
+    {
+        return Some((
+            403,
+            json_error(
+                "CRDT_REPLICATION_DISABLED",
+                "Binary CRDT updates are disabled for this entity. Use the JSON update API.",
+            ),
+        ));
+    }
     // Plugin chain: run `before_update` so TenantScopePlugin and any
     // audit_log / validation plugins observe the write. The CRDT
     // wire shape is opaque bytes, so we pass a synthetic data payload

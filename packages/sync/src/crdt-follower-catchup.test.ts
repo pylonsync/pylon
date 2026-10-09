@@ -1,14 +1,9 @@
-// Follower catch-up for CRDT rows. The server ships its catch-up
-// snapshot only on a FRESH `crdt-subscribe`; when a follower tab
-// registers interest in a row the leader (or another follower) already
-// subscribed, no wire traffic happens — pre-fix the new tab's LoroDoc
-// stayed empty until the next live edit ("open the doc in a second tab
-// and the content doesn't render"). The leader now caches the latest
-// snapshot frame per row and replays it over the tab channel.
+// A new follower needs a full authorized snapshot from the server.
+// Binary update frames cannot serve as a complete document cache.
 import { describe, expect, test } from "bun:test";
 import { SubscriptionCoordinator, crdtKey } from "./subscription-coordinator";
 import { ServerSubscriptions } from "./server-subscriptions";
-import { crdtFrameKey } from "./index";
+import { crdtFrameKey, SyncEngine } from "./index";
 
 function encodeSnapshotFrame(
   type: number,
@@ -47,7 +42,6 @@ describe("crdtFrameKey", () => {
 describe("forwarded register replay", () => {
   function harness() {
     const sent: unknown[] = [];
-    const replayed: Array<[string, string]> = [];
     const serverSubs = new ServerSubscriptions((msg) => {
       sent.push(msg);
       return true;
@@ -55,36 +49,31 @@ describe("forwarded register replay", () => {
     const coordinator = new SubscriptionCoordinator(serverSubs, {
       isLeader: () => true,
       broadcastToTabs: () => {},
-      replayCrdtFrame: (entity, rowId) => {
-        replayed.push([entity, rowId]);
-      },
     });
-    return { coordinator, sent, replayed };
+    return { coordinator, sent };
   }
 
-  test("already-alive subscription replays the cached snapshot to followers", () => {
-    const { coordinator, replayed } = harness();
+  test("an existing subscription requests a full snapshot for a new follower", () => {
+    const { coordinator, sent } = harness();
     // Leader's own component holds the row → WS sub is alive.
     coordinator.subscribeCrdt("Doc", "row1");
-    // A second tab opens the same doc and forwards its interest. No new
-    // crdt-subscribe goes out (the sub exists), so the ONLY way this
-    // tab gets state is the replay.
+    // A second tab needs a fresh snapshot even though the row is subscribed.
     coordinator.handleForwardedRegister(
       { kind: "crdt", key: crdtKey("Doc", "row1"), entity: "Doc", rowId: "row1" },
       "tab-2",
     );
-    expect(replayed).toEqual([["Doc", "row1"]]);
+    expect(sent.filter((message) => (message as { type?: string }).type === "crdt-subscribe")).toHaveLength(2);
   });
 
-  test("fresh subscription does NOT replay — the server catch-up covers it", () => {
-    const { coordinator, replayed, sent } = harness();
+  test("a fresh subscription needs only its initial request", () => {
+    const { coordinator, sent } = harness();
     coordinator.handleForwardedRegister(
       { kind: "crdt", key: crdtKey("Doc", "row9"), entity: "Doc", rowId: "row9" },
       "tab-2",
     );
     // First interest in the row → real crdt-subscribe goes out; the
     // server's own catch-up snapshot will be fanned to tabs.
-    expect(replayed).toEqual([]);
+    expect(sent).toHaveLength(1);
     expect(
       sent.some(
         (m) => (m as { type?: string }).type === "crdt-subscribe",
@@ -92,8 +81,8 @@ describe("forwarded register replay", () => {
     ).toBe(true);
   });
 
-  test("second follower for the same row also gets a replay", () => {
-    const { coordinator, replayed } = harness();
+  test("a second follower refreshes state but duplicate registration does not", () => {
+    const { coordinator, sent } = harness();
     coordinator.handleForwardedRegister(
       { kind: "crdt", key: crdtKey("Doc", "row1"), entity: "Doc", rowId: "row1" },
       "tab-2",
@@ -102,6 +91,48 @@ describe("forwarded register replay", () => {
       { kind: "crdt", key: crdtKey("Doc", "row1"), entity: "Doc", rowId: "row1" },
       "tab-3",
     );
-    expect(replayed).toEqual([["Doc", "row1"]]);
+    expect(sent.filter((message) => (message as { type?: string }).type === "crdt-subscribe")).toHaveLength(2);
+    coordinator.handleForwardedRegister(
+      { kind: "crdt", key: crdtKey("Doc", "row1"), entity: "Doc", rowId: "row1" }, "tab-3",
+    );
+    expect(sent).toHaveLength(2);
   });
+});
+
+
+test("binary fanout follows row subscriptions and retains snapshot catch-up", () => {
+  const engine = new SyncEngine({ baseUrl: "http://test.invalid", multiTab: false, persist: false });
+  const internal = engine as unknown as {
+    subscriptions: SubscriptionCoordinator;
+    dispatchBinaryFrame(bytes: Uint8Array): void;
+    broadcastToTabs(message: { type: string; bytes?: Uint8Array }): void;
+  };
+  const sent: Uint8Array[] = [];
+  internal.broadcastToTabs = (message) => { if (message.type === "binary") sent.push(message.bytes!); };
+  const subscription = { kind: "crdt" as const, key: crdtKey("Doc", "wanted"), entity: "Doc", rowId: "wanted" };
+  internal.subscriptions.handleForwardedRegister(subscription, "follower");
+  const payload = new Uint8Array(1024 * 1024);
+  for (let i = 0; i < 10; i++) {
+    internal.dispatchBinaryFrame(encodeSnapshotFrame(i % 2 ? 0x10 : 0x11, "Doc", `other-${i}`, payload));
+  }
+  expect(sent).toHaveLength(0);
+  const snapshot = encodeSnapshotFrame(0x10, "Doc", "wanted", payload);
+  const update = encodeSnapshotFrame(0x11, "Doc", "wanted", new Uint8Array([1]));
+  internal.dispatchBinaryFrame(snapshot);
+  internal.dispatchBinaryFrame(update);
+  expect(sent).toEqual([snapshot, update]);
+  internal.subscriptions.handleForwardedRegister(subscription, "late-follower");
+  expect(sent).toHaveLength(2); // Never replay cached binary data to a new follower.
+  for (const bytes of [new Uint8Array([0x20]), new Uint8Array([0x10, 0, 9]), new Uint8Array([0x10, 0, 1, 0xff, 0, 1, 0x61])]) {
+    internal.dispatchBinaryFrame(bytes);
+    expect(sent.at(-1)).toBe(bytes);
+  }
+  for (const follower of ["follower", "late-follower"]) {
+    internal.subscriptions.handleForwardedUnregister({ type: "sub-unregister", ...subscription }, follower);
+  }
+  const count = sent.length;
+  internal.dispatchBinaryFrame(snapshot);
+  internal.dispatchBinaryFrame(update);
+  internal.dispatchBinaryFrame(new Uint8Array([0x20]));
+  expect(sent).toHaveLength(count);
 });

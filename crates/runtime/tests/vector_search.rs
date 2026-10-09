@@ -354,7 +354,7 @@ fn crdt_peer_merge_never_touches_embeddings() {
     let check = pylon_crdt::loro::LoroDoc::new();
     check.import(&snapshot).unwrap();
     let json = serde_json::to_value(check.get_deep_value()).unwrap();
-    let root = &json["root"];
+    let root = &json[pylon_crdt::ROOT_MAP];
     assert!(
         root.get("embedding").is_none() || root["embedding"].is_null(),
         "binary CRDT frames must not carry server-only embeddings, got {root}"
@@ -380,4 +380,118 @@ fn crdt_entity_supports_vector_fields() {
     let hits = result["hits"].as_array().unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0]["id"], json!(id));
+}
+
+#[test]
+fn vector_search_does_not_wait_for_the_sqlite_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("vectors.sqlite");
+    let rt = std::sync::Arc::new(Runtime::open(path.to_str().unwrap(), manifest()).unwrap());
+    let ids = seed(&rt);
+    assert!(rt.read_pool_size() > 0);
+    let writer = rt.lock_conn_pub().unwrap();
+    let (send, receive) = std::sync::mpsc::channel();
+    let reader = rt.clone();
+    let thread = std::thread::spawn(move || {
+        send.send(DataStore::vector_search(
+            &*reader,
+            "Doc",
+            &json!({
+                "field": "embedding", "vector": [1.0, 0.0, 0.0, 0.0], "limit": 2
+            }),
+        ))
+        .unwrap();
+    });
+    let result = receive.recv_timeout(std::time::Duration::from_secs(5));
+    // Release the lock before asserting so regressions cannot leave a blocked worker.
+    drop(writer);
+    thread.join().unwrap();
+    let result = result
+        .expect("vector reads must not wait for the writer")
+        .unwrap();
+    assert_eq!(result["hits"][0]["id"], ids[0]);
+    assert_eq!(result["hits"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn vector_documents_keep_json_and_bool_fields_and_omit_all_vectors() {
+    let mut schema = manifest();
+    schema.entities[0].fields.extend([
+        field("otherEmbedding", "vector(2)", true),
+        field("metadata", "json", true),
+        field("published", "bool", true),
+    ]);
+    let rt = Runtime::in_memory(schema).unwrap();
+    let id = rt
+        .insert(
+            "Doc",
+            &json!({
+                "title": "typed", "kind": "a", "embedding": [1.0, 0.0, 0.0, 0.0],
+                "otherEmbedding": [1.0, 0.0], "metadata": {"tags": ["a"]}, "published": true
+            }),
+        )
+        .unwrap();
+    for in_transaction in [false, true] {
+        let query = json!({"field": "embedding", "vector": [1.0, 0.0, 0.0, 0.0]});
+        let result = if in_transaction {
+            let conn = rt.lock_conn_pub().unwrap();
+            let store = pylon_runtime::datastore::TxStore::new(&rt, &conn);
+            DataStore::vector_search(&store, "Doc", &query).unwrap()
+        } else {
+            DataStore::vector_search(&rt, "Doc", &query).unwrap()
+        };
+        let doc = &result["hits"][0]["doc"];
+        assert_eq!(doc["id"], id);
+        assert_eq!(doc["metadata"], json!({"tags": ["a"]}));
+        assert_eq!(doc["published"], true);
+        assert!(doc.get("embedding").is_none());
+        assert!(doc.get("otherEmbedding").is_none());
+    }
+}
+
+thread_local! {
+    static VECTOR_SQL: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[test]
+fn vector_hits_use_one_projected_batch_query() {
+    let rt = rt();
+    for i in 0..200 {
+        rt.insert(
+            "Doc",
+            &json!({"title": format!("d{i}"), "kind": "a", "embedding": [1.0, 0.0, 0.0, 0.0]}),
+        )
+        .unwrap();
+    }
+    for in_transaction in [false, true] {
+        VECTOR_SQL.with(|sql| sql.borrow_mut().clear());
+        rt.lock_conn_pub().unwrap().trace(Some(|sql| {
+            VECTOR_SQL.with(|queries| queries.borrow_mut().push(sql.to_owned()));
+        }));
+        let query = json!({"field": "embedding", "vector": [1.0, 0.0, 0.0, 0.0], "limit": 200});
+        let result = if in_transaction {
+            let conn = rt.lock_conn_pub().unwrap();
+            let store = pylon_runtime::datastore::TxStore::new(&rt, &conn);
+            DataStore::vector_search(&store, "Doc", &query).unwrap()
+        } else {
+            DataStore::vector_search(&rt, "Doc", &query).unwrap()
+        };
+        rt.lock_conn_pub().unwrap().trace(None);
+        assert_eq!(result["hits"].as_array().unwrap().len(), 200);
+        VECTOR_SQL.with(|sql| {
+            let queries = sql.borrow();
+            let selects: Vec<_> = queries
+                .iter()
+                .filter(|sql| sql.starts_with("SELECT"))
+                .collect();
+            assert_eq!(
+                selects.len(),
+                2,
+                "one vector scan and one document query: {selects:?}"
+            );
+            let projection = selects[1].split(" FROM ").next().unwrap();
+            assert!(!projection.contains("embedding"));
+            assert!(!projection.contains('*'));
+        });
+    }
 }

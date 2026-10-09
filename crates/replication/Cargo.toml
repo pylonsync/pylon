@@ -11,3 +11,7 @@ version.workspace = true
 
 # No dependencies: pylon-shard-guest builds it for wasm32-unknown-unknown.
 [dependencies]
+
+[[bench]]
+name = "view_history"
+harness = false

@@ -217,9 +217,7 @@ pub(crate) fn handle(
             if let pylon_policy::PolicyResult::Denied {
                 policy_name,
                 reason,
-            } = ctx
-                .policy_engine
-                .check_entity_read(entity, ctx.auth_ctx, None)
+            } = ctx.policy_engine.check_entity_scan(entity, ctx.auth_ctx)
             {
                 tracing::warn!("[policy] query {entity} denied by \"{policy_name}\": {reason}");
                 return Some((
@@ -244,6 +242,10 @@ pub(crate) fn handle(
                     ));
                 }
             };
+            if let Err(error) = crate::validate_public_filter(ctx.store.manifest(), entity, &filter)
+            {
+                return Some(error);
+            }
             return Some(match ctx.store.query_filtered(entity, &filter) {
                 Ok(rows) => {
                     let manifest = ctx.store.manifest();
@@ -288,6 +290,11 @@ pub(crate) fn handle(
             // `auth.userId == data.createdBy` see `data` as null and
             // ALWAYS deny — every lookup 403s for non-admin callers.
             // Same pattern the GET /api/entities/:id/:field path uses.
+            if let Err(error) =
+                crate::require_public_field(ctx.store.manifest(), parts[0], parts[1])
+            {
+                return Some(error);
+            }
             let row = match ctx.store.lookup(parts[0], parts[1], parts[2]) {
                 Ok(r) => r,
                 Err(e) => return Some((400, json_error(&e.code, &e.message))),
@@ -338,7 +345,7 @@ pub(crate) fn handle(
         if method == HttpMethod::Post && !entity.is_empty() {
             let check = ctx
                 .policy_engine
-                .check_entity_read(entity, ctx.auth_ctx, None);
+                .check_entity_read_aggregate(entity, ctx.auth_ctx);
             if let pylon_policy::PolicyResult::Denied {
                 policy_name,
                 reason,
@@ -353,6 +360,9 @@ pub(crate) fn handle(
                 Ok(v) => v,
                 Err((s, b)) => return Some((s, b)),
             };
+            if let Err(error) = validate_public_aggregate(ctx.store.manifest(), entity, &spec) {
+                return Some(error);
+            }
             // Tenant clamp — if the entity has an `orgId` column and the
             // caller has an active tenant, force WHERE orgId = tenantId.
             // Server overwrites any client-supplied value, so a payload
@@ -419,6 +429,9 @@ pub(crate) fn handle(
         if let Some(obj) = query.as_object() {
             let mut touched: Vec<String> = Vec::new();
             for (entity_name, opts) in obj {
+                if let Err(error) = validate_public_graph(manifest, entity_name, opts) {
+                    return Some(error);
+                }
                 collect_graph_entities(entity_name, opts, manifest, &mut touched);
             }
             for entity_name in &touched {
@@ -427,7 +440,7 @@ pub(crate) fn handle(
                     reason,
                 } = ctx
                     .policy_engine
-                    .check_entity_read(entity_name, ctx.auth_ctx, None)
+                    .check_entity_read_aggregate(entity_name, ctx.auth_ctx)
                 {
                     tracing::warn!(
                         "[policy] graph query on {entity_name} denied by \"{policy_name}\": {reason}"
@@ -498,54 +511,181 @@ fn project_graph_result(
         return;
     };
     for (entity_name, rows_val) in result_obj.iter_mut() {
-        let include_map = query
-            .get(entity_name)
-            .and_then(|q| q.get("include"))
-            .and_then(|v| v.as_object());
-        let ent = manifest.entities.iter().find(|e| e.name == *entity_name);
-        let Some(rows) = rows_val.as_array_mut() else {
-            continue;
-        };
-        for row in rows.iter_mut() {
-            // Project the nested relation rows FIRST (against their target
-            // entity), then the parent row. The nested values are plain
-            // extra object keys, so a non-User parent projection preserves
-            // them; doing nested-first guarantees the target entity's
-            // `serverOnly`/secret fields are stripped regardless of order.
-            if let (Some(include_map), Some(ent)) = (include_map, ent) {
-                for rel_name in include_map.keys() {
-                    if let Some(rel) = ent.relations.iter().find(|r| r.name == *rel_name) {
-                        if let Some(slot) = row.get_mut(rel_name) {
-                            project_related_in_place(slot, manifest, auth_user, &rel.target);
-                        }
-                    }
-                }
-            }
-            let taken = std::mem::replace(row, serde_json::Value::Null);
-            *row = crate::project_row_for_wire(manifest, auth_user, entity_name, taken);
-        }
+        let options = query.get(entity_name).unwrap_or(&serde_json::Value::Null);
+        project_graph_rows(rows_val, options, manifest, auth_user, entity_name);
     }
 }
 
-/// Project an `include`d relation slot in place — either a single object
-/// (to-one) or an array of objects (to-many) — against `target` entity.
-fn project_related_in_place(
-    slot: &mut serde_json::Value,
+fn project_graph_rows(
+    value: &mut serde_json::Value,
+    options: &serde_json::Value,
     manifest: &pylon_kernel::AppManifest,
     auth_user: &pylon_kernel::ManifestAuthUserConfig,
-    target: &str,
+    entity: &str,
 ) {
-    match slot {
-        serde_json::Value::Array(items) => {
-            for item in items.iter_mut() {
-                let taken = std::mem::replace(item, serde_json::Value::Null);
-                *item = crate::project_row_for_wire(manifest, auth_user, target, taken);
+    if let Some(rows) = value.as_array_mut() {
+        for row in rows {
+            project_graph_rows(row, options, manifest, auth_user, entity);
+        }
+        return;
+    }
+    let Some(row) = value.as_object_mut() else {
+        *value = serde_json::Value::Null;
+        return;
+    };
+    let mut related = serde_json::Map::new();
+    if let (Some(includes), Some(definition)) = (
+        options.get("include").and_then(|value| value.as_object()),
+        manifest
+            .entities
+            .iter()
+            .find(|definition| definition.name == entity),
+    ) {
+        for (name, child_options) in includes {
+            if let Some(relation) = definition
+                .relations
+                .iter()
+                .find(|relation| relation.name == *name)
+            {
+                if let Some(mut child) = row.remove(name) {
+                    project_graph_rows(
+                        &mut child,
+                        child_options,
+                        manifest,
+                        auth_user,
+                        &relation.target,
+                    );
+                    related.insert(name.clone(), child);
+                }
             }
         }
-        serde_json::Value::Object(_) => {
-            let taken = std::mem::replace(slot, serde_json::Value::Null);
-            *slot = crate::project_row_for_wire(manifest, auth_user, target, taken);
+    }
+    let taken = value.take();
+    *value = crate::project_row_for_wire(manifest, auth_user, entity, taken);
+    if let Some(row) = value.as_object_mut() {
+        row.extend(related);
+    }
+}
+
+fn validate_public_aggregate(
+    manifest: &pylon_kernel::AppManifest,
+    entity: &str,
+    spec: &serde_json::Value,
+) -> Result<(), (u16, String)> {
+    if let Some(field) = spec.get("count").and_then(|value| value.as_str()) {
+        if field != "*" {
+            crate::require_public_field(manifest, entity, field)?;
         }
-        _ => {}
+    }
+    for key in ["sum", "avg", "min", "max", "countDistinct", "groupBy"] {
+        if let Some(fields) = spec.get(key).and_then(|value| value.as_array()) {
+            for field in fields {
+                if let Some(name) = field
+                    .as_str()
+                    .or_else(|| field.get("field").and_then(|value| value.as_str()))
+                {
+                    crate::require_public_field(manifest, entity, name)?;
+                }
+            }
+        }
+    }
+    if let Some(filter) = spec.get("where") {
+        crate::validate_public_filter(manifest, entity, filter)?;
+    }
+    Ok(())
+}
+
+fn validate_public_graph(
+    manifest: &pylon_kernel::AppManifest,
+    entity: &str,
+    options: &serde_json::Value,
+) -> Result<(), (u16, String)> {
+    if let Some(filter) = options.get("where") {
+        crate::validate_public_filter(manifest, entity, filter)?;
+    }
+    if let (Some(includes), Some(definition)) = (
+        options.get("include").and_then(|value| value.as_object()),
+        manifest
+            .entities
+            .iter()
+            .find(|definition| definition.name == entity),
+    ) {
+        for (name, options) in includes {
+            if let Some(relation) = definition
+                .relations
+                .iter()
+                .find(|relation| relation.name == *name)
+            {
+                validate_public_graph(manifest, &relation.target, options)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod public_field_tests {
+    use super::*;
+    use pylon_kernel::{AppManifest, ManifestEntity, ManifestField, ManifestRelation};
+    use serde_json::json;
+
+    fn manifest() -> AppManifest {
+        AppManifest {
+            entities: vec![ManifestEntity {
+                name: "Doc".into(),
+                fields: vec![
+                    ManifestField {
+                        name: "title".into(),
+                        ..Default::default()
+                    },
+                    ManifestField {
+                        name: "secret".into(),
+                        server_only: true,
+                        ..Default::default()
+                    },
+                ],
+                relations: vec![ManifestRelation {
+                    name: "children".into(),
+                    target: "Doc".into(),
+                    field: "parentId".into(),
+                    many: true,
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn graph_projection_preserves_requested_nested_relations_only() {
+        let manifest = manifest();
+        let query = json!({"Doc":{"include":{"children":{"include":{"children":{}}}}}});
+        let mut result = json!({"Doc":[{"id":"a", "title":"root", "removedSecret":"hidden", "children":[{"id":"b", "secret":"hidden", "children":[{"id":"c", "removedSecret":"hidden", "children":"old-column"}]}]}]});
+        project_graph_result(&mut result, &query, &manifest, &manifest.auth.user);
+        assert_eq!(
+            result,
+            json!({"Doc":[{"id":"a", "title":"root", "children":[{"id":"b", "children":[{"id":"c"}]}]}]})
+        );
+    }
+
+    #[test]
+    fn aggregate_and_graph_filters_reject_hidden_user_fields() {
+        let mut manifest = manifest();
+        manifest.auth.user.entity = "Doc".into();
+        manifest.auth.user.expose = vec!["title".into()];
+        for field in ["secret", "passwordHash", "removed", "_token"] {
+            assert!(validate_public_aggregate(&manifest, "Doc", &json!({"min":[field]})).is_err());
+        }
+        manifest.auth.user.hide = vec!["title".into()];
+        assert!(
+            validate_public_aggregate(&manifest, "Doc", &json!({"groupBy":["title"]})).is_err()
+        );
+        assert!(validate_public_graph(
+            &manifest,
+            "Doc",
+            &json!({"include":{"children":{"where":{"title":"probe"}}}})
+        )
+        .is_err());
+        assert!(validate_public_aggregate(&manifest, "Doc", &json!({"count":"*"})).is_ok());
     }
 }

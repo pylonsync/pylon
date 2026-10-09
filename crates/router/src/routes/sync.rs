@@ -820,15 +820,7 @@ fn handle_delta_pull(ctx: &RouterContext, since: u64) -> (u16, String) {
     }
 
     let manifest = ctx.store.manifest();
-    // Non-synced entities (`sync: false`) are never in the client replica
-    // (snapshot skips them), so don't stream their deltas either —
-    // otherwise the change-log tail would re-flood them post-snapshot.
-    let non_synced: std::collections::HashSet<&str> = manifest
-        .entities
-        .iter()
-        .filter(|e| !e.sync)
-        .map(|e| e.name.as_str())
-        .collect();
+    // Delta rows must belong to the same public entity set as snapshots.
     // Data-dependent policies ask the same `exists(...)` question for
     // every event of the page; memoize for this request only, same as
     // the snapshot path.
@@ -877,7 +869,7 @@ fn handle_delta_pull(ctx: &RouterContext, since: u64) -> (u16, String) {
         changes.extend(
             page.changes
                 .into_iter()
-                .filter(|ev| !non_synced.contains(ev.entity.as_str()))
+                .filter(|ev| crate::is_replicated_entity(manifest, &ev.entity))
                 .filter_map(|ev| project_change_for_caller(ctx, ev)),
         );
         if !has_more || changes.len() >= DELTA_BATCH_LIMIT || scanned >= scan_budget {

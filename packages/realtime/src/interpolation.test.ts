@@ -178,4 +178,26 @@ describe("EntityInterpolator", () => {
     // A render tick past them all draws nothing.
     expect(h.at(tick).size).toBe(0);
   });
+
+  test("cleanup preserves reused ids through compaction and a tick reset", () => {
+    const h = harness();
+    for (let tick = 1; tick <= 3000; tick++) {
+      h.frame(tick, {
+        despawn: tick > 1 ? [1, 2] : [],
+        spawn: [{ id: 1, pos: [tick, 0, 0] }, { id: 2, pos: [-tick, 0, 0] }],
+      });
+    }
+    expect(h.at(2999.5).get(1)?.x).toBeCloseTo(2999);
+    expect(h.at(3000).get(1)?.x).toBeCloseTo(3000);
+    expect(h.interp.entered).toEqual([1, 2]);
+    expect(h.interp.left).toEqual([1, 2]);
+    const retained = h.interp as unknown as { ended: unknown[] };
+    expect(retained.ended.length).toBeLessThan(2048);
+    h.frame(1, { full: true, spawn: [{ id: 3, pos: [7, 0, 0] }] });
+    expect([...h.at(1).keys()]).toEqual([3]);
+    h.frame(2, { despawn: [3] });
+    h.frame(300, {});
+    expect(h.at(300).size).toBe(0);
+    expect(retained.ended.length).toBe(0);
+  });
 });

@@ -281,6 +281,19 @@ impl PostgresDataStore {
         crate::pg_search::run_search(conn.client_mut(), entity, config, query)
     }
 
+    /// Fetch vector hit documents without embedding columns.
+    pub fn vector_documents(
+        &self,
+        entity: &pylon_kernel::ManifestEntity,
+        ids: &[String],
+    ) -> Result<Vec<serde_json::Value>, DataError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut conn = self.checkout()?;
+        crate::pg_vector::fetch_documents(conn.client_mut(), entity, ids).map_err(Self::map_err)
+    }
+
     /// Exact k-NN scan over a `vector(dims)` column. Returns
     /// `(id, score)` best-first; the runtime layer fetches + normalizes
     /// the hit rows.
@@ -521,6 +534,23 @@ impl DataStore for PostgresDataStore {
             .map_err(Self::map_err)
     }
 
+    fn count_filtered(&self, entity: &str, filter: &serde_json::Value) -> Result<usize, DataError> {
+        let ent = self
+            .manifest
+            .entities
+            .iter()
+            .find(|e| e.name == entity)
+            .ok_or_else(|| DataError {
+                code: "ENTITY_NOT_FOUND".into(),
+                message: format!("Unknown entity: \"{entity}\""),
+            })?;
+        let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
+
+        let mut conn = self.checkout()?;
+        conn.count_filtered(entity, filter, &columns)
+            .map_err(Self::map_err)
+    }
+
     fn query_filtered(
         &self,
         entity: &str,
@@ -561,55 +591,24 @@ impl DataStore for PostgresDataStore {
                     message: format!("Unknown entity: \"{entity_name}\""),
                 })?;
 
-            let filter = opts.get("where").cloned().unwrap_or(serde_json::json!({}));
+            let filter = crate::graph::parent_filter(opts);
             let rows = self.query_filtered(entity_name, &filter)?;
 
-            // Apply `include` (relation expansion). One-to-many uses the
-            // child side's FK; one-to-one / many-to-one calls get_by_id
-            // on the target. Mirrors `Runtime::query_graph` so callers
-            // see the same shape on both adapters.
+            // Fetch each relation once for all selected parents.
             let rows = if let Some(include) = opts.get("include").and_then(|v| v.as_object()) {
-                rows.into_iter()
-                    .map(|mut row| {
-                        for (rel_name, _sub_query) in include {
-                            if let Some(rel) = ent.relations.iter().find(|r| r.name == *rel_name) {
-                                let fk_value = row
-                                    .get(&rel.field)
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string());
-                                if let Some(fk) = fk_value {
-                                    if rel.many {
-                                        let sub_filter = serde_json::json!({ &rel.field: &fk });
-                                        if let Ok(related) =
-                                            self.query_filtered(&rel.target, &sub_filter)
-                                        {
-                                            row[rel_name] = serde_json::json!(related);
-                                        }
-                                    } else if let Ok(Some(related)) =
-                                        self.get_by_id(&rel.target, &fk)
-                                    {
-                                        row[rel_name] = related;
-                                    }
-                                }
-                            }
-                        }
-                        row
-                    })
-                    .collect()
+                crate::pg_graph::expand_includes(rows, ent, include, |relation, keys| {
+                    let mut conn = self.checkout()?;
+                    crate::pg_graph::fetch_relation(
+                        conn.client_mut(),
+                        &self.manifest,
+                        relation,
+                        keys,
+                    )
+                })
             } else {
                 rows
             };
-
-            // Apply `limit` after expansion to match SQLite. Docs commit
-            // to "the limit applies to the top-level rows," so trimming
-            // pre-expansion would change semantics.
-            let rows = if let Some(limit) = opts.get("limit").and_then(|v| v.as_u64()) {
-                rows.into_iter().take(limit as usize).collect()
-            } else {
-                rows
-            };
-
-            results.insert(entity_name.clone(), serde_json::json!(rows));
+            results.insert(entity_name.clone(), serde_json::Value::Array(rows));
         }
         Ok(serde_json::Value::Object(results))
     }

@@ -1,8 +1,11 @@
 pub mod files;
+pub mod graph;
 #[cfg(feature = "postgres-live")]
 pub mod pg_datastore;
 #[cfg(feature = "postgres-live")]
 pub mod pg_exec;
+#[cfg(feature = "postgres-live")]
+mod pg_graph;
 #[cfg(feature = "postgres-live")]
 pub mod pg_search;
 #[cfg(feature = "postgres-live")]

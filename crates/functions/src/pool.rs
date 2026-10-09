@@ -211,17 +211,17 @@ impl FnRunnerPool {
     /// operator sees activity from EVERY runner in one stream
     /// rather than per-runner subsets.
     pub fn recent_traces(&self, limit: usize) -> Vec<FnTrace> {
-        let mut all: Vec<FnTrace> = self
+        let mut all: Vec<Arc<FnTrace>> = self
             .runners
             .iter()
-            .flat_map(|r| r.trace_log.recent(limit))
+            .flat_map(|r| r.trace_log.recent_shared(limit))
             .collect();
         // Newest first across the merge. FnTrace's started_at is
         // epoch seconds; sort descending so admin views show the
         // latest activity at the top.
         all.sort_by(|a, b| b.started_at.cmp(&a.started_at));
         all.truncate(limit);
-        all
+        all.into_iter().map(|trace| (*trace).clone()).collect()
     }
 
     /// The default pool size when `PYLON_FN_POOL_SIZE` is unset: CPU/2
@@ -284,6 +284,36 @@ mod tests {
         // Bare runner, never started — pick() doesn't touch the
         // process. Trace log capacity 10 keeps allocations small.
         Arc::new(FnRunner::new(10))
+    }
+
+    #[test]
+    fn recent_traces_merge_timestamps_and_preserve_tie_order() {
+        use crate::protocol::FnType;
+        use crate::trace::TraceBuilder;
+        let a = dummy_runner();
+        let b = dummy_runner();
+        for (runner, name, time) in [
+            (&a, "a-old", 1),
+            (&a, "a-new", 3),
+            (&b, "b-old", 2),
+            (&b, "b-new", 3),
+        ] {
+            let mut trace =
+                TraceBuilder::new(name.into(), name.into(), FnType::Query, None).finish_ok(None);
+            trace.started_at = time;
+            runner.trace_log.push(trace);
+        }
+        let pool = FnRunnerPool::new(vec![a, b]);
+        assert!(pool.recent_traces(0).is_empty());
+        let traces = pool.recent_traces(3);
+        assert_eq!(
+            traces
+                .iter()
+                .map(|trace| trace.fn_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a-new", "b-new", "b-old"]
+        );
+        assert_eq!(pool.recent_traces(10).len(), 4);
     }
 
     #[test]

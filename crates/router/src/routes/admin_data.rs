@@ -3,10 +3,16 @@
 //! escape hatches for migrations, backups, fixups. Do NOT proxy
 //! user-supplied data through these.
 
-use crate::{
-    chrono_now_iso, json_error, json_error_safe, parse_json, require_admin, RouterContext,
-};
+use crate::{chrono_now_iso, json_error, json_error_safe, parse_json, RouterContext};
 use pylon_http::HttpMethod;
+
+fn require_global_admin(ctx: &RouterContext) -> Option<(u16, String)> {
+    if ctx.auth_ctx.is_admin && ctx.auth_ctx.tenant_id().is_none() {
+        None
+    } else {
+        Some((403, json_error("FORBIDDEN", "Global admin access required")))
+    }
+}
 
 pub(crate) fn handle(
     ctx: &RouterContext,
@@ -17,11 +23,8 @@ pub(crate) fn handle(
 ) -> Option<(u16, String)> {
     // GET /api/export — full database dump
     if url == "/api/export" && method == HttpMethod::Get {
-        if !ctx.auth_ctx.is_admin {
-            return Some((
-                403,
-                json_error("FORBIDDEN", "Admin access required for data export"),
-            ));
+        if let Some(error) = require_global_admin(ctx) {
+            return Some(error);
         }
         let manifest = ctx.store.manifest();
         let mut entities_map = serde_json::Map::new();
@@ -30,7 +33,7 @@ pub(crate) fn handle(
             match ctx.store.list(&ent.name) {
                 Ok(rows) => {
                     counts_map.insert(ent.name.clone(), serde_json::json!(rows.len()));
-                    entities_map.insert(ent.name.clone(), serde_json::json!(rows));
+                    entities_map.insert(ent.name.clone(), serde_json::Value::Array(rows));
                 }
                 Err(e) => {
                     return Some((
@@ -47,11 +50,11 @@ pub(crate) fn handle(
         let now = chrono_now_iso();
         return Some((
             200,
-            serde_json::json!({
-                "exported_at": now,
-                "entities": entities_map,
-                "counts": counts_map,
-            })
+            serde_json::Value::Object(serde_json::Map::from_iter([
+                ("exported_at".into(), serde_json::Value::String(now)),
+                ("entities".into(), serde_json::Value::Object(entities_map)),
+                ("counts".into(), serde_json::Value::Object(counts_map)),
+            ]))
             .to_string(),
         ));
     }
@@ -60,11 +63,8 @@ pub(crate) fn handle(
     if let Some(entity_name) = url.strip_prefix("/api/export/") {
         let entity_name = entity_name.split('?').next().unwrap_or(entity_name);
         if method == HttpMethod::Get && !entity_name.is_empty() {
-            if !ctx.auth_ctx.is_admin {
-                return Some((
-                    403,
-                    json_error("FORBIDDEN", "Admin access required for data export"),
-                ));
+            if let Some(error) = require_global_admin(ctx) {
+                return Some(error);
             }
             return Some(match ctx.store.list(entity_name) {
                 Ok(rows) => {
@@ -72,14 +72,14 @@ pub(crate) fn handle(
                     let mut entities_map = serde_json::Map::new();
                     let mut counts_map = serde_json::Map::new();
                     counts_map.insert(entity_name.to_string(), serde_json::json!(rows.len()));
-                    entities_map.insert(entity_name.to_string(), serde_json::json!(rows));
+                    entities_map.insert(entity_name.to_string(), serde_json::Value::Array(rows));
                     (
                         200,
-                        serde_json::json!({
-                            "exported_at": now,
-                            "entities": entities_map,
-                            "counts": counts_map,
-                        })
+                        serde_json::Value::Object(serde_json::Map::from_iter([
+                            ("exported_at".into(), serde_json::Value::String(now)),
+                            ("entities".into(), serde_json::Value::Object(entities_map)),
+                            ("counts".into(), serde_json::Value::Object(counts_map)),
+                        ]))
                         .to_string(),
                     )
                 }
@@ -90,14 +90,8 @@ pub(crate) fn handle(
 
     // POST /api/import — load a backup bundle
     if url == "/api/import" && method == HttpMethod::Post {
-        if let Some(err) = require_admin(ctx) {
+        if let Some(err) = require_global_admin(ctx) {
             return Some(err);
-        }
-        if !ctx.auth_ctx.is_admin {
-            return Some((
-                403,
-                json_error("FORBIDDEN", "Admin access required for data import"),
-            ));
         }
         let data: serde_json::Value = match parse_json(body) {
             Ok(v) => v,

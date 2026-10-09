@@ -13,8 +13,8 @@
 use postgres::types::ToSql;
 
 /// Read + write operations available on either `Client` or
-/// `Transaction`. Methods mirror the postgres crate's surface 1:1
-/// so call sites read identically regardless of which impl they got.
+/// `Transaction`. The streaming callback avoids exposing a
+/// connection-specific iterator lifetime.
 pub trait PgConn {
     fn execute(
         &mut self,
@@ -27,6 +27,20 @@ pub trait PgConn {
         sql: &str,
         params: &[&(dyn ToSql + Sync)],
     ) -> Result<Vec<postgres::Row>, postgres::Error>;
+
+    /// Visit query rows. Built-in clients and transactions stream the result.
+    /// The default buffers rows to support custom adapters that only implement `query`.
+    fn query_each(
+        &mut self,
+        sql: &str,
+        params: &[&(dyn ToSql + Sync)],
+        visit: &mut dyn FnMut(postgres::Row),
+    ) -> Result<(), postgres::Error> {
+        for row in self.query(sql, params)? {
+            visit(row);
+        }
+        Ok(())
+    }
 
     fn query_opt(
         &mut self,
@@ -49,6 +63,19 @@ impl PgConn for postgres::Client {
         params: &[&(dyn ToSql + Sync)],
     ) -> Result<Vec<postgres::Row>, postgres::Error> {
         postgres::Client::query(self, sql, params)
+    }
+    fn query_each(
+        &mut self,
+        sql: &str,
+        params: &[&(dyn ToSql + Sync)],
+        visit: &mut dyn FnMut(postgres::Row),
+    ) -> Result<(), postgres::Error> {
+        use postgres::fallible_iterator::FallibleIterator;
+        let mut rows = postgres::Client::query_raw(self, sql, params.iter().copied())?;
+        while let Some(row) = rows.next()? {
+            visit(row);
+        }
+        Ok(())
     }
     fn query_opt(
         &mut self,
@@ -73,6 +100,19 @@ impl<'a> PgConn for postgres::Transaction<'a> {
         params: &[&(dyn ToSql + Sync)],
     ) -> Result<Vec<postgres::Row>, postgres::Error> {
         postgres::Transaction::query(self, sql, params)
+    }
+    fn query_each(
+        &mut self,
+        sql: &str,
+        params: &[&(dyn ToSql + Sync)],
+        visit: &mut dyn FnMut(postgres::Row),
+    ) -> Result<(), postgres::Error> {
+        use postgres::fallible_iterator::FallibleIterator;
+        let mut rows = postgres::Transaction::query_raw(self, sql, params.iter().copied())?;
+        while let Some(row) = rows.next()? {
+            visit(row);
+        }
+        Ok(())
     }
     fn query_opt(
         &mut self,

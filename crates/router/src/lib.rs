@@ -1776,6 +1776,7 @@ fn route_inner(
 // ---------------------------------------------------------------------------
 
 pub(crate) fn handle_list(ctx: &RouterContext, entity: &str, url: &str) -> (u16, String) {
+    let _read_memo = pylon_policy::ExistsMemo::fresh_scope();
     let store = ctx.store;
     // Per-row read-policy fence: this is the ONLY list path, and unlike the
     // /cursor + /query paths it previously skipped per-row filtering — so any
@@ -1814,7 +1815,13 @@ pub(crate) fn handle_list(ctx: &RouterContext, entity: &str, url: &str) -> (u16,
     let (effective_limit, effective_offset) = if paginated {
         let pp = per_page.unwrap_or(25).max(1).min(1000);
         let p = page.unwrap_or(1).max(1);
-        (Some(pp), (p - 1) * pp)
+        let Some(offset) = (p - 1).checked_mul(pp) else {
+            return (
+                400,
+                json_error("INVALID_PAGINATION", "Page offset is too large"),
+            );
+        };
+        (Some(pp), offset)
     } else {
         (limit, offset)
     };
@@ -1826,6 +1833,9 @@ pub(crate) fn handle_list(ctx: &RouterContext, entity: &str, url: &str) -> (u16,
         if let Some(field) = k.strip_prefix("filter[").and_then(|s| s.strip_suffix(']')) {
             // Try numeric / bool coercion so `filter[active]=true` matches
             // a stored boolean. Fall back to string equality otherwise.
+            if let Err(error) = require_public_field(store.manifest(), entity, field) {
+                return error;
+            }
             let parsed = parse_query_value(v);
             filter.insert(field.to_string(), parsed);
         }
@@ -1833,6 +1843,9 @@ pub(crate) fn handle_list(ctx: &RouterContext, entity: &str, url: &str) -> (u16,
 
     // ---- Sort --------------------------------------------------------
     if let Some(sort_field) = qp.get("sort") {
+        if let Err(error) = require_public_field(store.manifest(), entity, sort_field) {
+            return error;
+        }
         let order = qp
             .get("order")
             .map(|s| s.as_str())
@@ -1864,9 +1877,18 @@ pub(crate) fn handle_list(ctx: &RouterContext, entity: &str, url: &str) -> (u16,
         count_filter.remove("$limit");
         count_filter.remove("$offset");
         count_filter.remove("$order");
-        match store.query_filtered(entity, &serde_json::Value::Object(count_filter)) {
-            Ok(rows) => Some(rows.iter().filter(|r| row_visible(r)).count()),
-            Err(_) => None,
+        let count_filter = serde_json::Value::Object(count_filter);
+        if matches!(
+            ctx.policy_engine
+                .check_entity_read_aggregate(entity, ctx.auth_ctx),
+            pylon_policy::PolicyResult::Allowed
+        ) {
+            store.count_filtered(entity, &count_filter).ok()
+        } else {
+            store
+                .query_filtered(entity, &count_filter)
+                .ok()
+                .map(|rows| rows.iter().filter(|row| row_visible(row)).count())
         }
     } else {
         None
@@ -1918,32 +1940,24 @@ pub(crate) fn handle_list(ctx: &RouterContext, entity: &str, url: &str) -> (u16,
         .map(|r| strip_server_only_fields(manifest, entity, r))
         .collect();
 
-    if paginated {
+    let mut response = if paginated {
         let p = page.unwrap_or(1);
         let pp = per_page.unwrap_or(25);
-        (
-            200,
-            serde_json::json!({
-                "data": rows,
-                "total": total,
-                "page": p,
-                "per_page": pp,
-            })
-            .to_string(),
-        )
+        serde_json::json!({
+            "total": total,
+            "page": p,
+            "per_page": pp,
+        })
     } else {
         let count = rows.len();
-        (
-            200,
-            serde_json::json!({
-                "data": rows,
-                "count": count,
-                "offset": offset,
-                "limit": limit,
-            })
-            .to_string(),
-        )
-    }
+        serde_json::json!({
+            "count": count,
+            "offset": offset,
+            "limit": limit,
+        })
+    };
+    response["data"] = serde_json::Value::Array(rows);
+    (200, response.to_string())
 }
 
 /// Parse the `?key=value&key=value` portion of a URL into a flat map.
@@ -2288,7 +2302,11 @@ pub fn broadcast_change_with_crdt(
     prev_data: Option<&serde_json::Value>,
 ) {
     broadcast_change_event(notifier, seq, entity, row_id, kind.clone(), data, prev_data);
-    if matches!(kind, ChangeKind::Delete) {
+    let manifest = store.manifest();
+    if matches!(kind, ChangeKind::Delete)
+        || !supports_crdt_replication(manifest, &manifest.auth.user, entity)
+        || store.has_private_crdt_history(entity)
+    {
         return;
     }
     // Per-row "last VV broadcast" map. Pre-fix every CRDT write
@@ -2332,6 +2350,10 @@ pub fn broadcast_change_with_crdt(
     };
 
     if let Some(payload) = frame_payload {
+        // Another instance can restrict the entity while the bytes load.
+        if store.has_private_crdt_history(entity) {
+            return;
+        }
         // notify_crdt takes (entity, row_id, snapshot|delta) — the
         // wire framing is owned by the notifier, but it always
         // ships frame type 0x10 (snapshot) today. Pylon's
@@ -2579,22 +2601,9 @@ pub fn maybe_project_user_row(
     project_user_fields(row, auth_user)
 }
 
-/// Strip every field annotated `serverOnly` in the manifest from a
-/// row before serializing to an HTTP response. Identity for entities
-/// with no `serverOnly` fields (the common case), so the wrapper is
-/// safe to call unconditionally.
-///
-/// The User entity's `passwordHash` + `_*` fields are stripped by
-/// `maybe_project_user_row` separately — that's a stricter projection
-/// for the auth-shaped row. This function handles every OTHER entity
-/// that uses the `field.X().serverOnly()` modifier (Org's
-/// stripeCustomerId, BillingProfile's external ids, etc.).
-///
-/// Pylon never returns `serverOnly` fields over HTTP. They stay
-/// readable from inside server functions via `ctx.db.*` — apps that
-/// need the value at the server-side boundary read it there; apps
-/// that need to expose it intentionally must opt back in by
-/// re-serializing the field in their own function return.
+/// Project entity rows onto the current public schema before serialization.
+/// Removed SQL columns and `serverOnly` fields remain available internally.
+/// The User projection also applies its configured expose and hide lists.
 /// Run a row through every wire-bound projection step:
 ///   - User entity → `maybe_project_user_row` (allowlist + redact)
 ///   - `serverOnly` fields → stripped via `strip_server_only_fields`
@@ -2636,13 +2645,107 @@ pub fn project_row_for_replication(
 /// (the WebSocket hub, the SSE hub, the sync relay). `sync: false`
 /// entities are never in a client replica: the snapshot, the delta pull,
 /// the reconcile fetch, and the live fan-out all leave them out. A name
-/// the manifest doesn't declare (a system table) keeps going out.
+/// the manifest does not declare must not reach client replicas.
 pub fn is_replicated_entity(manifest: &pylon_kernel::AppManifest, entity: &str) -> bool {
     manifest
         .entities
         .iter()
         .find(|e| e.name == entity)
-        .is_none_or(|e| e.sync)
+        .is_some_and(|e| e.sync && !e.name.starts_with('_'))
+}
+
+/// Raw CRDT history cannot apply field-level projection. Keep private
+/// entities on JSON replication, including documents saved under older schemas.
+pub fn supports_crdt_replication(
+    manifest: &pylon_kernel::AppManifest,
+    auth_user: &pylon_kernel::ManifestAuthUserConfig,
+    entity: &str,
+) -> bool {
+    entity != auth_user.entity
+        && manifest.entities.iter().any(|definition| {
+            definition.name == entity
+                && definition.crdt
+                && definition.sync
+                && !definition.fields.iter().any(|field| {
+                    field.server_only || field.sync_omit || field.field_type.starts_with("vector(")
+                })
+        })
+}
+
+#[cfg(test)]
+mod crdt_privacy_tests {
+    use super::*;
+    use pylon_kernel::{AppManifest, ManifestEntity, ManifestField};
+
+    #[test]
+    fn binary_replication_requires_a_public_declared_entity() {
+        let mut manifest = AppManifest {
+            entities: vec![ManifestEntity {
+                name: "Doc".into(),
+                crdt: true,
+                sync: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(supports_crdt_replication(
+            &manifest,
+            &manifest.auth.user,
+            "Doc"
+        ));
+        assert!(!supports_crdt_replication(
+            &manifest,
+            &manifest.auth.user,
+            "Unknown"
+        ));
+        for private_field in [
+            ManifestField {
+                name: "secret".into(),
+                field_type: "string".into(),
+                server_only: true,
+                ..Default::default()
+            },
+            ManifestField {
+                name: "large".into(),
+                field_type: "json".into(),
+                sync_omit: true,
+                ..Default::default()
+            },
+            ManifestField {
+                name: "embedding".into(),
+                field_type: "vector(3)".into(),
+                ..Default::default()
+            },
+        ] {
+            manifest.entities[0].fields = vec![private_field];
+            assert!(!supports_crdt_replication(
+                &manifest,
+                &manifest.auth.user,
+                "Doc"
+            ));
+        }
+        manifest.entities[0].fields.clear();
+        manifest.entities[0].sync = false;
+        assert!(!supports_crdt_replication(
+            &manifest,
+            &manifest.auth.user,
+            "Doc"
+        ));
+        manifest.entities[0].sync = true;
+        manifest.entities[0].crdt = false;
+        assert!(!supports_crdt_replication(
+            &manifest,
+            &manifest.auth.user,
+            "Doc"
+        ));
+        manifest.entities[0].crdt = true;
+        manifest.auth.user.entity = "Doc".into();
+        assert!(!supports_crdt_replication(
+            &manifest,
+            &manifest.auth.user,
+            "Doc"
+        ));
+    }
 }
 
 /// Option-variant of [`project_row_for_replication`], for
@@ -2654,6 +2757,234 @@ pub fn project_row_for_replication_opt(
     row: Option<serde_json::Value>,
 ) -> Option<serde_json::Value> {
     row.map(|r| project_row_for_replication(manifest, auth_user, entity, r))
+}
+
+/// Project a borrowed row without copying fields excluded from replication.
+pub fn project_row_for_replication_ref(
+    manifest: &pylon_kernel::AppManifest,
+    auth_user: &pylon_kernel::ManifestAuthUserConfig,
+    entity: &str,
+    row: &serde_json::Value,
+) -> serde_json::Value {
+    let Some(definition) = manifest
+        .entities
+        .iter()
+        .find(|definition| definition.name == entity)
+    else {
+        return serde_json::json!({});
+    };
+    let serde_json::Value::Object(row) = row else {
+        return row.clone();
+    };
+    if definition.fields.len() < 32 || row.len() < 32 {
+        return serde_json::Value::Object(
+            row.iter()
+                .filter(|(name, _)| {
+                    (name.as_str() == "id"
+                        || definition
+                            .fields
+                            .iter()
+                            .any(|field| field.name == name.as_str() && !field.server_only))
+                        && !definition
+                            .fields
+                            .iter()
+                            .any(|field| field.name == name.as_str() && field.sync_omit)
+                        && (entity != auth_user.entity || public_user_field(name, auth_user))
+                })
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+        );
+    }
+    let mut public: std::collections::HashSet<&str> = definition
+        .fields
+        .iter()
+        .filter(|field| !field.server_only)
+        .map(|field| field.name.as_str())
+        .collect();
+    public.insert("id");
+    for field in definition.fields.iter().filter(|field| field.sync_omit) {
+        public.remove(field.name.as_str());
+    }
+    if entity == auth_user.entity {
+        public.retain(|field| public_user_field(field, auth_user));
+    }
+    serde_json::Value::Object(
+        public
+            .into_iter()
+            .filter_map(|name| row.get(name).map(|value| (name.to_owned(), value.clone())))
+            .collect(),
+    )
+}
+
+/// Optional borrowed row projection for change events and tombstones.
+pub fn project_row_for_replication_opt_ref(
+    manifest: &pylon_kernel::AppManifest,
+    auth_user: &pylon_kernel::ManifestAuthUserConfig,
+    entity: &str,
+    row: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    row.map(|row| project_row_for_replication_ref(manifest, auth_user, entity, row))
+}
+
+#[cfg(test)]
+mod borrowed_replication_projection_tests {
+    use super::*;
+    use pylon_kernel::{ManifestEntity, ManifestField};
+
+    fn manifest() -> pylon_kernel::AppManifest {
+        let fields: Vec<_> = [
+            "id",
+            "visible",
+            "private",
+            "omitted",
+            "passwordHash",
+            "_internal",
+            "hidden",
+            "embedding",
+            "nested",
+        ]
+        .into_iter()
+        .map(|name| ManifestField {
+            name: name.into(),
+            field_type: if name == "embedding" {
+                "vector(3)"
+            } else {
+                "json"
+            }
+            .into(),
+            server_only: name == "private",
+            sync_omit: name == "omitted",
+            ..Default::default()
+        })
+        .collect();
+        pylon_kernel::AppManifest {
+            entities: ["Entry", "Account"]
+                .into_iter()
+                .map(|name| ManifestEntity {
+                    name: name.into(),
+                    fields: fields.clone(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn borrowed_projection_matches_owned_privacy_rules() {
+        let rows = [
+            serde_json::Value::Null,
+            serde_json::json!(true),
+            serde_json::json!(42),
+            serde_json::json!("text"),
+            serde_json::json!([{"private":"value"}]),
+            serde_json::json!({}),
+            serde_json::json!({"id":"row", "visible":"text", "private":"secret", "omitted":"large", "passwordHash":"hash", "_internal":"internal", "hidden":"hide", "embedding":[1,2,3], "nested":{"a":[1,null,"value"]}, "removed":"old column", "relation":[{"id":"joined"}]}),
+        ];
+        for id_flags in 0..4 {
+            let mut manifest = manifest();
+            for definition in &mut manifest.entities {
+                definition.fields[0].server_only = id_flags & 1 != 0;
+                definition.fields[0].sync_omit = id_flags & 2 != 0;
+                // Preserve existing behavior even for duplicate definitions.
+                definition.fields.push(ManifestField {
+                    name: "visible".into(),
+                    server_only: true,
+                    ..Default::default()
+                });
+                definition.fields.push(ManifestField {
+                    name: "hidden".into(),
+                    sync_omit: true,
+                    ..Default::default()
+                });
+            }
+            for exposed in [false, true] {
+                for hidden in [false, true] {
+                    let mut config = manifest.auth.user.clone();
+                    config.entity = "Account".into();
+                    if exposed {
+                        config.expose = vec![
+                            "visible".into(),
+                            "nested".into(),
+                            "passwordHash".into(),
+                            "_internal".into(),
+                        ];
+                    }
+                    if hidden {
+                        config.hide = vec!["visible".into(), "id".into()];
+                    }
+                    for entity in ["Entry", "Account", "Unknown"] {
+                        assert_eq!(
+                            project_row_for_replication_opt_ref(&manifest, &config, entity, None),
+                            None
+                        );
+                        for row in &rows {
+                            assert_eq!(project_row_for_replication_opt_ref(&manifest, &config, entity, Some(row)), project_row_for_replication_opt(&manifest, &config, entity, Some(row.clone())), "entity={entity}, id_flags={id_flags}, expose={exposed}, hide={hidden}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn borrowed_projection_preserves_wide_schema_privacy() {
+        let mut manifest = manifest();
+        let mut row = serde_json::Map::new();
+        for i in 0..100 {
+            let name = format!("field_{i}");
+            manifest.entities[0].fields.push(ManifestField {
+                name: name.clone(),
+                server_only: i % 3 == 0,
+                sync_omit: i % 5 == 0,
+                ..Default::default()
+            });
+            row.insert(name, serde_json::json!({"i":i}));
+        }
+        row.insert("removed".into(), serde_json::json!("old"));
+        row.insert("id".into(), serde_json::json!("row"));
+        let row = serde_json::Value::Object(row);
+        assert_eq!(
+            project_row_for_replication_ref(&manifest, &manifest.auth.user, "Entry", &row),
+            project_row_for_replication(&manifest, &manifest.auth.user, "Entry", row.clone())
+        );
+    }
+
+    #[test]
+    #[ignore = "release-mode performance benchmark"]
+    fn benchmark_borrowed_projection() {
+        use std::hint::black_box;
+        let manifest = manifest();
+        for excluded_bytes in [0, 2 * 1024 * 1024] {
+            let row = serde_json::json!({"id":"row", "visible":"x".repeat(1024), "private":"p".repeat(excluded_bytes), "omitted":"o".repeat(excluded_bytes)});
+            for borrowed in [false, true] {
+                let mut samples = Vec::new();
+                for _ in 0..7 {
+                    let start = std::time::Instant::now();
+                    for _ in 0..100 {
+                        black_box(if borrowed {
+                            project_row_for_replication_ref(
+                                &manifest,
+                                &manifest.auth.user,
+                                "Entry",
+                                black_box(&row),
+                            )
+                        } else {
+                            project_row_for_replication(
+                                &manifest,
+                                &manifest.auth.user,
+                                "Entry",
+                                black_box(&row).clone(),
+                            )
+                        });
+                    }
+                    samples.push(start.elapsed().as_secs_f64() * 1e6 / 100.0);
+                }
+                samples.sort_by(f64::total_cmp);
+                println!("{excluded_bytes} bytes per excluded field, borrowed={borrowed}: {:.3} us median", samples[3]);
+            }
+        }
+    }
 }
 
 /// Strip `syncOmit`-annotated fields from a row. Mirrors
@@ -2697,21 +3028,29 @@ pub fn strip_server_only_fields(
 ) -> serde_json::Value {
     let entity_def = match manifest.entities.iter().find(|e| e.name == entity) {
         Some(e) => e,
-        None => return row,
+        None => return serde_json::json!({}),
     };
-    // Nothing to strip → return as-is. The common case (most entities have no
-    // serverOnly fields) skips both the row destructure and — more importantly
-    // on the per-row sync/WS/SSE/list projection hot path — allocating a
-    // `Vec<&str>` of field names for EVERY projected row; we iterate the
-    // (already-borrowed) field list inline.
-    if !entity_def.fields.iter().any(|f| f.server_only) {
-        return row;
-    }
     let serde_json::Value::Object(mut obj) = row else {
         return row;
     };
-    for field in entity_def.fields.iter().filter(|f| f.server_only) {
-        obj.remove(field.name.as_str());
+    // Removed fields can remain in SQL columns or old change events.
+    // Only the current public schema defines the fields sent to clients.
+    if entity_def.fields.len() >= 32 && obj.len() >= 32 {
+        let public: std::collections::HashSet<&str> = entity_def
+            .fields
+            .iter()
+            .filter(|field| !field.server_only)
+            .map(|field| field.name.as_str())
+            .collect();
+        obj.retain(|name, _| name == "id" || public.contains(name.as_str()));
+    } else {
+        obj.retain(|name, _| {
+            name == "id"
+                || entity_def
+                    .fields
+                    .iter()
+                    .any(|field| field.name == *name && !field.server_only)
+        });
     }
     serde_json::Value::Object(obj)
 }
@@ -2763,8 +3102,77 @@ pub fn reject_readonly_payload(
     Ok(())
 }
 
-/// Core User projection used by every client-bound User-row path.
-/// Callers must have already confirmed the row belongs to the User entity.
+/// Whether a declared field can appear in a public entity response.
+pub fn is_public_field(manifest: &pylon_kernel::AppManifest, entity: &str, field: &str) -> bool {
+    let Some(definition) = manifest
+        .entities
+        .iter()
+        .find(|definition| definition.name == entity)
+    else {
+        return false;
+    };
+    if field == "id" {
+        return true;
+    }
+    definition
+        .fields
+        .iter()
+        .any(|definition| definition.name == field && !definition.server_only)
+        && (entity != manifest.auth.user.entity || public_user_field(field, &manifest.auth.user))
+}
+
+fn public_user_field(field: &str, config: &pylon_kernel::ManifestAuthUserConfig) -> bool {
+    field == "id"
+        || ((config.expose.is_empty() || config.expose.iter().any(|name| name == field))
+            && field != "passwordHash"
+            && !field.starts_with('_')
+            && !config.hide.iter().any(|name| name == field))
+}
+
+pub(crate) fn validate_public_filter(
+    manifest: &pylon_kernel::AppManifest,
+    entity: &str,
+    filter: &serde_json::Value,
+) -> Result<(), (u16, String)> {
+    if let Some(fields) = filter.as_object() {
+        for (field, value) in fields {
+            if field == "$order" {
+                if let Some(order) = value.as_object() {
+                    for name in order.keys() {
+                        require_public_field(manifest, entity, name)?;
+                    }
+                }
+            } else if field == "$and" || field == "$or" {
+                if let Some(filters) = value.as_array() {
+                    for filter in filters {
+                        validate_public_filter(manifest, entity, filter)?;
+                    }
+                }
+            } else if !field.starts_with('$') {
+                require_public_field(manifest, entity, field)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn require_public_field(
+    manifest: &pylon_kernel::AppManifest,
+    entity: &str,
+    field: &str,
+) -> Result<(), (u16, String)> {
+    if is_public_field(manifest, entity, field) {
+        return Ok(());
+    }
+    Err((
+        403,
+        json_error(
+            "FIELD_NOT_PUBLIC",
+            "This field is not available to client queries",
+        ),
+    ))
+}
+
 fn project_user_fields(
     row: serde_json::Value,
     cfg: &pylon_kernel::ManifestAuthUserConfig,
@@ -2774,21 +3182,7 @@ fn project_user_fields(
     };
     let filtered: serde_json::Map<String, serde_json::Value> = obj
         .into_iter()
-        .filter(|(k, _)| {
-            if k == "id" {
-                return true;
-            }
-            if !cfg.expose.is_empty() && !cfg.expose.iter().any(|f| f == k) {
-                return false;
-            }
-            if k == "passwordHash" || k.starts_with('_') {
-                return false;
-            }
-            if cfg.hide.iter().any(|f| f == k) {
-                return false;
-            }
-            true
-        })
+        .filter(|(key, _)| public_user_field(key, cfg))
         .collect();
     serde_json::Value::Object(filtered)
 }
@@ -3051,6 +3445,47 @@ mod field_gate_tests {
     }
 
     #[test]
+    fn wide_wire_projection_keeps_only_public_schema_fields() {
+        let fields = (0..100)
+            .map(|i| ManifestField {
+                name: format!("field{i}"),
+                server_only: i % 2 == 0,
+                ..Default::default()
+            })
+            .collect();
+        let manifest = AppManifest {
+            entities: vec![ManifestEntity {
+                name: "Wide".into(),
+                fields,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut row = serde_json::json!({"id":"row", "removed":"private"});
+        for i in 0..100 {
+            row[format!("field{i}")] = serde_json::json!(i);
+        }
+        let projected = project_row_for_wire(&manifest, &manifest.auth.user, "Wide", row);
+        assert_eq!(projected.as_object().unwrap().len(), 51);
+        assert_eq!(projected["id"], "row");
+        for i in 0..100 {
+            assert_eq!(projected.get(format!("field{i}")).is_some(), i % 2 == 1);
+        }
+        assert!(!is_replicated_entity(&manifest, "Removed"));
+        assert!(!is_replicated_entity(&manifest, "_Internal"));
+    }
+
+    #[test]
+    fn wire_projection_drops_undeclared_columns_after_schema_change() {
+        let manifest = org_with_secret_field();
+        let row = serde_json::json!({"id":"org", "name":"visible", "removedSecret":"hidden", "stripeCustomerId":"hidden"});
+        assert_eq!(
+            project_row_for_wire(&manifest, &manifest.auth.user, "Org", row),
+            serde_json::json!({"id":"org", "name":"visible"})
+        );
+    }
+
+    #[test]
     fn strip_server_only_removes_marked_field() {
         let manifest = org_with_secret_field();
         let row = serde_json::json!({
@@ -3120,7 +3555,7 @@ mod field_gate_tests {
 
     #[test]
     fn strip_server_only_no_op_when_no_marked_fields() {
-        // PublicPost has no serverOnly fields — every column passes through.
+        // Every declared PublicPost field is public.
         let manifest = AppManifest {
             required_env: Vec::new(),
             build: Default::default(),
@@ -3165,12 +3600,12 @@ mod field_gate_tests {
     }
 
     #[test]
-    fn strip_server_only_unknown_entity_is_identity() {
-        // Unknown entity → no manifest lookup match → pass through.
+    fn strip_server_only_unknown_entity_has_no_public_fields() {
+        // An undeclared entity has no public fields.
         let manifest = org_with_secret_field();
         let row = serde_json::json!({ "id": "x", "field": "value" });
-        let out = strip_server_only_fields(&manifest, "NotInManifest", row.clone());
-        assert_eq!(out, row);
+        let out = strip_server_only_fields(&manifest, "NotInManifest", row);
+        assert_eq!(out, serde_json::json!({}));
     }
 
     #[test]
@@ -3908,6 +4343,49 @@ mod auth_gate_tests {
             let (status, body, _ct) = route(ctx, HttpMethod::Get, "/api/rooms/heartbeat", "", None);
             assert_ne!(status, 200, "{body}");
         });
+    }
+
+    #[test]
+    fn delta_sync_excludes_removed_and_internal_entities() {
+        let mut manifest = empty_manifest();
+        manifest.entities = vec![pylon_kernel::ManifestEntity {
+            name: "Doc".into(),
+            sync: true,
+            ..Default::default()
+        }];
+        let store = StubDataStore::empty(manifest.clone());
+        with_ctx_store(
+            false,
+            &AuthContext::admin(),
+            &NoopPluginHooks,
+            None,
+            None,
+            None,
+            None,
+            manifest,
+            store,
+            "127.0.0.1",
+            |ctx| {
+                for entity in ["Doc", "Removed", "_OldSecret", "Doc"] {
+                    ctx.change_log.record(
+                        entity,
+                        "row",
+                        pylon_sync::ChangeRecord::Insert {
+                            row: serde_json::json!({"id":"row", "oldSecret":"private"}),
+                        },
+                    );
+                }
+                let (status, body, _) =
+                    route(ctx, HttpMethod::Get, "/api/sync/pull?since=1", "", None);
+                assert_eq!(status, 200, "{body}");
+                let result: serde_json::Value = serde_json::from_str(&body).unwrap();
+                let changes = result["changes"].as_array().unwrap();
+                assert_eq!(changes.len(), 1, "{body}");
+                assert_eq!(changes[0]["entity"], "Doc");
+                assert_eq!(changes[0]["data"], serde_json::json!({"id":"row"}));
+                assert_eq!(result["cursor"]["last_seq"], 4);
+            },
+        );
     }
 
     fn with_ctx_full<F>(
@@ -5898,6 +6376,19 @@ mod auth_gate_tests {
     // yield ONLY the caller's row. Reverting the `.filter(row_visible)` in
     // handle_list makes this return BOTH rows → the test fails (non-vacuous).
     #[test]
+    fn list_rejects_page_offset_overflow() {
+        with_ctx(false, &AuthContext::admin(), |ctx| {
+            let (status, body) = handle_list(
+                ctx,
+                "Doc",
+                &format!("/api/entities/Doc?page={}&per_page=1000", usize::MAX),
+            );
+            assert_eq!(status, 400);
+            assert!(body.contains("INVALID_PAGINATION"));
+        });
+    }
+
+    #[test]
     fn handle_list_filters_rows_by_read_policy() {
         use pylon_kernel::{AppManifest, ManifestPolicy, MANIFEST_VERSION};
 
@@ -5996,7 +6487,22 @@ mod auth_gate_tests {
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),
-            entities: vec![],
+            entities: vec![pylon_kernel::ManifestEntity {
+                name: "Doc".into(),
+                fields: vec![
+                    pylon_kernel::ManifestField {
+                        name: "ownerId".into(),
+                        field_type: "string".into(),
+                        ..Default::default()
+                    },
+                    pylon_kernel::ManifestField {
+                        name: "title".into(),
+                        field_type: "string".into(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
             routes: vec![],
             queries: vec![],
             actions: vec![],
@@ -6109,6 +6615,55 @@ mod auth_gate_tests {
             "another owner's row MUST be filtered out (cross-tenant list leak); got {ids:?}"
         );
         assert_eq!(data.len(), 1, "only the caller's row should be returned");
+
+        // Count and page reads share resolved policy lookups within this request.
+        // Revocation must take effect on the next request.
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        struct MembershipResolver {
+            calls: AtomicUsize,
+            revoked: AtomicBool,
+        }
+        impl pylon_policy::PolicyDataResolver for MembershipResolver {
+            fn entity_exists(
+                &self,
+                entity: &str,
+                conditions: &[(Vec<String>, serde_json::Value)],
+            ) -> bool {
+                assert_eq!(entity, "Membership");
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                !self.revoked.load(Ordering::SeqCst)
+                    && conditions
+                        .iter()
+                        .any(|(path, value)| path == &["ownerId"] && value == "u-1")
+            }
+        }
+        let resolver = std::sync::Arc::new(MembershipResolver {
+            calls: AtomicUsize::new(0),
+            revoked: AtomicBool::new(false),
+        });
+        let mut membership_manifest = manifest.clone();
+        membership_manifest.policies[0].allow_read =
+            Some("exists(Membership where ownerId == data.ownerId)".into());
+        let membership_policy = PolicyEngine::from_manifest(&membership_manifest);
+        membership_policy.set_resolver(resolver.clone());
+        let membership_ctx = RouterContext {
+            policy_engine: &membership_policy,
+            ..ctx
+        };
+        let (status, body) = handle_list(&membership_ctx, "Doc", "/api/entities/Doc?page=1");
+        assert_eq!(status, 200);
+        let result: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(result["total"], 1);
+        assert_eq!(result["data"].as_array().unwrap().len(), 1);
+        assert_eq!(result["data"][0]["id"], "d1");
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 2);
+        resolver.revoked.store(true, Ordering::SeqCst);
+        let (status, body) = handle_list(&membership_ctx, "Doc", "/api/entities/Doc?page=1");
+        assert_eq!(status, 200);
+        let result: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(result["total"], 0);
+        assert_eq!(result["data"], serde_json::json!([]));
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 4);
     }
 
     // #354: an ADMIN with an active tenant must be SCOPED to that tenant on the
@@ -6215,7 +6770,22 @@ mod auth_gate_tests {
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),
-            entities: vec![],
+            entities: vec![pylon_kernel::ManifestEntity {
+                name: "Doc".into(),
+                fields: vec![
+                    pylon_kernel::ManifestField {
+                        name: "orgId".into(),
+                        field_type: "string".into(),
+                        ..Default::default()
+                    },
+                    pylon_kernel::ManifestField {
+                        name: "title".into(),
+                        field_type: "string".into(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
             routes: vec![],
             queries: vec![],
             actions: vec![],
@@ -7588,7 +8158,32 @@ mod user_projection_tests {
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),
-            entities: vec![],
+            entities: vec![pylon_kernel::ManifestEntity {
+                name: "User".into(),
+                fields: vec![
+                    pylon_kernel::ManifestField {
+                        name: "email".into(),
+                        field_type: "string".into(),
+                        ..Default::default()
+                    },
+                    pylon_kernel::ManifestField {
+                        name: "displayName".into(),
+                        field_type: "string".into(),
+                        ..Default::default()
+                    },
+                    pylon_kernel::ManifestField {
+                        name: "passwordHash".into(),
+                        field_type: "string".into(),
+                        ..Default::default()
+                    },
+                    pylon_kernel::ManifestField {
+                        name: "secretToken".into(),
+                        field_type: "string".into(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
             routes: vec![],
             queries: vec![],
             actions: vec![],

@@ -86,10 +86,13 @@ describe("SubscriptionCoordinator CRDT subs", () => {
       "follower-a",
     );
     expect(h.serverSubs.has("Todo\x00r1")).toBe(true);
-    // Leader's own subscribe doesn't re-send (already alive via fwd).
+    // A first local consumer requests a full bootstrap.
     const before = h.wsSent.length;
     h.coord.subscribeCrdt("Todo", "r1");
-    expect(h.wsSent.length).toBe(before);
+    expect(h.wsSent.length).toBe(before + 1);
+    h.coord.subscribeCrdt("Todo", "r1");
+    expect(h.wsSent.length).toBe(before + 1);
+    h.coord.unsubscribeCrdt("Todo", "r1");
     // Leader unsubscribe with follower still wanting it keeps the WS sub alive.
     h.coord.unsubscribeCrdt("Todo", "r1");
     expect(h.serverSubs.has("Todo\x00r1")).toBe(true);

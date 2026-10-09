@@ -622,13 +622,14 @@ pub struct Stack0FileStorage {
     base_url: String,
     /// Optional folder/prefix for organizing uploads.
     folder: Option<String>,
+    agent: ureq::Agent,
 }
 
 impl Stack0FileStorage {
-    /// `/cdn/assets/<id>` for an asset id. Stack0 ids are UUIDs: letters,
+    /// Validate an asset id. Stack0 ids are UUIDs: letters,
     /// digits, `-`, `_`, and `.` only. Anything else (`?`, `#`, `/`) would
     /// change which URL the request reaches, so it is refused.
-    fn asset_url(&self, id: &str) -> Result<String, FileStorageError> {
+    fn validate_asset_id(id: &str) -> Result<(), FileStorageError> {
         let safe = !id.is_empty()
             && id
                 .chars()
@@ -638,6 +639,11 @@ impl Stack0FileStorage {
         if !safe {
             return Err(stack0_err("INVALID_ID", "Invalid file ID"));
         }
+        Ok(())
+    }
+
+    fn asset_url(&self, id: &str) -> Result<String, FileStorageError> {
+        Self::validate_asset_id(id)?;
         Ok(format!("{}/cdn/assets/{}", self.base_url, id))
     }
 
@@ -647,6 +653,7 @@ impl Stack0FileStorage {
             project_slug: project_slug.into(),
             base_url: "https://api.stack0.dev/v1".into(),
             folder: None,
+            agent: stack0_agent(),
         }
     }
 
@@ -737,7 +744,7 @@ impl FileStorage for Stack0FileStorage {
         // process never touches the body. Pre-0.3.91 pylon proxied
         // every byte through a multipart handler, which OOM'd on
         // 30MB uploads.
-        let agent = stack0_agent();
+        let agent = &self.agent;
         let init_body = self.build_upload_init_body(name, content_type, size);
         let init_resp: serde_json::Value = agent
             .post(&format!("{}/cdn/upload", self.base_url))
@@ -779,6 +786,7 @@ impl FileStorage for Stack0FileStorage {
     }
 
     fn confirm_upload(&self, asset_id: &str) -> Result<StoredFile, FileStorageError> {
+        Self::validate_asset_id(asset_id)?;
         // Step 3 of the canonical flow. Stack0 marks the asset as
         // ready and returns the final metadata (size, cdnUrl). The
         // client has already PUT bytes to the presigned URL between
@@ -791,7 +799,7 @@ impl FileStorage for Stack0FileStorage {
         // upload bytes landed on the CDN but the asset stayed in a
         // half-confirmed state and the store() call returned an
         // error to the caller.
-        let agent = stack0_agent();
+        let agent = &self.agent;
         let resp: serde_json::Value = agent
             .post(&format!(
                 "{}/cdn/upload/{}/confirm",
@@ -829,7 +837,7 @@ impl FileStorage for Stack0FileStorage {
         // through init_upload + confirm_upload with the bytes
         // going direct to S3.
         let init = self.init_upload(name, content_type, content.len())?;
-        let agent = stack0_agent();
+        let agent = &self.agent;
         agent
             .put(&init.upload_url)
             .set("Content-Type", content_type)
@@ -849,7 +857,7 @@ impl FileStorage for Stack0FileStorage {
         // the CDN to the client. This method only runs when an
         // internal caller (e.g. a background job rehashing the
         // file) needs the actual bytes.
-        let agent = stack0_agent();
+        let agent = &self.agent;
         let meta: serde_json::Value = agent
             .get(&self.asset_url(id)?)
             .set("Authorization", &format!("Bearer {}", self.api_key))
@@ -877,7 +885,7 @@ impl FileStorage for Stack0FileStorage {
     }
 
     fn delete(&self, id: &str) -> Result<bool, FileStorageError> {
-        let agent = stack0_agent();
+        let agent = &self.agent;
         match agent
             .delete(&self.asset_url(id)?)
             .set("Authorization", &format!("Bearer {}", self.api_key))
@@ -894,7 +902,7 @@ impl FileStorage for Stack0FileStorage {
         // it. One round-trip to Stack0 — apps that store the cdnUrl
         // in their DB at confirm time should reference that URL
         // directly and skip pylon's `GET /api/files/<id>` entirely.
-        let agent = stack0_agent();
+        let agent = &self.agent;
         let meta: serde_json::Value = match agent
             .get(&self.asset_url(id)?)
             .set("Authorization", &format!("Bearer {}", self.api_key))
@@ -915,12 +923,85 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stack0_reuses_connections_without_forwarding_api_credentials_to_cdn() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let cdn_url = format!("{base}/content");
+        let response_url = cdn_url.clone();
+        let server = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(socket);
+            for path in [
+                "/cdn/assets/asset",
+                "/cdn/assets/asset",
+                "/cdn/assets/asset",
+                "/content",
+                "/cdn/assets/missing",
+            ] {
+                let mut request = String::new();
+                assert!(reader.read_line(&mut request).unwrap() > 0);
+                assert_eq!(request, format!("GET {path} HTTP/1.1\r\n"));
+                let mut authorized = false;
+                loop {
+                    let mut header = String::new();
+                    assert!(reader.read_line(&mut header).unwrap() > 0);
+                    if header == "\r\n" {
+                        break;
+                    }
+                    if header.to_ascii_lowercase().starts_with("authorization:") {
+                        assert_eq!(
+                            header.trim().split_once(':').unwrap().1.trim(),
+                            "Bearer test-key"
+                        );
+                        authorized = true;
+                    }
+                }
+                assert_eq!(authorized, path != "/content");
+                let (status, body) = if path == "/content" {
+                    ("200 OK", "file bytes".to_owned())
+                } else if path.ends_with("missing") {
+                    ("404 Not Found", String::new())
+                } else {
+                    (
+                        "200 OK",
+                        serde_json::json!({"cdnUrl": response_url}).to_string(),
+                    )
+                };
+                write!(reader.get_mut(), "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{body}", body.len()).unwrap();
+                reader.get_mut().flush().unwrap();
+            }
+        });
+        let storage = Stack0FileStorage::new("test-key", "test-project").with_base_url(base);
+        for _ in 0..2 {
+            assert_eq!(storage.direct_url("asset").unwrap(), Some(cdn_url.clone()));
+        }
+        assert_eq!(storage.get("asset").unwrap(), b"file bytes");
+        assert_eq!(storage.direct_url("missing").unwrap(), None);
+        server.join().unwrap();
+    }
+
+    #[test]
     fn stack0_refuses_ids_that_would_change_the_request_url() {
         // Base URL on a closed port: a refused id never reaches it.
         let storage = Stack0FileStorage::new("k", "p").with_base_url("http://127.0.0.1:9");
         for id in ["asset#x", "a/b", "a?b", "..", ""] {
             assert_eq!(storage.delete(id).unwrap_err().code, "INVALID_ID", "{id:?}");
             assert_eq!(storage.get(id).unwrap_err().code, "INVALID_ID", "{id:?}");
+            assert_eq!(
+                storage.direct_url(id).unwrap_err().code,
+                "INVALID_ID",
+                "{id:?}"
+            );
+            assert_eq!(
+                storage.confirm_upload(id).unwrap_err().code,
+                "INVALID_ID",
+                "{id:?}"
+            );
         }
         assert!(storage
             .asset_url("0b8e5f2a-1c3d-4e5f-9a8b-7c6d5e4f3a2b")

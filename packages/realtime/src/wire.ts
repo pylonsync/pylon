@@ -323,6 +323,7 @@ export class StreamFrames {
 
   /** Add a chunk and return the frames it completed. */
   push(chunk: Uint8Array): ArrayBuffer[] {
+    if (chunk.length === 0) return [];
     this.chunks.push(chunk);
     this.buffered += chunk.length;
     const frames: ArrayBuffer[] = [];
@@ -331,9 +332,10 @@ export class StreamFrames {
       const len = new DataView(head.buffer, head.byteOffset, 4).getUint32(0);
       if (len > MAX_STREAM_FRAME) throw new Error(`a ${len}-byte stream frame`);
       if (this.buffered < 4 + len) break;
-      this.take(4);
-      const frame = this.take(len);
-      frames.push(frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.length) as ArrayBuffer);
+      this.consume(4);
+      const frame = new Uint8Array(len);
+      this.consume(len, frame);
+      frames.push(frame.buffer);
     }
     return frames;
   }
@@ -351,11 +353,11 @@ export class StreamFrames {
     return out;
   }
 
-  private take(n: number): Uint8Array {
-    const out = this.peek(n);
+  private consume(n: number, output?: Uint8Array): void {
     let left = n;
     while (left > 0) {
       const c = this.chunks[0];
+      if (output) output.set(c.subarray(0, Math.min(c.length, left)), n - left);
       if (c.length <= left) {
         this.chunks.shift();
         left -= c.length;
@@ -365,6 +367,5 @@ export class StreamFrames {
       }
     }
     this.buffered -= n;
-    return out;
   }
 }

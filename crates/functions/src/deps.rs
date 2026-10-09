@@ -19,11 +19,10 @@ use std::collections::HashSet;
 
 /// Dep set collected during one handler invocation.
 ///
-/// `entities` is the coarse signal — when a mutation touches this
-/// entity the subscription is dirty. `rows` is the precise signal —
-/// when set is non-empty the registry can suppress re-runs for
-/// changes outside the read row ids. Both are populated; the registry
-/// chooses which granularity to consult.
+/// `entities` records all entities read by the handler. `rows` records
+/// individual row reads. `entity_reads` records reads that can depend
+/// on any row, such as lists and counts. The registry combines these
+/// dependencies so a row read cannot hide a list read.
 ///
 /// `row_cap_blown` is sticky: once a handler exceeds [`ROW_DEP_CAP`]
 /// distinct row reads, we fall back to entity-only matching for the
@@ -35,6 +34,7 @@ use std::collections::HashSet;
 pub struct DepSet {
     pub entities: HashSet<String>,
     pub rows: HashSet<(String, String)>,
+    entity_reads: HashSet<String>,
     row_cap_blown: bool,
 }
 
@@ -55,13 +55,20 @@ impl DepSet {
             // bloats memory + slows match lookups. Once we exceed the
             // cap, drop to entity-only matching permanently for this
             // sub via the sticky `row_cap_blown` flag.
-            if self.rows.len() >= ROW_DEP_CAP {
+            self.rows.insert((entity.to_string(), id.to_string()));
+            if self.rows.len() > ROW_DEP_CAP {
                 self.rows.clear();
                 self.row_cap_blown = true;
-            } else {
-                self.rows.insert((entity.to_string(), id.to_string()));
             }
+        } else {
+            self.entity_reads.insert(entity.to_string());
         }
+    }
+
+    /// True when any row in this entity can affect the result.
+    pub fn reads_entity(&self, entity: &str) -> bool {
+        self.entities.contains(entity)
+            && (self.row_cap_blown || self.rows.is_empty() || self.entity_reads.contains(entity))
     }
 
     /// Returns true if `entities` is non-empty and `rows` is empty —
@@ -218,5 +225,40 @@ mod tests {
         // entity-only matching.
         assert!(deps.entity_only());
         assert_eq!(deps.rows.len(), 0);
+    }
+
+    #[test]
+    fn mixed_reads_preserve_each_entity_wide_dependency_in_either_order() {
+        for row_entity in ["A", "B"] {
+            for list_first in [false, true] {
+                let mut deps = DepSet::new();
+                if list_first {
+                    deps.record_read("A", None);
+                }
+                deps.record_read(row_entity, Some("1"));
+                if !list_first {
+                    deps.record_read("A", None);
+                }
+                assert!(deps.reads_entity("A"));
+                assert!(!deps.reads_entity("B"));
+                assert!(deps.rows.contains(&(row_entity.into(), "1".into())));
+            }
+        }
+    }
+
+    #[test]
+    fn cap_counts_distinct_rows_and_covers_later_entities() {
+        let mut deps = DepSet::new();
+        for i in 0..ROW_DEP_CAP {
+            deps.record_read("A", Some(&i.to_string()));
+        }
+        deps.record_read("A", Some("0"));
+        assert!(!deps.reads_entity("A"));
+        deps.record_read("B", Some("new"));
+        deps.record_read("C", Some("later"));
+        assert!(deps.reads_entity("A"));
+        assert!(deps.reads_entity("B"));
+        assert!(deps.reads_entity("C"));
+        assert!(!deps.reads_entity("unread"));
     }
 }

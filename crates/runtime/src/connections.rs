@@ -239,6 +239,27 @@ impl ConnectionManager {
             .clone()
     }
 
+    /// Delete after any active refresh has persisted its result.
+    /// This prevents that refresh from restoring a disconnected connection.
+    pub fn disconnect<F>(
+        &self,
+        user_id: &str,
+        connection_name: &str,
+        delete_fn: F,
+    ) -> Result<(), ConnectionError>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        // Undeclared connections cannot refresh. Still delete stale rows for
+        // removed definitions without retaining locks for arbitrary names.
+        if self.get_def(connection_name).is_none() {
+            return delete_fn().map_err(ConnectionError::StorageFailed);
+        }
+        let key_lock = self.refresh_lock_for(user_id, connection_name);
+        let _guard = key_lock.lock().unwrap_or_else(|p| p.into_inner());
+        delete_fn().map_err(ConnectionError::StorageFailed)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.defs.is_empty()
     }
@@ -831,6 +852,81 @@ struct FieldOpts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disconnect_waits_for_refresh_and_keeps_other_users_independent() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let manager = ConnectionManager::new(
+            vec![ConnectionDef {
+                name: "google".into(),
+                provider: "google".into(),
+                scopes: String::new(),
+            }],
+            None,
+            Arc::new(pylon_auth::InMemoryOAuthBackend::new()),
+        );
+        let row = Mutex::new(Some("old token"));
+        let refresh_lock = manager.refresh_lock_for("user-1", "google");
+        let refreshing = refresh_lock.lock().unwrap();
+        std::thread::scope(|scope| {
+            let (started_tx, started_rx) = mpsc::channel();
+            let (deleted_tx, deleted_rx) = mpsc::channel();
+            let manager = &manager;
+            let row = &row;
+            let disconnect = scope.spawn(move || {
+                started_tx.send(()).unwrap();
+                manager
+                    .disconnect("user-1", "google", || {
+                        *row.lock().unwrap() = None;
+                        deleted_tx.send(()).unwrap();
+                        Ok(())
+                    })
+                    .unwrap();
+            });
+            started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            // A different user's operation does not wait for this refresh.
+            manager.disconnect("user-2", "google", || Ok(())).unwrap();
+            assert!(deleted_rx.recv_timeout(Duration::from_millis(50)).is_err());
+            *row.lock().unwrap() = Some("refreshed token");
+            drop(refreshing);
+            disconnect.join().unwrap();
+            deleted_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        });
+        assert!(row.lock().unwrap().is_none());
+        // A refresh started after disconnect cannot recreate the row.
+        let result = manager.ensure_fresh_token(
+            "user-1",
+            "google",
+            || Ok(None),
+            |_| panic!("deleted row must not be saved"),
+        );
+        assert!(matches!(result, Err(ConnectionError::NotConnected { .. })));
+        assert!(matches!(
+            manager.disconnect("user-1", "google", || Err("storage failed".into())),
+            Err(ConnectionError::StorageFailed(_))
+        ));
+    }
+
+    #[test]
+    fn unknown_disconnects_delete_stale_rows_without_retaining_locks() {
+        let manager = ConnectionManager::new(
+            vec![],
+            None,
+            Arc::new(pylon_auth::InMemoryOAuthBackend::new()),
+        );
+        let mut deleted = 0;
+        for i in 0..1000 {
+            manager
+                .disconnect("user", &format!("removed-{i}"), || {
+                    deleted += 1;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        assert_eq!(deleted, 1000);
+        assert!(manager.refresh_locks.lock().unwrap().is_empty());
+    }
 
     #[test]
     fn stable_id_is_deterministic_per_user_connection() {

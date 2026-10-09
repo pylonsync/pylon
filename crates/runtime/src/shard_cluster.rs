@@ -1656,11 +1656,16 @@ fn verify_with(
 /// The HTTP agent machine-to-machine calls use: 3 s to connect, 15 s in
 /// all, no redirects. One agent keeps its connections for reuse.
 pub fn call_agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(3))
-        .timeout(Duration::from_secs(15))
-        .redirects(0)
-        .build()
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT
+        .get_or_init(|| {
+            ureq::AgentBuilder::new()
+                .timeout_connect(Duration::from_secs(3))
+                .timeout(Duration::from_secs(15))
+                .redirects(0)
+                .build()
+        })
+        .clone()
 }
 
 /// Run `op` on machine `to` at `address`.
@@ -1698,6 +1703,63 @@ pub fn call_with(
 pub(crate) mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    pub(crate) fn assert_shared_agent(make_agent: fn() -> ureq::Agent, header_name: &'static str) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/test", listener.local_addr().unwrap());
+        let redirect_url = url.clone();
+        let server = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(socket);
+            for (signature, status) in [
+                ("first-signature", "200 OK"),
+                ("second-signature", "302 Found"),
+            ] {
+                let mut request_line = String::new();
+                assert!(reader.read_line(&mut request_line).unwrap() > 0);
+                assert_eq!(request_line, "GET /test HTTP/1.1\r\n");
+                let mut received = Vec::new();
+                loop {
+                    let mut header = String::new();
+                    assert!(reader.read_line(&mut header).unwrap() > 0);
+                    if header == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = header.split_once(':') {
+                        if name.eq_ignore_ascii_case(header_name) {
+                            received.push(value.trim().to_owned());
+                        }
+                    }
+                }
+                assert_eq!(received, [signature]);
+                write!(
+                    reader.get_mut(),
+                    "HTTP/1.1 {status}\r\nContent-Length: 2\r\nLocation: {redirect_url}\r\n\r\nok"
+                )
+                .unwrap();
+                reader.get_mut().flush().unwrap();
+            }
+        });
+        for (signature, status) in [("first-signature", 200), ("second-signature", 302)] {
+            let response = make_agent()
+                .get(&url)
+                .set(header_name, signature)
+                .call()
+                .unwrap();
+            assert_eq!(response.status(), status);
+            assert_eq!(response.into_string().unwrap(), "ok");
+        }
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn remote_calls_reuse_connections_and_keep_signatures_per_request() {
+        assert_shared_agent(call_agent, AUTH_HEADER);
+    }
 
     fn m(id: &str, capacity: u32, load: u32) -> Machine {
         Machine {

@@ -197,6 +197,8 @@ pub struct InterestManager<K = u64> {
     scratch: Vec<EntityId>,
     /// One bit per grid entity: in view this update.
     bits: Vec<u64>,
+    /// Nonzero words in `bits`. Sparse views visit only these words.
+    touched_words: Vec<usize>,
 }
 
 impl<K: Hash + Eq + Clone> InterestManager<K> {
@@ -207,6 +209,7 @@ impl<K: Hash + Eq + Clone> InterestManager<K> {
             views: HashMap::new(),
             scratch: Vec::new(),
             bits: Vec::new(),
+            touched_words: Vec::new(),
         }
     }
 
@@ -229,6 +232,7 @@ impl<K: Hash + Eq + Clone> InterestManager<K> {
     /// Rebuild the grid from this tick's entities.
     pub fn rebuild(&mut self, entities: &[EntityPos]) {
         self.grid.rebuild(entities);
+        self.bits.resize(self.grid.len().div_ceil(64), 0);
     }
 
     /// Recompute one subscriber's view. `area` None sees nothing. `filter`
@@ -260,24 +264,40 @@ impl<K: Hash + Eq + Clone> InterestManager<K> {
             let prev = &view.visible;
             let entities = &self.grid.entities;
             let bits = &mut self.bits;
-            bits.clear();
-            bits.resize(entities.len().div_ceil(64), 0);
+            let touched = &mut self.touched_words;
+            // A small bitset fits in 512 bytes. Scanning it is cheaper than
+            // recording word indexes for each visible entity.
+            let track_words = bits.len() > 64;
             self.grid.for_each_index_near(ax, ay, keep, |i| {
                 let e = &entities[i];
                 let (dx, dy) = (e.x as f64 - ax, e.y as f64 - ay);
                 let d2 = dx * dx + dy * dy;
                 if d2 <= r2 || (d2 <= keep2 && prev.binary_search(&e.id).is_ok()) {
-                    bits[i / 64] |= 1 << (i % 64);
+                    let word = i / 64;
+                    if track_words && bits[word] == 0 {
+                        touched.push(word);
+                    }
+                    bits[word] |= 1 << (i % 64);
                 }
             });
-            // Entities are in id order, so reading the bits in order gives
-            // sorted ids with no sort.
-            for (w, word) in bits.iter().enumerate() {
-                let mut word = *word;
+            let mut emit = |w: usize, mut word: u64| {
                 while word != 0 {
                     let b = word.trailing_zeros() as usize;
                     next.push(entities[w * 64 + b].id);
                     word &= word - 1;
+                }
+            };
+            if !track_words || touched.len() >= bits.len().div_ceil(2) {
+                // Dense views use a sequential scan instead of sorting words.
+                for (w, word) in bits.iter_mut().enumerate() {
+                    emit(w, std::mem::take(word));
+                }
+                touched.clear();
+            } else {
+                // Sparse views clear and visit only their nonzero words.
+                touched.sort_unstable();
+                for w in touched.drain(..) {
+                    emit(w, std::mem::take(&mut bits[w]));
                 }
             }
             filter(next);
@@ -510,5 +530,101 @@ mod tests {
         diff_into(&[1, 3, 5, 9], &[2, 3, 9, 10], &mut en, &mut le);
         assert_eq!(en, vec![2, 10]);
         assert_eq!(le, vec![1, 5]);
+    }
+
+    #[test]
+    fn sparse_views_clear_words_before_other_subscribers_and_rebuilds() {
+        let mut manager: InterestManager<u64> = InterestManager::default();
+        let entities: Vec<_> = (0..100_000)
+            .map(|id| e(id, id as f32 * 100.0, 0.0))
+            .collect();
+        manager.rebuild(&entities);
+        for id in [0, 63, 64, 50_001, 99_999] {
+            let view = manager.update(&id, area(id as f32 * 100.0, 0.0, 0.0), |_| {});
+            assert_eq!(view.visible, [id]);
+            assert_eq!(view.entered, [id]);
+            assert!(manager.touched_words.is_empty());
+            assert!(manager.bits.iter().all(|word| *word == 0));
+        }
+        manager.rebuild(&[e(99_999, 0.0, 0.0)]);
+        let view = manager.update(&0, area(0.0, 0.0, 0.0), |_| {});
+        assert_eq!(view.visible, [99_999]);
+        assert_eq!(view.entered, [99_999]);
+        assert_eq!(view.left, [0]);
+        manager.rebuild(&[]);
+        assert_eq!(
+            manager.update(&0, area(0.0, 0.0, 1.0), |_| {}).left,
+            [99_999]
+        );
+    }
+
+    #[test]
+    fn indexed_views_match_full_scan_across_movement_and_filters() {
+        for entity_count in [1025, 8193] {
+            let mut manager: InterestManager<u64> = InterestManager::new(InterestConfig {
+                cell_size: 8.0,
+                margin: 3.0,
+            });
+            let mut previous: HashMap<u64, Vec<u64>> = HashMap::new();
+            for tick in 0..20 {
+                let mut entities: Vec<_> = (0..entity_count)
+                    .rev()
+                    .filter(|id| (id + tick) % 11 != 0)
+                    .map(|id| {
+                        e(
+                            id,
+                            ((id * 37 + tick * 3) % 200) as f32 - 100.0,
+                            ((id * 17 + tick * 7) % 200) as f32 - 100.0,
+                        )
+                    })
+                    .collect();
+                entities.extend([e(2000, f32::NAN, 0.0), e(2001, f32::INFINITY, 0.0)]);
+                if let Some(first) = entities.first().copied() {
+                    entities.push(e(first.id, 10_000.0, 10_000.0));
+                }
+                manager.rebuild(&entities);
+                for sub in 0..16 {
+                    let current_area = if sub == 0 && tick % 3 == 0 {
+                        None
+                    } else {
+                        area(
+                            sub as f32 * 10.0 - 80.0,
+                            tick as f32 - 10.0,
+                            if sub == 1 { 1000.0 } else { 5.0 + sub as f32 },
+                        )
+                    };
+                    let prev = previous.entry(sub).or_default();
+                    let mut expected = Vec::new();
+                    if let Some(a) = current_area {
+                        for entity in &manager.grid.entities {
+                            let distance = (entity.x as f64 - a.x as f64).powi(2)
+                                + (entity.y as f64 - a.y as f64).powi(2);
+                            let visible = distance <= (a.radius as f64).powi(2)
+                                || (distance <= (a.radius as f64 + 3.0).powi(2)
+                                    && prev.binary_search(&entity.id).is_ok());
+                            if visible && entity.id % 7 != sub % 7 {
+                                expected.push(entity.id);
+                            }
+                        }
+                    }
+                    let entered: Vec<_> = expected
+                        .iter()
+                        .copied()
+                        .filter(|id| prev.binary_search(id).is_err())
+                        .collect();
+                    let left: Vec<_> = prev
+                        .iter()
+                        .copied()
+                        .filter(|id| expected.binary_search(id).is_err())
+                        .collect();
+                    let view = manager
+                        .update(&sub, current_area, |ids| ids.retain(|id| id % 7 != sub % 7));
+                    assert_eq!(view.visible, expected);
+                    assert_eq!(view.entered, entered);
+                    assert_eq!(view.left, left);
+                    *prev = expected;
+                }
+            }
+        }
     }
 }

@@ -1713,6 +1713,24 @@ pub mod live {
             Ok(rows.iter().map(row_to_json).collect())
         }
 
+        pub fn count_filtered(
+            &mut self,
+            entity: &str,
+            filter: &serde_json::Value,
+            valid_columns: &[String],
+        ) -> Result<usize, StorageError> {
+            let (sql, params) = Self::build_query_filtered_sql(entity, filter, valid_columns)?;
+            let pg_params = as_pg_params(&params);
+            let row = self
+                .client
+                .query_one(
+                    &format!("SELECT COUNT(*) FROM ({sql}) AS pylon_count"),
+                    &pg_params,
+                )
+                .map_err(pg_err)?;
+            Ok(row.get::<_, i64>(0) as usize)
+        }
+
         /// Build the `SELECT ... FROM entity ...` SQL + bound params for
         /// a `query_filtered` request. Pure: takes a manifest's column
         /// list, returns text. Both the live adapter and the in-tx

@@ -6,12 +6,51 @@ import {
   SHARD_HEADER_LEN,
   ShardCodec,
   ShardFrameKind,
+  StreamFrames,
   decodeShardPayload,
   decodeShardRejection,
   encodeDatagramAckBatches,
   encodeShardInput,
   parseShardFrame,
+  lengthPrefixed,
 } from "./wire";
+
+describe("StreamFrames", () => {
+  test("decodes fragmented headers, empty frames, and combined frames", () => {
+    const messages = [new Uint8Array(), new Uint8Array([1, 2, 3]), new Uint8Array([4])];
+    const wire = new Uint8Array(messages.reduce((sum, value) => sum + value.length + 4, 0));
+    let at = 0;
+    for (const message of messages) {
+      wire.set(lengthPrefixed(message), at);
+      at += message.length + 4;
+    }
+    for (const size of [1, 2, 3, 4, 7, wire.length]) {
+      const decoder = new StreamFrames();
+      const frames: ArrayBuffer[] = [];
+      expect(decoder.push(new Uint8Array())).toEqual([]);
+      for (let offset = 0; offset < wire.length; offset += size) {
+        frames.push(...decoder.push(wire.subarray(offset, offset + size)));
+      }
+      expect(frames.map((value) => [...new Uint8Array(value)])).toEqual(messages.map((value) => [...value]));
+    }
+  });
+
+  test("completed frames own their bytes for contiguous and fragmented inputs", () => {
+    for (const split of [1, 5, 10]) {
+      const source = lengthPrefixed(new Uint8Array([1, 2, 3, 4, 5, 6]));
+      const decoder = new StreamFrames();
+      const frames = [...decoder.push(source.subarray(0, split)), ...decoder.push(source.subarray(split))];
+      source.fill(0);
+      expect([...new Uint8Array(frames[0])]).toEqual([1, 2, 3, 4, 5, 6]);
+    }
+  });
+
+  test("rejects oversized frames before buffering their body", () => {
+    const header = new Uint8Array(4);
+    new DataView(header.buffer).setUint32(0, 64 * 1024 * 1024 + 1);
+    expect(() => new StreamFrames().push(header)).toThrow("stream frame");
+  });
+});
 
 function frame(kind: number, codec: number, tick: number, ack: number, payload: Uint8Array) {
   const buf = new ArrayBuffer(SHARD_HEADER_LEN + payload.length);

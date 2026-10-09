@@ -6,7 +6,7 @@
 //!
 //! Execution shape, in one round-trip:
 //!
-//! 1. Base bitmap = FTS5 MATCH result (or "all rows" if no query).
+//! 1. Base bitmap = FTS5 MATCH result, first facet filter, or all rows.
 //! 2. Apply each filter: base &= facet_bitmap(filter_field, filter_value).
 //! 3. For each declared facet the caller asked about:
 //!       for each (value, facet_bitmap):
@@ -51,12 +51,12 @@ pub fn run_search(
 ) -> Result<SearchResult, StorageError> {
     let t0 = std::time::Instant::now();
 
-    // --- 1. Base bitmap: FTS match, or all-rows ----------------------------
+    // --- 1. Base bitmap: FTS match, or first valid facet filter ------------
 
     let mut base = if query.query.trim().is_empty() || config.text.is_empty() {
-        load_all_rows(conn, entity)?
+        None
     } else {
-        load_fts_matches(conn, entity, &query.query)?
+        Some(load_fts_matches(conn, entity, &query.query)?)
     };
 
     // --- 2. Apply equality filters (AND) ----------------------------------
@@ -73,8 +73,18 @@ pub fn run_search(
             None => return Ok(empty_result(t0)),
         };
         let filter_bitmap = load_facet_bitmap(conn, entity, field, &value_str)?;
-        base &= filter_bitmap;
+        match &mut base {
+            Some(base) => *base &= filter_bitmap,
+            None => base = Some(filter_bitmap),
+        }
     }
+
+    // Facet bitmaps are maintained in the same transaction as entity rows.
+    // Only an unfiltered browse needs to enumerate every row ID.
+    let base = match base {
+        Some(base) => base,
+        None => load_all_rows(conn, entity)?,
+    };
 
     let total = base.len();
 
@@ -252,7 +262,7 @@ fn count_facet_values(
     base: &RoaringBitmap,
 ) -> Result<BTreeMap<String, u64>, StorageError> {
     let mut stmt = conn
-        .prepare(
+        .prepare_cached(
             "SELECT value, bitmap FROM \"_facet_bitmap\" \
              WHERE entity = ?1 AND facet = ?2",
         )
@@ -269,11 +279,14 @@ fn count_facet_values(
         let value: String = row
             .get(0)
             .map_err(|e| StorageError::new("FACET_VALUE_FAILED", &e.to_string()))?;
-        let bytes: Vec<u8> = row
-            .get(1)
+        let bytes = row
+            .get_ref(1)
             .map_err(|e| StorageError::new("FACET_BYTES_FAILED", &e.to_string()))?;
-        let bmp = deserialize_bitmap(&bytes)?;
-        let count = (base & bmp).len();
+        let bytes = bytes
+            .as_blob()
+            .map_err(|e| StorageError::new("FACET_BYTES_FAILED", &e.to_string()))?;
+        let bmp = deserialize_bitmap(bytes)?;
+        let count = base.intersection_len(&bmp);
         if count > 0 {
             out.insert(value, count);
         }
@@ -365,8 +378,7 @@ fn fetch_rows_sorted(
     offset: usize,
     limit: usize,
 ) -> Result<Vec<Value>, StorageError> {
-    // Temp table lives for the duration of the connection; DROP at the
-    // end keeps the namespace clean even for long-lived connections.
+    // Reuse the connection's temporary table, clearing the previous match set.
     conn.execute(
         "CREATE TEMP TABLE IF NOT EXISTS \"_search_hits\" (rowid INTEGER PRIMARY KEY);",
         [],
@@ -376,6 +388,16 @@ fn fetch_rows_sorted(
         .map_err(|e| StorageError::new("TEMP_CLEAR_FAILED", &e.to_string()))?;
 
     {
+        // Avoid one implicit commit per row. A caller's existing transaction
+        // already batches these writes and must remain under its control.
+        let transaction = if conn.is_autocommit() {
+            Some(
+                conn.unchecked_transaction()
+                    .map_err(|e| StorageError::new("TEMP_TRANSACTION_FAILED", &e.to_string()))?,
+            )
+        } else {
+            None
+        };
         let mut insert = conn
             .prepare_cached("INSERT INTO \"_search_hits\" (rowid) VALUES (?1)")
             .map_err(|e| StorageError::new("TEMP_PREPARE_FAILED", &e.to_string()))?;
@@ -383,6 +405,12 @@ fn fetch_rows_sorted(
             insert
                 .execute([rid as i64])
                 .map_err(|e| StorageError::new("TEMP_INSERT_FAILED", &e.to_string()))?;
+        }
+        drop(insert);
+        if let Some(transaction) = transaction {
+            transaction
+                .commit()
+                .map_err(|e| StorageError::new("TEMP_TRANSACTION_FAILED", &e.to_string()))?;
         }
     }
 
@@ -406,10 +434,6 @@ fn fetch_rows_sorted(
     let params: Vec<&dyn rusqlite::types::ToSql> = vec![&limit_i64, &offset_i64];
     let out = collect_rows(&mut stmt, &params)?;
 
-    // Drop the temp table to release its pages. The CREATE IF NOT
-    // EXISTS above means the next search reuses the same schema; the
-    // DELETE at the top of this function empties it first.
-    drop(stmt);
     Ok(out)
 }
 
@@ -523,6 +547,192 @@ mod tests {
             sortable: vec!["price".into()],
             language: None,
         }
+    }
+
+    #[test]
+    fn sorted_search_leaves_the_callers_transaction_open() {
+        let conn = seed_store(5);
+        let transaction = conn.unchecked_transaction().unwrap();
+        conn.execute("UPDATE Product SET price = 999 WHERE id = 'p_000000'", [])
+            .unwrap();
+        let base = load_all_rows(&conn, "Product").unwrap();
+        let hits = fetch_rows_sorted(&conn, "Product", &base, "price", "desc", 0, 1).unwrap();
+        assert_eq!(hits[0]["id"], "p_000000");
+        assert_eq!(hits[0]["price"], 999.0);
+        assert!(!conn.is_autocommit());
+        transaction.rollback().unwrap();
+        let price: f64 = conn
+            .query_row(
+                "SELECT price FROM Product WHERE id = 'p_000000'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(price, 10.0);
+    }
+
+    #[test]
+    fn failed_match_table_fill_rolls_back_and_the_connection_can_retry() {
+        let conn = seed_store(5);
+        conn.execute_batch(
+            "CREATE TEMP TABLE _search_hits (rowid INTEGER PRIMARY KEY);
+            CREATE TEMP TRIGGER fail_match BEFORE INSERT ON _search_hits
+            WHEN NEW.rowid = 2 BEGIN SELECT RAISE(ABORT, 'test failure'); END;",
+        )
+        .unwrap();
+        let base = load_all_rows(&conn, "Product").unwrap();
+        let error = fetch_rows_sorted(&conn, "Product", &base, "price", "desc", 0, 2).unwrap_err();
+        assert_eq!(error.code, "TEMP_INSERT_FAILED");
+        assert!(conn.is_autocommit());
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM _search_hits", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        conn.execute_batch("DROP TRIGGER fail_match").unwrap();
+        let hits = fetch_rows_sorted(&conn, "Product", &base, "price", "desc", 0, 2).unwrap();
+        assert_eq!(
+            hits.iter()
+                .map(|row| row["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["p_000004", "p_000003"]
+        );
+        assert!(conn.is_autocommit());
+    }
+
+    thread_local! {
+        static SEARCH_SQL: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    fn record_sql(sql: &str) {
+        SEARCH_SQL.with(|queries| queries.borrow_mut().push(sql.to_string()));
+    }
+
+    fn facet_query() -> SearchQuery {
+        SearchQuery {
+            query: String::new(),
+            filters: [("brand".into(), Value::String("Nike".into()))].into(),
+            facets: vec![],
+            sort: None,
+            page: 0,
+            page_size: 20,
+        }
+    }
+
+    #[test]
+    fn selective_facets_skip_the_full_rowid_scan() {
+        let mut conn = seed_store(30);
+        conn.trace(Some(record_sql));
+        SEARCH_SQL.with(|queries| queries.borrow_mut().clear());
+        let mut query = facet_query();
+        query
+            .filters
+            .insert("category".into(), Value::String("shoes".into()));
+        query.sort = Some(("price".into(), "desc".into()));
+        query.page_size = 3;
+        query.page = 1;
+        let result = run_search(&conn, "Product", &product_config(), &query).unwrap();
+        assert_eq!(result.total, 10);
+        assert_eq!(result.facet_counts["brand"]["Nike"], 10);
+        assert_eq!(result.facet_counts["category"]["shoes"], 10);
+        let ids: Vec<_> = result
+            .hits
+            .iter()
+            .map(|row| row["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["p_000018", "p_000015", "p_000012"]);
+        SEARCH_SQL.with(|queries| {
+            assert!(!queries
+                .borrow()
+                .iter()
+                .any(|sql| sql == "SELECT rowid FROM \"Product\""));
+        });
+
+        // An ignored filter must still use the unfiltered fallback.
+        query.filters = [("unknown".into(), Value::String("x".into()))].into();
+        let result = run_search(&conn, "Product", &product_config(), &query).unwrap();
+        assert_eq!(result.total, 30);
+        SEARCH_SQL.with(|queries| {
+            assert!(queries
+                .borrow()
+                .iter()
+                .any(|sql| sql == "SELECT rowid FROM \"Product\""));
+        });
+    }
+
+    #[test]
+    fn facet_base_preserves_text_and_empty_filter_results() {
+        let conn = seed_store(30);
+        let mut query = facet_query();
+        query.query = "Adidas".into();
+        assert_eq!(
+            run_search(&conn, "Product", &product_config(), &query)
+                .unwrap()
+                .total,
+            0
+        );
+
+        // Text is ignored on entities without text search fields.
+        let mut config = product_config();
+        config.text.clear();
+        assert_eq!(
+            run_search(&conn, "Product", &config, &query).unwrap().total,
+            10
+        );
+        for value in [
+            serde_json::json!("missing"),
+            serde_json::json!({"bad": true}),
+        ] {
+            query.filters.insert("brand".into(), value);
+            let result = run_search(&conn, "Product", &config, &query).unwrap();
+            assert_eq!(result.total, 0);
+            assert!(result.hits.is_empty());
+            assert!(result.facet_counts.is_empty());
+        }
+    }
+
+    #[test]
+    fn facet_base_tracks_inserts_updates_and_deletes() {
+        use crate::search_maintenance::{apply_delete, apply_update};
+        let conn = seed_store(6);
+        let config = product_config();
+        let old = serde_json::json!({"brand": "Nike", "category": "shoes"});
+        conn.execute(
+            "UPDATE Product SET brand = 'Adidas' WHERE id = 'p_000000'",
+            [],
+        )
+        .unwrap();
+        apply_update(
+            &conn,
+            "Product",
+            "p_000000",
+            &old,
+            &serde_json::json!({"brand": "Adidas"}),
+            &config,
+        )
+        .unwrap();
+        apply_delete(&conn, "Product", "p_000003", &old, &config).unwrap();
+        conn.execute("DELETE FROM Product WHERE id = 'p_000003'", [])
+            .unwrap();
+        let query = facet_query();
+        assert_eq!(
+            run_search(&conn, "Product", &config, &query).unwrap().total,
+            0
+        );
+
+        conn.execute("INSERT INTO Product (id, name, brand, category) VALUES ('new', 'Nike', 'Nike', 'shoes')", []).unwrap();
+        apply_insert(
+            &conn,
+            "Product",
+            "new",
+            &serde_json::json!({"name": "Nike", "brand": "Nike", "category": "shoes"}),
+            &config,
+        )
+        .unwrap();
+        let result = run_search(&conn, "Product", &config, &query).unwrap();
+        assert_eq!(result.total, 1);
+        assert_eq!(result.hits[0]["id"], "new");
+        assert_eq!(result.facet_counts["brand"]["Nike"], 1);
+        assert_eq!(result.facet_counts["category"]["shoes"], 1);
     }
 
     #[test]

@@ -94,6 +94,10 @@ fn wait_for_port(port: u16) {
 }
 
 fn start_server() -> (u16, Arc<Runtime>) {
+    start_runtime(Arc::new(Runtime::in_memory(manifest()).unwrap()))
+}
+
+fn start_runtime(rt: Arc<Runtime>) -> (u16, Arc<Runtime>) {
     static ENV: std::sync::Once = std::sync::Once::new();
     ENV.call_once(|| {
         // SAFETY: once per binary, before any server thread starts.
@@ -103,7 +107,6 @@ fn start_server() -> (u16, Arc<Runtime>) {
         }
     });
     let port = available_port();
-    let rt = Arc::new(Runtime::in_memory(manifest()).unwrap());
     let rt2 = Arc::clone(&rt);
     std::thread::spawn(move || {
         let _ = pylon_runtime::server::start(rt2, port);
@@ -363,6 +366,8 @@ impl pylon_router::FnOps for FeedFns {
                 duration_ms: 0.0,
                 outcome: pylon_functions::trace::FnOutcome::Ok { value: None },
                 ops: vec![],
+                ops_omitted: 0,
+                schedules_omitted: 0,
                 stream_bytes: 0,
                 stream_chunks: 0,
                 schedules: vec![],
@@ -468,4 +473,167 @@ fn signing_out_closes_the_sockets_that_used_the_session() {
         None,
         "a socket on another session was closed"
     );
+}
+
+#[test]
+fn private_fields_in_old_crdt_history_never_reach_binary_clients() {
+    private_history_wire_case(false);
+}
+
+#[test]
+fn removing_a_private_field_does_not_publish_its_old_crdt_history() {
+    private_history_wire_case(true);
+}
+
+fn private_history_wire_case(remove_field: bool) {
+    use pylon_http::DataStore;
+    use serde_json::json;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("privacy.sqlite");
+    let mut schema = AppManifest {
+        entities: vec![
+            ManifestEntity {
+                name: "PrivateDoc".into(),
+                fields: vec![field("title"), field("secret")],
+                crdt: true,
+                sync: true,
+                ..Default::default()
+            },
+            ManifestEntity {
+                name: "PublicDoc".into(),
+                fields: vec![field("title")],
+                crdt: true,
+                sync: true,
+                ..Default::default()
+            },
+        ],
+        policies: vec![open_policy("PrivateDoc"), open_policy("PublicDoc")],
+        ..Default::default()
+    };
+    let old = Runtime::open(path.to_str().unwrap(), schema.clone()).unwrap();
+    let private_id = old
+        .insert(
+            "PrivateDoc",
+            &json!({"title":"before", "secret":"stored-private-value"}),
+        )
+        .unwrap();
+    let public_id = old.insert("PublicDoc", &json!({"title":"public"})).unwrap();
+    assert!(!DataStore::has_private_crdt_history(&old, "PrivateDoc"));
+    schema.entities[0].fields[1].server_only = true;
+    let private_runtime = Runtime::open(path.to_str().unwrap(), schema.clone()).unwrap();
+    assert!(DataStore::has_private_crdt_history(
+        &private_runtime,
+        "PrivateDoc"
+    ));
+    assert!(
+        DataStore::has_private_crdt_history(&old, "PrivateDoc"),
+        "running instances must see restrictions from another instance"
+    );
+    assert!(!DataStore::has_private_crdt_history(&old, "PublicDoc"));
+    drop(old);
+    drop(private_runtime);
+    if remove_field {
+        schema.entities[0].fields.pop();
+        assert!(pylon_router::supports_crdt_replication(
+            &schema,
+            &schema.auth.user,
+            "PrivateDoc"
+        ));
+    }
+    let runtime = Arc::new(Runtime::open(path.to_str().unwrap(), schema).unwrap());
+    assert!(DataStore::has_private_crdt_history(
+        runtime.as_ref(),
+        "PrivateDoc"
+    ));
+    let snapshot = DataStore::crdt_snapshot(runtime.as_ref(), "PrivateDoc", &private_id)
+        .unwrap()
+        .unwrap();
+    let document = pylon_crdt::loro::LoroDoc::new();
+    document.import(&snapshot).unwrap();
+    let stored = serde_json::to_value(document.get_deep_value()).unwrap();
+    assert_eq!(
+        stored[pylon_crdt::ROOT_MAP]["secret"],
+        "stored-private-value",
+        "the test must cover an existing private document"
+    );
+    let (port, _runtime) = start_runtime(runtime);
+    let mut ws = connect_ws(port, ADMIN_TOKEN);
+    for (entity, row) in [("PrivateDoc", &private_id), ("PublicDoc", &public_id)] {
+        ws.send(Message::Text(
+            json!({"type":"crdt-subscribe", "entity":entity, "rowId":row}).to_string(),
+        ))
+        .unwrap();
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut public_snapshot = false;
+    while Instant::now() < deadline && !public_snapshot {
+        match ws.read() {
+            Ok(Message::Binary(bytes)) => {
+                let len = u16::from_be_bytes([bytes[1], bytes[2]]) as usize;
+                let entity = std::str::from_utf8(&bytes[3..3 + len]).unwrap();
+                assert_eq!(
+                    entity, "PublicDoc",
+                    "private CRDT history reached the socket"
+                );
+                public_snapshot = true;
+            }
+            Ok(Message::Ping(bytes)) => {
+                ws.send(Message::Pong(bytes)).unwrap();
+            }
+            Ok(_) => {}
+            Err(tungstenite::Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => panic!("websocket failed: {error}"),
+        }
+    }
+    assert!(
+        public_snapshot,
+        "public CRDT subscriptions must remain available"
+    );
+    let (status, body) = http(
+        port,
+        "POST",
+        &format!("/api/crdt/PrivateDoc/{private_id}"),
+        Some(r#"{"update":"00"}"#),
+        Some(ADMIN_TOKEN),
+    );
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("CRDT_REPLICATION_DISABLED"));
+    let (status, body) = http(
+        port,
+        "PATCH",
+        &format!("/api/entities/PrivateDoc/{private_id}"),
+        Some(r#"{"title":"after"}"#),
+        Some(ADMIN_TOKEN),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(!body.contains("stored-private-value"));
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let mut saw_json = false;
+    while Instant::now() < deadline {
+        match ws.read() {
+            Ok(Message::Binary(_)) => panic!("private live update emitted a binary frame"),
+            Ok(Message::Text(text)) => {
+                assert!(!text.contains("stored-private-value"));
+                let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+                if value["entity"] == "PrivateDoc" && value["data"]["title"] == "after" {
+                    saw_json = true;
+                }
+            }
+            Ok(Message::Ping(bytes)) => {
+                ws.send(Message::Pong(bytes)).unwrap();
+            }
+            Ok(_) => {}
+            Err(tungstenite::Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => panic!("websocket failed: {error}"),
+        }
+    }
+    assert!(saw_json, "projected JSON replication must remain available");
 }

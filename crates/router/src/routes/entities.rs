@@ -215,15 +215,12 @@ pub(crate) fn handle(
                     .and_then(|r| r.get("id"))
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
-                return Some((
-                    200,
-                    serde_json::json!({
-                        "data": page,
-                        "next_cursor": next_cursor,
-                        "has_more": has_more,
-                    })
-                    .to_string(),
-                ));
+                let mut response = serde_json::json!({
+                    "next_cursor": next_cursor,
+                    "has_more": has_more,
+                });
+                response["data"] = serde_json::Value::Array(page);
+                return Some((200, response.to_string()));
             }
         }
     }

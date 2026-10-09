@@ -101,6 +101,11 @@ pub struct StoredCall {
 pub trait DataStore: Send + Sync {
     fn manifest(&self) -> &pylon_kernel::AppManifest;
 
+    /// Stored CRDT history can remain private after a schema field is removed.
+    fn has_private_crdt_history(&self, _entity: &str) -> bool {
+        false
+    }
+
     /// Per-operation privilege signal from the caller. The function
     /// runner calls this before every db op with the CURRENT admin
     /// state, so a mid-call `ctx.auth.elevate({ admin: true })` reaches
@@ -170,6 +175,11 @@ pub trait DataStore: Send + Sync {
     ) -> Result<bool, DataError>;
 
     fn unlink(&self, entity: &str, id: &str, relation: &str) -> Result<bool, DataError>;
+
+    /// Count the bounded rows returned by query_filtered with the same filter.
+    fn count_filtered(&self, entity: &str, filter: &serde_json::Value) -> Result<usize, DataError> {
+        self.query_filtered(entity, filter).map(|rows| rows.len())
+    }
 
     fn query_filtered(
         &self,

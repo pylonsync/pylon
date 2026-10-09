@@ -492,19 +492,6 @@ export class SyncEngine {
   private binaryHandlers: Set<(bytes: Uint8Array) => void> = new Set();
 
   /**
-   * Latest server CRDT SNAPSHOT frame per `entity|rowId`, kept so a
-   * follower tab that registers interest in an ALREADY-subscribed row
-   * gets state immediately. The server sends its catch-up snapshot only
-   * when a fresh `crdt-subscribe` goes over the WS — when the leader
-   * (or another follower) already holds the subscription, no wire
-   * traffic happens and, pre-cache, the new tab's LoroDoc stayed empty
-   * until the next live edit. Server broadcasts are always FULL merged
-   * snapshots (CRDT_FRAME_SNAPSHOT), so one frame per row is complete
-   * state. Bounded FIFO — see LAST_CRDT_FRAMES_MAX.
-   */
-  private lastCrdtFrames: Map<string, Uint8Array> = new Map();
-
-  /**
    * Server-side ephemeral subscriptions (CRDT row subs, reactive query
    * subs, future kinds). Owns the WS replay bookkeeping — each kind
    * registers the message that re-creates its server-side state, and
@@ -631,14 +618,6 @@ export class SyncEngine {
     this.subscriptions = new SubscriptionCoordinator(this.serverSubs, {
       isLeader: () => this.isMultiTabLeader,
       broadcastToTabs: (payload) => this.broadcastToTabs(payload),
-      // Follower registered interest in a row whose WS subscription is
-      // already alive — no server catch-up will come, so replay the
-      // cached snapshot over the tab channel. Loro imports are
-      // idempotent, so tabs that already have the state are unaffected.
-      replayCrdtFrame: (entity, rowId) => {
-        const cached = this.lastCrdtFrames.get(`${entity}|${rowId}`);
-        if (cached) this.broadcastToTabs({ type: "binary", bytes: cached });
-      },
     });
     this.rooms = new RoomSubscriptions((msg) => {
       // Leader: send over the WS. Followers don't open a transport;
@@ -1098,10 +1077,10 @@ export class SyncEngine {
           // restoring it is correct on both tabs.
           this.mutations.add(op.change, op.prevRow, op.owner, op.ownerPending);
         }
-        void this.push();
+        void this.pushNew(ops.map((op) => op.id));
       },
       onMutationsAcked: (opIds: string[]) => {
-        for (const id of opIds) this.mutations.markApplied(id);
+        this.mutations.markAppliedMany(opIds);
         this.mutations.clear();
       },
       onMutationsQueued: (opIds: string[]) => {
@@ -1624,13 +1603,33 @@ export class SyncEngine {
     tombstoneSeq: number,
     opts: { fromBroadcast?: boolean } = {},
   ): Promise<void> {
+    const epoch = this.replicaEpoch;
     return this.chainApply(async () => {
-      await this.store.applyReconcileBatch(
-        entity,
-        upserts,
-        removalIds,
-        tombstoneSeq,
+      if (epoch !== this.replicaEpoch) return;
+      const changes = this.store.applyReconcileInMemory(
+        entity, upserts, removalIds, tombstoneSeq,
       );
+      if (epoch !== this.replicaEpoch) return;
+      if (changes.length > 0 && this.store._persistFn) {
+        try {
+          if (this.persistence?.saveBatch) {
+            const durable = await this.persistence.saveBatch(changes, null);
+            if (epoch !== this.replicaEpoch) return;
+            if (!durable) this.persistDegraded = true;
+          } else {
+            for (const change of changes) {
+              if (epoch !== this.replicaEpoch) break;
+              const durable = await this.store._persistFn(change);
+              if (epoch !== this.replicaEpoch) return;
+              if (durable === false) this.persistDegraded = true;
+            }
+          }
+        } catch {
+          if (epoch !== this.replicaEpoch) return;
+          this.persistDegraded = true;
+        }
+      }
+      if (epoch !== this.replicaEpoch) return;
       // Leader fans the reconcile batch out so each follower can
       // converge without its own fetch. Suppress when we ourselves
       // received this batch via the channel (promotion mid-flight
@@ -1656,6 +1655,7 @@ export class SyncEngine {
     }
     for (const timer of this.retryTimers) clearTimeout(timer);
     this.retryTimers.clear();
+    this.pushRetryTimer = null;
     if (this.transport) {
       this.transport.stop();
       this.transport = null;
@@ -1797,6 +1797,9 @@ export class SyncEngine {
     // re-latches the flag.)
     this.persistDegraded = false;
     if (wipeMutations) {
+      this.cancelPushRetry();
+      this.pushFailureCount = 0;
+      this.newPushIds.clear();
       // Identity flip: discard the outgoing identity's pending offline
       // writes (and persist the empty queue to disk via the mutation
       // backend). persistence.clear() deliberately leaves MUTATIONS_STORE
@@ -2400,6 +2403,7 @@ export class SyncEngine {
         //      under the new context.
         const cursorBeforeFetch = this.cursor.last_seq;
         const sessionBeforeFetch = this.session.signature();
+        const epochBeforeFetch = this.replicaEpoch;
         let serverRows: Row[];
         let fetchTruncated: boolean;
         try {
@@ -2410,6 +2414,9 @@ export class SyncEngine {
           // Network errors are expected (offline, transient 5xx). Skip
           // this entity; the next reconcile trigger will retry.
           const status = (err as { status?: number })?.status;
+          if (this.replicaEpoch !== epochBeforeFetch || this.session.signature() !== sessionBeforeFetch) {
+            return;
+          }
           if (status === 404) {
             // Entity removed from the manifest — definitive. Drop its rows.
             this.reconcile403Streak.delete(entity);
@@ -2576,23 +2583,13 @@ export class SyncEngine {
     entity: string,
     tombstoneSeq: number,
   ): Promise<void> {
-    const locals = this.store.list(entity);
-    let removed = false;
-    for (const local of locals) {
-      const id = (local as { id?: unknown }).id;
-      if (typeof id !== "string") continue;
-      if (this.store.reconcileRemove(entity, id, tombstoneSeq)) {
-        removed = true;
-        if (this.persistence) {
-          try {
-            await this.persistence.deleteRow(entity, id);
-          } catch {
-            /* best-effort */
-          }
-        }
-      }
+    const removalIds: string[] = [];
+    for (const row of this.store.list(entity)) {
+      if (typeof row.id === "string") removalIds.push(row.id);
     }
-    if (removed) this.store.notify();
+    if (removalIds.length > 0) {
+      await this.enqueueReconcile(entity, [], removalIds, tombstoneSeq);
+    }
   }
 
   /**
@@ -2990,7 +2987,6 @@ export class SyncEngine {
       }
       this.store.notify();
     }
-    this.evictCrdtFrame(entity, rowId);
     for (const listener of this.rowEvictionListeners) {
       listener(entity, rowId);
     }
@@ -3134,37 +3130,54 @@ export class SyncEngine {
     return parsed;
   }
 
-  /** Push pending mutations to the server. Coalesces concurrent callers
-   *  via the op queue's keyed dedupe — a slow push can't be restarted
-   *  by the poll timer or a user mutation, which would resend the same
-   *  batch (the mutation `op_id` keeps that safe at the protocol level,
-   *  but shipping the same batch twice is still wasted bandwidth). Also
-   *  serializes against pull / reconcile / resetReplica so a push can't
-   *  observe a half-reset cursor or a mid-reconcile replica. */
-  async push(): Promise<void> {
-    await this.opQueue.enqueue("push", () => this.pushInner());
-    // A call made while a push was already running got that push's
-    // promise, but that push had snapshotted its batch before this
-    // caller's mutation was queued. Send any mutation no push has
-    // attempted yet. Mutations that failed transiently were attempted
-    // and wait for their backoff retry instead.
-    if (this.mutations.pending().some((m) => !this.attemptedOps.has(m.id))) {
-      await this.push();
-    }
+  private inFlightPush: Promise<void> | null = null;
+  private newPushIds = new Set<string>();
+  private pushReplayRequested = false;
+  private pushRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Explicit recovery retries all pending writes. Concurrent callers share
+   *  the complete drain, including writes added during the request. */
+  push(): Promise<void> {
+    this.pushReplayRequested = true;
+    return this.inFlightPush ?? this.drainPush();
   }
 
-  /** Op ids of pending mutations that some push already sent (or
-   *  forwarded to the leader). */
-  private attemptedOps = new Set<string>();
+  private pushNew(ids: string[]): Promise<void> {
+    for (const id of ids) this.newPushIds.add(id);
+    return this.inFlightPush ?? this.drainPush();
+  }
 
-  private async pushInner(): Promise<void> {
-    const queued = this.mutations.pending();
-    // Keep the attempted set bounded to what is still pending.
-    const pendingIds = new Set(queued.map((m) => m.id));
-    for (const id of this.attemptedOps) {
-      if (!pendingIds.has(id)) this.attemptedOps.delete(id);
+  private drainPush(): Promise<void> {
+    this.inFlightPush = (async () => {
+      try {
+        do {
+          await this.opQueue.enqueue("push", async () => {
+            const replay = this.pushReplayRequested;
+            this.pushReplayRequested = false;
+            const ids = this.newPushIds;
+            this.newPushIds = new Set();
+            if (replay) this.cancelPushRetry();
+            await this.pushInner(replay ? null : ids);
+          });
+        } while (this.pushReplayRequested || this.newPushIds.size > 0);
+      } finally {
+        this.inFlightPush = null;
+      }
+    })();
+    return this.inFlightPush;
+  }
+
+  private async pushInner(newIds: Set<string> | null): Promise<void> {
+    // Followers forward new writes only. During backoff, new writes settle
+    // locally without copying or sending the existing queue again.
+    const delta = newIds !== null && (!this.isMultiTabLeader || this.pushRetryTimer !== null);
+    const queued: PendingMutation[] = delta ? [] : this.mutations.pending();
+    if (delta) {
+      for (const id of newIds) {
+        const mutation = this.mutations.get(id);
+        if (mutation?.status === "pending") queued.push(mutation);
+      }
     }
-    for (const id of pendingIds) this.attemptedOps.add(id);
     if (queued.length === 0) return;
 
     // Multi-tab follower: we don't own the network. Forward the
@@ -3208,6 +3221,12 @@ export class SyncEngine {
     }
     if (pending.length === 0) return;
 
+    if (this.pushRetryTimer !== null) {
+      for (const mutation of pending) this.mutations.settleQueued(mutation.id);
+      this.broadcastToTabs({ type: "mutations-queued", opIds: pending.map((mutation) => mutation.id) });
+      return;
+    }
+
     try {
       // Sent with the token the owner check ran against.
       const resp = await this.request<PushResponse>(
@@ -3228,6 +3247,7 @@ export class SyncEngine {
       // back to positional. Invariant: a partial-failure batch lands
       // the correct status on each mutation by id, never by position.
       // Test: `push_partial_failure_maps_results_by_op_id`.
+      const appliedIds: string[] = [];
       let maxAppliedSeq = 0;
       let hasInFlightDedupe = false;
       if (Array.isArray(resp.results)) {
@@ -3252,7 +3272,7 @@ export class SyncEngine {
           // from the client's perspective.
           // deduped: legacy server response — treat as replayed.
           if (r.status === "applied" || r.status === "replayed" || r.status === "deduped") {
-            this.mutations.markApplied(m.id);
+            appliedIds.push(m.id);
             if (typeof r.seq === "number" && r.seq > maxAppliedSeq) {
               maxAppliedSeq = r.seq;
             }
@@ -3286,7 +3306,7 @@ export class SyncEngine {
         const errors = Array.isArray(resp.errors) ? resp.errors : [];
         for (let i = 0; i < pending.length; i++) {
           if (i < applied) {
-            this.mutations.markApplied(pending[i].id);
+            appliedIds.push(pending[i].id);
           } else if (errors[i - applied]) {
             this.failPushedMutation(pending[i], errors[i - applied]);
           } else {
@@ -3294,6 +3314,8 @@ export class SyncEngine {
           }
         }
       }
+
+      this.mutations.markAppliedMany(appliedIds);
 
       // Broadcast per-op outcomes BEFORE clearing locally so followers
       // can update their queue status. Filter strictly by current
@@ -3342,9 +3364,7 @@ export class SyncEngine {
       // takes the Proceed slot). 250ms is short enough that user
       // perception doesn't notice, long enough to not hot-loop.
       if (hasInFlightDedupe) {
-        this.later(250, () => {
-          void this.push();
-        });
+        this.schedulePushRetry(250);
       }
     } catch (err) {
       // Whole-request failure. CRITICAL distinction:
@@ -3403,11 +3423,27 @@ export class SyncEngine {
         console.warn(
           `[sync] /api/sync/push transient failure (status ${status ?? "offline"}); keeping ${pending.length} mutation(s) pending, retrying in ${delayMs}ms`,
         );
-        this.later(delayMs, () => {
-          void this.push();
-        });
+        this.schedulePushRetry(delayMs);
       }
     }
+  }
+
+  private cancelPushRetry(): void {
+    if (this.pushRetryTimer === null) return;
+    clearTimeout(this.pushRetryTimer);
+    this.retryTimers.delete(this.pushRetryTimer);
+    this.pushRetryTimer = null;
+  }
+
+  private schedulePushRetry(ms: number): void {
+    this.cancelPushRetry();
+    const timer = setTimeout(() => {
+      this.retryTimers.delete(timer);
+      this.pushRetryTimer = null;
+      if (this.running) void this.push();
+    }, ms);
+    this.pushRetryTimer = timer;
+    this.retryTimers.add(timer);
   }
 
   /** Run `fn` after `ms` unless the engine stops first. A retry from a
@@ -3504,7 +3540,7 @@ export class SyncEngine {
     const outcome = this.mutations.waitForOutcome(opId);
     // Mark the promise handled: push() can settle it before we await it.
     outcome.catch(() => {});
-    await this.push();
+    await this.pushNew([opId]);
     if (!this.isMultiTabLeader) {
       // A follower forwards the write and waits for the leader's verdict.
       // A frozen or dying leader must not hang the caller: after the
@@ -4011,7 +4047,8 @@ export class SyncEngine {
       },
       setStatus: (s) => this.setConnectionStatus(s),
       performPollTick: async () => {
-        await this.push().then(() => this.pull());
+        if (this.pushRetryTimer === null) await this.push();
+        await this.pull();
       },
       performReconnectPull: async () => {
         // Wrapped in try so a transient pull failure doesn't kill the
@@ -4177,19 +4214,7 @@ export class SyncEngine {
    *  follower tab forwarded a CRDT sub, mirror over the multi-tab
    *  channel so followers see Loro updates too. */
   private dispatchBinaryFrame(bytes: Uint8Array): void {
-    // Remember the latest snapshot per row for follower catch-up (see
-    // lastCrdtFrames). Header-only peek; the payload stays opaque.
-    const key = crdtFrameKey(bytes);
-    if (key !== null) {
-      if (!this.lastCrdtFrames.has(key) &&
-          this.lastCrdtFrames.size >= LAST_CRDT_FRAMES_MAX) {
-        const oldest = this.lastCrdtFrames.keys().next().value;
-        if (oldest !== undefined) this.lastCrdtFrames.delete(oldest);
-      }
-      // Re-insert to refresh FIFO position.
-      this.lastCrdtFrames.delete(key);
-      this.lastCrdtFrames.set(key, bytes);
-    }
+    const route = crdtFrameRoute(bytes);
     for (const handler of this.binaryHandlers) {
       try {
         handler(bytes);
@@ -4197,26 +4222,13 @@ export class SyncEngine {
         console.warn("[sync] binary handler threw:", err);
       }
     }
-    // Forward to follower tabs ONLY when at least one follower is
-    // currently forwarded for a CRDT row. The engine is binary-
-    // agnostic — it can't peek inside the frame to route per-row —
-    // so this is a tab-level gate: no forwarders = no broadcast.
-    // Saves bandwidth in the common single-tab case.
-    //
-    // Trade-off: when ANY follower has forwarded a CRDT sub on ANY
-    // key, we broadcast EVERY binary frame regardless of which row
-    // it's for. Acceptable for now; the lever to pull if it shows
-    // up in profiling is a binaryRoutes map keyed by the Loro doc
-    // id parsed from the frame header.
-    if (this.subscriptions.hasCrdtForwarders()) {
+    // Known CRDT frames need a follower subscribed to this row.
+    // Other binary formats retain the general follower fallback.
+    if (route
+      ? this.subscriptions.hasCrdtForwardersFor(route.entity, route.rowId)
+      : this.subscriptions.hasCrdtForwarders()) {
       this.broadcastToTabs({ type: "binary", bytes });
     }
-  }
-
-  /** Drop the cached snapshot for a revoked row so it can't be
-   *  replayed to a late-joining tab after policy said no. */
-  private evictCrdtFrame(entity: string, rowId: string): void {
-    this.lastCrdtFrames.delete(`${entity}|${rowId}`);
   }
 
   private async request<T>(
@@ -4355,16 +4367,7 @@ export async function getServerData(
   return { entities: entityData, cursor };
 }
 
-/**
- * Stable equality check for reconciler diffs. Keys are sorted so
- * `{a:1,b:2}` and `{b:2,a:1}` compare equal — without that, every
- * reconcile pass would think every row had changed (insertion order
- * varies by mutation path on the server). Recursive on objects only;
- * arrays and primitives use their natural shape.
- */
-/** Cap on cached per-row CRDT snapshots (see lastCrdtFrames). 64 rows of
- *  collaborative state is far beyond what one browser session edits at
- *  once; FIFO eviction keeps a long-lived leader tab bounded. */
+/** @deprecated The engine no longer caches binary frames. */
 export const LAST_CRDT_FRAMES_MAX = 64;
 
 /**
@@ -4381,22 +4384,33 @@ export const LAST_CRDT_FRAMES_MAX = 64;
  * this parser and the Swift one change with it.
  *
  * The engine still treats the PAYLOAD as opaque — this reads only the
- * routing header so the follower-catch-up cache can be keyed per row.
+ * routing header. A snapshot type does not prove the payload is complete.
  */
 export function crdtFrameKey(bytes: Uint8Array): string | null {
-  const SNAPSHOT_TYPE = 0x10;
-  if (bytes.length < 5 || bytes[0] !== SNAPSHOT_TYPE) return null;
+  const route = crdtFrameRoute(bytes);
+  return route?.snapshot ? `${route.entity}|${route.rowId}` : null;
+}
+
+const crdtHeaderDecoder = new TextDecoder("utf-8", { fatal: true });
+
+function crdtFrameRoute(bytes: Uint8Array): { entity: string; rowId: string; snapshot: boolean } | null {
+  if (bytes.length < 5 || (bytes[0] !== 0x10 && bytes[0] !== 0x11)) return null;
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const entityLen = view.getUint16(1, false);
   const entityEnd = 3 + entityLen;
-  if (entityEnd + 2 > bytes.length) return null;
+  if (entityLen === 0 || entityEnd + 2 > bytes.length) return null;
   const rowIdLen = view.getUint16(entityEnd, false);
   const rowIdEnd = entityEnd + 2 + rowIdLen;
-  if (rowIdEnd > bytes.length) return null;
-  const decoder = new TextDecoder();
-  const entity = decoder.decode(bytes.subarray(3, entityEnd));
-  const rowId = decoder.decode(bytes.subarray(entityEnd + 2, rowIdEnd));
-  return `${entity}|${rowId}`;
+  if (rowIdLen === 0 || rowIdEnd > bytes.length) return null;
+  try {
+    return {
+      entity: crdtHeaderDecoder.decode(bytes.subarray(3, entityEnd)),
+      rowId: crdtHeaderDecoder.decode(bytes.subarray(entityEnd + 2, rowIdEnd)),
+      snapshot: bytes[0] === 0x10,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function rowsDiffer(a: Row, b: Row): boolean {

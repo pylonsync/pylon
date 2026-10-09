@@ -2818,6 +2818,12 @@ fn start_server(
         Arc::clone(&shared_manifest),
         runtime.manifest().auth.user.clone(),
     );
+    let privacy_runtime = Arc::downgrade(&runtime);
+    ws_hub.set_crdt_private_history(Arc::new(move |entity| {
+        privacy_runtime.upgrade().is_none_or(|runtime| {
+            pylon_http::DataStore::has_private_crdt_history(runtime.as_ref(), entity)
+        })
+    }));
     let sse_hub = SseHub::new(
         Arc::clone(&policy_engine),
         Arc::clone(&shared_manifest),
@@ -3864,18 +3870,15 @@ fn start_server(
         let auth_user_for_fetcher = runtime.manifest().auth.user.clone();
         Arc::new(move |auth_ctx, entity, row_id| {
             use pylon_http::DataStore;
-            // P0 leak guard: never ship raw CRDT snapshots for the
-            // User entity, even on the initial `crdt-subscribe`
-            // bootstrap. The snapshot is a Loro doc carrying every
-            // non-id field on the row — `passwordHash`,
-            // `_secret`-prefixed columns, anything the JSON broadcast
-            // path's User projection strips. `WsSseNotifier::notify_crdt`
-            // applies the same guard for live updates; this is the
-            // matching guard for the initial subscribe payload. A
-            // denied subscribe returns None → the WS handler doesn't
-            // register the subscription, so subsequent writes also
-            // never leak.
-            if entity == auth_user_for_fetcher.entity {
+            // Raw snapshots include document history. Entity-level denial
+            // also protects documents stored before a field became private.
+            if runtime_for_fetcher.has_private_crdt_history(entity)
+                || !pylon_router::supports_crdt_replication(
+                    runtime_for_fetcher.manifest(),
+                    &auth_user_for_fetcher,
+                    entity,
+                )
+            {
                 return None;
             }
             // Fetch the row first so the policy engine can evaluate
@@ -4266,6 +4269,8 @@ fn start_server(
         }
     }
 
+    let file_ops = Arc::new(LocalFileOps::new_default());
+
     // Use recv() in a loop instead of incoming_requests() so we can share
     // the Arc<Server> with the shutdown path (incoming_requests borrows &self
     // which prevents moving the Arc into another thread).
@@ -4373,6 +4378,7 @@ fn start_server(
         // outer originals (which the next loop iteration still needs).
         // The existing per-iteration aliases (rt, ss, pe …) stay so the
         // body's existing references compile unchanged.
+        let file_ops = Arc::clone(&file_ops);
         let runtime = Arc::clone(&runtime);
         let session_store = Arc::clone(&session_store);
         let policy_engine = Arc::clone(&policy_engine);
@@ -4587,7 +4593,7 @@ fn start_server(
             || url == "/metrics"
             || url.starts_with("/admin/logs/tail");
         if !is_noisy {
-            tracing::info!("→ {} {} from {}", method.as_str(), url, request_peer_ip);
+            tracing::info!("→ {} {} from {}", method.as_str(), crate::metrics::request_log_path(&url), request_peer_ip);
             // Stash for the response log (`record_request` reads this
             // thread-local to emit method/url/status/duration in one
             // line, like Next.js's `GET /login 200 in 27ms`).
@@ -5156,39 +5162,10 @@ fn start_server(
                             "handlers": job_stats.handlers,
                         }),
                     );
-                    // Bucket workflow instances by their status variant
-                    // for the dashboard. One pass over the in-memory list;
-                    // workflows are bounded by max_history so this is
-                    // O(few thousand) at worst.
-                    let mut wf_pending = 0usize;
-                    let mut wf_running = 0usize;
-                    let mut wf_waiting = 0usize;
-                    let mut wf_sleeping = 0usize;
-                    let mut wf_completed = 0usize;
-                    let mut wf_failed = 0usize;
-                    let mut wf_cancelled = 0usize;
-                    for inst in workflow_engine.list(None) {
-                        match inst.status {
-                            crate::workflows::WorkflowStatus::Pending => wf_pending += 1,
-                            crate::workflows::WorkflowStatus::Running => wf_running += 1,
-                            crate::workflows::WorkflowStatus::WaitingForEvent => wf_waiting += 1,
-                            crate::workflows::WorkflowStatus::Sleeping => wf_sleeping += 1,
-                            crate::workflows::WorkflowStatus::Completed => wf_completed += 1,
-                            crate::workflows::WorkflowStatus::Failed => wf_failed += 1,
-                            crate::workflows::WorkflowStatus::Cancelled => wf_cancelled += 1,
-                        }
-                    }
                     obj.insert(
                         "workflows".to_string(),
-                        serde_json::json!({
-                            "pending": wf_pending,
-                            "running": wf_running,
-                            "waiting": wf_waiting,
-                            "sleeping": wf_sleeping,
-                            "completed": wf_completed,
-                            "failed": wf_failed,
-                            "cancelled": wf_cancelled,
-                        }),
+                        serde_json::to_value(workflow_engine.status_counts())
+                            .expect("workflow counts serialize as integers"),
                     );
                     obj.insert(
                         "realtime".to_string(),
@@ -5210,7 +5187,7 @@ fn start_server(
                 (snap.to_string(), "application/json")
             };
             let response = with_security_headers(
-                Response::from_string(&body)
+                Response::from_string(body)
                     .with_status_code(200u16)
                     .with_header(Header::from_bytes("Content-Type", content_type).unwrap())
                     .with_header(
@@ -5296,7 +5273,7 @@ fn start_server(
             })
             .to_string();
             let response = with_security_headers(
-                Response::from_string(&body)
+                Response::from_string(body)
                     .with_status_code(200u16)
                     .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
                     .with_header(
@@ -6576,7 +6553,7 @@ fn start_server(
                 return;
             }
 
-            let storage = pylon_storage::files::select_from_env();
+            let storage = &file_ops.storage;
             let (status, body) = match storage.init_upload(filename, mime_type, size) {
                 Ok(init) => {
                     // Bind the freshly-minted asset to its initiator NOW so the
@@ -6726,7 +6703,7 @@ fn start_server(
                 }
             };
 
-            let storage = pylon_storage::files::select_from_env();
+            let storage = &file_ops.storage;
             let storage: &dyn pylon_storage::files::FileStorage = storage.as_ref();
             let requires_owner_check = storage.requires_owner_check();
             if requires_owner_check
@@ -7030,7 +7007,7 @@ fn start_server(
                     mt.record_request("DELETE", 401);
                     return;
                 }
-                let storage = pylon_storage::files::select_from_env();
+                let storage = &file_ops.storage;
                 let storage: &dyn pylon_storage::files::FileStorage = storage.as_ref();
                 // Owner check: backends that record ownership (local) must
                 // match the requester. Stack0 returns None and we fall
@@ -7180,7 +7157,7 @@ fn start_server(
                         .and_then(|(_, q)| crate::file_urls::sig_params(q))
                         .map(|(sig, exp)| crate::file_urls::verify(asset_id, &exp, &sig))
                         .unwrap_or(false);
-                    let storage = pylon_storage::files::select_from_env();
+                    let storage = &file_ops.storage;
                     let storage: &dyn pylon_storage::files::FileStorage = storage.as_ref();
                     // Ownership-tracking backends: read the owner once. A file
                     // its uploader marked public (`visibility: "public"` at
@@ -8316,7 +8293,7 @@ fn start_server(
                             Err(e) => (400u16, json_error(&e.code, &e.message)),
                         };
                         let response = with_security_headers(
-                            Response::from_string(&resp_body)
+                            Response::from_string(resp_body)
                                 .with_status_code(status)
                                 .with_header(
                                     Header::from_bytes("Content-Type", "application/json").unwrap(),
@@ -8831,7 +8808,7 @@ fn start_server(
                 }
             };
             let response = with_security_headers(
-                Response::from_string(&body)
+                Response::from_string(body)
                     .with_status_code(status)
                     .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
                     .with_header(
@@ -9614,7 +9591,6 @@ fn start_server(
                 let openapi_gen = RuntimeOpenApiGenerator {
                     manifest: rt.manifest(),
                 };
-                let file_ops = LocalFileOps::new_default();
                 let cache_adapter = CacheAdapter(Arc::clone(&ca));
                 let pubsub_adapter = PubSubAdapter(Arc::clone(&ps));
                 // Auth routes (magic codes / reset / invites) use the auth
@@ -9668,7 +9644,7 @@ fn start_server(
                     jobs: jq.as_ref(),
                     scheduler: sc.as_ref(),
                     workflows: we.as_ref(),
-                    files: &file_ops,
+                    files: file_ops.as_ref(),
                     openapi: &openapi_gen,
                     functions: fn_ops,
                     email: &email_adapter,
@@ -9703,7 +9679,7 @@ fn start_server(
         // their own respond sites; they'll stay at 0 until separately
         // stamped, which is an acceptable known undercount for now.
         crate::metrics::set_current_response_bytes(response_body.len());
-        let mut response = Response::from_string(&response_body)
+        let mut response = Response::from_string(response_body)
             .with_status_code(status)
             .with_header(
                 Header::from_bytes("Content-Type", content_type.as_bytes().to_vec())

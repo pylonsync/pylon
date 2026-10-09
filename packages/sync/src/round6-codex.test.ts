@@ -184,10 +184,7 @@ describe("codex round-6: mutations-acked broadcast filters by status", () => {
 
     // The mutation stays in the queue, status=failed, with the error
     // string preserved.
-    const all = (engine.mutations as unknown as {
-      queue: { id: string; status: string; error?: string }[];
-    }).queue;
-    const found = all.find((m) => m.id === "op-x");
+    const found = env.engine.mutations.get("op-x");
     expect(found).toBeDefined();
     expect(found?.status).toBe("failed");
     expect(found?.error).toBe("server rejected");

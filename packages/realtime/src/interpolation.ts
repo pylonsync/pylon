@@ -93,7 +93,8 @@ export class EntityInterpolator {
   private drawn = -1;
   /** Lives that ended, oldest first, so `record` can drop them when
    *  `update` does not run (a hidden tab keeps receiving frames). */
-  private ended: Array<{ id: number; life: Life }> = [];
+  private ended: Array<{ id: number; life: Life } | undefined> = [];
+  private endedStart = 0;
 
   constructor(options: InterpolationOptions = {}) {
     this.snapDistance = options.snapDistance ?? Infinity;
@@ -120,6 +121,7 @@ export class EntityInterpolator {
   clear(): void {
     this.lives.clear();
     this.ended = [];
+    this.endedStart = 0;
     this.lastTick = -1;
     this.floor = -Infinity;
     this.drawn = -1;
@@ -215,18 +217,26 @@ export class EntityInterpolator {
    * when it runs; this bounds them when it does not.
    */
   private dropEnded(tick: number): void {
-    let n = 0;
-    while (n < this.ended.length && (this.ended[n].life.despawnTick as number) < tick - ENDED_TICKS) {
-      const { id, life } = this.ended[n];
+    while (this.endedStart < this.ended.length) {
+      const { id, life } = this.ended[this.endedStart]!;
+      const expired = (life.despawnTick as number) < tick - ENDED_TICKS;
+      if (!expired) break;
       const lives = this.lives.get(id);
       if (lives) {
         const i = lives.indexOf(life);
         if (i >= 0) lives.splice(i, 1);
         if (lives.length === 0) this.lives.delete(id);
       }
-      n++;
+      // Release the life now, without shifting the retained entries.
+      this.ended[this.endedStart++] = undefined;
     }
-    if (n > 0) this.ended.splice(0, n);
+    if (this.endedStart === this.ended.length) {
+      this.ended = [];
+      this.endedStart = 0;
+    } else if (this.endedStart >= 1024 && this.endedStart >= this.ended.length / 2) {
+      this.ended = this.ended.slice(this.endedStart);
+      this.endedStart = 0;
+    }
   }
 
   private openLife(id: number): Life | null {

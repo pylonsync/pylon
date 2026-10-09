@@ -868,36 +868,14 @@ impl PgCrdtHook for PgCrdtHookImpl {
     }
 }
 
-/// Resolve the CRDT field shape for an entity. Same logic as
-/// `Runtime::crdt_fields_for` but without the runtime borrow — the
-/// hook lives across the storage/runtime boundary and only needs
-/// the manifest. Returns `Err` if any field's CRDT annotation is
-/// invalid, matching `Runtime::crdt_fields_for`'s strict behavior:
-/// silently dropping an invalid field would commit the SQL row
-/// while omitting that field from the snapshot — exactly the
-/// sidecar/row divergence we're trying to prevent. Codex flagged.
+/// Use the runtime's field rules, including server-only vector exclusion.
 fn crdt_fields_for(
     ent: &pylon_kernel::ManifestEntity,
 ) -> Result<Vec<pylon_crdt::CrdtField>, pylon_http::DataError> {
-    let mut out = Vec::with_capacity(ent.fields.len());
-    for f in &ent.fields {
-        if f.name == "id" {
-            continue;
-        }
-        let kind =
-            pylon_crdt::field_kind(&f.field_type, f.crdt).map_err(|e| pylon_http::DataError {
-                code: "INVALID_CRDT_FIELD".into(),
-                message: format!(
-                    "{}.{}: {e} (declared type={}, crdt={:?})",
-                    ent.name, f.name, f.field_type, f.crdt
-                ),
-            })?;
-        out.push(pylon_crdt::CrdtField {
-            name: f.name.clone(),
-            kind,
-        });
-    }
-    Ok(out)
+    crate::resolve_crdt_fields(ent).map_err(|error| pylon_http::DataError {
+        code: error.code,
+        message: error.message,
+    })
 }
 
 #[cfg(test)]

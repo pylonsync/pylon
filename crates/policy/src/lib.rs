@@ -75,28 +75,43 @@ thread_local! {
 /// with different `orgId` do NOT share an answer. Correctness here is
 /// load-bearing: a key that collapsed distinct tenants would leak rows.
 pub struct ExistsMemo {
-    _private: (),
+    previous: Option<Option<HashMap<String, bool>>>,
+    // The guard must be dropped on the thread that owns the cache.
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
 impl ExistsMemo {
-    /// Begin memoizing on this thread. Nested scopes are safe — the inner one
-    /// reuses the outer's map and leaves teardown to the outermost.
+    /// Reuse the current scan cache. Only its owner restores the previous cache.
     pub fn scope() -> Self {
-        EXISTS_MEMO.with(|m| {
-            let mut m = m.borrow_mut();
-            if m.is_none() {
-                *m = Some(HashMap::new());
+        let previous = EXISTS_MEMO.with(|memo| {
+            let mut memo = memo.borrow_mut();
+            if memo.is_some() {
+                None
+            } else {
+                Some(memo.replace(HashMap::new()))
             }
         });
-        Self { _private: () }
+        Self {
+            previous,
+            _thread: std::marker::PhantomData,
+        }
+    }
+
+    /// Start an independent read. Do not reuse answers from an enclosing read.
+    pub fn fresh_scope() -> Self {
+        let previous = EXISTS_MEMO.with(|memo| memo.borrow_mut().replace(HashMap::new()));
+        Self {
+            previous: Some(previous),
+            _thread: std::marker::PhantomData,
+        }
     }
 }
 
 impl Drop for ExistsMemo {
     fn drop(&mut self) {
-        EXISTS_MEMO.with(|m| {
-            *m.borrow_mut() = None;
-        });
+        if let Some(previous) = self.previous.take() {
+            EXISTS_MEMO.with(|memo| *memo.borrow_mut() = previous);
+        }
     }
 }
 
@@ -619,6 +634,26 @@ impl PolicyEngine {
         PolicyResult::Allowed
     }
 
+    /// Aggregates require a read policy that does not depend on a row.
+    pub fn check_entity_read_aggregate(&self, entity: &str, auth: &AuthContext) -> PolicyResult {
+        if auth.is_admin && auth.tenant_id().is_none() {
+            return PolicyResult::Allowed;
+        }
+        for policy in self.entity_policies_for(entity) {
+            let expr = Self::expr_for(policy, EntityAction::Read);
+            if expr.is_empty() {
+                continue;
+            }
+            if !matches!(self.compiled.get(expr), Some(Ok(ast)) if !ast.uses_row()) {
+                return PolicyResult::Denied {
+                    policy_name: policy.name.clone(),
+                    reason: "Search requires a row-independent read policy".into(),
+                };
+            }
+        }
+        self.check_entity_read(entity, auth, None)
+    }
+
     /// True if the entity's READ policy can NEVER permit any row for ANY
     /// caller — an explicit deny (`allowRead: "false"` on every read rule).
     ///
@@ -946,7 +981,8 @@ fn evaluate_ast(
         data,
         input,
         resolver,
-        now: pylon_kernel::util::now_iso(),
+        now_epoch: pylon_kernel::util::now_epoch_secs(),
+        now: std::cell::OnceCell::new(),
     };
     match env.eval(ast) {
         EvalResult::True => PolicyResult::Allowed,
@@ -1218,6 +1254,35 @@ enum Ast {
     Null,
     /// Degenerate: bare `auth.isAdmin` etc. resolves to a boolean.
     Bool(bool),
+}
+
+impl Ast {
+    fn uses_row(&self) -> bool {
+        match self {
+            Self::Path(path) | Self::Len(path) => path
+                .first()
+                .is_some_and(|root| root == "data" || root == "existing"),
+            Self::Not(value) => value.uses_row(),
+            Self::And(a, b)
+            | Self::Or(a, b)
+            | Self::Eq(a, b)
+            | Self::Neq(a, b)
+            | Self::Lt(a, b)
+            | Self::Lte(a, b)
+            | Self::Gt(a, b)
+            | Self::Gte(a, b) => a.uses_row() || b.uses_row(),
+            Self::Exists { conditions, .. } => conditions.iter().any(|(_, value)| value.uses_row()),
+            Self::True
+            | Self::False
+            | Self::HasRole(_)
+            | Self::HasAnyRole(_)
+            | Self::Str(_)
+            | Self::Num(_)
+            | Self::Ago(_)
+            | Self::Null
+            | Self::Bool(_) => false,
+        }
+    }
 }
 
 /// Cap recursive descent so a pathological input like `((((...!x))))` can't
@@ -1742,10 +1807,10 @@ struct EvalEnv<'a> {
     /// don't supply one (most unit tests, scan-mode pre-checks);
     /// `Ast::Exists` then evaluates to Denied with a clear reason.
     resolver: Option<&'a dyn PolicyDataResolver>,
-    /// Current UTC time (ISO-8601), bound to the `now` identifier so policies
-    /// can express time windows (`data.publishAt <= now`). Computed once per
-    /// evaluation so every `now` in one expression sees the same instant.
-    now: String,
+    /// Capture the clock at evaluation start. Format it only if the rule
+    /// uses time. Every `now` and `ago` still uses the same instant.
+    now_epoch: u64,
+    now: std::cell::OnceCell<String>,
 }
 
 #[derive(Debug)]
@@ -1763,6 +1828,11 @@ enum Value {
 }
 
 impl<'a> EvalEnv<'a> {
+    fn now(&self) -> &str {
+        self.now
+            .get_or_init(|| pylon_kernel::util::epoch_to_iso(self.now_epoch))
+    }
+
     fn eval(&self, ast: &Ast) -> EvalResult {
         match ast {
             Ast::True => EvalResult::True,
@@ -1915,7 +1985,7 @@ impl<'a> EvalEnv<'a> {
             // comparison stays consistent. An unparseable `now` (cannot
             // happen with the kernel formatter) resolves to Null, which
             // every comparison treats as deny-safe false.
-            Ast::Ago(secs) => match chrono::DateTime::parse_from_rfc3339(&self.now) {
+            Ast::Ago(secs) => match chrono::DateTime::parse_from_rfc3339(self.now()) {
                 Ok(t) => Value::Str(
                     (t - chrono::Duration::seconds(*secs))
                         .with_timezone(&chrono::Utc)
@@ -1954,7 +2024,7 @@ impl<'a> EvalEnv<'a> {
             "input" => self.resolve_json(self.input, &parts[1..]),
             // `now` is the current UTC time as an ISO-8601 string, for time
             // windows. Only valid as a bare identifier (no sub-path).
-            "now" if parts.len() == 1 => Value::Str(self.now.clone()),
+            "now" if parts.len() == 1 => Value::Str(self.now().to_owned()),
             other => {
                 // Unknown top-level — treat as null so policies fail closed
                 // rather than authorizing based on unresolved identifiers.
@@ -3293,6 +3363,33 @@ mod tests {
     }
 
     #[test]
+    fn time_is_formatted_only_when_used_and_keeps_the_start_instant() {
+        let auth = AuthContext::anonymous();
+        let env = EvalEnv {
+            auth: &auth,
+            data: None,
+            input: None,
+            resolver: None,
+            now_epoch: 946_684_800,
+            now: std::cell::OnceCell::new(),
+        };
+        assert!(matches!(
+            env.eval(&compile_expr("true || now == null").unwrap()),
+            EvalResult::True
+        ));
+        assert!(env.now.get().is_none());
+        assert!(matches!(
+            env.eval(&compile_expr("now == '2000-01-01T00:00:00Z'").unwrap()),
+            EvalResult::True
+        ));
+        assert!(matches!(
+            env.eval(&compile_expr("ago('1s') == '1999-12-31T23:59:59Z'").unwrap()),
+            EvalResult::True
+        ));
+        assert_eq!(env.now.get().unwrap(), "2000-01-01T00:00:00Z");
+    }
+
+    #[test]
     fn now_enables_expiry_window() {
         let auth = AuthContext::anonymous();
         let live = serde_json::json!({ "expiresAt": "2999-01-01T00:00:00.000Z" });
@@ -3694,6 +3791,45 @@ mod exists_memo_tests {
     }
 
     #[test]
+    fn nested_scope_keeps_the_outer_cache_alive() {
+        let resolver = Arc::new(CountingResolver {
+            calls: AtomicUsize::new(0),
+            active: vec!["org-1".into()],
+        });
+        let engine = engine(Arc::clone(&resolver));
+        let auth = AuthContext::authenticated("alice".into());
+        let _outer = ExistsMemo::scope();
+        let read = || engine.check_entity_read("Stat", &auth, Some(&row("org-1")));
+        assert!(read().is_allowed());
+        {
+            let _inner = ExistsMemo::scope();
+            assert!(read().is_allowed());
+        }
+        assert!(read().is_allowed());
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn independent_read_does_not_reuse_an_enclosing_answer() {
+        let resolver = Arc::new(CountingResolver {
+            calls: AtomicUsize::new(0),
+            active: vec!["org-1".into()],
+        });
+        let engine = engine(Arc::clone(&resolver));
+        let auth = AuthContext::authenticated("alice".into());
+        let _outer = ExistsMemo::scope();
+        let read = || engine.check_entity_read("Stat", &auth, Some(&row("org-1")));
+        assert!(read().is_allowed());
+        {
+            let _inner = ExistsMemo::fresh_scope();
+            assert!(read().is_allowed());
+            assert!(read().is_allowed());
+        }
+        assert!(read().is_allowed());
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
     fn two_tenants_never_share_an_answer() {
         // The thing that would make this a security bug rather than an
         // optimization: org-2 has no subscription and must still be denied
@@ -3955,5 +4091,29 @@ mod update_policy_tests {
         assert_eq!(merged["name"], serde_json::Value::Null);
         assert_eq!(merged["id"], "p1");
         assert_eq!(merged["status"], "draft");
+    }
+}
+
+#[cfg(test)]
+mod aggregate_read_tests {
+    #[test]
+    fn detects_row_access_in_policy_expressions() {
+        for (expr, uses_row) in [
+            ("data.private != true", true),
+            ("existing.private != true", true),
+            ("len(data.title) != 3", true),
+            ("auth.userId != null || data.private == false", true),
+            ("!(data.private == false)", true),
+            ("exists(Note where owner == data.owner)", true),
+            ("auth.userId != null", false),
+            ("auth.userId == \"data.private\"", false),
+            ("exists(Note where owner == auth.userId)", false),
+        ] {
+            assert_eq!(
+                super::compile_expr(expr).unwrap().uses_row(),
+                uses_row,
+                "{expr}"
+            );
+        }
     }
 }

@@ -166,6 +166,10 @@ fn free_port() -> u16 {
 }
 
 fn start() -> App {
+    start_manifest(manifest())
+}
+
+fn start_manifest(schema: AppManifest) -> App {
     static ENV: std::sync::Once = std::sync::Once::new();
     ENV.call_once(|| {
         // SAFETY: once per binary, before any server thread starts.
@@ -179,7 +183,7 @@ fn start() -> App {
         }
     });
     let port = free_port();
-    let runtime = Arc::new(Runtime::in_memory(manifest()).unwrap());
+    let runtime = Arc::new(Runtime::in_memory(schema).unwrap());
     let rt = Arc::clone(&runtime);
     std::thread::spawn(move || {
         let _ = pylon_runtime::server::start(rt, port);
@@ -461,11 +465,10 @@ fn insert_with_a_taken_id_leaves_the_other_rows_doc_alone() {
     assert!(state.contains(ORG_B), "{state}");
 }
 
-/// The CRDT merge check compares the merged doc with the stored row. The
-/// doc holds encrypted columns as ciphertext and the row read back holds
-/// plaintext; the check must not see that as a change.
+/// Binary history can contain private ciphertext. Reject CRDT pushes and
+/// keep JSON updates available beside an encrypted readonly column.
 #[test]
-fn crdt_push_ignores_encryption_of_untouched_columns() {
+fn encrypted_columns_require_json_updates() {
     let app = start();
     let (s, body) = app.call(
         "POST",
@@ -477,8 +480,209 @@ fn crdt_push_ignores_encryption_of_untouched_columns() {
     assert_eq!(app.stored("Note", &id)["secret"], "s3cret");
 
     let (s, body) = app.crdt_push("Note", &id, &[("name", "renamed")]);
-    assert_eq!(s, 200, "edit next to an encrypted readonly column: {body}");
+    assert_eq!(s, 403, "private binary history must be blocked: {body}");
+    assert_eq!(app.stored("Note", &id)["name"], "n");
+    let (s, body) = app.call(
+        "PATCH",
+        &format!("/api/entities/Note/{id}"),
+        json!({"name": "renamed"}),
+    );
+    assert_eq!(
+        s, 200,
+        "JSON update beside an encrypted readonly column: {body}"
+    );
+    assert!(body.get("secret").is_none(), "private plaintext: {body}");
     let row = app.stored("Note", &id);
     assert_eq!(row["name"], "renamed");
     assert_eq!(row["secret"], "s3cret");
+}
+
+#[test]
+fn client_queries_cannot_probe_private_fields() {
+    let mut schema = manifest();
+    schema
+        .policies
+        .iter_mut()
+        .find(|policy| policy.entity.as_deref() == Some("Note"))
+        .unwrap()
+        .allow_read = Some("true".into());
+    let app = start_manifest(schema);
+    let (status, body) = app.call(
+        "POST",
+        "/api/entities/Note",
+        json!({"orgId": ORG_A, "name": "public", "secret": "hidden"}),
+    );
+    assert_eq!(status, 201, "{body}");
+    for spec in [
+        json!({"min":["secret"]}),
+        json!({"max":["secret"]}),
+        json!({"count":"secret"}),
+        json!({"countDistinct":["secret"]}),
+        json!({"count":"*", "groupBy":["secret"]}),
+        json!({"count":"*", "groupBy":[{"field":"secret"}]}),
+        json!({"count":"*", "where":{"secret":"hidden"}}),
+    ] {
+        let (status, body) = app.call("POST", "/api/aggregate/Note", spec.clone());
+        assert_eq!(status, 403, "{spec}: {body}");
+        assert!(body.to_string().contains("FIELD_NOT_PUBLIC"));
+    }
+    for filter in [
+        json!({"secret":"hidden"}),
+        json!({"$order":{"secret":"asc"}}),
+    ] {
+        let (status, body) = app.call("POST", "/api/query/Note", filter);
+        assert_eq!(status, 403, "{body}");
+    }
+    for path in [
+        "/api/lookup/Note/secret/hidden",
+        "/api/entities/Note?sort=secret",
+        "/api/entities/Note?filter[secret]=hidden",
+    ] {
+        let (status, body) = app.call("GET", path, json!(null));
+        assert_eq!(status, 403, "{path}: {body}");
+    }
+    let (status, body) = app.call(
+        "POST",
+        "/api/aggregate/Note",
+        json!({"count":"*", "groupBy":["name"]}),
+    );
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = app.call("POST", "/api/query/Note", json!({"name":"public"}));
+    assert_eq!(status, 200, "{body}");
+    assert!(!body.to_string().contains("secret"));
+}
+
+#[test]
+fn bulk_reads_reject_row_rules_that_pass_without_a_row() {
+    let mut schema = manifest();
+    schema
+        .policies
+        .iter_mut()
+        .find(|policy| policy.entity.as_deref() == Some("Doc"))
+        .unwrap()
+        .allow_read = Some("data.name != 'hidden'".into());
+    let app = start_manifest(schema);
+    app.runtime
+        .insert("Doc", &json!({"orgId": ORG_A, "name":"hidden"}))
+        .unwrap();
+    app.runtime
+        .insert("Doc", &json!({"orgId": ORG_A, "name":"visible"}))
+        .unwrap();
+    for (path, query) in [
+        ("/api/aggregate/Doc", json!({"count":"*"})),
+        ("/api/query", json!({"Doc":{}})),
+        ("/api/search/Doc", json!({"q":""})),
+        (
+            "/api/vector-search/Doc",
+            json!({"field":"embedding", "vector":[1.0]}),
+        ),
+    ] {
+        let (status, body) = app.call("POST", path, query);
+        assert_eq!(status, 403, "{path}: {body}");
+    }
+    let (status, body) = app.call("POST", "/api/query/Doc", json!({}));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body.as_array().unwrap().len(), 1);
+    assert_eq!(body[0]["name"], "visible");
+}
+
+#[test]
+fn list_totals_use_sql_counts_only_for_row_independent_policies() {
+    static COUNTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    fn trace(event: rusqlite::trace::TraceEvent<'_>) {
+        let rusqlite::trace::TraceEvent::Stmt(_, sql) = event else {
+            return;
+        };
+        if sql.starts_with("SELECT COUNT(*) FROM (") && sql.contains("pylon_count") {
+            COUNTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    for (rule, expected_total, expected_queries) in
+        [("true", 2, 1), ("auth.tenantId == existing.orgId", 1, 0)]
+    {
+        let mut schema = manifest();
+        schema
+            .policies
+            .iter_mut()
+            .find(|policy| policy.entity.as_deref() == Some("Doc"))
+            .unwrap()
+            .allow_read = Some(rule.into());
+        let app = start_manifest(schema);
+        app.runtime
+            .insert("Doc", &json!({"orgId":ORG_A,"name":"ours"}))
+            .unwrap();
+        app.runtime
+            .insert("Doc", &json!({"orgId":ORG_B,"name":"theirs"}))
+            .unwrap();
+        COUNTS.store(0, std::sync::atomic::Ordering::SeqCst);
+        app.runtime.lock_conn_pub().unwrap().trace_v2(
+            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(trace),
+        );
+        let (status, body) = app.call("GET", "/api/entities/Doc?page=1&per_page=1", json!(null));
+        app.runtime
+            .lock_conn_pub()
+            .unwrap()
+            .trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["total"], expected_total, "{rule}: {body}");
+        assert_eq!(
+            COUNTS.load(std::sync::atomic::Ordering::SeqCst),
+            expected_queries
+        );
+    }
+}
+
+#[test]
+fn bulk_import_and_export_require_admin_without_an_active_tenant() {
+    let mut schema = manifest();
+    schema.auth.user.admin_field = Some("isAdmin".into());
+    schema.entities.push(ManifestEntity {
+        name: "User".into(),
+        fields: vec![ManifestField {
+            field_type: "bool".into(),
+            server_only: true,
+            ..field("isAdmin", false)
+        }],
+        ..Default::default()
+    });
+    let app = start_manifest(schema);
+    // The shared session fixture uses a legacy, non-hex user ID.
+    app.runtime
+        .lock_conn_pub()
+        .unwrap()
+        .execute(
+            "INSERT INTO User(id, isAdmin) VALUES (?1, ?2)",
+            rusqlite::params!["alice", true],
+        )
+        .unwrap();
+    // This policy requires admin status. Confirm session elevation before
+    // testing the tenant restriction, so a plain-user denial cannot pass.
+    assert_eq!(app.call("GET", "/api/entities/Org", Value::Null).0, 200);
+    let foreign_id = app
+        .runtime
+        .insert("Doc", &json!({"orgId":ORG_B,"name":"foreign"}))
+        .unwrap();
+    for path in ["/api/export", "/api/export/Doc"] {
+        let (status, body) = app.call("GET", path, Value::Null);
+        assert_eq!(status, 403, "{path}: {body}");
+        assert!(!body.to_string().contains("foreign"));
+        let (status, body) = request(app.port, "GET", path, "", Some(ADMIN_TOKEN));
+        assert_eq!(status, 200, "{path}: {body}");
+        assert_eq!(body["entities"]["Doc"][0]["id"], foreign_id);
+    }
+    let bundle = json!({"entities":{"Doc":[{"orgId":ORG_B,"name":"imported"}]}});
+    let (status, body) = app.call("POST", "/api/import", bundle.clone());
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(app.runtime.list("Doc").unwrap().len(), 1);
+    let (status, body) = request(
+        app.port,
+        "POST",
+        "/api/import",
+        &bundle.to_string(),
+        Some(ADMIN_TOKEN),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["imported"], 1);
+    assert_eq!(app.runtime.list("Doc").unwrap().len(), 2);
 }

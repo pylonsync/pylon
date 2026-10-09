@@ -40,6 +40,8 @@ fn stub_trace(name: &str) -> pylon_functions::trace::FnTrace {
         duration_ms: 0.0,
         outcome: pylon_functions::trace::FnOutcome::Ok { value: None },
         ops: vec![],
+        ops_omitted: 0,
+        schedules_omitted: 0,
         stream_bytes: 0,
         stream_chunks: 0,
         schedules: vec![],

@@ -24,33 +24,60 @@ const NUM_SHARDS: usize = 16;
 /// change event from every tenant. Caught in the 2026-05-10 codex
 /// pass-3 audit (P0).
 ///
-/// `_guard` is held for the lifetime of the connection — dropping it
-/// (when the client is removed) releases the client's slot in the
+/// The writer task holds the guard for the lifetime of the connection.
+/// When the task ends, it releases the client's slot in the
 /// per-IP connection counter. Without this, a crash-loopy browser
 /// could open unlimited SSE streams.
 struct SseClient {
-    stream: TcpStream,
+    tx: tokio::sync::mpsc::Sender<SseFrame>,
+    bytes: Arc<tokio::sync::Semaphore>,
+    writer: tokio::task::AbortHandle,
     auth: AuthContext,
-    _guard: Option<IpConnGuard>,
+    #[cfg(test)]
+    timeout: Option<Duration>,
 }
 
-/// Same rationale as the WS hub: bounded queue + drop-oldest-on-full so a
-/// stuck subscriber can't balloon memory on the broadcast path. Clients
-/// that miss events catch up via the change-log cursor protocol on
-/// reconnect — SSE is a notify-sooner, not a durable-delivery transport.
+struct SseFrame {
+    data: Arc<str>,
+    _bytes: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl SseClient {
+    fn enqueue(&self, data: &Arc<str>) -> bool {
+        // One oversized frame may run alone. All other queued frames count
+        // against the byte budget, including the frame being written.
+        let weight = data.len().min(CLIENT_QUEUE_BYTES) as u32;
+        let Ok(bytes) = Arc::clone(&self.bytes).try_acquire_many_owned(weight) else {
+            return false;
+        };
+        self.tx
+            .try_send(SseFrame {
+                data: Arc::clone(data),
+                _bytes: bytes,
+            })
+            .is_ok()
+    }
+}
+
+impl Drop for SseClient {
+    fn drop(&mut self) {
+        self.writer.abort();
+    }
+}
+
+/// Full client queues disconnect the client. Its cursor can recover missing
+/// events on reconnect. Frame count and retained bytes are both bounded.
+const CLIENT_QUEUE_DEPTH: usize = 64;
+const CLIENT_QUEUE_BYTES: usize = 1024 * 1024;
 const BROADCAST_QUEUE_DEPTH: usize = 1024;
 
-/// Default per-client socket write deadline. Bounds how long the shard
-/// worker can block on ONE slow consumer's `write_all`/`flush` while
-/// holding the shard lock — past this, the write errors, the client is
-/// dropped, and the rest of the shard keeps flowing. 5s is generous for
-/// a healthy client (a TLS-terminated CDN edge draining a 1KB frame) but
-/// short enough that a wedged socket doesn't stall the shard for long.
+/// Async deadline for one complete frame. A stalled writer cannot hold the
+/// shard lock or delay another client's writer.
 const DEFAULT_SSE_WRITE_TIMEOUT_MS: u64 = 5_000;
 
 /// Parse the per-client write deadline from the raw env value. `None`
-/// (unset / unparseable) → the 5s default. `"0"` → no deadline (blocking
-/// writes — opt-out, not recommended). Any positive integer → that many
+/// (unset / unparseable) → the 5s default. `"0"` → no deadline
+/// (the queue limits still apply). Any positive integer → that many
 /// milliseconds. Pure + side-effect-free so the parsing is unit-testable
 /// without touching the process environment.
 fn parse_sse_write_timeout(raw: Option<&str>) -> Option<Duration> {
@@ -84,13 +111,66 @@ impl SseShard {
         }
     }
 
-    fn add(&self, id: u64, stream: TcpStream, auth: AuthContext, guard: Option<IpConnGuard>) {
-        self.clients.lock().unwrap().insert(
+    fn add(
+        self: &Arc<Self>,
+        id: u64,
+        stream: TcpStream,
+        auth: AuthContext,
+        guard: Option<IpConnGuard>,
+        timeout: Option<Duration>,
+    ) {
+        use tokio::io::AsyncWriteExt;
+        let Some(runtime) = crate::io_runtime::runtime() else {
+            return;
+        };
+        if stream.set_nonblocking(true).is_err() {
+            return;
+        }
+        let entered = runtime.enter();
+        let Ok(mut stream) = tokio::net::TcpStream::from_std(stream) else {
+            return;
+        };
+        drop(entered);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<SseFrame>(CLIENT_QUEUE_DEPTH);
+        let shard = Arc::downgrade(self);
+        // Hold the map lock until registration completes. A writer that fails
+        // immediately must remove the registered entry, not race its insertion.
+        let mut clients = self.clients.lock().unwrap();
+        let writer = runtime
+            .spawn(async move {
+                let _guard = guard;
+                while let Some(frame) = rx.recv().await {
+                    let result = if let Some(deadline) = timeout {
+                        match tokio::time::timeout(
+                            deadline,
+                            stream.write_all(frame.data.as_bytes()),
+                        )
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(_) => break,
+                        }
+                    } else {
+                        stream.write_all(frame.data.as_bytes()).await
+                    };
+                    if result.is_err() {
+                        break;
+                    }
+                }
+                if let Some(shard) = shard.upgrade() {
+                    shard.remove(id);
+                }
+            })
+            .abort_handle();
+        clients.insert(
             id,
             SseClient {
-                stream,
+                tx,
+                bytes: Arc::new(tokio::sync::Semaphore::new(CLIENT_QUEUE_BYTES)),
+                writer,
                 auth,
-                _guard: guard,
+                #[cfg(test)]
+                timeout,
             },
         );
     }
@@ -101,16 +181,13 @@ impl SseShard {
     }
 
     /// Send SSE-formatted data to every client in this shard.
-    /// Dead clients (write failures) are removed inline and their IDs returned.
+    /// Full or closed client queues are removed and their IDs returned.
     /// Used for non-tenant-scoped messages (e.g. presence relays).
-    fn broadcast(&self, data: &str) -> Vec<u64> {
-        let sse_data = format!("data: {data}\n\n");
+    fn broadcast(&self, frame: &Arc<str>) -> Vec<u64> {
         let mut clients = self.clients.lock().unwrap();
         let mut dead = Vec::new();
         for (id, client) in clients.iter_mut() {
-            if client.stream.write_all(sse_data.as_bytes()).is_err()
-                || client.stream.flush().is_err()
-            {
+            if !client.enqueue(frame) {
                 dead.push(*id);
             }
         }
@@ -129,11 +206,10 @@ impl SseShard {
     fn broadcast_change(
         &self,
         event: &ChangeEvent,
-        json: &str,
-        synth_delete_sse: Option<&str>,
+        frame: &Arc<str>,
+        synth_delete_sse: Option<&Arc<str>>,
         policy: &PolicyEngine,
     ) -> Vec<u64> {
-        let sse_data = format!("data: {json}\n\n");
         let mut clients = self.clients.lock().unwrap();
         let mut dead = Vec::new();
         for (id, client) in clients.iter_mut() {
@@ -143,15 +219,15 @@ impl SseShard {
             // the stale row from their local replica.
             // Unscoped admin (no active tenant) bypasses; admin-with-tenant is
             // scoped like a member via check_entity_read. See is_unscoped_admin.
-            let payload: &str = if client.auth.is_unscoped_admin() {
-                &sse_data
+            let payload: &Arc<str> = if client.auth.is_unscoped_admin() {
+                frame
             } else {
                 let post_allowed = matches!(
                     policy.check_entity_read(&event.entity, &client.auth, event.data.as_ref(),),
                     PolicyResult::Allowed
                 );
                 if post_allowed {
-                    &sse_data
+                    frame
                 } else if let Some(synth) = synth_delete_sse {
                     let pre_allowed = matches!(
                         policy.check_entity_read(
@@ -170,9 +246,7 @@ impl SseShard {
                     continue;
                 }
             };
-            if client.stream.write_all(payload.as_bytes()).is_err()
-                || client.stream.flush().is_err()
-            {
+            if !client.enqueue(payload) {
                 dead.push(*id);
             }
         }
@@ -182,14 +256,13 @@ impl SseShard {
         dead
     }
 
-    /// Send an SSE comment keepalive to every client. Removes dead clients.
+    /// Queue a keepalive comment. Remove clients whose queues are full or closed.
     fn keepalive(&self) {
+        let frame: Arc<str> = Arc::from(": keepalive\n\n");
         let mut clients = self.clients.lock().unwrap();
         let mut dead = Vec::new();
         for (id, client) in clients.iter_mut() {
-            if client.stream.write_all(b": keepalive\n\n").is_err()
-                || client.stream.flush().is_err()
-            {
+            if !client.enqueue(&frame) {
                 dead.push(*id);
             }
         }
@@ -202,16 +275,14 @@ impl SseShard {
         self.clients.lock().unwrap().len()
     }
 
-    /// Test-only: read the write deadline on a registered client's stream
-    /// so the head-of-line guard's wiring (`add_client` →
-    /// `set_write_timeout`) can be asserted end-to-end.
+    /// Test-only: inspect the deadline used by the async writer.
     #[cfg(test)]
     fn client_write_timeout(&self, id: u64) -> Option<Duration> {
         self.clients
             .lock()
             .unwrap()
             .get(&id)
-            .and_then(|c| c.stream.write_timeout().ok().flatten())
+            .and_then(|c| c.timeout)
     }
 }
 
@@ -222,7 +293,7 @@ impl SseShard {
 pub enum SseJob {
     Change {
         event: Arc<ChangeEvent>,
-        json: Arc<str>,
+        frame: Arc<str>,
         /// Pre-serialized SSE-framed `data: {...}\n\n` for the
         /// synthesized Delete (visibility-flip tombstone). See
         /// `BroadcastJob::Change::synth_delete_json` in `ws.rs`.
@@ -237,8 +308,8 @@ pub enum SseJob {
 /// worker thread (receives messages via `mpsc::channel`) and a keepalive
 /// thread that sends SSE comments every 30 seconds.
 ///
-/// This means 10k connected SSE clients require only 32 background threads
-/// (16 broadcast + 16 keepalive) instead of 10k threads in the old design.
+/// Socket writers run as async tasks on the shared connection runtime.
+/// Client count does not increase the number of writer threads.
 pub struct SseHub {
     shards: Vec<Arc<SseShard>>,
     next_id: Mutex<u64>,
@@ -246,10 +317,8 @@ pub struct SseHub {
     /// Policy engine for per-client read checks on every change-event
     /// broadcast.
     policy: Arc<PolicyEngine>,
-    /// Manifest snapshot for wire projection at the serialization
-    /// edge — same rationale as `WsHub::manifest`. Policies that
-    /// reference `serverOnly` fields must see the raw row; projection
-    /// happens AFTER the per-client policy check.
+    /// Manifest snapshot for client wire projection. Workers check the
+    /// raw row against each client's policy before sending the projected frame.
     manifest: Arc<pylon_kernel::AppManifest>,
     /// Auth-user manifest config for `maybe_project_user_row`.
     auth_user: pylon_kernel::ManifestAuthUserConfig,
@@ -268,8 +337,8 @@ impl SseHub {
             let shard = Arc::new(SseShard::new());
             let (tx, rx) = mpsc::sync_channel::<SseJob>(BROADCAST_QUEUE_DEPTH);
 
-            // Broadcast worker: drains the channel and writes to every client
-            // in this shard. Runs until the channel is dropped (hub teardown).
+            // Check policies and queue frames. Socket writers run separately.
+            // This worker exits when the hub drops its sender.
             let shard_clone = Arc::clone(&shard);
             let policy_clone = Arc::clone(&policy);
             thread::Builder::new()
@@ -279,13 +348,13 @@ impl SseHub {
                         match job {
                             SseJob::Change {
                                 event,
-                                json,
+                                frame,
                                 synth_delete_sse,
                             } => {
                                 shard_clone.broadcast_change(
                                     &event,
-                                    &json,
-                                    synth_delete_sse.as_deref(),
+                                    &frame,
+                                    synth_delete_sse.as_ref(),
                                     &policy_clone,
                                 );
                             }
@@ -299,12 +368,15 @@ impl SseHub {
 
             // Keepalive worker: sends an SSE comment every 30s to prevent
             // proxies and load balancers from closing idle connections.
-            let shard_ka = Arc::clone(&shard);
+            let shard_ka = Arc::downgrade(&shard);
             thread::Builder::new()
                 .name(format!("sse-keepalive-{i}"))
                 .spawn(move || loop {
                     thread::sleep(Duration::from_secs(30));
-                    shard_ka.keepalive();
+                    let Some(shard) = shard_ka.upgrade() else {
+                        break;
+                    };
+                    shard.keepalive();
                 })
                 .expect("Failed to spawn SSE keepalive worker");
 
@@ -331,39 +403,42 @@ impl SseHub {
         if !pylon_router::is_replicated_entity(&self.manifest, &event.entity) {
             return;
         }
-        // Project NOW for wire serialization (User allowlist +
-        // serverOnly strip), AFTER the per-client policy check in
-        // the shard worker. The `event` in the SseJob stays raw so
+        // Prepare the projected frame. The worker checks each client's
+        // policy before sending it. The `event` in the SseJob stays raw so
         // policies referencing `serverOnly` fields evaluate
         // against the unprojected row. `prev_data` is stripped
         // from the wire — server-internal only.
-        let projected_data = pylon_router::project_row_for_replication_opt(
+        let projected_data = pylon_router::project_row_for_replication_opt_ref(
             self.manifest.as_ref(),
             &self.auth_user,
             &event.entity,
-            event.data.clone(),
+            event.data.as_ref(),
         );
         let wire_event = ChangeEvent {
+            seq: event.seq,
+            entity: event.entity.clone(),
+            row_id: event.row_id.clone(),
+            kind: event.kind.clone(),
             data: projected_data,
             prev_data: None,
-            ..event.clone()
+            timestamp: event.timestamp.clone(),
         };
         let json = match serde_json::to_string(&wire_event) {
             Ok(j) => j,
             Err(_) => return,
         };
-        let json_arc: Arc<str> = Arc::from(json.into_boxed_str());
+        let frame: Arc<str> = Arc::from(format!("data: {json}\n\n"));
         // Pre-serialize the visibility-flip tombstone in SSE wire
         // shape. Synth-delete uses the PROJECTED prev_data as its
         // wire `data` so serverOnly fields on the pre-row don't
         // leak via the tombstone path.
         let synth_delete_sse: Option<Arc<str>> =
             if matches!(event.kind, ChangeKind::Update) && event.prev_data.is_some() {
-                let projected_prev = pylon_router::project_row_for_replication_opt(
+                let projected_prev = pylon_router::project_row_for_replication_opt_ref(
                     self.manifest.as_ref(),
                     &self.auth_user,
                     &event.entity,
-                    event.prev_data.clone(),
+                    event.prev_data.as_ref(),
                 );
                 let synth = ChangeEvent {
                     seq: event.seq,
@@ -384,7 +459,7 @@ impl SseHub {
         for tx in &self.broadcast_txs {
             let _ = tx.try_send(SseJob::Change {
                 event: Arc::clone(&event_arc),
-                json: Arc::clone(&json_arc),
+                frame: Arc::clone(&frame),
                 synth_delete_sse: synth_delete_sse.clone(),
             });
         }
@@ -394,7 +469,7 @@ impl SseHub {
     /// filtering. Used for presence/topic relays where the payload
     /// doesn't carry tenant-scoped row data.
     pub fn broadcast_message(&self, msg: &str) {
-        let shared: Arc<str> = Arc::from(msg.to_string().into_boxed_str());
+        let shared: Arc<str> = Arc::from(format!("data: {msg}\n\n"));
         for tx in &self.broadcast_txs {
             let _ = tx.try_send(SseJob::Plain(Arc::clone(&shared)));
         }
@@ -402,7 +477,7 @@ impl SseHub {
 
     #[allow(dead_code)]
     fn send_to_all(&self, msg: &str) {
-        let shared: Arc<str> = Arc::from(msg.to_string().into_boxed_str());
+        let shared: Arc<str> = Arc::from(format!("data: {msg}\n\n"));
         for tx in &self.broadcast_txs {
             match tx.try_send(SseJob::Plain(Arc::clone(&shared))) {
                 Ok(()) => {}
@@ -421,23 +496,11 @@ impl SseHub {
     /// authenticated this connection. The optional `guard` binds the
     /// client's slot in the per-IP connection counter.
     fn add_client(&self, stream: TcpStream, auth: AuthContext, guard: Option<IpConnGuard>) -> u64 {
-        // Bound every per-client socket write so one wedged consumer (full
-        // kernel send buffer, dead-but-unreset connection) can't block the
-        // shard worker — and the shard's `clients` lock — indefinitely.
-        // The broadcast/keepalive paths write `write_all` + `flush`
-        // SYNCHRONOUSLY while holding that lock; without a deadline a single
-        // stuck socket head-of-lines every other subscriber on the shard
-        // and backs the broadcast channel up until events drop for the whole
-        // shard. On timeout the write errors → the client is marked dead +
-        // removed → it recovers via the change-log cursor on reconnect.
-        // `set_write_timeout` failing is non-fatal: the client just keeps
-        // the OS default (blocking), same as before this guard.
-        let _ = stream.set_write_timeout(sse_write_timeout());
         let mut next_id = self.next_id.lock().unwrap();
         let id = *next_id;
         *next_id += 1;
         let shard_idx = (id as usize) % NUM_SHARDS;
-        self.shards[shard_idx].add(id, stream, auth, guard);
+        self.shards[shard_idx].add(id, stream, auth, guard, sse_write_timeout());
         id
     }
 
@@ -680,6 +743,277 @@ mod tests {
         SseHub::new(empty_policy(), Arc::new(manifest), auth_user)
     }
 
+    fn socket_pair() -> (TcpStream, TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        (client, listener.accept().unwrap().0)
+    }
+
+    fn tenant_policy() -> PolicyEngine {
+        PolicyEngine::from_manifest(&AppManifest {
+            policies: vec![pylon_kernel::ManifestPolicy {
+                name: "tenant_read".into(),
+                entity: Some("Doc".into()),
+                allow_read: Some("auth.tenantId == data.tenantId".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+    }
+
+    fn tenant_event() -> ChangeEvent {
+        ChangeEvent {
+            seq: 1,
+            entity: "Doc".into(),
+            row_id: "row".into(),
+            kind: ChangeKind::Update,
+            data: Some(serde_json::json!({"tenantId":"b"})),
+            prev_data: Some(serde_json::json!({"tenantId":"a"})),
+            timestamp: String::new(),
+        }
+    }
+
+    fn read_frame(stream: &mut TcpStream, expected: &str) {
+        let mut bytes = vec![0; expected.len()];
+        stream.read_exact(&mut bytes).unwrap();
+        assert_eq!(bytes, expected.as_bytes());
+    }
+
+    #[test]
+    fn hub_shares_framed_payloads_across_all_shards() {
+        let manifest = Arc::new(AppManifest {
+            entities: vec![pylon_kernel::ManifestEntity {
+                name: "Doc".into(),
+                fields: vec![pylon_kernel::ManifestField {
+                    name: "tenantId".into(),
+                    field_type: "string".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let (senders, receivers): (Vec<_>, Vec<_>) = (0..NUM_SHARDS)
+            .map(|_| mpsc::sync_channel(BROADCAST_QUEUE_DEPTH))
+            .unzip();
+        let hub = SseHub {
+            shards: Vec::new(),
+            next_id: Mutex::new(0),
+            broadcast_txs: senders,
+            policy: Arc::new(tenant_policy()),
+            auth_user: manifest.auth.user.clone(),
+            manifest,
+        };
+        let event = tenant_event();
+        let wire = ChangeEvent {
+            prev_data: None,
+            ..event.clone()
+        };
+        let delete = ChangeEvent {
+            kind: ChangeKind::Delete,
+            data: event.prev_data.clone(),
+            prev_data: None,
+            ..event.clone()
+        };
+        let expected = format!("data: {}\n\n", serde_json::to_string(&wire).unwrap());
+        let expected_delete = format!("data: {}\n\n", serde_json::to_string(&delete).unwrap());
+        hub.broadcast(&event);
+        let mut first: Option<(Arc<str>, Arc<str>)> = None;
+        for receiver in &receivers {
+            let SseJob::Change {
+                event: raw,
+                frame,
+                synth_delete_sse: Some(delete),
+            } = receiver.try_recv().unwrap()
+            else {
+                panic!("missing change frame");
+            };
+            assert!(raw.prev_data.is_some(), "policy checks retain the old row");
+            assert_eq!(frame.as_ref(), expected);
+            assert_eq!(delete.as_ref(), expected_delete);
+            if let Some((first_frame, first_delete)) = &first {
+                assert!(Arc::ptr_eq(first_frame, &frame));
+                assert!(Arc::ptr_eq(first_delete, &delete));
+            } else {
+                first = Some((frame, delete));
+            }
+        }
+        hub.broadcast_message("presence");
+        let mut first_plain = None;
+        for receiver in &receivers {
+            let SseJob::Plain(frame) = receiver.try_recv().unwrap() else {
+                panic!("missing plain frame");
+            };
+            assert_eq!(frame.as_ref(), "data: presence\n\n");
+            if let Some(first) = &first_plain {
+                assert!(Arc::ptr_eq(first, &frame));
+            } else {
+                first_plain = Some(frame);
+            }
+        }
+    }
+
+    #[test]
+    fn a_blocked_writer_does_not_delay_another_client_or_shard_access() {
+        let shard = Arc::new(SseShard::new());
+        let (_slow_reader, slow_writer) = socket_pair();
+        let (mut healthy_reader, healthy_writer) = socket_pair();
+        let counter = Arc::new(IpConnCounter::new(1));
+        let ip = "192.0.2.1".parse().unwrap();
+        shard.add(
+            1,
+            slow_writer,
+            AuthContext::user("slow".into()).with_tenant("a".into()),
+            counter.acquire(ip),
+            None,
+        );
+        shard.add(
+            2,
+            healthy_writer,
+            AuthContext::user("fast".into()).with_tenant("b".into()),
+            None,
+            Some(Duration::from_secs(1)),
+        );
+        let huge: Arc<str> = Arc::from("x".repeat(16 * 1024 * 1024));
+        assert!(shard
+            .clients
+            .lock()
+            .unwrap()
+            .get(&1)
+            .unwrap()
+            .enqueue(&huge));
+        // No reader drains this frame. The writer still holds its byte permits.
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while shard.clients.lock().unwrap().get(&1).unwrap().tx.capacity() != CLIENT_QUEUE_DEPTH
+            && std::time::Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            shard.clients.lock().unwrap().get(&1).unwrap().tx.capacity(),
+            CLIENT_QUEUE_DEPTH
+        );
+        assert_eq!(
+            shard
+                .clients
+                .lock()
+                .unwrap()
+                .get(&1)
+                .unwrap()
+                .bytes
+                .available_permits(),
+            0
+        );
+        {
+            let clients = shard.clients.lock().unwrap();
+            let slow = clients.get(&1).unwrap();
+            assert!(!slow.enqueue(&Arc::from("another frame")));
+            let empty = Arc::from("");
+            // The oversized frame is already being written, leaving 64 slots.
+            for _ in 0..CLIENT_QUEUE_DEPTH {
+                assert!(slow.enqueue(&empty));
+            }
+            assert!(!slow.enqueue(&empty));
+        }
+        let start = std::time::Instant::now();
+        shard.broadcast_change(
+            &tenant_event(),
+            &Arc::from("data: healthy\n\n"),
+            None,
+            &tenant_policy(),
+        );
+        read_frame(&mut healthy_reader, "data: healthy\n\n");
+        assert_eq!(shard.count(), 2, "the blocked writer is still active");
+        assert!(start.elapsed() < Duration::from_secs(1));
+        // A full byte budget disconnects only the stalled client.
+        shard.keepalive();
+        read_frame(&mut healthy_reader, ": keepalive\n\n");
+        assert_eq!(shard.count(), 1);
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while counter.get(ip) != 0 && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            counter.get(ip),
+            0,
+            "cancelled writer releases its connection slot"
+        );
+    }
+
+    #[test]
+    fn async_deadline_removes_a_stalled_writer_and_releases_its_slot() {
+        let shard = Arc::new(SseShard::new());
+        let (_reader, writer) = socket_pair();
+        let counter = Arc::new(IpConnCounter::new(1));
+        let ip = "192.0.2.2".parse().unwrap();
+        shard.add(
+            1,
+            writer,
+            AuthContext::anonymous(),
+            counter.acquire(ip),
+            Some(Duration::from_millis(50)),
+        );
+        let huge: Arc<str> = Arc::from("x".repeat(16 * 1024 * 1024));
+        assert!(shard
+            .clients
+            .lock()
+            .unwrap()
+            .get(&1)
+            .unwrap()
+            .enqueue(&huge));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while counter.get(ip) != 0 && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(shard.count(), 0);
+        assert_eq!(counter.get(ip), 0);
+    }
+
+    #[test]
+    fn queued_changes_preserve_tenant_gates_and_visibility_tombstones() {
+        let shard = Arc::new(SseShard::new());
+        let (mut old_reader, old_writer) = socket_pair();
+        let (mut new_reader, new_writer) = socket_pair();
+        let (mut other_reader, other_writer) = socket_pair();
+        other_reader
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        for (id, tenant, writer) in [
+            (1, "a", old_writer),
+            (2, "b", new_writer),
+            (3, "c", other_writer),
+        ] {
+            shard.add(
+                id,
+                writer,
+                AuthContext::user(tenant.into()).with_tenant(tenant.into()),
+                None,
+                Some(Duration::from_secs(1)),
+            );
+        }
+        shard.broadcast_change(
+            &tenant_event(),
+            &Arc::from("data: post-row\n\n"),
+            Some(&Arc::from("data: deleted\n\n")),
+            &tenant_policy(),
+        );
+        read_frame(&mut old_reader, "data: deleted\n\n");
+        read_frame(&mut new_reader, "data: post-row\n\n");
+        let mut byte = [0];
+        let error = other_reader.read(&mut byte).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ));
+        shard.keepalive();
+        read_frame(&mut old_reader, ": keepalive\n\n");
+        read_frame(&mut new_reader, ": keepalive\n\n");
+        read_frame(&mut other_reader, ": keepalive\n\n");
+    }
+
     #[test]
     fn hub_starts_with_correct_shard_count() {
         let hub = empty_hub();
@@ -711,7 +1045,7 @@ mod tests {
     #[test]
     fn broadcast_on_empty_shard_returns_no_dead() {
         let shard = SseShard::new();
-        let dead = shard.broadcast("test");
+        let dead = shard.broadcast(&Arc::from("data: test\n\n"));
         assert!(dead.is_empty());
     }
 
@@ -753,61 +1087,7 @@ mod tests {
         );
     }
 
-    // P2 head-of-line guard: the deadline must ACTUALLY bound a write to a
-    // wedged socket. A real connected pair whose receiver never reads will
-    // fill the kernel send buffer; without `set_write_timeout` the writer
-    // blocks forever (the head-of-line stall under the shard lock). With
-    // the deadline applied, the write returns an error within ~deadline
-    // instead of hanging — proving the mechanism the shard relies on
-    // works on this platform, not just that the field is set.
-    #[test]
-    fn write_deadline_bounds_a_wedged_socket() {
-        use std::io::Write;
-        use std::net::{TcpListener, TcpStream};
-
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        // Connect FIRST — the OS completes the handshake into the listen
-        // backlog, so connect() returns without us having called accept()
-        // yet (avoids the accept-before-connect deadlock).
-        let mut client = TcpStream::connect(addr).expect("connect");
-        // Accept but NEVER read — the receive side stays full so the
-        // sender's kernel buffer backs up and stays backed up. Hold the
-        // accepted socket for the test body so it isn't dropped/reset.
-        let (_hold, _) = listener.accept().expect("accept");
-        client
-            .set_write_timeout(parse_sse_write_timeout(Some("300")))
-            .expect("set deadline");
-
-        // Blast until the buffers fill and the write deadline trips. A
-        // healthy bound returns Err(WouldBlock/TimedOut) within a few
-        // hundred ms; an unbounded socket would hang here forever.
-        let started = std::time::Instant::now();
-        let big = vec![0u8; 256 * 1024];
-        let mut errored = false;
-        for _ in 0..512 {
-            if client.write_all(&big).is_err() {
-                errored = true;
-                break;
-            }
-            if started.elapsed() > Duration::from_secs(5) {
-                break; // safety valve — should never hit with the deadline
-            }
-        }
-        assert!(
-            errored,
-            "a bounded write to a never-draining socket must error, not block forever"
-        );
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "the write deadline must trip well before the 5s safety valve"
-        );
-    }
-
-    // P2 head-of-line guard: registering a client through the hub must
-    // leave a write deadline on its stream. This pins the WIRING
-    // (`add_client` → `set_write_timeout`), not just the mechanism —
-    // deleting that line drops the deadline to None and fails here.
+    // Registration must pass the configured deadline to the async writer.
     #[test]
     fn add_client_sets_a_write_deadline() {
         use std::net::{TcpListener, TcpStream};
@@ -821,8 +1101,7 @@ mod tests {
         let shard = &hub.shards[(id as usize) % NUM_SHARDS];
         assert!(
             shard.client_write_timeout(id).is_some(),
-            "a registered SSE client must carry a bounded write deadline so a \
-             wedged consumer can't head-of-line the shard"
+            "a registered SSE client must carry a bounded async write deadline"
         );
     }
 }

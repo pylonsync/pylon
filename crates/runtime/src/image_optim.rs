@@ -29,8 +29,10 @@
 //! immutable`. The hash encodes the exact transform so any change
 //! produces a different URL.
 
-use std::io::Cursor;
+use std::collections::HashMap;
+use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use sha2::{Digest, Sha256};
 use tiny_http::{Header, Request, Response};
@@ -901,6 +903,101 @@ fn cache_path(cache_dir: &Path, src: &str, width: u32, quality: u8, fmt: OutForm
     cache_dir.join(format!("{hex}.{}", fmt.extension()))
 }
 
+type ImageResult = Result<Arc<Vec<u8>>, (u16, String)>;
+
+/// Share a cold transform with concurrent requests for the same cache file.
+/// Entries last only while requests use them, including failed transforms.
+#[derive(Default)]
+struct ImageWork {
+    pending: Mutex<HashMap<PathBuf, Weak<OnceLock<ImageResult>>>>,
+}
+
+struct ImageFlight<'a> {
+    work: &'a ImageWork,
+    path: &'a Path,
+}
+
+impl Drop for ImageFlight<'_> {
+    fn drop(&mut self) {
+        let mut pending = self.work.pending.lock().unwrap_or_else(|e| e.into_inner());
+        // The map holds only a Weak. No new caller can join while locked.
+        if pending
+            .get(self.path)
+            .is_some_and(|entry| entry.strong_count() == 0)
+        {
+            pending.remove(self.path);
+        }
+    }
+}
+
+impl ImageWork {
+    fn get(
+        &self,
+        path: &Path,
+        render: impl FnOnce() -> Result<Vec<u8>, (u16, String)>,
+    ) -> ImageResult {
+        if let Some(bytes) = read_cached_image(path)? {
+            return Ok(Arc::new(bytes));
+        }
+        // Declare the cleanup guard first so the result Arc drops before it,
+        // including during a panic. Check the last reference under the lock.
+        let _flight = ImageFlight { work: self, path };
+        let result = {
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            match pending.get(path).and_then(Weak::upgrade) {
+                Some(result) => result,
+                None => {
+                    let result = Arc::new(OnceLock::new());
+                    pending.insert(path.to_path_buf(), Arc::downgrade(&result));
+                    result
+                }
+            }
+        };
+        result
+            .get_or_init(|| {
+                // Another flight can finish between the first read and joining.
+                if let Some(bytes) = read_cached_image(path)? {
+                    return Ok(Arc::new(bytes));
+                }
+                let bytes = render()?;
+                // Cache failure must not discard a successful transform.
+                let _ = write_cached_image(path, &bytes);
+                Ok(Arc::new(bytes))
+            })
+            .clone()
+    }
+}
+
+fn read_cached_image(path: &Path) -> Result<Option<Vec<u8>>, (u16, String)> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err((500, format!("cache read failed: {error}"))),
+    }
+}
+
+fn write_cached_image(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let temp = path.with_extension(format!(
+        "tmp.{}.{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed),
+    ));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)?;
+    let written = file.write_all(bytes);
+    drop(file);
+    // Publish only the complete file. Other processes can read this cache too.
+    let result = written.and_then(|()| std::fs::rename(&temp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
 /// Public entry point — wired from `frontend.rs`. `cache_root` is
 /// the project's `.pylon` directory; we create
 /// `<cache_root>/.cache/images/` lazily.
@@ -925,57 +1022,45 @@ pub fn serve(request: Request, cache_root: &Path, frontend_dir: Option<&Path>, c
     }
     let dest = cache_path(&cache_dir, &parsed.src, parsed.width, parsed.quality, fmt);
 
-    let bytes = if dest.exists() {
-        match std::fs::read(&dest) {
-            Ok(b) => b,
-            Err(e) => {
-                respond_err(request, 500, &format!("cache read failed: {e}"));
-                return;
-            }
+    static WORK: OnceLock<ImageWork> = OnceLock::new();
+    let bytes = match WORK.get_or_init(ImageWork::default).get(&dest, || {
+        let source = load_source(&parsed.src, frontend_dir, cfg).map_err(|e| (400, e))?;
+        process(&source, parsed.width, parsed.quality, fmt, cfg).map_err(|e| (500, e))
+    }) {
+        Ok(bytes) => bytes,
+        Err((status, message)) => {
+            respond_err(request, status, &message);
+            return;
         }
-    } else {
-        let source = match load_source(&parsed.src, frontend_dir, cfg) {
-            Ok(s) => s,
-            Err(e) => {
-                respond_err(request, 400, &e);
-                return;
-            }
-        };
-        let processed = match process(&source, parsed.width, parsed.quality, fmt, cfg) {
-            Ok(b) => b,
-            Err(e) => {
-                respond_err(request, 500, &e);
-                return;
-            }
-        };
-        // Best-effort write — failing to cache is non-fatal, the
-        // browser still gets a working image.
-        let _ = std::fs::write(&dest, &processed);
-        processed
     };
 
-    let response = Response::from_data(bytes)
-        .with_status_code(200u16)
-        .with_header(Header::from_bytes("Content-Type", fmt.mime()).unwrap())
-        .with_header(
-            Header::from_bytes("Cache-Control", "public, max-age=31536000, immutable").unwrap(),
+    let response = Response::new(
+        tiny_http::StatusCode(200),
+        Vec::new(),
+        Cursor::new(bytes.as_slice()),
+        Some(bytes.len()),
+        None,
+    )
+    .with_header(Header::from_bytes("Content-Type", fmt.mime()).unwrap())
+    .with_header(
+        Header::from_bytes("Cache-Control", "public, max-age=31536000, immutable").unwrap(),
+    )
+    // The output format is negotiated from Accept when the URL
+    // doesn't pin one — any shared cache MUST key on it or Safari
+    // gets the AVIF a Chrome visitor warmed. CDNs that support
+    // CDN-Cache-Control (Cloudflare et al.) get an explicit edge
+    // TTL so transforms are edge-cacheable without a manual rule.
+    .with_header(Header::from_bytes("Vary", "Accept").unwrap())
+    .with_header(
+        Header::from_bytes("CDN-Cache-Control", "public, max-age=31536000, immutable").unwrap(),
+    )
+    .with_header(
+        Header::from_bytes(
+            "Access-Control-Allow-Origin",
+            cors_origin.as_bytes().to_vec(),
         )
-        // The output format is negotiated from Accept when the URL
-        // doesn't pin one — any shared cache MUST key on it or Safari
-        // gets the AVIF a Chrome visitor warmed. CDNs that support
-        // CDN-Cache-Control (Cloudflare et al.) get an explicit edge
-        // TTL so transforms are edge-cacheable without a manual rule.
-        .with_header(Header::from_bytes("Vary", "Accept").unwrap())
-        .with_header(
-            Header::from_bytes("CDN-Cache-Control", "public, max-age=31536000, immutable").unwrap(),
-        )
-        .with_header(
-            Header::from_bytes(
-                "Access-Control-Allow-Origin",
-                cors_origin.as_bytes().to_vec(),
-            )
-            .unwrap(),
-        );
+        .unwrap(),
+    );
     let _ = request.respond(response);
 }
 
@@ -1000,6 +1085,224 @@ mod tests {
 
     fn accept_header(v: &str) -> Vec<Header> {
         vec![Header::from_bytes("Accept", v).unwrap()]
+    }
+
+    #[test]
+    fn concurrent_image_requests_share_successes_and_errors() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Condvar;
+        use std::time::{Duration, Instant};
+
+        for cache_writable in [false, true] {
+            for fail in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = if cache_writable {
+                    dir.path().join("image.jpg")
+                } else {
+                    dir.path().join("missing/image.jpg")
+                };
+                let work = Arc::new(ImageWork::default());
+                let calls = Arc::new(AtomicUsize::new(0));
+                let release = Arc::new((Mutex::new(false), Condvar::new()));
+                let workers: Vec<_> = (0..16)
+                    .map(|_| {
+                        let work = Arc::clone(&work);
+                        let calls = Arc::clone(&calls);
+                        let release = Arc::clone(&release);
+                        let path = path.clone();
+                        std::thread::spawn(move || {
+                            work.get(&path, || {
+                                calls.fetch_add(1, Ordering::Relaxed);
+                                let (lock, ready) = &*release;
+                                let (allowed, timeout) = ready
+                                    .wait_timeout_while(
+                                        lock.lock().unwrap(),
+                                        Duration::from_secs(5),
+                                        |allowed| !*allowed,
+                                    )
+                                    .unwrap();
+                                assert!(*allowed && !timeout.timed_out());
+                                if fail {
+                                    Err((400, "source failed".into()))
+                                } else {
+                                    Ok(vec![7; 1024])
+                                }
+                            })
+                        })
+                    })
+                    .collect();
+                let deadline = Instant::now() + Duration::from_secs(3);
+                let joined = loop {
+                    let count = work
+                        .pending
+                        .lock()
+                        .unwrap()
+                        .get(&path)
+                        .map(Weak::strong_count)
+                        .unwrap_or(0);
+                    if count == 16 {
+                        break true;
+                    }
+                    if Instant::now() >= deadline {
+                        break false;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                };
+                *release.0.lock().unwrap() = true;
+                release.1.notify_all();
+                let results: Vec<_> = workers.into_iter().map(|w| w.join().unwrap()).collect();
+                assert!(
+                    joined,
+                    "all requests must join while the transform is blocked"
+                );
+                assert_eq!(calls.load(Ordering::Relaxed), 1);
+                assert!(work.pending.lock().unwrap().is_empty());
+                if fail {
+                    assert!(results
+                        .iter()
+                        .all(|r| r.as_ref().unwrap_err() == &(400, "source failed".into())));
+                    assert_eq!(*work.get(&path, || Ok(vec![9])).unwrap(), [9]);
+                } else {
+                    let first = results[0].as_ref().unwrap();
+                    assert_eq!(first.as_slice(), &[7; 1024]);
+                    assert!(results
+                        .iter()
+                        .all(|r| Arc::ptr_eq(first, r.as_ref().unwrap())));
+                    if cache_writable {
+                        assert_eq!(
+                            *work
+                                .get(&path, || panic!("cache hit must not render"))
+                                .unwrap(),
+                            **first
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn different_images_do_not_wait_for_each_others_transform() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let work = Arc::new(ImageWork::default());
+        let (started, entered) = mpsc::channel();
+        let (release, allowed) = mpsc::channel();
+        let slow = Arc::clone(&work);
+        let slow_path = dir.path().join("slow.jpg");
+        let worker = std::thread::spawn(move || {
+            slow.get(&slow_path, || {
+                started.send(()).unwrap();
+                allowed.recv_timeout(Duration::from_secs(5)).unwrap();
+                Ok(vec![1])
+            })
+        });
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        let fast = Arc::clone(&work);
+        let fast_path = dir.path().join("fast.jpg");
+        let (done, received) = mpsc::channel();
+        let second =
+            std::thread::spawn(move || done.send(fast.get(&fast_path, || Ok(vec![2]))).unwrap());
+        let result = received.recv_timeout(Duration::from_secs(2));
+        release.send(()).unwrap();
+        worker.join().unwrap().unwrap();
+        second.join().unwrap();
+        assert_eq!(*result.unwrap().unwrap(), [2]);
+        assert!(work.pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn panicked_transform_releases_its_registry_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("retry.jpg");
+        let work = ImageWork::default();
+        let result = std::panic::catch_unwind(|| work.get(&path, || panic!("failed transform")));
+        assert!(result.is_err());
+        assert!(work.pending.lock().unwrap().is_empty());
+        assert_eq!(*work.get(&path, || Ok(vec![3])).unwrap(), [3]);
+    }
+
+    #[test]
+    fn image_cache_publishes_whole_files_and_cleans_failed_writes() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("image.jpg");
+        let first = vec![1; 128 * 1024];
+        let second = vec![2; 256 * 1024];
+        write_cached_image(&path, &first).unwrap();
+        let finished = Arc::new(AtomicBool::new(false));
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for _ in 0..32 {
+                    write_cached_image(&path, &second).unwrap();
+                    write_cached_image(&path, &first).unwrap();
+                }
+                finished.store(true, Ordering::Release);
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let bytes = std::fs::read(&path).unwrap();
+                assert!(bytes == first || bytes == second);
+                if finished.load(Ordering::Acquire) {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "cache writes must finish");
+            }
+        });
+        let directory = dir.path().join("directory.jpg");
+        std::fs::create_dir(&directory).unwrap();
+        assert!(write_cached_image(&directory, &[4]).is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn image_endpoint_returns_complete_cached_jpeg_with_original_headers() {
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let source = image::DynamicImage::new_rgb8(32, 16);
+        source.save(dir.path().join("source.png")).unwrap();
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let address = server.server_addr().to_ip().unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for _ in 0..2 {
+                    let request = server
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap()
+                        .unwrap();
+                    serve(
+                        request,
+                        dir.path(),
+                        Some(dir.path()),
+                        "https://example.test",
+                    );
+                }
+            });
+            let mut prior = Vec::new();
+            for _ in 0..2 {
+                let response = ureq::get(&format!(
+                    "http://{address}/_pylon/image?src=/source.png&w=64&q=75&format=jpeg"
+                ))
+                .call()
+                .unwrap();
+                assert_eq!(response.header("Content-Type"), Some("image/jpeg"));
+                assert_eq!(response.header("Vary"), Some("Accept"));
+                assert_eq!(
+                    response.header("Access-Control-Allow-Origin"),
+                    Some("https://example.test")
+                );
+                let mut bytes = Vec::new();
+                response.into_reader().read_to_end(&mut bytes).unwrap();
+                let decoded = image::load_from_memory(&bytes).unwrap();
+                assert_eq!((decoded.width(), decoded.height()), (32, 16));
+                if !prior.is_empty() {
+                    assert_eq!(bytes, prior);
+                }
+                prior = bytes;
+            }
+        });
     }
 
     #[test]

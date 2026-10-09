@@ -42,6 +42,7 @@ postgres = { workspace = true }
 # The BytesMut buffer postgres' ToSql writes into (the shard directory's values).
 bytes = "1"
 rusqlite = { workspace = true }
+hashlink = "0.10"
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -125,6 +126,7 @@ libc = "0.2"
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [dev-dependencies]
+rusqlite = { workspace = true, features = ["trace"] }
 rand = { workspace = true }
 # shard_wasm tests write small modules in the text format.
 wat = "1"
@@ -153,4 +155,20 @@ harness = false
 
 [[bench]]
 name = "realtime_bench"
+harness = false
+
+[[bench]]
+name = "rate_limit"
+harness = false
+
+[[bench]]
+name = "query_schema"
+harness = false
+
+[[bench]]
+name = "filtered_count"
+harness = false
+
+[[bench]]
+name = "workflow_list"
 harness = false

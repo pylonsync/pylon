@@ -741,9 +741,7 @@ describe("sync scenarios", () => {
     // makes the standard reconnect push re-ship it. (insert() returns the
     // ROW id; match the mutation by row_id, not its op_id.)
     expect(env.engine.store.get("Note", id)).not.toBeNull();
-    const mine = (env.engine.mutations as unknown as {
-      queue: { change: { row_id: string }; status: string }[];
-    }).queue.filter((m) => m.change.row_id === id);
+    const mine = env.engine.mutations.pending().filter((m) => m.change.row_id === id);
     expect(mine).toHaveLength(1);
     expect(mine[0]!.status).toBe("pending");
   });
@@ -811,12 +809,12 @@ describe("sync scenarios", () => {
     env.server.primeNextPushOutcome({ kind: "network" });
     await env.engine.insert("Note", { title: "draft" });
     await env.flush();
-    const queue = (env.engine.mutations as unknown as { queue: unknown[] }).queue;
-    expect(queue.length).toBeGreaterThan(0);
+    const queue = (env.engine.mutations as unknown as { queue: Map<string, unknown> }).queue;
+    expect(queue.size).toBeGreaterThan(0);
 
     // Identity flip → wipe.
     await env.engine.resetReplica({ wipeMutations: true });
-    expect((env.engine.mutations as unknown as { queue: unknown[] }).queue).toHaveLength(0);
+    expect((env.engine.mutations as unknown as { queue: Map<string, unknown> }).queue.size).toBe(0);
   });
 
   // TRANSPORT CYCLE ON IDENTITY FLIP. The WS binds the bearer token at
@@ -869,13 +867,13 @@ describe("sync scenarios", () => {
     env.server.primeNextPushOutcome({ kind: "network" });
     await env.engine.insert("Note", { title: "draft" });
     await env.flush();
-    const before = (env.engine.mutations as unknown as { queue: unknown[] }).queue.length;
+    const before = (env.engine.mutations as unknown as { queue: Map<string, unknown> }).queue.size;
     expect(before).toBeGreaterThan(0);
 
     // 410 RESYNC path is the default (wipeMutations omitted) — KEEP writes.
     await env.engine.resetReplica();
     expect(
-      (env.engine.mutations as unknown as { queue: unknown[] }).queue.length,
+      (env.engine.mutations as unknown as { queue: Map<string, unknown> }).queue.size,
     ).toBe(before);
   });
 

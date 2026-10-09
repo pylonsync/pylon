@@ -417,10 +417,8 @@ export async function persistChange(
  * `MutationQueue` into the same database as the entity mirror so everything
  * the app needs to resume a session lives in one place.
  *
- * `saveAll` writes the entire queue on every change. That's O(n) per write,
- * but `n` is bounded by "how many mutations the user queued while offline",
- * which is tiny in practice. If that ever becomes a bottleneck, switch to
- * per-id `put`/`delete` — the schema (`keyPath: "id"`) already supports it.
+ * Incremental writes update only changed IDs. Full snapshots support initial
+ * hydration and identity reset, and remain available to custom backends.
  */
 export class IndexedDBMutationPersistence implements MutationQueuePersistence {
   private db: IDBDatabase | null = null;
@@ -446,6 +444,20 @@ export class IndexedDBMutationPersistence implements MutationQueuePersistence {
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error ?? new Error("mutation queue save failed"));
       tx.onabort = () => reject(tx.error ?? new Error("mutation queue save aborted"));
+    });
+  }
+
+  async saveChanges(upserts: PendingMutation[], removedIds: string[]): Promise<void> {
+    const db = this.handle();
+    if (!db) return;
+    const tx = db.transaction(MUTATIONS_STORE, "readwrite");
+    const store = tx.objectStore(MUTATIONS_STORE);
+    for (const mutation of upserts) store.put(mutation);
+    for (const id of removedIds) store.delete(id);
+    return new Promise((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error ?? new Error("mutation queue update failed"));
+      tx.onabort = () => reject(tx.error ?? new Error("mutation queue update aborted"));
     });
   }
 

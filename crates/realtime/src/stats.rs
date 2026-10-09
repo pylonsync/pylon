@@ -67,13 +67,31 @@ impl Quantiles {
         if v.is_empty() {
             return Self::default();
         }
-        v.sort_by(|a, b| a.total_cmp(b));
-        let at = |q: f64| v[((v.len() - 1) as f64 * q).round() as usize];
-        Self {
-            p50: at(0.5),
-            p99: at(0.99),
-            max: v[v.len() - 1],
+        let p50_index = ((v.len() - 1) as f64 * 0.5).round() as usize;
+        let p99_index = ((v.len() - 1) as f64 * 0.99).round() as usize;
+        if v.is_sorted_by(|a, b| a.total_cmp(b).is_le()) {
+            return Self {
+                p50: v[p50_index],
+                p99: v[p99_index],
+                max: v[v.len() - 1],
+            };
         }
+        if v.is_sorted_by(|a, b| a.total_cmp(b).is_ge()) {
+            return Self {
+                p50: v[v.len() - 1 - p50_index],
+                p99: v[v.len() - 1 - p99_index],
+                max: v[0],
+            };
+        }
+        let (lower, p99, upper) = v.select_nth_unstable_by(p99_index, f64::total_cmp);
+        let p99 = *p99;
+        let max = upper.iter().copied().max_by(f64::total_cmp).unwrap_or(p99);
+        let p50 = if p50_index == p99_index {
+            p99
+        } else {
+            *lower.select_nth_unstable_by(p50_index, f64::total_cmp).1
+        };
+        Self { p50, p99, max }
     }
 }
 
@@ -137,6 +155,12 @@ struct WindowTick {
     bytes: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SubscriberSamples {
+    bytes: [u64; SUBSCRIBER_SAMPLES_PER_TICK],
+    len: usize,
+}
+
 /// Records tick samples; owned by the shard behind a lock taken once per
 /// tick. Clone it under the lock and call `snapshot` on the clone, so the
 /// percentiles are computed without holding the lock.
@@ -145,7 +169,7 @@ pub struct StatsRecorder {
     ticks: u64,
     window: VecDeque<WindowTick>,
     /// Per-subscriber byte samples, one group per tick in the window.
-    subscriber_bytes: VecDeque<Vec<u64>>,
+    subscriber_bytes: VecDeque<SubscriberSamples>,
     /// Where the next tick's subscriber sample starts.
     sample_offset: usize,
     whole_total: Duration,
@@ -185,17 +209,21 @@ impl StatsRecorder {
             self.window.pop_front();
         }
         let all = sample.subscriber_bytes;
-        let picked = if all.len() <= SUBSCRIBER_SAMPLES_PER_TICK {
-            all
+        let mut picked = SubscriberSamples {
+            bytes: [0; SUBSCRIBER_SAMPLES_PER_TICK],
+            len: all.len().min(SUBSCRIBER_SAMPLES_PER_TICK),
+        };
+        if all.len() <= SUBSCRIBER_SAMPLES_PER_TICK {
+            picked.bytes[..picked.len].copy_from_slice(&all);
         } else {
             // In turn: consecutive ticks sample different subscribers.
             let n = all.len();
             let start = self.sample_offset % n;
             self.sample_offset = self.sample_offset.wrapping_add(SUBSCRIBER_SAMPLES_PER_TICK);
-            (0..SUBSCRIBER_SAMPLES_PER_TICK)
-                .map(|i| all[(start + i) % n])
-                .collect()
-        };
+            for (i, value) in picked.bytes.iter_mut().enumerate() {
+                *value = all[(start + i) % n];
+            }
+        }
         self.subscriber_bytes.push_back(picked);
         while self.subscriber_bytes.len() > WINDOW_TICKS {
             self.subscriber_bytes.pop_front();
@@ -233,7 +261,10 @@ impl StatsRecorder {
             },
             bytes_per_tick: Quantiles::of(w.iter().map(|s| s.bytes as f64)),
             bytes_per_subscriber: Quantiles::of(
-                self.subscriber_bytes.iter().flatten().map(|&b| b as f64),
+                self.subscriber_bytes
+                    .iter()
+                    .flat_map(|sample| &sample.bytes[..sample.len])
+                    .map(|&b| b as f64),
             ),
             bytes_total: self.bytes_total,
             dropped_frames_total: self.dropped_frames_total,
@@ -246,6 +277,91 @@ impl StatsRecorder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sorted_quantiles(values: &[f64]) -> Quantiles {
+        let mut values = values.to_vec();
+        if values.is_empty() {
+            return Quantiles::default();
+        }
+        values.sort_by(f64::total_cmp);
+        let at = |q: f64| values[((values.len() - 1) as f64 * q).round() as usize];
+        Quantiles {
+            p50: at(0.5),
+            p99: at(0.99),
+            max: values[values.len() - 1],
+        }
+    }
+
+    #[test]
+    fn selected_quantiles_match_sorting_at_boundaries_and_with_ties() {
+        for n in (0..200).chain([WINDOW_TICKS, WINDOW_TICKS * SUBSCRIBER_SAMPLES_PER_TICK]) {
+            let mut values: Vec<_> = (0..n).map(|i| ((i * 31337) % 97) as f64).collect();
+            for shape in 0..6 {
+                match shape {
+                    1 | 3 => values.reverse(),
+                    2 => values.sort_by(f64::total_cmp),
+                    4 => values.fill(1.0),
+                    5 => {
+                        if let Some(first) = values.first_mut() {
+                            *first = -1.0;
+                        }
+                    }
+                    _ => {}
+                }
+                let got = Quantiles::of(values.iter().copied());
+                let expected = sorted_quantiles(&values);
+                assert_eq!(got, expected, "length {n}");
+            }
+        }
+        let special = [f64::NAN, f64::NEG_INFINITY, -0.0, 0.0, f64::INFINITY, -1.0];
+        let got = Quantiles::of(special.into_iter());
+        let expected = sorted_quantiles(&special);
+        assert_eq!(
+            [got.p50, got.p99, got.max].map(f64::to_bits),
+            [expected.p50, expected.p99, expected.max].map(f64::to_bits)
+        );
+    }
+
+    #[test]
+    #[ignore = "release-mode performance benchmark"]
+    fn benchmark_quantiles() {
+        use std::hint::black_box;
+        for n in [
+            100,
+            WINDOW_TICKS,
+            WINDOW_TICKS * SUBSCRIBER_SAMPLES_PER_TICK,
+        ] {
+            for shape in ["random", "sorted", "reverse", "equal"] {
+                let values: Vec<f64> = (0..n)
+                    .map(|i| match shape {
+                        "sorted" => i as f64,
+                        "reverse" => (n - i) as f64,
+                        "equal" => 1.0,
+                        _ => ((i * 31337) % 997) as f64,
+                    })
+                    .collect();
+                for select in [false, true] {
+                    let mut samples = Vec::new();
+                    for _ in 0..7 {
+                        let start = std::time::Instant::now();
+                        for _ in 0..100 {
+                            black_box(if select {
+                                Quantiles::of(black_box(&values).iter().copied())
+                            } else {
+                                sorted_quantiles(black_box(&values))
+                            });
+                        }
+                        samples.push(start.elapsed().as_secs_f64() * 1e6 / 100.0);
+                    }
+                    samples.sort_by(f64::total_cmp);
+                    println!(
+                        "{n} {shape} quantiles, select={select}: {:.3} us median",
+                        samples[3]
+                    );
+                }
+            }
+        }
+    }
 
     fn sample(ms_each: u64, bytes: &[u64], dropped: u64) -> TickSample {
         let d = Duration::from_millis(ms_each);
@@ -260,6 +376,68 @@ mod tests {
             },
             subscriber_bytes: bytes.to_vec(),
             dropped_frames: dropped,
+        }
+    }
+
+    #[test]
+    fn subscriber_samples_preserve_empty_short_and_rotating_groups() {
+        let mut recorder = StatsRecorder::new();
+        let groups: &[&[u64]] = &[
+            &[],
+            &[17],
+            &[3, 7],
+            &[10, 11, 12, 13],
+            &[100, 101, 102, 103, 104],
+        ];
+        for group in groups {
+            recorder.record(sample(1, group, 0));
+        }
+        let snapshot = recorder.snapshot();
+        assert_eq!(
+            snapshot.bytes_total,
+            groups.iter().flat_map(|group| group.iter()).sum::<u64>()
+        );
+        assert_eq!(
+            snapshot.bytes_per_subscriber,
+            sorted_quantiles(&[17.0, 3.0, 7.0, 10.0, 11.0, 12.0, 13.0, 100.0, 101.0, 102.0, 103.0])
+        );
+        recorder.record(sample(1, groups[4], 0));
+        let last = recorder.subscriber_bytes.back().unwrap();
+        assert_eq!(last.bytes, [104, 100, 101, 102]);
+        assert_eq!(recorder.clone().snapshot(), recorder.snapshot());
+    }
+
+    #[test]
+    #[ignore = "release-mode performance benchmark"]
+    fn benchmark_snapshot_clone() {
+        use std::hint::black_box;
+        let mut recorder = StatsRecorder::new();
+        for _ in 0..WINDOW_TICKS {
+            recorder.record(sample(1, &[1, 2, 3, 4], 0));
+        }
+        let nested: VecDeque<Vec<u64>> = recorder
+            .subscriber_bytes
+            .iter()
+            .map(|sample| sample.bytes[..sample.len].to_vec())
+            .collect();
+        for flat in [false, true] {
+            let mut samples = Vec::new();
+            for _ in 0..7 {
+                let start = std::time::Instant::now();
+                for _ in 0..100 {
+                    if flat {
+                        black_box(recorder.clone());
+                    } else {
+                        black_box((recorder.window.clone(), nested.clone()));
+                    }
+                }
+                samples.push(start.elapsed().as_secs_f64() * 1e6 / 100.0);
+            }
+            samples.sort_by(f64::total_cmp);
+            println!(
+                "1200-tick snapshot clone, flat={flat}: {:.3} us median",
+                samples[3]
+            );
         }
     }
 

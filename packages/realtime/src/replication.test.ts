@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import { replicationPayload } from "../test/frames";
 import { EntityTable, ReplicationError } from "./replication";
 import fixtures from "./replication.fixtures.json";
 
@@ -12,6 +13,76 @@ function bytes(hex: string): Uint8Array {
 function hex(b: Uint8Array): string {
   return Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
 }
+
+describe("stream position updates", () => {
+  test("empty and sparse frames do not read unchanged positions", () => {
+    const table = new EntityTable();
+    table.apply(replicationPayload({
+      full: true,
+      spawn: [
+        { id: 1, pos: [1, 2, 3] },
+        { id: 2, pos: [4, 5, 6] },
+      ],
+    }));
+    const quiet = table.get(2)!;
+    let reads = 0;
+    const qx = quiet.qx;
+    Object.defineProperty(quiet, "qx", {
+      get() {
+        reads++;
+        return qx;
+      },
+    });
+    table.apply(replicationPayload({}), 2);
+    const summary = table.apply(replicationPayload({
+      update: [{ id: 1, from: [1, 2, 3], pos: [-1, 8, 3] }],
+    }), 3);
+    expect(reads).toBe(0);
+    expect(summary.updated).toEqual([1]);
+    const moved = table.get(1)!;
+    expect([moved.x, moved.y, moved.z]).toEqual([-100, 800, 300].map((q) => q * table.precision));
+    expect([quiet.x, quiet.y, quiet.z]).toEqual([400, 500, 600].map((q) => q * table.precision));
+    expect(table.streamTick).toBe(3);
+  });
+
+  test("precision changes rescale unchanged entities", () => {
+    const table = new EntityTable();
+    table.apply(replicationPayload({
+      spawn: [
+        { id: 1, pos: [1, 2, -3] },
+        { id: 2, pos: [4, 5, 6] },
+      ],
+    }));
+    const frame = replicationPayload({ update: [{ id: 1, from: [1, 2, -3], pos: [2, 2, -3] }] });
+    new DataView(frame.buffer).setFloat32(2, 0.5, true);
+    table.apply(frame);
+    expect([table.get(1)!.x, table.get(1)!.y, table.get(1)!.z]).toEqual([100, 100, -150]);
+    expect([table.get(2)!.x, table.get(2)!.y, table.get(2)!.z]).toEqual([200, 250, 300]);
+    const empty = replicationPayload({});
+    new DataView(empty.buffer).setFloat32(2, 0.25, true);
+    table.apply(empty);
+    expect(table.get(2)!.x).toBe(100);
+  });
+
+  test("mixed frames and full replacements retain positions and components", () => {
+    const table = new EntityTable();
+    table.apply(replicationPayload({ spawn: [{ id: 1 }, { id: 2 }] }));
+    table.apply(replicationPayload({
+      despawn: [1],
+      spawn: [{ id: 3, pos: [7, -8, 9] }],
+      update: [
+        { id: 2, components: { 4: [1, 2] } },
+        { id: 3, from: [7, -8, 9], pos: [8, -8, 9] },
+      ],
+    }));
+    expect(table.get(1)).toBeUndefined();
+    expect(table.get(2)!.components.get(4)).toEqual(new Uint8Array([1, 2]));
+    expect(table.get(3)!.x).toBe(800 * table.precision);
+    table.apply(replicationPayload({ full: true, spawn: [{ id: 4, pos: [-2, 3, 4] }] }));
+    expect([...table.entities.keys()]).toEqual([4]);
+    expect(table.get(4)!.x).toBe(-200 * table.precision);
+  });
+});
 
 describe("the Rust encoder's frames (replication.fixtures.json)", () => {
   test("apply to the same tables the Rust decoder holds", () => {

@@ -108,7 +108,7 @@ pub fn now_iso() -> String {
 /// DO isolate the moment it filtered one event. On wasm the time comes
 /// from JS `Date.now()` instead; native targets use `SystemTime`.
 #[cfg(not(target_arch = "wasm32"))]
-fn now_epoch_secs() -> u64 {
+pub fn now_epoch_secs() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -117,7 +117,7 @@ fn now_epoch_secs() -> u64 {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn now_epoch_secs() -> u64 {
+pub fn now_epoch_secs() -> u64 {
     // `Date.now()` is milliseconds since the Unix epoch.
     (js_sys::Date::now() / 1000.0) as u64
 }

@@ -35,13 +35,47 @@ export class LocalStore {
    * `optimistic_delete_releases_id_when_server_confirms`.
    */
   private optimisticTombstones: Map<string, Set<string>> = new Map();
-  private listeners: Set<() => void> = new Set();
+  private listeners = new Map<(entity?: string) => void, string | undefined>();
+  private versions = new Map<string, number>();
+  private rowVersions = new Map<string, Map<string, number>>();
+  private revision = 0;
+  private resetVersion = 0;
+
+  /** Changes only when this entity changes or the replica is cleared. */
+  version(entity: string): number {
+    return this.versions.get(entity) ?? this.resetVersion;
+  }
+
+  /** Changes only when this row changes or the replica is cleared. */
+  rowVersion(entity: string, id: string): number {
+    return this.rowVersions.get(entity)?.get(id) ?? this.resetVersion;
+  }
+
+  private touch(entity: string, id: string): void {
+    const revision = ++this.revision;
+    this.versions.set(entity, revision);
+    if (this.tables.get(entity)?.has(id)) {
+      let versions = this.rowVersions.get(entity);
+      if (!versions) {
+        versions = new Map();
+        this.rowVersions.set(entity, versions);
+      }
+      versions.set(id, revision);
+    } else {
+      this.rowVersions.get(entity)?.delete(id);
+    }
+  }
 
   /** Get all rows for an entity. */
   list(entity: string): Row[] {
     const table = this.tables.get(entity);
     if (!table) return [];
     return Array.from(table.values());
+  }
+
+  /** Iterate current rows without copying the table. Consume synchronously. */
+  rows(entity: string): IterableIterator<Row> {
+    return this.tables.get(entity)?.values() ?? [][Symbol.iterator]();
   }
 
   /** Get a row by ID. */
@@ -84,6 +118,7 @@ export class LocalStore {
     const table = this.tables.get(entity);
     if (!table || !table.has(id)) return false;
     table.delete(id);
+    this.touch(entity, id);
     this.recordTombstone(entity, id, tombstoneSeq);
     return true;
   }
@@ -107,6 +142,7 @@ export class LocalStore {
    */
   revokeRow(entity: string, id: string, tombstoneSeq: number): boolean {
     const removed = this.tables.get(entity)?.delete(id) ?? false;
+    if (removed) this.touch(entity, id);
     this.recordTombstone(entity, id, tombstoneSeq);
     return removed;
   }
@@ -180,6 +216,7 @@ export class LocalStore {
         this.recordTombstone(change.entity, change.row_id, change.seq);
         break;
     }
+    this.touch(change.entity, change.row_id);
   }
 
   /** Apply multiple changes synchronously. Persistence runs fire-
@@ -190,7 +227,7 @@ export class LocalStore {
     for (const change of changes) {
       this.applyChange(change);
     }
-    this.notify();
+    this.notifyEntities(new Set(changes.map((change) => change.entity)));
 
     if (this._persistFn) {
       for (const change of changes) {
@@ -210,7 +247,7 @@ export class LocalStore {
     for (const change of changes) {
       this.applyChange(change);
     }
-    this.notify();
+    this.notifyEntities(new Set(changes.map((change) => change.entity)));
     return changes.map((c) => this.hydrateFromMemory(c));
   }
 
@@ -233,7 +270,7 @@ export class LocalStore {
     for (const change of changes) {
       this.applyChange(change);
     }
-    this.notify();
+    this.notifyEntities(new Set(changes.map((change) => change.entity)));
     let allDurable = true;
     if (this._persistFn) {
       // Sequential await — concurrent IDB writes can resolve out of
@@ -272,15 +309,25 @@ export class LocalStore {
    *  (treated as durable / fire-and-forget). */
   _persistFn: ((change: ChangeEvent) => void | Promise<boolean>) | null = null;
 
-  /** Subscribe to store changes. Returns unsubscribe function. */
-  subscribe(listener: () => void): () => void {
-    this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
+  /** Subscribe globally or to one entity. Global status/reset signals reach both. */
+  subscribe(listener: (entity?: string) => void, entity?: string): () => void {
+    this.listeners.set(listener, entity);
+    return () => {
+      this.listeners.delete(listener);
+    };
   }
 
-  notify(): void {
-    for (const listener of this.listeners) {
-      listener();
+  /** No entity means a global status or reset signal. */
+  notify(entity?: string): void {
+    this.notifyEntities(entity === undefined ? undefined : new Set([entity]));
+  }
+
+  private notifyEntities(entities?: ReadonlySet<string>): void {
+    if (entities?.size === 0) return;
+    const changedEntity =
+      entities?.size === 1 ? entities.values().next().value : undefined;
+    for (const [listener, entity] of this.listeners) {
+      if (!entities || entity === undefined || entities.has(entity)) listener(changedEntity);
     }
   }
 
@@ -291,7 +338,8 @@ export class LocalStore {
       this.tables.set(entity, new Map());
     }
     this.tables.get(entity)!.set(tempId, { id: tempId, ...data });
-    this.notify();
+    this.touch(entity, tempId);
+    this.notify(entity);
     return tempId;
   }
 
@@ -312,7 +360,8 @@ export class LocalStore {
       this.tables.set(entity, new Map());
     }
     this.tables.get(entity)!.set(id, { ...data, id });
-    this.notify();
+    this.touch(entity, id);
+    this.notify(entity);
   }
 
   /**
@@ -327,7 +376,10 @@ export class LocalStore {
    */
   rollbackOptimisticInsert(entity: string, id: string): void {
     const removed = this.tables.get(entity)?.delete(id);
-    if (removed) this.notify();
+    if (removed) {
+      this.touch(entity, id);
+      this.notify(entity);
+    }
   }
 
   /** Apply an optimistic update. */
@@ -337,7 +389,8 @@ export class LocalStore {
     const existing = table.get(id);
     if (existing) {
       table.set(id, { ...existing, ...data });
-      this.notify();
+      this.touch(entity, id);
+      this.notify(entity);
     }
   }
 
@@ -369,7 +422,8 @@ export class LocalStore {
       // Server authoritatively removed this row mid-flight — its
       // deletion outranks our local rollback.
       this.tables.get(entity)?.delete(id);
-      this.notify();
+      this.touch(entity, id);
+      this.notify(entity);
       return;
     }
     if (prev) {
@@ -378,7 +432,8 @@ export class LocalStore {
     } else {
       this.tables.get(entity)?.delete(id);
     }
-    this.notify();
+    this.touch(entity, id);
+    this.notify(entity);
   }
 
   /** Apply an optimistic delete. Block any incoming insert/update
@@ -389,7 +444,8 @@ export class LocalStore {
       this.optimisticTombstones.set(entity, new Set());
     }
     this.optimisticTombstones.get(entity)!.add(id);
-    this.notify();
+    this.touch(entity, id);
+    this.notify(entity);
   }
 
   /**
@@ -409,12 +465,12 @@ export class LocalStore {
    * the engine's cursor stays pinned to the change-log position the
    * reconcile started from.
    */
-  async applyReconcileBatch(
+  applyReconcileInMemory(
     entity: string,
     upserts: Row[],
     removalIds: string[],
     tombstoneSeq: number,
-  ): Promise<void> {
+  ): ChangeEvent[] {
     if (!this.tables.has(entity)) this.tables.set(entity, new Map());
     const table = this.tables.get(entity)!;
     const applied: Array<{ id: string; row: Row }> = [];
@@ -427,6 +483,7 @@ export class LocalStore {
       if (this.isTombstoned(entity, id, tombstoneSeq + 1)) continue;
       const merged = { ...row, id };
       table.set(id, merged);
+      this.touch(entity, id);
       applied.push({ id, row: merged });
     }
     const removed: string[] = [];
@@ -435,36 +492,41 @@ export class LocalStore {
         removed.push(id);
       }
     }
-    if (applied.length > 0 || removed.length > 0) this.notify();
-    // Persist sequentially so disk order matches memory order — same
-    // discipline as applyChangesAsync.
+    if (applied.length > 0 || removed.length > 0) this.notify(entity);
+    return [
+      ...applied.map(({ id, row }): ChangeEvent => ({
+        seq: tombstoneSeq + 1,
+        entity,
+        row_id: id,
+        kind: "insert",
+        data: row,
+        timestamp: "",
+      })),
+      ...removed.map((id): ChangeEvent => ({
+        seq: tombstoneSeq,
+        entity,
+        row_id: id,
+        kind: "delete",
+        timestamp: "",
+      })),
+    ];
+  }
+
+  /** Apply and persist with the single-row fallback for standalone stores. */
+  async applyReconcileBatch(
+    entity: string,
+    upserts: Row[],
+    removalIds: string[],
+    tombstoneSeq: number,
+  ): Promise<void> {
+    const changes = this.applyReconcileInMemory(
+      entity, upserts, removalIds, tombstoneSeq,
+    );
     if (this._persistFn) {
-      for (const { id, row } of applied) {
-        const ev: ChangeEvent = {
-          seq: tombstoneSeq + 1,
-          entity,
-          row_id: id,
-          kind: "insert",
-          data: row,
-          timestamp: "",
-        };
-        const result = this._persistFn(ev);
-        if (result instanceof Promise) await result;
-      }
-      for (const id of removed) {
-        const ev: ChangeEvent = {
-          seq: tombstoneSeq,
-          entity,
-          row_id: id,
-          kind: "delete",
-          data: undefined as unknown as Row,
-          timestamp: "",
-        };
-        const result = this._persistFn(ev);
-        if (result instanceof Promise) await result;
-      }
+      for (const change of changes) await this._persistFn(change);
     }
   }
+
 
   /**
    * Drop every table + tombstone in-place, then notify. Used by the
@@ -472,6 +534,9 @@ export class LocalStore {
    * changed — the old replica reflects a different visible set).
    */
   clearAll(): void {
+    this.resetVersion = ++this.revision;
+    this.versions.clear();
+    this.rowVersions.clear();
     this.tables.clear();
     this.tombstones.clear();
     this.optimisticTombstones.clear();
