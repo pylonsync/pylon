@@ -753,6 +753,19 @@ mod tests {
         (client, listener.accept().unwrap().0)
     }
 
+    fn stalled_socket_pair() -> (TcpStream, TcpStream) {
+        let (reader, writer) = socket_pair();
+        // Bound both buffers so the test frame cannot fit without a reader.
+        // Windows can otherwise accept the whole frame into its send buffer.
+        socket2::SockRef::from(&reader)
+            .set_recv_buffer_size(1024)
+            .unwrap();
+        socket2::SockRef::from(&writer)
+            .set_send_buffer_size(1024)
+            .unwrap();
+        (reader, writer)
+    }
+
     fn tenant_policy() -> PolicyEngine {
         PolicyEngine::from_manifest(&AppManifest {
             policies: vec![pylon_kernel::ManifestPolicy {
@@ -860,7 +873,7 @@ mod tests {
     #[test]
     fn a_blocked_writer_does_not_delay_another_client_or_shard_access() {
         let shard = Arc::new(SseShard::new());
-        let (_slow_reader, slow_writer) = socket_pair();
+        let (_slow_reader, slow_writer) = stalled_socket_pair();
         let (mut healthy_reader, healthy_writer) = socket_pair();
         let counter = Arc::new(IpConnCounter::new(1));
         let ip = "192.0.2.1".parse().unwrap();
@@ -947,7 +960,7 @@ mod tests {
     #[test]
     fn async_deadline_removes_a_stalled_writer_and_releases_its_slot() {
         let shard = Arc::new(SseShard::new());
-        let (_reader, writer) = socket_pair();
+        let (_reader, writer) = stalled_socket_pair();
         let counter = Arc::new(IpConnCounter::new(1));
         let ip = "192.0.2.2".parse().unwrap();
         shard.add(
