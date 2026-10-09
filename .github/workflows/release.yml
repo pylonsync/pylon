@@ -939,6 +939,7 @@ jobs:
               echo "not a version tag ref — nothing to guard"
               echo "pylon=false"   >> "$GITHUB_OUTPUT"
               echo "builder=false" >> "$GITHUB_OUTPUT"
+              echo "dev=false"     >> "$GITHUB_OUTPUT"
               exit 0
               ;;
           esac
@@ -958,6 +959,7 @@ jobs:
           }
           check pylon         pylon
           check pylon-builder builder
+          check pylon-dev     dev
 
       - uses: docker/metadata-action@v5
         id: meta
@@ -986,6 +988,32 @@ jobs:
           # unless Cargo.lock actually changed. mode=max preserves
           # intermediate layers, not just the final image — saves
           # the rust-builder stage's deps cache too.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # pylon-dev: the cloud dev-workspace image, the runtime image just
+      # pushed plus the coding agent's browser and web search
+      # (docker/dev.Dockerfile). Customer apps never boot it, so Chromium
+      # stays out of the runtime image.
+      - uses: docker/metadata-action@v5
+        id: meta-dev
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/pylon-dev
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+      - uses: docker/build-push-action@v6
+        if: steps.immutable.outputs.dev != 'true'
+        with:
+          context: .
+          file: docker/dev.Dockerfile
+          build-args: |
+            PYLON_IMAGE=ghcr.io/${{ github.repository_owner }}/pylon:${{ steps.meta.outputs.version }}
+          push: true
+          tags: ${{ steps.meta-dev.outputs.tags }}
+          labels: ${{ steps.meta-dev.outputs.labels }}
+          platforms: linux/amd64
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
