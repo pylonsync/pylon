@@ -71,13 +71,19 @@ fn app_dir(tag: &str, files: &[(&str, &str)]) -> PathBuf {
 
 fn start_runner(dir: &Path) -> FnRunner {
     let runner = FnRunner::new(16);
-    let script = format!(
-        "cd '{}' && exec bun '{}' functions",
-        dir.display(),
-        runtime_ts().display()
-    );
+    let runtime = runtime_ts();
+    // Start Bun directly so kill/wait reaps the process that holds the files.
+    // A shell can retain a separate Bun child on Windows.
     runner
-        .start("sh", &["-c", &script])
+        .start(
+            "bun",
+            &[
+                "--cwd",
+                dir.to_str().unwrap(),
+                runtime.to_str().unwrap(),
+                "functions",
+            ],
+        )
         .expect("bun runtime starts");
     runner
 }
