@@ -568,9 +568,10 @@ pub fn start_sse_server(
         let auth = Arc::clone(&auth);
         let cookie_name = cookie_name.clone();
         let cookie_trust = Arc::clone(&cookie_trust);
+        // Authentication and first-use async runtime setup need the default
+        // thread stack. This thread exits after it registers the connection.
         thread::Builder::new()
             .name("sse-accept".into())
-            .stack_size(64 * 1024)
             .spawn(move || {
                 handle_sse_connection(hub, &auth, &cookie_name, &cookie_trust, stream, guard);
             })
