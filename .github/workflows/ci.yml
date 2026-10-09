@@ -574,7 +574,10 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        # The official image from Amazon's public mirror of Docker Hub. Pulls
+        # from Docker Hub without an account hit its rate limit, which GitHub
+        # runners share, and failed the job before any test ran.
+        image: public.ecr.aws/docker/library/postgres:16
         env:
           POSTGRES_PASSWORD: postgres
         ports:
