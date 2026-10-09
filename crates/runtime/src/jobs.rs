@@ -2013,11 +2013,12 @@ mod tests {
             );
             let id = delayed(&q, 0);
             let worker_q = Arc::clone(&q);
-            let worker = std::thread::spawn(move || worker_q.process_one());
+            let worker =
+                std::thread::spawn(move || worker_q.process_one_with_timeout(Duration::ZERO));
             let cancelled = q.cancel_pending(&id).unwrap();
             worker.join().unwrap();
             // Drain anything the worker missed so a lost job would show.
-            while q.process_one() {}
+            while q.process_one_with_timeout(Duration::ZERO) {}
             let runs = ran.load(Ordering::SeqCst);
             assert_eq!(
                 runs + u64::from(cancelled),

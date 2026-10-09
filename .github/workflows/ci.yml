@@ -161,22 +161,16 @@ jobs:
         if: matrix.os == 'windows-latest'
         timeout-minutes: 45
         uses: ./.github/actions/setup-xmlsec-windows
-      # PYLON_RUN_XMLSEC_SIGN_TESTS opts in to the SAML cert-trust
-      # regression tests on Linux. They're #[ignore]'d by default
-      # because samael's IdP signing path SIGSEGVs on macOS dev boxes
-      # (Homebrew xmlsec1 + OpenSSL 3 interop). --include-ignored
-      # forces them to run when the env opt-in is set.
-      - name: cargo test (Linux — includes xmlsec sign tests)
+      # The C# live sign-in test runs in wasm-shard-smoke with a required SDK.
+      # Manual benchmarks and load tests stay ignored in this debug build.
+      - name: cargo test
+        run: cargo test --workspace --all-targets -- --test-threads=1 --skip the_csharp_client_signs_in_with_apple_google_and_steam
+      # Only the SAML signature tests need the Linux xmlsec opt-in.
+      - name: SAML certificate trust
         if: matrix.os == 'ubuntu-latest'
         env:
           PYLON_RUN_XMLSEC_SIGN_TESTS: "1"
-        run: cargo test --workspace --all-targets -- --test-threads=1 --include-ignored
-      - name: cargo test (macOS — skips ignored)
-        if: matrix.os == 'macos-latest'
-        run: cargo test --workspace --all-targets -- --test-threads=1
-      - name: cargo test (Windows — skips ignored)
-        if: matrix.os == 'windows-latest'
-        run: cargo test --workspace --all-targets -- --test-threads=1
+        run: cargo test -p pylon-auth --test saml_cert_trust -- --test-threads=1 --ignored
       # Linux only. `--all-targets` excludes doctests, so this is a SECOND
       # full compilation of the workspace — and on Windows that pass was
       # taking longer than everything else in the matrix combined. Doc
