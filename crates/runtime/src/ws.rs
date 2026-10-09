@@ -1826,9 +1826,13 @@ pub fn start_ws_server(
         let fetcher = snapshot_fetcher.clone();
         let reactive_cl = reactive.as_ref().map(Arc::clone);
         let rooms_cl = rooms.as_ref().map(Arc::clone);
+        // 256 KiB, like the server's stream threads. 64 KiB overflowed on
+        // Windows debug builds once connection setup grew (ws_live_fanout:
+        // "thread 'ws-client' has overflowed its stack"). The size is
+        // reserved address space; pages are committed only as used.
         let spawn_result = thread::Builder::new()
             .name("ws-client".into())
-            .stack_size(64 * 1024)
+            .stack_size(256 * 1024)
             .spawn(move || {
                 let _conn_slot = guard;
                 handle_ws_connection(
