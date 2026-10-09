@@ -471,6 +471,14 @@ mod tests {
         )
         .unwrap();
 
+        let facet_rows = || -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM \"_facet_bitmap\" WHERE entity = 'Product' AND facet = 'brand' AND value = 'Nike'",
+                [], |r| r.get(0),
+            ).unwrap()
+        };
+        assert_eq!(facet_rows(), 1);
+
         // Should succeed — no FTS delete attempted.
         apply_delete(
             &conn,
@@ -480,6 +488,7 @@ mod tests {
             &cfg,
         )
         .unwrap();
+        assert_eq!(facet_rows(), 0);
     }
 
     #[test]

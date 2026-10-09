@@ -112,9 +112,13 @@ describe("mutation owner", () => {
   }, 10_000);
 
   test("after a reload while signed out, the previous user's queued writes are not pushed", async () => {
+    let pushCalls = 0;
     globalThis.fetch = (async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.includes("/api/sync/push")) throw new Error("must not push");
+      if (url.includes("/api/sync/push")) {
+        pushCalls += 1;
+        throw new Error("must not push");
+      }
       const body = url.includes("/api/sync/pull")
         ? { changes: [], cursor: { last_seq: 0 }, has_more: false }
         : url.includes("/api/auth/me")
@@ -150,6 +154,7 @@ describe("mutation owner", () => {
     });
     await engine.start();
     await engine.push();
+    expect(pushCalls).toBe(0);
     expect(engine.pendingCount()).toBe(1);
     expect(engine.mutations.pending()[0]!.owner).toBe("u1");
     engine.stop();

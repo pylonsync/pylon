@@ -1029,13 +1029,16 @@ mod advisory_lock_tests {
     use super::*;
 
     #[test]
-    fn key_pair_is_deterministic() {
-        // Same input → same i32 pair, every call. Required so two
-        // concurrent mutations holding the SAME logical key actually
-        // collide on `pg_advisory_xact_lock`.
-        let a = pg_advisory_key_pair("org_count:user_alice");
-        let b = pg_advisory_key_pair("org_count:user_alice");
-        assert_eq!(a, b);
+    fn key_pairs_remain_compatible_across_versions() {
+        // A changed hash would let old and new processes take different locks.
+        for (key, expected) in [
+            ("", (-2078137563, -873292572)),
+            ("org_count:user_alice", (-1616306931, 252366960)),
+            ("project_count:org_acme", (721971121, -2039628656)),
+            ("tenant:λ", (-1118324218, 1088213909)),
+        ] {
+            assert_eq!(pg_advisory_key_pair(key), expected, "{key}");
+        }
     }
 
     #[test]
@@ -1049,13 +1052,6 @@ mod advisory_lock_tests {
         assert_ne!(a, b);
         assert_ne!(a, c);
         assert_ne!(b, c);
-    }
-
-    #[test]
-    fn empty_key_does_not_panic() {
-        // Defensive: callers shouldn't pass empty strings, but we
-        // shouldn't crash on it either — produce a stable hash.
-        let _ = pg_advisory_key_pair("");
     }
 }
 

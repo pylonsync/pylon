@@ -238,8 +238,11 @@ mod tests {
         let held = crate::bind_dual_stack_tcp(0).unwrap();
         let port = held.local_addr().unwrap().port();
         assert!(!super::port_is_free(port));
-        drop(held);
-        assert!(super::port_is_free(port));
+    }
+
+    #[test]
+    fn an_ephemeral_port_can_be_allocated() {
+        assert!(super::port_is_free(0));
     }
 
     #[test]

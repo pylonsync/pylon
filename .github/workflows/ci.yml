@@ -606,10 +606,16 @@ jobs:
       - name: Tests against Postgres
         env:
           PYLON_TEST_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
+          TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/postgres
         run: |
           # One thread: these tests share one database and recreate tables.
           cargo test -p pylon-runtime --test postgres_backend -- --test-threads=1
           cargo test -p pylon-runtime --test crdt_parity -- --test-threads=1
+          cargo test -p pylon-runtime --test postgres_auth_backends -- --test-threads=1
+          cargo test -p pylon-runtime --test filtered_count -- --test-threads=1
+          cargo test -p pylon-runtime --test postgres_change_log -- --test-threads=1
+          cargo test -p pylon-runtime --lib pg_workflow_store -- --test-threads=1
+          cargo test -p pylon-storage --features postgres-live --test postgres_performance --test postgres_live -- --test-threads=1
           cargo test -p pylon-runtime --lib shard_cluster
           cargo test -p pylon-runtime --lib shard_wasm::lease_tests
           cargo test -p pylon-runtime --lib shard_wasm::transfer::tests

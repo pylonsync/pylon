@@ -205,7 +205,11 @@ echo "→ 2b. the shard port: a WebSocket to b's shard port (+3) reaches a"
 curl -si --max-time 3 "http://127.0.0.1:$((PORT_B + 3))/?shard=replay-check&sid=port-check&v=2" \
 	-H "Upgrade: websocket" -H "Connection: Upgrade" \
 	-H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Sec-WebSocket-Version: 13" >/dev/null 2>&1 || true
-wait_log a.log "GET /shard?shard=replay-check&sid=port-check" 5
+# Request logs omit query parameters because they can contain credentials.
+wait_log a.log "GET /shard 101" 5
+if grep -q 'sid=port-check' "$TMP/a.log"; then
+	fail "the request log exposed a query parameter"
+fi
 
 echo "→ 2c. transfer: a player moves from a zone on a to one on b"
 (cd "$ROOT/packages/realtime" &&

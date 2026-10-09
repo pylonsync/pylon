@@ -367,36 +367,22 @@ describe("Fix C: race election || auth/me", () => {
   });
 
   test("two tabs racing election: only the leader applies its bootstrap session", async () => {
-    // Multi-tab integration: two engines share a BroadcastChannel (Bun
-    // provides one in its test runtime). Both kick off
-    // fetchSessionBootstrap in parallel. Both fetches land — the
-    // network fetch isn't leader-gated; that's the whole speedup —
-    // but only the engine that won the election routes the result
-    // into the resolver via applySessionTransition. The follower's
-    // result is discarded by start().
-    //
-    // This test pins the invariant: a follower MUST NOT commit a
-    // session it fetched during the parallel bootstrap. If a future
-    // refactor "simplifies" the bootstrap back to gating the fetch on
-    // isMultiTabLeader, no behavior changes here (the test still
-    // passes); if the refactor instead drops the leader check at the
-    // APPLY point, follower starts double-committing — and this test
-    // fails because the follower would call applySessionTransition
-    // which broadcasts back to the leader.
-
+    // The follower's later response must not replace the leader's session.
     const appName = "boot-race-" + Math.random().toString(36).slice(2);
     let authMeHits = 0;
+    let releaseFollower!: () => void;
+    const followerResponse = new Promise<void>((resolve) => { releaseFollower = resolve; });
     const original = globalThis.fetch;
     globalThis.fetch = (async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
       if (url.endsWith("/api/auth/me")) {
-        authMeHits += 1;
-        await new Promise((r) => setTimeout(r, 10));
+        const request = ++authMeHits;
+        if (request === 2) await followerResponse;
         return {
           ok: true,
           status: 200,
           json: async () => ({
-            user_id: "u1",
+            user_id: request === 1 ? "leader-user" : "stale-follower-user",
             tenant_id: null,
             is_admin: false,
             roles: [],
@@ -452,6 +438,7 @@ describe("Fix C: race election || auth/me", () => {
     const startB = b.start();
 
     await Promise.all([startA, startB]);
+    releaseFollower();
     // Let any trailing broadcasts / poll ticks settle.
     await new Promise((r) => setTimeout(r, 100));
 
@@ -469,42 +456,54 @@ describe("Fix C: race election || auth/me", () => {
     const aSession = a.session.signature();
     const bSession = b.session.signature();
     expect(bSession).toBe(aSession);
-    // Both saw auth/me at most once each (no retry storm).
-    expect(authMeHits).toBeGreaterThanOrEqual(1);
-    expect(authMeHits).toBeLessThanOrEqual(2);
+    expect(a.session.resolved().userId).toBe("leader-user");
+    expect(authMeHits).toBe(2);
 
     a.stop();
     b.stop();
   });
 });
 
-// ---------------------------------------------------------------------------
-// Fix D — Fire-and-forget saveCursor on bootstrap
-//
-// The behavioral change is purely "didn't block start()". Hard to assert
-// directly without timing flakiness; instead pin the invariant that
-// start() completes even when saveCursor is artificially slow.
-// ---------------------------------------------------------------------------
-
-describe("Fix D: fire-and-forget bootstrap saveCursor", () => {
-  // This is the lightest-weight assertion that pins the fix: the
-  // bootstrap call site uses `void this.persistence.saveCursor(...)`,
-  // not `await`. We can't easily install a slow persistence layer into
-  // an engine that explicitly opted out of persistence, so the
-  // regression coverage here is the AST shape — verified by reading
-  // the file and asserting the call is not awaited.
-  test("source uses void (not await) for the bootstrap saveCursor", async () => {
-    const path = new URL("./index.ts", import.meta.url).pathname;
-    const src = await Bun.file(path).text();
-    // Find the bootstrap save block.
-    const marker = "// Save cursor after pull.";
-    const idx = src.indexOf(marker);
-    expect(idx).toBeGreaterThan(0);
-    const window = src.slice(idx, idx + 800);
-    // The fixed form uses `void this.persistence.saveCursor`; the
-    // pre-fix form was `await this.persistence.saveCursor`. Pin both
-    // sides of that change so a revert fails clearly.
-    expect(window).toContain("void this.persistence.saveCursor(this.cursor)");
-    expect(window).not.toContain("await this.persistence.saveCursor");
+describe("bootstrap cursor persistence", () => {
+  test("startup completes while the final cursor save is pending", async () => {
+    let release!: (saved: boolean) => void;
+    const pendingSave = new Promise<boolean>((resolve) => { release = resolve; });
+    let saves = 0;
+    const restoreFetch = installFetch(async (url) => ({
+      status: 200,
+      body: url.includes("/api/auth/me")
+        ? { user_id: null }
+        : { changes: [], cursor: { last_seq: 0 }, has_more: false },
+    }));
+    const engine = new SyncEngine({
+      baseUrl: "http://stub.invalid",
+      multiTab: false,
+      transport: "poll",
+      pollInterval: 1e9,
+      persistence: {
+        open: async () => {},
+        loadSnapshot: async () => ({ entities: {}, cursor: null, hadCache: false }),
+        loadIdentity: async () => null,
+        saveIdentity: async () => true,
+        saveCursor: () => { saves += 1; return pendingSave; },
+        saveRow: async () => true,
+        deleteRow: async () => true,
+        clear: async () => true,
+      },
+    });
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const result = await Promise.race([
+        engine.start().then(() => "started"),
+        new Promise<string>((resolve) => { timeout = setTimeout(() => resolve("blocked"), 1000); }),
+      ]);
+      expect(result).toBe("started");
+      expect(saves).toBeGreaterThan(0);
+    } finally {
+      clearTimeout(timeout);
+      release(true);
+      engine.stop();
+      restoreFetch();
+    }
   });
 });

@@ -92,9 +92,13 @@ describe("mutation owner and the bearer token", () => {
   }, 10_000);
 
   test("a session that expired across a reload keeps the user's queued writes", async () => {
+    let pushCalls = 0;
     globalThis.fetch = (async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.includes("/api/sync/push")) throw new Error("must not push");
+      if (url.includes("/api/sync/push")) {
+        pushCalls += 1;
+        throw new Error("must not push");
+      }
       const body = url.includes("/api/auth/me")
         ? { user_id: null }
         : { changes: [], cursor: { last_seq: 0 }, has_more: false };
@@ -124,6 +128,7 @@ describe("mutation owner and the bearer token", () => {
     });
     await engine.start();
     await engine.push();
+    expect(pushCalls).toBe(0);
     expect(engine.pendingCount()).toBe(1);
     engine.stop();
     reopened.connection?.close();

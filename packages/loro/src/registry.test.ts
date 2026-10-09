@@ -148,7 +148,7 @@ test("two registries hydrated from snapshots converge after exchange", () => {
   const aText = a.doc("Note", "n1").getText("body").toString();
   const bText = b.doc("Note", "n1").getText("body").toString();
   expect(aText).toBe(bText);
-  expect(aText.length).toBeGreaterThan(0);
+  expect([...aText].sort()).toEqual([..."from-afrom-b"].sort());
 });
 
 test("touch bumps the version and notifies — optimistic local renders", () => {

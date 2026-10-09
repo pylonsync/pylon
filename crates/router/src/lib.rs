@@ -8714,50 +8714,85 @@ mod consolidation_tests {
     /// replica indefinitely.
     #[test]
     fn pull_synthesizes_delete_for_visibility_revoked_update() {
-        // A caller authenticated as user "u_old". The change log
-        // has an Update event that moves the row from owner=u_old
-        // to owner=u_new (post denies, pre allows). Pull MUST
-        // return a Delete tombstone at that seq.
-        let auth = AuthContext {
-            user_id: Some("u_old".into()),
-            is_admin: false,
-            ..AuthContext::anonymous()
+        let manifest = pylon_kernel::AppManifest {
+            entities: vec![serde_json::from_value(serde_json::json!({
+                "name": "Doc", "fields": [{"name": "ownerId", "type": "string", "optional": false, "unique": false}], "indexes": []
+            }))
+            .unwrap()],
+            policies: vec![pylon_kernel::ManifestPolicy {
+                name: "owner".into(),
+                entity: Some("Doc".into()),
+                allow_read: Some("auth.userId == data.ownerId".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
         };
-        with_ctx(true, &auth, |ctx| {
-            // Seed the change log directly with a typed Update
-            // record carrying prev_data — bypasses the store
-            // (StubDataStore::update is a no-op) and exercises
-            // the pull filter in isolation.
-            ctx.change_log.record(
-                "Doc",
-                "d1",
-                pylon_sync::ChangeRecord::Update {
-                    row: serde_json::json!({"id": "d1", "ownerId": "u_new"}),
-                    prev: Some(serde_json::json!({"id": "d1", "ownerId": "u_old"})),
-                },
-            );
-            // Caller pulls. We use since=0 so we hit the regular
-            // delta path (the snapshot branch would short-circuit
-            // through entity list).
-            let (_status, body, _ct) =
-                route(ctx, HttpMethod::Get, "/api/sync/pull?since=0", "", None);
-            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
-            let changes = parsed["changes"]
-                .as_array()
-                .expect("pull response carries changes array");
-            // Pure-test policy engine doesn't actually evaluate the
-            // ownership predicate, so the synthesized-Delete branch
-            // would only fire if the test harness had a real policy
-            // engine. What we CAN pin here is that pull's response
-            // never leaks `prev_data` to the wire — the filter must
-            // strip it from any kept event.
-            for ch in changes {
-                assert!(
-                    ch.get("prev_data").is_none(),
-                    "pull response must not leak prev_data, got {ch:?}",
+        let policy = pylon_policy::PolicyEngine::from_manifest(&manifest);
+        let store = ExistingRowStore { manifest };
+        for (user, expected_kind) in [
+            ("u_old", Some("delete")),
+            ("u_new", Some("update")),
+            ("unrelated", None),
+        ] {
+            let auth = AuthContext::authenticated(user.into());
+            with_ctx(false, &auth, |base| {
+                let ctx = RouterContext {
+                    store: &store,
+                    policy_engine: &policy,
+                    response_headers: RefCell::new(Vec::new()),
+                    ..*base
+                };
+                // A nonzero cursor selects the delta path.
+                let before = ctx.change_log.record(
+                    "Doc",
+                    "prior",
+                    pylon_sync::ChangeRecord::Insert {
+                        row: serde_json::json!({"id": "prior", "ownerId": "u_old"}),
+                    },
                 );
-            }
-        });
+                let event = ctx.change_log.record(
+                    "Doc",
+                    "d1",
+                    pylon_sync::ChangeRecord::Update {
+                        row: serde_json::json!({"id": "d1", "ownerId": "u_new"}),
+                        prev: Some(serde_json::json!({"id": "d1", "ownerId": "u_old"})),
+                    },
+                );
+                let (status, body, _) = route(
+                    &ctx,
+                    HttpMethod::Get,
+                    &format!("/api/sync/pull?since={}", before.seq),
+                    "",
+                    None,
+                );
+                assert_eq!(status, 200, "{body}");
+                let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+                let changes = parsed["changes"].as_array().unwrap();
+                assert_eq!(parsed["cursor"]["last_seq"], event.seq);
+                if let Some(kind) = expected_kind {
+                    assert_eq!(changes.len(), 1, "{user}: {body}");
+                    let change = &changes[0];
+                    assert_eq!(change["kind"], kind);
+                    assert_eq!(change["seq"], event.seq);
+                    assert_eq!(change["entity"], "Doc");
+                    assert_eq!(change["row_id"], "d1");
+                    assert!(change.get("prev_data").is_none());
+                    if kind == "delete" {
+                        assert_eq!(
+                            change["data"],
+                            serde_json::json!({"id":"d1", "ownerId":"u_old"})
+                        );
+                    } else {
+                        assert_eq!(
+                            change["data"],
+                            serde_json::json!({"id":"d1", "ownerId":"u_new"})
+                        );
+                    }
+                } else {
+                    assert!(changes.is_empty(), "{body}");
+                }
+            });
+        }
     }
 }
 

@@ -471,12 +471,16 @@ mod tests {
         let mut t = table();
         let good = datagram(1, 0.5, &[(1, 1, [Some(1), Some(2), None])]);
         for cut in 0..good.len() {
-            let _ = t.clone().apply_datagram(&good[..cut]);
+            assert!(
+                t.clone().apply_datagram(&good[..cut]).is_err(),
+                "accepted datagram truncated at byte {cut}"
+            );
         }
         assert!(
             t.apply_datagram(&[1, 0, 0]).is_err(),
             "a frame, not a datagram"
         );
+        assert!(t.clone().apply_datagram(&good).is_ok());
         let mut extra = good.clone();
         extra.push(0);
         assert!(t.apply_datagram(&extra).is_err());

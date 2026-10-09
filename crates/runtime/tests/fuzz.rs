@@ -423,14 +423,24 @@ fn workflow_mixed_action_sequence() {
         serde_json::json!({"action": "complete", "output": {"done": true}}),
     ];
 
-    for resp in responses {
-        let status = engine.advance_with_response(&id, resp);
-        // Should never panic -- Ok or Err.
-        assert!(status.is_ok() || status.is_err());
+    let expected = [
+        WorkflowStatus::Running,
+        WorkflowStatus::Sleeping,
+        WorkflowStatus::Running,
+        WorkflowStatus::Running,
+        WorkflowStatus::Running,
+        WorkflowStatus::Completed,
+    ];
+    for (resp, expected) in responses.into_iter().zip(expected) {
+        assert_eq!(engine.advance_with_response(&id, resp).unwrap(), expected);
     }
 
     let wf = engine.get(&id).unwrap();
     assert_eq!(wf.status, WorkflowStatus::Completed);
+    assert_eq!(wf.output, Some(serde_json::json!({"done": true})));
+    assert_eq!(wf.steps.len(), 4);
+    assert_eq!(wf.steps[2].error.as_deref(), Some("oops"));
+    assert_eq!(wf.steps[3].output, Some(serde_json::json!("recovered")));
 }
 
 /// Malformed action responses should produce errors, not panics.

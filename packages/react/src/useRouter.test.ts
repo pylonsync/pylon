@@ -14,10 +14,6 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { NotFoundError, notFound, redirect } from "./useRouter";
 
 describe("notFound() — branded for the SSR not-found boundary", () => {
-  test("throws a NotFoundError", () => {
-    expect(() => notFound()).toThrow(NotFoundError);
-  });
-
   test("the thrown error carries the exact digest the runtime keys on", () => {
     // This string is the cross-package contract: ssr-runtime.ts's
     // `asRouteControl` matches `err.digest === "PYLON_NOT_FOUND"`. If this
@@ -31,17 +27,6 @@ describe("notFound() — branded for the SSR not-found boundary", () => {
     }
     expect(caught).toBeInstanceOf(NotFoundError);
     expect((caught as NotFoundError).digest).toBe("PYLON_NOT_FOUND");
-  });
-
-  test("notFound() never returns (control always throws)", () => {
-    let reached = false;
-    try {
-      notFound();
-      reached = true;
-    } catch {
-      /* expected */
-    }
-    expect(reached).toBe(false);
   });
 });
 

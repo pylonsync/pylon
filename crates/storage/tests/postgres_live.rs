@@ -338,13 +338,18 @@ fn killed_backend_heals_on_next_checkout() {
     // Works before we sever anything.
     store.list("PgTodo").expect("list before kill");
 
-    // Kill the only pooled backend from the server side. The execute itself
-    // errors (the connection dies under it); the now-dead adapter returns to
-    // the pool flagged closed.
-    let _ = store.with_client(|c| {
-        let _ = c.execute("SELECT pg_terminate_backend(pg_backend_pid())", &[]);
-        Ok::<(), DataError>(())
-    });
+    let backend_pid = || {
+        store.with_client(|c| {
+            c.query_one("SELECT pg_backend_pid()", &[])
+                .map(|row| row.get::<_, i32>(0))
+                .map_err(|e| DataError {
+                    code: "PG_TEST".into(),
+                    message: e.to_string(),
+                })
+        })
+    };
+    let old_pid = backend_pid().expect("original backend PID");
+    terminate_backend(&url, old_pid);
 
     // The next checkout must reconnect the dead slot. Retry a few times: if the
     // connection wasn't flagged closed in time on the first attempt, the failed
@@ -370,6 +375,7 @@ fn killed_backend_heals_on_next_checkout() {
         "pool never reconnected the killed backend; last error: {:?}",
         last_err.map(|e| e.message)
     );
+    assert_ne!(backend_pid().expect("replacement backend PID"), old_pid);
 }
 
 /// The auxiliary auth backends (sessions, API keys, OAuth state, …) hold ONE
@@ -392,9 +398,14 @@ fn reconnecting_client_heals_after_backend_kill() {
     conn.with_client(|c| c.execute("SELECT 1", &[]))
         .expect("query before kill");
 
-    // Server-side kill — the same shape as an idle-timeout reap. The
-    // statement itself errors (its own backend died under it), which is fine.
-    let _ = conn.with_client(|c| c.execute("SELECT pg_terminate_backend(pg_backend_pid())", &[]));
+    let backend_pid = || {
+        conn.with_client(|c| {
+            c.query_one("SELECT pg_backend_pid()", &[])
+                .map(|row| row.get::<_, i32>(0))
+        })
+    };
+    let old_pid = backend_pid().expect("original backend PID");
+    terminate_backend(&url, old_pid);
 
     // The wrapper must reconnect and serve subsequent operations. Retry a few
     // times: the client may need one failed op to notice the dead socket.
@@ -417,4 +428,14 @@ fn reconnecting_client_heals_after_backend_kill() {
         healed,
         "ReconnectingPgClient never healed after backend kill; last error: {last_err:?}"
     );
+    assert_ne!(backend_pid().expect("replacement backend PID"), old_pid);
+}
+
+fn terminate_backend(url: &str, pid: i32) {
+    let mut control = postgres::Client::connect(url, postgres::NoTls).expect("control connection");
+    let terminated: bool = control
+        .query_one("SELECT pg_terminate_backend($1, 5000)", &[&pid])
+        .expect("terminate the test connection")
+        .get(0);
+    assert!(terminated, "backend {pid} was not terminated");
 }
