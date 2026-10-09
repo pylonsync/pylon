@@ -260,6 +260,7 @@ HASHES=$(grep -o '"certHashes":\[[^]]*\]' <<<"$INFO" | grep -o '"[A-Za-z0-9+/=]\
 	echo "$INFO" >&2
 	fail "h lists $HASHES certificate hashes, not its 2 and i's 2"
 }
+B_UPGRADES_BEFORE=$(grep -c "GET /shard 101" "$TMP/b.log" || true)
 BENCH=$("$PYLON" bench shard --url "http://127.0.0.1:$PORT_H" --transport webtransport \
 	--join joinFrontier --join-args '{"frontier":"wt-relay","size":400,"machine":"b"}' \
 	--bots 5 --duration 6 --ramp 1 --drop-datagrams 20 \
@@ -275,7 +276,9 @@ grep -Eq '"frames":[0-9]{2,}' <<<"$BENCH" && grep -Eq '"inputs_acked":[1-9]' <<<
 	echo "$BENCH" >&2
 	fail "WebTransport through h: no state or no acks"
 }
-grep -q "GET /shard?shard=wt-relay" "$TMP/b.log" || fail "b did not serve the relayed sessions"
+grep -Fq "[shard wt-relay] started (frontier)" "$TMP/b.log" || fail "b did not start the relayed shard"
+B_UPGRADES_AFTER=$(grep -c "GET /shard 101" "$TMP/b.log" || true)
+(( B_UPGRADES_AFTER - B_UPGRADES_BEFORE >= 5 )) || fail "b did not serve all five relayed sessions"
 kill "$PID_H" "$PID_I"
 
 echo "→ 3. e2e: create on b through a, connect through a, kill b"
