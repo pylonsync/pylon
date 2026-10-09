@@ -119,7 +119,6 @@ impl SseShard {
         guard: Option<IpConnGuard>,
         timeout: Option<Duration>,
     ) {
-        use tokio::io::AsyncWriteExt;
         let Some(runtime) = crate::io_runtime::runtime() else {
             return;
         };
@@ -127,10 +126,23 @@ impl SseShard {
             return;
         }
         let entered = runtime.enter();
-        let Ok(mut stream) = tokio::net::TcpStream::from_std(stream) else {
+        let Ok(stream) = tokio::net::TcpStream::from_std(stream) else {
             return;
         };
         drop(entered);
+        self.add_writer(id, stream, auth, guard, timeout, runtime);
+    }
+
+    fn add_writer<W: tokio::io::AsyncWrite + Unpin + Send + 'static>(
+        self: &Arc<Self>,
+        id: u64,
+        mut stream: W,
+        auth: AuthContext,
+        guard: Option<IpConnGuard>,
+        timeout: Option<Duration>,
+        runtime: &tokio::runtime::Runtime,
+    ) {
+        use tokio::io::AsyncWriteExt;
         let (tx, mut rx) = tokio::sync::mpsc::channel::<SseFrame>(CLIENT_QUEUE_DEPTH);
         let shard = Arc::downgrade(self);
         // Hold the map lock until registration completes. A writer that fails
@@ -753,19 +765,6 @@ mod tests {
         (client, listener.accept().unwrap().0)
     }
 
-    fn stalled_socket_pair() -> (TcpStream, TcpStream) {
-        let (reader, writer) = socket_pair();
-        // Bound both buffers so the test frame cannot fit without a reader.
-        // Windows can otherwise accept the whole frame into its send buffer.
-        socket2::SockRef::from(&reader)
-            .set_recv_buffer_size(1024)
-            .unwrap();
-        socket2::SockRef::from(&writer)
-            .set_send_buffer_size(1024)
-            .unwrap();
-        (reader, writer)
-    }
-
     fn tenant_policy() -> PolicyEngine {
         PolicyEngine::from_manifest(&AppManifest {
             policies: vec![pylon_kernel::ManifestPolicy {
@@ -873,16 +872,17 @@ mod tests {
     #[test]
     fn a_blocked_writer_does_not_delay_another_client_or_shard_access() {
         let shard = Arc::new(SseShard::new());
-        let (_slow_reader, slow_writer) = stalled_socket_pair();
+        let (_slow_reader, slow_writer) = tokio::io::duplex(64);
         let (mut healthy_reader, healthy_writer) = socket_pair();
         let counter = Arc::new(IpConnCounter::new(1));
         let ip = "192.0.2.1".parse().unwrap();
-        shard.add(
+        shard.add_writer(
             1,
             slow_writer,
             AuthContext::user("slow".into()).with_tenant("a".into()),
             counter.acquire(ip),
             None,
+            crate::io_runtime::runtime().unwrap(),
         );
         shard.add(
             2,
@@ -960,15 +960,16 @@ mod tests {
     #[test]
     fn async_deadline_removes_a_stalled_writer_and_releases_its_slot() {
         let shard = Arc::new(SseShard::new());
-        let (_reader, writer) = stalled_socket_pair();
+        let (_reader, writer) = tokio::io::duplex(64);
         let counter = Arc::new(IpConnCounter::new(1));
         let ip = "192.0.2.2".parse().unwrap();
-        shard.add(
+        shard.add_writer(
             1,
             writer,
             AuthContext::anonymous(),
             counter.acquire(ip),
             Some(Duration::from_millis(50)),
+            crate::io_runtime::runtime().unwrap(),
         );
         let huge: Arc<str> = Arc::from("x".repeat(16 * 1024 * 1024));
         assert!(shard
