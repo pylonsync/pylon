@@ -2780,6 +2780,8 @@ fn start_server(
         runtime.clone() as Arc<dyn pylon_http::DataStore>,
         runtime.manifest().auth.org.clone(),
     ));
+    // Re-runs the federated org mirror while users stay signed in.
+    let org_resync = pylon_router::OrgResync::new(Arc::clone(&orgs), Arc::clone(&account_store));
     let siwe = auth_stores.siwe;
     let phone_codes = auth_stores.phone_codes;
     let passkeys = auth_stores.passkeys;
@@ -4398,6 +4400,7 @@ fn start_server(
         let account_store = Arc::clone(&account_store);
         let api_keys = Arc::clone(&api_keys);
         let orgs = Arc::clone(&orgs);
+        let org_resync = org_resync.clone();
         let siwe = Arc::clone(&siwe);
         let phone_codes = Arc::clone(&phone_codes);
         let passkeys = Arc::clone(&passkeys);
@@ -4470,6 +4473,7 @@ fn start_server(
         let acc = Arc::clone(&account_store);
         let ak = Arc::clone(&api_keys);
         let og = Arc::clone(&orgs);
+        let ors = org_resync.clone();
         let sw = Arc::clone(&siwe);
         let pcd = Arc::clone(&phone_codes);
         let pks = Arc::clone(&passkeys);
@@ -9627,6 +9631,7 @@ fn start_server(
                     account_store: &acc,
                     api_keys: &ak,
                     orgs: &og,
+                    org_resync: Some(&ors),
                     siwe: &sw,
                     phone_codes: &pcd,
                     passkeys: &pks,

@@ -3,7 +3,8 @@
 //!
 //! A Pylon IdP puts the user's org memberships in the `orgs` claim
 //! (`[{ id, name, slug?, role }]`, see [`crate::ExternalOrg`]). On every
-//! login through the configured provider the relying app reconciles its
+//! login through the configured provider, and again while the user stays
+//! signed in (pylon-router's `org_resync`), the relying app reconciles its
 //! local Org rows and memberships against that claim:
 //!
 //!   - an org in the claim with no local mirror is created (keyed by the

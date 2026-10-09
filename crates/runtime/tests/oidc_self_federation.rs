@@ -568,6 +568,77 @@ fn pylon_client_signs_in_against_pylon_idp() {
             .unwrap_or(false),
         "userinfo orgs claim: {info}"
     );
+
+    // ── 6. An org created upstream after sign-in, no new login. ─────────
+    let (status, _, _, body) = http_request(
+        "POST",
+        &format!("{origin}/api/auth/orgs"),
+        Some(r#"{"name":"Second Org"}"#),
+        &idp_auth_ref,
+    );
+    assert_eq!(status, 200, "second upstream org: {body}");
+    let second: serde_json::Value = serde_json::from_str(&body).expect("org json");
+    let second_id = second["id"].as_str().expect("org id").to_string();
+
+    let app_cookie = [("Cookie", app_jar.as_str())];
+    let (status, _, _, body) = http_request(
+        "POST",
+        &format!("{origin}/api/auth/orgs/refresh"),
+        Some("{}"),
+        &app_cookie,
+    );
+    assert_eq!(status, 200, "org refresh with the app session: {body}");
+    let report: serde_json::Value = serde_json::from_str(&body).expect("refresh json");
+    assert_eq!(report["ok"], true, "{report}");
+    // Two mirrors are created: Second Org, and the mirror of Fed Org
+    // (this server is both halves, so the user's local mirror is also an
+    // org in the IdP's claim). Nothing is removed.
+    assert_eq!(report["created"], 2, "{report}");
+    assert_eq!(report["removed"], 0, "{report}");
+
+    let (status, _, _, body) =
+        http_request("GET", &format!("{origin}/api/auth/orgs"), None, &app_cookie);
+    assert_eq!(status, 200, "list orgs after refresh: {body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).expect("orgs json");
+    let second_mirror = listed
+        .as_array()
+        .expect("orgs array")
+        .iter()
+        .find(|o| o["name"] == "Second Org" && o["id"].as_str() != Some(second_id.as_str()))
+        .unwrap_or_else(|| panic!("mirror of the new upstream org: {listed}"));
+    assert_eq!(second_mirror["role"], "owner", "{second_mirror}");
+    let second_mirror_id = second_mirror["id"].as_str().unwrap();
+    let (status, _, _, body) = http_request(
+        "GET",
+        &format!("{origin}/api/entities/Org/{second_mirror_id}"),
+        None,
+        &[("Authorization", "Bearer selffed-admin-token")],
+    );
+    assert_eq!(status, 200, "read second mirror row: {body}");
+    let row: serde_json::Value = serde_json::from_str(&body).expect("org row");
+    let ext = row["externalId"]
+        .as_str()
+        .or_else(|| row["data"]["externalId"].as_str());
+    assert_eq!(ext, Some(second_id.as_str()), "keyed by upstream id: {row}");
+
+    // A second explicit refresh inside 10s is refused.
+    let (status, _, _, body) = http_request(
+        "POST",
+        &format!("{origin}/api/auth/orgs/refresh"),
+        Some("{}"),
+        &app_cookie,
+    );
+    assert_eq!(status, 429, "refresh is rate limited: {body}");
+    assert!(body.contains("RATE_LIMITED"), "{body}");
+
+    // Guests and anonymous callers cannot refresh.
+    let (status, _, _, body) = http_request(
+        "POST",
+        &format!("{origin}/api/auth/orgs/refresh"),
+        Some("{}"),
+        &[],
+    );
+    assert_eq!(status, 401, "anonymous refresh: {body}");
 }
 
 fn url_encode(s: &str) -> String {

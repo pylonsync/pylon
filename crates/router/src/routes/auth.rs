@@ -1362,6 +1362,17 @@ pub(crate) fn handle(
     // calling session_store.resolve here would miss the
     // PYLON_ADMIN_TOKEN bearer-auth branch.
     if url == "/api/auth/me" && method == HttpMethod::Get {
+        // Pick up orgs created upstream since sign-in. Runs on its own
+        // thread and is throttled per user, so this response never
+        // waits on the IdP and never depends on the result.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let (Some(resync), Some(uid), false) = (
+            ctx.org_resync,
+            ctx.auth_ctx.user_id.as_deref(),
+            ctx.auth_ctx.is_guest,
+        ) {
+            resync.spawn_if_due(uid);
+        }
         let mut body = serde_json::to_value(ctx.auth_ctx)
             .ok()
             .and_then(|v| match v {
@@ -4511,6 +4522,15 @@ pub(crate) fn handle(
                 return Some(handle_org_sso_callback(ctx, org_id, rest));
             }
         }
+    }
+
+    // POST /api/auth/orgs/refresh
+    //
+    // Re-run the federation mirror now with a fresh `orgs` claim from the
+    // IdP. Matched before the /api/auth/orgs/:id routes below.
+    #[cfg(not(target_arch = "wasm32"))]
+    if url.split('?').next() == Some("/api/auth/orgs/refresh") && method == HttpMethod::Post {
+        return Some(handle_org_refresh(ctx));
     }
 
     // ─── Organizations + invites ───────────────────────────────────────
@@ -7794,6 +7814,59 @@ fn retry_hint(secs: u64) -> String {
             let h = secs.div_ceil(3600);
             format!("about {h} hour{}", if h == 1 { "" } else { "s" })
         }
+    }
+}
+
+/// `POST /api/auth/orgs/refresh`. Session users only: guests have no IdP
+/// account, and API keys may not manage org membership.
+#[cfg(not(target_arch = "wasm32"))]
+fn handle_org_refresh(ctx: &RouterContext) -> (u16, String) {
+    let user_id = match ctx.auth_ctx.user_id.as_deref() {
+        Some(u) if !ctx.auth_ctx.is_guest => u,
+        _ => return (401, json_error("AUTH_REQUIRED", "Login required")),
+    };
+    if ctx.auth_ctx.is_api_key_auth() {
+        return (
+            403,
+            json_error(
+                "API_KEY_AUTH_FORBIDDEN",
+                "Org management requires a session",
+            ),
+        );
+    }
+    if ctx.orgs.federation().is_none() {
+        return (
+            404,
+            json_error(
+                "ORG_FEDERATION_NOT_CONFIGURED",
+                "This app does not mirror organizations from an identity provider.",
+            ),
+        );
+    }
+    let Some(resync) = ctx.org_resync else {
+        return (
+            501,
+            json_error(
+                "ORG_REFRESH_UNAVAILABLE",
+                "Org refresh is not available on this server.",
+            ),
+        );
+    };
+    match resync.run_now(user_id) {
+        Ok(report) => (
+            200,
+            serde_json::json!({
+                "ok": true,
+                "created": report.created,
+                "joined": report.joined,
+                "role_changed": report.role_changed,
+                "removed": report.removed,
+                "refreshed": report.refreshed,
+                "failed": report.failed,
+            })
+            .to_string(),
+        ),
+        Err(e) => (e.status, json_error(e.code, &e.message)),
     }
 }
 

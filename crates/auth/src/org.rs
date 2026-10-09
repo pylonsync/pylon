@@ -338,6 +338,12 @@ impl OrgStore {
         self.cfg.federation.as_ref()
     }
 
+    /// The app's custom org roles (beyond owner/admin/member), as read
+    /// from the manifest at construction.
+    pub fn declared_roles(&self) -> &[String] {
+        &self.declared_roles
+    }
+
     /// The local org that mirrors upstream org `external_id`, keyed by
     /// the configured external-id field.
     pub fn find_by_external_id(&self, field: &str, external_id: &str) -> Option<Org> {

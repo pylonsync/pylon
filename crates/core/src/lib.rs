@@ -531,6 +531,8 @@ pub struct ManifestAuthOrgConfig {
     /// Mirror org memberships from an upstream Pylon IdP. When set,
     /// every login through `federation.provider` reads the `orgs`
     /// claim and reconciles local Org rows + memberships against it.
+    /// Signed-in users are reconciled again at most every 5 minutes
+    /// (from `GET /api/auth/me`) and on `POST /api/auth/orgs/refresh`.
     /// See [`ManifestAuthOrgFederation`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub federation: Option<ManifestAuthOrgFederation>,

@@ -13,6 +13,8 @@ use std::cell::RefCell;
 
 pub mod merge;
 pub mod mutate;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod org_resync;
 pub mod public_url;
 pub mod raw_response;
 mod routes;
@@ -28,6 +30,9 @@ pub use routes::sync::{
 /// fast path — `/api/fn/:name` with `Accept: text/event-stream` bypasses
 /// the router dispatch, so it must run the exact same gate itself.
 pub use routes::functions::{check_fn_auth, fn_auth_denial, fn_auth_error, FnAuthGate};
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use org_resync::{resync_federated_orgs, OrgResync, ResyncError};
 
 // ---------------------------------------------------------------------------
 // ChangeNotifier — abstraction over WS/SSE broadcast
@@ -799,6 +804,12 @@ pub struct RouterContext<'a> {
     /// Organizations + memberships + invites — multi-tenant team
     /// management. Endpoints under `/api/auth/orgs/...`.
     pub orgs: &'a pylon_auth::org::OrgStore,
+    /// Re-runs the federated org mirror for signed-in users (see
+    /// [`org_resync`]). `None` turns off the `/api/auth/me` trigger and
+    /// `POST /api/auth/orgs/refresh` answers 501. Gated on wasm32 — the
+    /// OAuth client is native-only.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub org_resync: Option<&'a OrgResync>,
     /// Per-address pending SIWE nonces. Issued at
     /// `/api/auth/siwe/nonce`, consumed at `/api/auth/siwe/verify`.
     /// Gated on wasm32 — SIWE verification needs k256 (native-only).
@@ -1305,6 +1316,11 @@ fn complete_login(
                 &user_id,
                 userinfo.orgs.as_deref(),
             );
+            // The login just mirrored a fresh claim; /api/auth/me need not
+            // fetch another for the next interval.
+            if let Some(resync) = ctx.org_resync {
+                resync.record_login(&user_id);
+            }
             // Land in the first MIRRORED org — the tenant the IdP vouches
             // for — not merely the first org the user belongs to.
             if session.tenant_id.is_none() {
@@ -4477,6 +4493,7 @@ mod auth_gate_tests {
             account_store: &account_store,
             api_keys: &api_keys,
             orgs: &orgs,
+            org_resync: None,
             siwe: &*siwe,
             phone_codes: &phone_codes,
             passkeys: &passkeys,
@@ -5225,6 +5242,7 @@ mod auth_gate_tests {
             account_store: &account_store,
             api_keys: &api_keys,
             orgs: &orgs,
+            org_resync: None,
             siwe: &*siwe,
             phone_codes: &phone_codes,
             passkeys: &passkeys,
@@ -6155,6 +6173,7 @@ mod auth_gate_tests {
                 account_store: &account_store,
                 api_keys: &api_keys,
                 orgs: &orgs,
+                org_resync: None,
                 siwe: &*siwe,
                 phone_codes: &phone_codes,
                 passkeys: &passkeys,
@@ -6563,6 +6582,7 @@ mod auth_gate_tests {
             account_store: &account_store,
             api_keys: &api_keys,
             orgs: &orgs,
+            org_resync: None,
             siwe: &*siwe,
             phone_codes: &phone_codes,
             passkeys: &passkeys,
@@ -6846,6 +6866,7 @@ mod auth_gate_tests {
             account_store: &account_store,
             api_keys: &api_keys,
             orgs: &orgs,
+            org_resync: None,
             siwe: &*siwe,
             phone_codes: &phone_codes,
             passkeys: &passkeys,
@@ -7160,6 +7181,7 @@ mod auth_gate_tests {
             account_store: &account_store,
             api_keys: &api_keys,
             orgs: &orgs,
+            org_resync: None,
             siwe: &*siwe,
             phone_codes: &phone_codes,
             passkeys: &passkeys,

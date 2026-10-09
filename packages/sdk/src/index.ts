@@ -2056,6 +2056,11 @@ export type AuthConfig = {
      * with `slugField`, its slug) onto the mirror. The org entity must
      * declare `externalIdField` (and `slugField`) as
      * `field.string().optional().unique()`.
+     *
+     * Memberships refresh from the IdP on sign-in, and at most every 5
+     * minutes while the user is signed in (triggered by
+     * `GET /api/auth/me`). `POST /api/auth/orgs/refresh` refreshes them
+     * at once, at most every 10 seconds per user.
      */
     federation?: {
       /** OAuth provider id whose `orgs` claim is trusted, e.g. `"stack0"`. */
