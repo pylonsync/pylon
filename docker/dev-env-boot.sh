@@ -305,6 +305,48 @@ if [ -n "${PYLON_DEV_MODEL_PROXY_URL:-}" ] &&
   "model": "${OC_DEFAULT_PROVIDER}/${OC_DEFAULT}"
 }
 JSON
+	# Global rules for the agent. OpenCode reads AGENTS.md from its config dir
+	# into every session, next to any AGENTS.md in the workspace. The image
+	# ships `search` and `agent-browser` (see the Dockerfile); without this file
+	# the agent does not know they exist and scrapes sites with curl.
+	cat >"$OC_CFG/AGENTS.md" <<RULES
+# Tools in this workspace
+
+## Web search
+
+To look something up on the web, run \`search "query"\`.
+Add \`--num N\` to get N results (1 to 10, default 5).
+Each result shows the title, the URL, the date, and the start of the page text.
+
+## Web pages
+
+To look at a web page, use \`agent-browser\`. Do not use curl to read web pages.
+
+1. Open the page: \`agent-browser open https://example.com\`
+2. Take a screenshot: \`agent-browser screenshot /tmp/page.png\`
+3. Read /tmp/page.png with the read tool to see the page.
+
+To get the content of the page as text, run \`agent-browser get text body\`.
+To get the page structure with element refs for clicks and form input, run \`agent-browser snapshot -i\`.
+Run \`agent-browser skills get core\` for the full command list.
+Run \`agent-browser close\` when you finish with the browser.
+
+## Check your own pages
+
+The app in this workspace runs at http://localhost:${PORT}.
+Before you finish a change to a page, look at the page at a phone size and at a desktop size:
+
+1. \`agent-browser open http://localhost:${PORT}/<path>\`
+2. \`agent-browser set viewport 390 844\`
+3. \`agent-browser screenshot /tmp/phone-1.png\`
+4. \`agent-browser set viewport 1440 900\`
+5. \`agent-browser screenshot /tmp/desktop-1.png\`
+6. Read both .png files and look at them.
+
+A screenshot without \`--full\` shows one screen. To see the next screen, run \`agent-browser scroll down 800\`, then take a new screenshot.
+A \`--full\` screenshot of a long page is too small to read. Use it only to check the overall layout.
+Fix layout problems that you see, then take new screenshots.
+RULES
 	export OPENCODE_SERVER_PASSWORD="${PYLON_DEV_OPENCODE_PASSWORD:-}"
 	echo "[dev-boot] starting opencode serve on :$OC_PORT (models: ${PYLON_DEV_MODELS:-$PYLON_DEV_MODEL}, default ${OC_DEFAULT_PROVIDER}/${OC_DEFAULT})"
 	(opencode serve --port "$OC_PORT" --hostname :: >/tmp/opencode.log 2>&1 &)
