@@ -3873,6 +3873,9 @@ mod tests {
         let config = reg.get("google").unwrap();
         assert_eq!(config.client_id, "test-id");
         assert!(config.auth_url().contains("accounts.google.com"));
+        // Google shows its account chooser, so a person can switch accounts
+        // after signing out.
+        assert!(config.auth_url().contains("prompt=select_account"));
     }
 
     // -- Spec-driven provider routing --

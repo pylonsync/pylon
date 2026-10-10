@@ -272,7 +272,10 @@ pub mod builtin {
         scopes: "openid email profile",
         scope_separator: " ",
         client_id_param: "client_id",
-        auth_query_extra: "",
+        // Show Google's account chooser every time. Without it, a person
+        // signed in to Google is signed in to the app with that account at
+        // once, and after signing out cannot pick another one.
+        auth_query_extra: "prompt=select_account",
         requires_pkce: false,
         userinfo_method: UserinfoMethod::Get,
         userinfo_parser: UserinfoParser::Oidc,
