@@ -39,11 +39,14 @@ jobs:
     name: CI passed for this commit
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    outputs:
+      run-id: ${{ steps.ci.outputs.run-id }}
     permissions:
       actions: read
       contents: read
     steps:
       - name: Wait for ci.yml on ${{ github.sha }}
+        id: ci
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -54,7 +57,8 @@ jobs:
           deadline=$((SECONDS + 55 * 60))
           while :; do
             run="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$sha" \
-              --json databaseId,status,conclusion,url --limit 1 --jq '.[0] // empty')"
+              --json databaseId,status,conclusion,url,event,headBranch --limit 20 \
+              --jq '[.[] | select((.event == "push" or .event == "workflow_dispatch") and (.headBranch == "main" or .headBranch == "master"))][0] // empty')"
             if [[ -z "$run" ]]; then
               echo "no ci.yml run found for $sha yet"
             else
@@ -64,6 +68,7 @@ jobs:
               echo "ci.yml: status=$status conclusion=$conclusion $url"
               if [[ "$status" == "completed" ]]; then
                 if [[ "$conclusion" == "success" ]]; then
+                  echo "run-id=$(jq -r .databaseId <<<"$run")" >> "$GITHUB_OUTPUT"
                   exit 0
                 fi
                 echo "::error::ci.yml concluded '$conclusion' for $sha — fix main, then re-run this workflow ($url)"
@@ -321,22 +326,8 @@ jobs:
           # while client was unpublished for releases, and every default scaffold
           # 404'd on `bun install`. Resolving it here closes that blind spot.
           #
-          # Step 1: wait for the registry itself to serve each version.
-          # `npm view` asks the registry per package and does not consult
-          # bun's cache, so this measures propagation and nothing else.
-          for name in @pylonsync/react @pylonsync/client @pylonsync/loro; do
-            attempt=0
-            until npm view "$name@$REFERENCE_VERSION" version >/dev/null 2>&1; do
-              attempt=$((attempt + 1))
-              if [[ "$attempt" -ge 20 ]]; then
-                echo "::error::Postflight: $name@$REFERENCE_VERSION is not on the registry after 20 attempts over 5 minutes. The publish above did not land." >&2
-                exit 5
-              fi
-              echo "→ waiting for $name@$REFERENCE_VERSION on the registry (attempt $attempt)..."
-              sleep 15
-            done
-            echo "✓ registry serves $name@$REFERENCE_VERSION"
-          done
+          # Verify versions and tarballs concurrently with a shared deadline.
+          node scripts/npm-postflight.mjs packages/react/package.json packages/client/package.json packages/loro/package.json
 
           # Step 2: resolve the graph the create-pylon templates pull in.
           # If bun cannot satisfy the deps, we just produced another broken
@@ -486,7 +477,10 @@ jobs:
 
   binaries:
     name: binary (${{ matrix.target }})
-    needs: verify
+    needs: [verify, ci-gate]
+    permissions:
+      actions: read
+      contents: write
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -530,9 +524,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+        if: runner.os != 'Linux'
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+        if: runner.os != 'Linux'
       - if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -583,13 +579,31 @@ jobs:
       # `pylon-studio-api`'s build.rs requires `web/dist/index.html` to
       # exist. Build the Studio UI bundle before cargo runs.
       - uses: oven-sh/setup-bun@v2
+        if: runner.os != 'Linux'
         with:
           bun-version: "1.3.14"
       - name: Build Studio UI bundle
+        if: runner.os != 'Linux'
         working-directory: crates/studio_api/web
         shell: bash
         run: bun install --frozen-lockfile && bun run build
+      - name: Restore Linux binary from successful CI
+        if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ needs.ci-gate.outputs.run-id }}
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The gate selects a successful main-branch run for this exact commit.
+          gh run download "$CI_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name "ci-release-$TARGET" --dir "target/$TARGET/release"
+          chmod +x "target/$TARGET/release/pylon"
+          test "$(target/$TARGET/release/pylon --version)" = "pylon $VERSION"
       - name: Build
+        if: runner.os != 'Linux'
         run: cargo build --release --locked --bin pylon --target ${{ matrix.target }}
       # The SAML verifier links libxmlsec1, which on macOS comes from Homebrew,
       # so a fresh build carries absolute /opt/homebrew paths and dyld aborts on
@@ -875,30 +889,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          fail=0
-          for pkg in cli-darwin-arm64 cli-linux-x64 cli-win32-x64 cli; do
-            NAME="$(node -p "require('./packages/$pkg/package.json').name")"
-            VERSION="$(node -p "require('./packages/$pkg/package.json').version")"
-            ENC="${NAME/@/%40}"; ENC="${ENC//\//%2f}"
-            ok=""
-            # ~5 minutes: the observed propagation delay was 3.5.
-            for attempt in $(seq 1 20); do
-              tarball="$(curl -sf "https://registry.npmjs.org/${ENC}/${VERSION}" \
-                | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).dist.tarball||"")}catch{}})' || true)"
-              if [ -n "$tarball" ] && [ "$(curl -s -o /dev/null -w '%{http_code}' -I "$tarball" || true)" = "200" ]; then
-                ok=1
-                break
-              fi
-              sleep 15
-            done
-            if [ -z "$ok" ]; then
-              echo "::error::$NAME@$VERSION is not publicly downloadable. npm silently skips an unreachable optionalDependency, so the CLI would keep an older binary or report none for that platform. Check the publish output above and whether the package published as restricted." >&2
-              fail=1
-            else
-              echo "✓ $NAME@$VERSION is publicly downloadable"
-            fi
-          done
-          exit "$fail"
+          node scripts/npm-postflight.mjs packages/cli-darwin-arm64/package.json packages/cli-linux-x64/package.json packages/cli-win32-x64/package.json packages/cli/package.json
 
   docker:
     needs: verify
@@ -1065,9 +1056,11 @@ jobs:
       # The control-plane repo is moving into the stack0 GitHub org. The
       # target comes from the PYLON_CLOUD_REPO repository variable so the
       # move is a one-value change here; the default is the current home.
+      # Use a token with Contents: write on the control-plane repository.
+      # Keep the release token fallback for existing installations.
       - name: Dispatch pylon-release to the control-plane repo
         env:
-          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.PYLON_CLOUD_RELEASE_TOKEN || secrets.RELEASES_REPO_TOKEN }}
           VERSION: ${{ needs.verify.outputs.version }}
           CLOUD_REPO: ${{ vars.PYLON_CLOUD_REPO || 'pylonsync/pylon-cloud' }}
         shell: bash
