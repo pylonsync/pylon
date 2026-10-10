@@ -23,15 +23,15 @@ jobs:
   # -----------------------------------------------------------------
   changes:
     name: detect changes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       ts: ${{ steps.filter.outputs.ts }}
       swift: ${{ steps.filter.outputs.swift }}
       csharp: ${{ steps.filter.outputs.csharp }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@v5
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -65,9 +65,9 @@ jobs:
     name: rustfmt
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -75,9 +75,9 @@ jobs:
 
   cli-vendored:
     name: vendored files in sync
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # Catches drift between /templates + /packages/sdk and the copies
       # vendored into crates/cli/ (cargo publish strips paths outside the
       # crate root), and between /scripts and the installers the site
@@ -102,9 +102,9 @@ jobs:
     name: clippy
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -136,9 +136,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # wasm32: crates/runtime/tests/shard_wasm.rs builds the example guest.
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -157,7 +157,7 @@ jobs:
         shell: bash
         run: bun install --frozen-lockfile && bun run build
       - name: Install xmlsec1 + libxml2 (Linux only — for SAML signature path)
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-24.04'
         run: sudo apt-get update && sudo apt-get install -y libxml2-dev libxmlsec1-dev libxmlsec1-openssl
       - name: Install xmlsec1 + libxml2 (macOS — runner pre-installed via brew)
         if: matrix.os == 'macos-latest'
@@ -175,7 +175,7 @@ jobs:
         run: cargo test --workspace --all-targets -- --test-threads=1 --skip the_csharp_client_signs_in_with_apple_google_and_steam
       # Only the SAML signature tests need the Linux xmlsec opt-in.
       - name: SAML certificate trust
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-24.04'
         env:
           PYLON_RUN_XMLSEC_SIGN_TESTS: "1"
         run: cargo test -p pylon-auth --test saml_cert_trust -- --test-threads=1 --ignored
@@ -185,7 +185,7 @@ jobs:
       # examples are plain Rust with no platform-specific paths, so compiling
       # them three times buys nothing.
       - name: cargo test --doc (Linux — doc examples are platform agnostic)
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-24.04'
         run: cargo test --workspace --doc
       # The Windows installer has no other gate: it is not exercised by any
       # build, and a syntax error in it only shows up when a user pipes it
@@ -215,9 +215,9 @@ jobs:
     name: perf guard
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install xmlsec1 + libxml2 (pylon-runtime build dep)
@@ -237,7 +237,7 @@ jobs:
     name: build (${{ matrix.target }})
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         # Only the gnu target ships. The musl target was dropped here for
@@ -248,7 +248,7 @@ jobs:
         target:
           - x86_64-unknown-linux-gnu
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -275,9 +275,9 @@ jobs:
     name: wasm32 workers check
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -294,9 +294,9 @@ jobs:
     name: typescript packages
     needs: changes
     if: needs.changes.outputs.ts == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.3.14"
@@ -330,11 +330,12 @@ jobs:
     name: create-pylon scaffold smoke test
     needs: changes
     if: needs.changes.outputs.ts == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
+          package-manager-cache: false
           node-version: 22
       - run: bash tools/smoke-create-pylon.sh
 
@@ -348,11 +349,12 @@ jobs:
     name: mobile template native bundles
     needs: changes
     if: needs.changes.outputs.ts == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
+          package-manager-cache: false
           node-version: 22
       - uses: oven-sh/setup-bun@v2
         with:
@@ -374,16 +376,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-24.04, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: native-debug
           save-if: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
+          package-manager-cache: false
           node-version: 22
       - uses: oven-sh/setup-bun@v2
         with:
@@ -393,7 +396,7 @@ jobs:
         shell: bash
         run: bun install --frozen-lockfile && bun run build
       - name: Install xmlsec1 + libxml2 (Linux)
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-24.04'
         run: sudo apt-get update && sudo apt-get install -y libxml2-dev libxmlsec1-dev libxmlsec1-openssl
       - name: Set up xmlsec1 (Windows)
         if: matrix.os == 'windows-latest'
@@ -413,7 +416,7 @@ jobs:
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ts == 'true' || needs.changes.outputs.swift == 'true'
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -433,9 +436,9 @@ jobs:
     name: cargo audit
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo install --locked cargo-audit
       # RUSTSEC-2023-0071 (rsa "Marvin" timing sidechannel) has no fixed
@@ -472,7 +475,7 @@ jobs:
       run:
         working-directory: packages/swift
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: swift build
         # Retry with backoff: SwiftPM downloads the LoroFFI binary
         # xcframework from GitHub releases on a cold cache, and that
@@ -493,11 +496,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: "8.0.x"
       # The core as a .NET Standard 2.1 library with Unity's C# version and
@@ -515,9 +518,9 @@ jobs:
     name: shard plugins current
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.csharp == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: The binaries match the sources
@@ -549,9 +552,9 @@ jobs:
     name: WebAssembly shard smoke
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ts == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -567,7 +570,7 @@ jobs:
         run: bun install --frozen-lockfile && bun run build
       - name: Install xmlsec1 + libxml2
         run: sudo apt-get update && sudo apt-get install -y libxml2-dev libxmlsec1-dev libxmlsec1-openssl
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: "8.0.x"
       - run: bun install --frozen-lockfile
@@ -588,7 +591,7 @@ jobs:
     name: Shard cluster smoke
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ts == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       postgres:
         # The official image from Amazon's public mirror of Docker Hub. Pulls
@@ -602,7 +605,7 @@ jobs:
         options: >-
           --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -667,7 +670,7 @@ jobs:
       - csharp
       - shard-plugins
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Evaluate job results
         shell: bash

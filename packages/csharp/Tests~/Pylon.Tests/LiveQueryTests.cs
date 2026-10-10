@@ -23,8 +23,6 @@ namespace Pylon.Tests
         public int PageSize = 1000;
         /// <summary>Answer the next pull with this status instead.</summary>
         public int? FailNextPull;
-        /// <summary>Changes below this seq are gone from the log (a since below it gets 410).</summary>
-        public ulong Retained;
         /// <summary>Runs before each pull answers (to race a live frame against it).</summary>
         public Action? BeforePull;
         public int Pulls;
@@ -77,8 +75,6 @@ namespace Pylon.Tests
                         return Task.FromResult(Json(status, "{\"error\":{\"code\":\"RESYNC_REQUIRED\",\"message\":\"x\"}}"));
                     }
                     var since = ulong.Parse(query["since"]);
-                    if (since > 0 && since < Retained)
-                        return Task.FromResult(Json(410, "{\"error\":{\"code\":\"RESYNC_REQUIRED\",\"message\":\"x\"}}"));
                     var changes = _log.Where(c => c["seq"].AsULong() > since && Visible(c["row_id"].AsString(), token))
                         .Take(PageSize).ToList();
                     var last = changes.Count > 0 ? changes[^1]["seq"].AsULong() : Seq;
@@ -399,7 +395,7 @@ namespace Pylon.Tests
         }
 
         [Fact]
-        public void ASessionChangedFrameRetriesItsPull()
+        public async Task ASessionChangedFrameRetriesItsPull()
         {
             var (client, sync, ws) = Wired();
             using var _ = ws;
@@ -416,8 +412,8 @@ namespace Pylon.Tests
             Until(() => q.Get("n1") != null, "the first pull");
             Until(() => Volatile.Read(ref server) != null, "the live socket");
             sync.FailNextPull = 503;
-            server!.SendAsync(Encoding.UTF8.GetBytes("{\"type\":\"session-changed\"}"),
-                System.Net.WebSockets.WebSocketMessageType.Text, true, default).Wait();
+            await server!.SendAsync(Encoding.UTF8.GetBytes("{\"type\":\"session-changed\"}"),
+                System.Net.WebSockets.WebSocketMessageType.Text, true, default);
             sync.Seed("Note", "n2", "insert", Data("two"));
             Until(() => q.Get("n1") != null && q.Get("n2") != null, "the retried pull");
             Assert.Equal(1, Volatile.Read(ref connections));
