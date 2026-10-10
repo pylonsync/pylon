@@ -9,5 +9,25 @@ shared-database = { max-threads = 1 }
 [[profile.ci.overrides]]
 # Keep tests that can share PostgreSQL tables in one serial group.
 # The dedicated PostgreSQL CI job still uses serial cargo test commands.
-filter = 'test(postgres) | test(pg_) | test(shard_cluster::) | test(shard_wasm::) | test(entity_writer::) | test(fn_calls::) | test(retention::) | test(workflows::) | test(crdt_privacy::) | binary(crdt_parity) | binary(shard_wasm)'
+filter = '''
+test(postgres) |
+test(pg_) |
+test(shard_cluster::) |
+test(shard_wasm::) |
+test(entity_writer::) |
+test(fn_calls::) |
+test(retention::) |
+test(workflows::) |
+test(crdt_privacy::) |
+binary(~postgres) |
+binary(field_max_length) |
+binary(crdt_parity) |
+binary(shard_wasm)
+'''
 test-group = 'shared-database'
+
+[[profile.ci.overrides]]
+# Runtime integration tests start servers with their own worker pools.
+# Concurrent pools starve live socket readers on small hosted runners.
+filter = 'package(pylon-runtime) & kind(test)'
+threads-required = 4
