@@ -113,7 +113,7 @@ It checks each page for these problems:
 
 It also checks robots.txt (present, not blocking the site, has a `Sitemap` line), the sitemap XML, and pages that the app links to but the sitemap leaves out.
 
-When Chrome or Chromium is present, the audit runs Lighthouse 13.5.0 for performance and accessibility, through `bun x`. It finds Chrome from `CHROME_PATH`, then `chromium` or `google-chrome` on PATH. Without Chrome, the report says so and the other checks still run. `pylon dev` adds dev-only scripts to each page. For performance numbers that match production, audit `pylon start` or the deployed URL.
+When Chrome or Chromium and Node.js 22.19 or newer are present, the audit runs Lighthouse 13.5.0 for performance and accessibility, through `bun x`. It finds Chrome from `CHROME_PATH`, then `chromium` or `google-chrome` on PATH. Without Chrome or Node.js, the report says so and the other checks still run. `pylon dev` adds dev-only scripts to each page. For performance numbers that match production, audit `pylon start` or the deployed URL.
 
 Each problem has a one-line fix. The exit code is 1 when there are errors and 0 when there are only warnings. It is 69 when nothing answers at the URL.
 

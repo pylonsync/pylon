@@ -1,14 +1,16 @@
 //! Lighthouse performance and accessibility runs for `pylon audit`.
 //!
-//! How Lighthouse runs: `bun x --bun lighthouse@<LIGHTHOUSE_VERSION>`, with
-//! CHROME_PATH set to the Chrome or Chromium found here. The reasons:
+//! How Lighthouse runs: `bun x lighthouse@<LIGHTHOUSE_VERSION>`, on Node.js,
+//! with CHROME_PATH set to the Chrome or Chromium found here. The reasons:
 //!
 //! - Lighthouse exists only as an npm package. There is no Rust port, and a
 //!   copy of its audits would drift from what Google measures.
-//! - Every Pylon project already needs Bun, and the dev-env image has Bun but
-//!   no Node, so `npx` is not an option there. `--bun` makes Bun run the
-//!   package even though its bin asks for `node`. Lighthouse 13.5.0 runs
-//!   correctly under Bun 1.3.
+//! - Every Pylon project already needs Bun, so `bun x` fetches and caches the
+//!   package. Lighthouse itself needs Node.js 22.19 or newer: its bin starts
+//!   with `#!/usr/bin/env node`. `bun x --bun` did not take over that shebang
+//!   on Linux ("env: 'node': No such file or directory" with no Node
+//!   installed), so the audit checks for Node first and says so when it is
+//!   missing or too old.
 //! - The version is pinned, so two runs of one Pylon release score pages with
 //!   the same audits. `bun x` keeps the package in Bun's cache after the
 //!   first run; the first run needs the npm registry.
@@ -83,6 +85,40 @@ pub fn find_chrome() -> Option<PathBuf> {
     fixed.iter().map(PathBuf::from).find(|p| p.is_file())
 }
 
+/// The oldest Node.js that Lighthouse 13 runs on (its `engines` field).
+pub const MIN_NODE: (u32, u32) = (22, 19);
+
+/// The installed Node.js version, from `node --version`, or None.
+pub fn node_version() -> Option<(u32, u32, u32)> {
+    let out = Command::new("node")
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_node_version(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// "v22.23.3" -> (22, 23, 3).
+pub fn parse_node_version(text: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = text.trim().trim_start_matches('v').splitn(3, '.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts
+        .next()
+        .and_then(|p| p.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok())
+        .unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+/// True when `version` is MIN_NODE or newer.
+pub fn node_new_enough(version: (u32, u32, u32)) -> bool {
+    (version.0, version.1) >= MIN_NODE
+}
+
 /// True when `bun` runs.
 pub fn bun_available() -> bool {
     Command::new("bun")
@@ -127,7 +163,6 @@ pub fn run_lighthouse(url: &str, chrome: &Path) -> Result<serde_json::Value, Str
     let mut child = Command::new("bun")
         .args([
             "x",
-            "--bun",
             &format!("lighthouse@{LIGHTHOUSE_VERSION}"),
             url,
             "--output=json",
@@ -422,6 +457,19 @@ fn describe_fix(description: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn node_versions_parse_and_compare() {
+        assert_eq!(parse_node_version("v22.23.3\n"), Some((22, 23, 3)));
+        assert_eq!(parse_node_version("v24.1.0"), Some((24, 1, 0)));
+        assert_eq!(parse_node_version("v20.19.2"), Some((20, 19, 2)));
+        assert_eq!(parse_node_version("nope"), None);
+        assert!(node_new_enough((22, 19, 0)));
+        assert!(node_new_enough((24, 0, 0)));
+        assert!(!node_new_enough((22, 18, 9)));
+        assert!(!node_new_enough((20, 19, 2)));
+    }
+
     use super::*;
 
     fn report(perf: f64, a11y: f64) -> serde_json::Value {

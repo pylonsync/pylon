@@ -13,7 +13,7 @@
 //!   4. Fetch every internal link once and report the broken ones, fetch each
 //!      og:image, and list linked pages that the sitemap leaves out.
 //!   5. Run Lighthouse (performance, accessibility) on the first pages when
-//!      Chrome and Bun are present. See `audit_lighthouse.rs`.
+//!      Chrome, Bun, and Node.js 22.19+ are present. See `audit_lighthouse.rs`.
 //!
 //! Errors make the exit code 1. Warnings do not.
 
@@ -906,6 +906,23 @@ fn run_lighthouse_pages(
     if !audit_lighthouse::bun_available() {
         run.skipped = Some("Bun is not installed. Lighthouse runs through `bun x`.".into());
         return run;
+    }
+    let (min_major, min_minor) = audit_lighthouse::MIN_NODE;
+    match audit_lighthouse::node_version() {
+        None => {
+            run.skipped = Some(format!(
+                "Node.js is not installed. Lighthouse needs Node.js {min_major}.{min_minor} or newer."
+            ));
+            return run;
+        }
+        Some(v) if !audit_lighthouse::node_new_enough(v) => {
+            run.skipped = Some(format!(
+                "Node.js {}.{}.{} is too old. Lighthouse needs Node.js {min_major}.{min_minor} or newer.",
+                v.0, v.1, v.2
+            ));
+            return run;
+        }
+        Some(_) => {}
     }
     let eligible = pages
         .iter_mut()
