@@ -988,8 +988,9 @@ jobs:
           # unless Cargo.lock actually changed. mode=max preserves
           # intermediate layers, not just the final image — saves
           # the rust-builder stage's deps cache too.
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Each image needs its own scope to preserve all three caches.
+          cache-from: type=gha,scope=pylon-runtime
+          cache-to: type=gha,mode=max,scope=pylon-runtime
 
       # pylon-dev: the cloud dev-workspace image, the runtime image just
       # pushed plus the coding agent's browser and web search
@@ -1014,8 +1015,8 @@ jobs:
           tags: ${{ steps.meta-dev.outputs.tags }}
           labels: ${{ steps.meta-dev.outputs.labels }}
           platforms: linux/amd64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=pylon-dev
+          cache-to: type=gha,mode=max,scope=pylon-dev
 
       # pylon-builder: the ephemeral image the Cloud build-artifact pipeline
       # runs on a throwaway Fly machine (builder/Dockerfile). Tiny + fast to
@@ -1037,8 +1038,8 @@ jobs:
           tags: ${{ steps.meta-builder.outputs.tags }}
           labels: ${{ steps.meta-builder.outputs.labels }}
           platforms: linux/amd64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=pylon-builder
+          cache-to: type=gha,mode=max,scope=pylon-builder
 
   # ---------------------------------------------------------------
   # Tell Pylon Cloud the release exists so its PYLON_RELEASE pin moves.
