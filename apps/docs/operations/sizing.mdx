@@ -41,6 +41,12 @@ cargo bench -p pylon-runtime --bench realtime_bench
 
 The WS hub `broadcast` number measures the enqueue side. It fans out to 16 shard worker threads, and each thread pushes to its connected clients. The real delivery rate depends on client count, message size, and TCP send buffers.
 
+### Change log memory
+
+The server keeps recent change events in memory, so a client that reconnects can catch up. The ring holds at most 10,000 events and 32 MiB of event data, whichever limit comes first. Events that leave the ring stay in `_pylon_change_log` on disk (SQLite), where a client that is further behind reads them.
+
+Apps that rewrite large rows often, such as a chat transcript updated while a model streams, fill the byte limit first. To change it, set `PYLON_CHANGE_LOG_MEMORY_MB`. `PYLON_CHANGE_LOG_RETAIN` sets how many events stay on disk (default 100,000).
+
 ## What these numbers mean for deploy sizing
 
 ### Small (1 vCPU, 1 GB RAM, ~$5/mo VPS)
