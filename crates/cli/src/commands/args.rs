@@ -38,6 +38,10 @@ const VALUE_FLAGS: &[&str] = &[
     // `pylon jobs` filters.
     "--status",
     "--queue",
+    // `pylon audit`.
+    "--url",
+    "--max-pages",
+    "--lighthouse-pages",
 ];
 
 /// Short flags that consume the next arg as their value. `-p` is the

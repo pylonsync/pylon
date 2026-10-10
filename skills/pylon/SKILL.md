@@ -834,7 +834,21 @@ function PostList({ promise }: { promise: Promise<Post[]> }) {
   - `w`: `16,32,48,64,96,128,256,384` + `640,750,828,1080,1200,1920,2048,3840`.
   - `format`: `avif`, `webp`, `jpeg` — not snapped (no meaningful "nearest" codec); anything else falls back to `Accept` negotiation. Never SVG: rejected as input and output, it can carry script.
   - Need other values? Set `PYLON_IMAGE_QUALITIES` / `PYLON_IMAGE_DEVICE_SIZES` / `PYLON_IMAGE_IMAGE_SIZES` / `PYLON_IMAGE_FORMATS` (comma-separated). Prefer picking an allowed value over widening the list.
-- SEO: `export const metadata: Metadata = {…}` (static) or `export async function generateMetadata(props)` (dynamic — keep it cheap, e.g. params→title). Fields: `title`, `description`, `canonical`, `robots`, `openGraph`, `twitter`, `icons`. Colocate `opengraph-image.png` / `icon.png` / `favicon.ico` next to a route and they're auto-wired.
+- SEO: `export const metadata: Metadata = {…}` (static) or `export async function generateMetadata(props)` (dynamic — keep it cheap, e.g. params→title). Fields: `title`, `description`, `canonical`, `robots`, `openGraph`, `twitter`, `icons`. Colocate `opengraph-image.png` / `twitter-image.png` / `icon.png` / `favicon.ico` next to a route and they're auto-wired.
+- Generated share image: `app/opengraph-image.tsx` (or `app/<segment>/opengraph-image.tsx`) is served at `/opengraph-image` (`/<segment>/opengraph-image`), and Pylon sets `og:image` (1200x630, image/png) and `twitter:image` on every page below it. The default export gets `{ params, searchParams }` and returns `new ImageResponse(<jsx/>, { width: 1200, height: 630, fonts })` from `@pylonsync/react`. Rendering is Satori: flexbox only, so an element with more than one child needs `display: "flex"`. `fonts` takes static TTF/OTF data (`{ name, data, weight, style }`), not woff2 and not variable fonts; without it, Inter 400/600 is used. A closer static image or an explicit `metadata.openGraph.image` wins. There is no `twitter-image.tsx` route; `twitter:image` uses the OG image.
+
+```tsx
+// app/opengraph-image.tsx
+import { ImageResponse } from "@pylonsync/react";
+export default function OG() {
+  return new ImageResponse(
+    <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", background: "#fef3c7", fontSize: 72 }}>
+      Rosa's Bakery
+    </div>,
+    { width: 1200, height: 630 },
+  );
+}
+```
 
 ### Code splitting
 
@@ -1134,6 +1148,15 @@ pylon deploy --no-wait          # fire-and-forget (CI that tracks status elsewhe
 # Same, plus walk the live URL with the `pylon verify` checks once it flips:
 pylon deploy --verify
 
+# Check a running site the way a search engine and Lighthouse do: title,
+# description, h1, canonical, lang, viewport, Open Graph (og:image must load),
+# img alt, JSON-LD (home page needs Organization/LocalBusiness), broken internal
+# links, robots.txt, sitemap.xml. Lighthouse performance + accessibility when
+# Chrome is found (CHROME_PATH or chromium on PATH). One-line fix per problem.
+# Exit 1 on errors; warnings pass. --json for machine output.
+pylon audit                          # http://localhost:<PYLON_PORT or 4321>
+pylon audit https://myapp.stack0.app
+
 # Dry-run a policy expression with the PRODUCTION evaluator before you
 # ship it — allow/deny + the exact comparison that failed. Exit 0=allow, 1=deny.
 pylon policy test 'auth.userId == data.ownerId' --auth userId=u1 --row '{"ownerId":"u2"}'
@@ -1158,6 +1181,7 @@ Dev-mode failures are disclosed where you'll see them: unhandled function errors
 
 - Run `bun run app.ts` in the project root — if it errors, the manifest won't build and `pylon dev` will fail silently on function load.
 - Run `pylon verify` — it boots the app and fails on any route/asset that doesn't serve. This is the cheap end-to-end check; don't skip it.
+- Building a public site? With `pylon dev` running, run `pylon audit` and fix every error it reports (missing titles, descriptions, og:image, structured data, broken links, sitemap gaps, slow pages).
 - Run `pylon lint` — flags wide-open dev policies (`allow*: "true"`) and other policy smells before they ship. Tighten what it reports.
 - **Test in tiers, cheapest first.** Tier 1: pure helpers in `lib/` (milliseconds, no DOM). Tier 2: components with fixture props via `@testing-library/react` (happy-dom is preloaded through `bunfig.toml`). Tier 3: functions/policies through `pylon policy test` and `pylon verify`. If a component is hard to test, it's usually because it fetches its own data — lift that to the container.
 - Run `pylon test` — discovers `*.test.ts` / `*.test.tsx` under `tests/` (or `functions/`) and runs them with Bun's test runner (`import { test, expect } from "bun:test"`).

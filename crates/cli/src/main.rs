@@ -90,6 +90,7 @@ fn run() -> ExitCode {
     match positional.first().copied() {
         Some("add") => commands::add::run(&args, json_mode),
         Some("admin") => commands::admin::run(&args, json_mode),
+        Some("audit") => commands::audit::run(&args, json_mode),
         Some("bench") => commands::bench::run(&args, json_mode),
         Some("build") => commands::build::run(&args, json_mode),
         Some("cache") => commands::cache::run(&args, json_mode),
@@ -189,7 +190,8 @@ fn run() -> ExitCode {
 // Known commands for did-you-mean suggestions
 // ---------------------------------------------------------------------------
 
-const TOP_LEVEL_COMMANDS: [&str; 46] = [
+const TOP_LEVEL_COMMANDS: [&str; 47] = [
+    "audit",
     "backup",
     "billing",
     "build",
@@ -350,6 +352,12 @@ fn print_command_help(cmd: &str) -> bool {
             println!("  PYLON_DB_PATH     SQLite database file");
             println!("  PYLON_FILES_DIR   Local file-storage directory");
             println!("  PYLON_CORS_ORIGIN Allowed CORS origin for the API");
+            true
+        }
+        "audit" => {
+            println!("pylon audit — check a running app for search and page-quality problems");
+            println!();
+            println!("{}", commands::audit::USAGE);
             true
         }
         "bench" => {
@@ -557,7 +565,8 @@ fn print_usage() {
   update [--dry-run]        Bump every @pylonsync/* dependency to the latest release
   upgrade [--check]         Update the pylon binary itself to the latest release
   verify [--url <base>] [--timeout <secs>]
-                            Boot (or target) the app and verify routes + assets serve"
+                            Boot (or target) the app and verify routes + assets serve
+  audit [url]               Check pages for SEO, accessibility, and speed problems"
     );
     println!("  version                   Show version");
     println!();

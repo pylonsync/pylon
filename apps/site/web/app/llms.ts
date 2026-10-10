@@ -158,7 +158,7 @@ export default function llms(): LlmsTxt {
             title: "@pylonsync/cli on npm",
             url: NPM_CLI_URL,
             notes:
-              "The official CLI. `npx @pylonsync/cli --help`, or install the binary with `curl -fsSL https://www.pylonsync.com/install.sh | bash`. Covers dev, build, test, verify, deploy, logs, secrets, domains, and database backups.",
+              "The official CLI. `npx @pylonsync/cli --help`, or install the binary with `curl -fsSL https://www.pylonsync.com/install.sh | bash`. Covers dev, build, test, verify, audit (SEO and Lighthouse checks), deploy, logs, secrets, domains, and database backups.",
           },
           {
             title: "CLI reference",

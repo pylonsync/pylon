@@ -50,12 +50,12 @@ const RESET: &str = "\x1b[0m";
 ///
 /// Respects the `NO_COLOR` standard (<https://no-color.org/>) and treats
 /// `TERM=dumb` as a plain terminal.
-fn use_color() -> bool {
+pub fn use_color() -> bool {
     std::env::var("NO_COLOR").is_err() && std::env::var("TERM").map(|t| t != "dumb").unwrap_or(true)
 }
 
 /// Format a single diagnostic with ANSI colors for human-readable output.
-fn format_diagnostic(d: &Diagnostic, color: bool) -> String {
+pub fn format_diagnostic(d: &Diagnostic, color: bool) -> String {
     let mut out = String::new();
 
     if color {

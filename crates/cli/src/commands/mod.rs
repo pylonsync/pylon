@@ -1,6 +1,11 @@
 pub mod add;
 pub mod admin;
 pub mod args;
+pub mod audit;
+pub mod audit_lighthouse;
+pub mod audit_org_types;
+pub mod audit_page;
+pub mod audit_site;
 pub mod backup;
 pub mod bench;
 pub mod build;

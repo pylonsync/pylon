@@ -82,6 +82,41 @@ pylon test:security --target https://api.example.com --json
 
 `pylon test` runs each test file with Bun against an in-memory Pylon. It exits non-zero on failure, so it fits into CI. `pylon test:security` is a separate probe that calls a running app and reports auth/policy holes. See the [Testing guide](/testing) for the unit, component, and HTTP patterns.
 
+## Audit
+
+`pylon audit` checks a running app for search and page-quality problems. Run it before you finish a public site.
+
+```bash
+pylon audit                          # the local app: http://localhost:<PYLON_PORT or 4321>
+pylon audit https://rosas.example    # a deployed site
+pylon audit --max-pages 10           # audit fewer pages (default: 50)
+pylon audit --lighthouse-pages 5     # run Lighthouse on more pages (default: 3)
+pylon audit --no-lighthouse          # HTML checks only
+pylon audit --json                   # machine-readable report
+```
+
+The audit gets the page list from the sitemap (the robots.txt `Sitemap` lines, else `/sitemap.xml`). Without a sitemap, it uses the static routes in `pylon.manifest.json`. Without those, it uses the links on the home page.
+
+It checks each page for these problems:
+
+- An HTTP status of 400 or more.
+- A missing, duplicate, too short, or too long `<title>`.
+- A missing, duplicate, too short, or too long meta description.
+- No `<h1>`, or more than one.
+- A missing, relative, or duplicate canonical link.
+- No `lang` on `<html>`, and no viewport meta tag.
+- No `og:title`, `og:description`, or `og:image`. The `og:image` URL must return 200 with an image content type.
+- Images without an `alt` attribute.
+- JSON-LD that does not parse. The home page must have JSON-LD with an Organization or LocalBusiness (or a subtype such as Restaurant).
+- Internal links that return 404 or another error.
+- `noindex` on a page that the sitemap lists.
+
+It also checks robots.txt (present, not blocking the site, has a `Sitemap` line), the sitemap XML, and pages that the app links to but the sitemap leaves out.
+
+When Chrome or Chromium is present, the audit runs Lighthouse 13.5.0 for performance and accessibility, through `bun x`. It finds Chrome from `CHROME_PATH`, then `chromium` or `google-chrome` on PATH. Without Chrome, the report says so and the other checks still run. `pylon dev` adds dev-only scripts to each page. For performance numbers that match production, audit `pylon start` or the deployed URL.
+
+Each problem has a one-line fix. The exit code is 1 when there are errors and 0 when there are only warnings. It is 69 when nothing answers at the URL.
+
 ## Deploy
 
 ```bash

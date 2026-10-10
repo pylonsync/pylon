@@ -65,6 +65,12 @@ base64 = { workspace = true }
 # bundle's SHA-256 against the hash the control plane injected via env
 # before extracting (see commands/artifact.rs).
 sha2 = { workspace = true }
+# `pylon audit`: an HTML5 parser (html5ever) with CSS selectors for the page
+# checks, an XML reader for sitemap.xml, and URL resolution for links. The
+# default `main` feature only adds a getopts demo binary.
+scraper = { version = "0.27", default-features = false, features = ["errors"] }
+quick-xml = "0.41"
+url = { workspace = true }
 
 # `pylon dev` hot reload: close inherited descriptors before re-exec'ing so
 # sockets accepted by the outgoing process image don't survive into the new

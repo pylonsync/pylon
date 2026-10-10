@@ -346,6 +346,13 @@ Before you finish a change to a page, look at the page at a phone size and at a 
 A screenshot without \`--full\` shows one screen. To see the next screen, run \`agent-browser scroll down 800\`, then take a new screenshot.
 A \`--full\` screenshot of a long page is too small to read. Use it only to check the overall layout.
 Fix layout problems that you see, then take new screenshots.
+
+## Check search and page quality
+
+Before you finish a public site, run \`pylon audit http://localhost:${PORT}\`.
+It checks titles, descriptions, headings, Open Graph images, structured data, links, robots.txt, and the sitemap, and runs Lighthouse.
+Each problem has a fix on the line below it. Fix every error, then run the audit again.
+The command exits with 0 when no errors are left.
 RULES
 	# An image may ship its own rules for the agent at
 	# /etc/pylon/agent-rules.md (Stack0 Build's workspace image does). They
