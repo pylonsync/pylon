@@ -347,6 +347,12 @@ A screenshot without \`--full\` shows one screen. To see the next screen, run \`
 A \`--full\` screenshot of a long page is too small to read. Use it only to check the overall layout.
 Fix layout problems that you see, then take new screenshots.
 RULES
+	# An image may ship its own rules for the agent at
+	# /etc/pylon/agent-rules.md (Stack0 Build's workspace image does). They
+	# replace the default above. {{PORT}} in them becomes the app's port.
+	if [ -f /etc/pylon/agent-rules.md ]; then
+		sed "s/{{PORT}}/${PORT}/g" /etc/pylon/agent-rules.md >"$OC_CFG/AGENTS.md"
+	fi
 	export OPENCODE_SERVER_PASSWORD="${PYLON_DEV_OPENCODE_PASSWORD:-}"
 	echo "[dev-boot] starting opencode serve on :$OC_PORT (models: ${PYLON_DEV_MODELS:-$PYLON_DEV_MODEL}, default ${OC_DEFAULT_PROVIDER}/${OC_DEFAULT})"
 	(opencode serve --port "$OC_PORT" --hostname :: >/tmp/opencode.log 2>&1 &)
