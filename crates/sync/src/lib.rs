@@ -270,10 +270,54 @@ pub trait ChangeLogStore: Send + Sync + std::fmt::Debug {
     }
 }
 
+/// Default byte budget for the in-memory change log: 32 MiB of
+/// approximate JSON. Override with [`ChangeLog::with_max_bytes`]; the
+/// server reads `PYLON_CHANGE_LOG_MEMORY_MB`.
+pub const DEFAULT_MAX_BYTES: usize = 32 * 1024 * 1024;
+
+/// Approximate JSON size of an event: what it would take serialized. Walks
+/// the row values without allocating; a fixed overhead covers the seq,
+/// kind, and field names.
+pub fn event_bytes(e: &ChangeEvent) -> usize {
+    64 + e.entity.len()
+        + e.row_id.len()
+        + e.timestamp.len()
+        + e.data.as_ref().map_or(0, json_bytes)
+        + e.prev_data.as_ref().map_or(0, json_bytes)
+}
+
+fn json_bytes(v: &serde_json::Value) -> usize {
+    match v {
+        serde_json::Value::Null => 4,
+        serde_json::Value::Bool(_) => 5,
+        serde_json::Value::Number(_) => 8,
+        serde_json::Value::String(s) => s.len() + 2,
+        serde_json::Value::Array(items) => {
+            2 + items.iter().map(|i| json_bytes(i) + 1).sum::<usize>()
+        }
+        serde_json::Value::Object(map) => {
+            2 + map
+                .iter()
+                .map(|(k, v)| k.len() + 4 + json_bytes(v))
+                .sum::<usize>()
+        }
+    }
+}
+
 pub struct ChangeLog {
     events: Mutex<std::collections::VecDeque<ChangeEvent>>,
     seq: Mutex<u64>,
     capacity: usize,
+    /// Byte budget for the events held in memory, by their approximate
+    /// JSON size ([`event_bytes`]). The count limit alone let a log of
+    /// large rows hold hundreds of MB: an app that rewrote a 4 KB row
+    /// every few seconds held 10,000 such events, loaded at every start.
+    /// The oldest events go first; a client behind the ring reads the
+    /// disk store, as for count eviction.
+    max_bytes: usize,
+    /// Approximate JSON size of `events`. Changed only while `events` is
+    /// locked.
+    held_bytes: std::sync::atomic::AtomicUsize,
     /// External seq mint. When set, `append` calls this for every new
     /// event's seq AND tracks max-seen in `seq` so `current_seq()` /
     /// `append_peer()` interop correctly with the global counter.
@@ -435,10 +479,42 @@ impl ChangeLog {
             )),
             seq: Mutex::new(0),
             capacity,
+            max_bytes: DEFAULT_MAX_BYTES,
+            held_bytes: std::sync::atomic::AtomicUsize::new(0),
             seq_provider: None,
             store: None,
             op_tracker: Mutex::new(OpTracker::with_capacity(10_000)),
             sinks: Vec::new(),
+        }
+    }
+
+    /// Set the byte budget for events held in memory (see `max_bytes`).
+    /// Call before [`ChangeLog::with_store`], which trims what it loads to
+    /// the budget.
+    pub fn with_max_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_bytes = max_bytes.max(1);
+        self
+    }
+
+    /// Approximate JSON size of the events held in memory.
+    pub fn held_bytes(&self) -> usize {
+        self.held_bytes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Drop the oldest events while the ring is over its count or byte
+    /// limit. Always keeps the newest event. Call with `events` locked.
+    fn evict(&self, events: &mut std::collections::VecDeque<ChangeEvent>) {
+        use std::sync::atomic::Ordering;
+        while events.len() > self.capacity
+            || (events.len() > 1 && self.held_bytes.load(Ordering::Relaxed) > self.max_bytes)
+        {
+            match events.pop_front() {
+                Some(evicted) => {
+                    self.held_bytes
+                        .fetch_sub(event_bytes(&evicted), Ordering::Relaxed);
+                }
+                None => break,
+            }
         }
     }
 
@@ -465,9 +541,15 @@ impl ChangeLog {
             {
                 let mut events = self.events.lock().unwrap();
                 events.clear();
+                self.held_bytes
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
                 for e in loaded.into_iter() {
+                    self.held_bytes
+                        .fetch_add(event_bytes(&e), std::sync::atomic::Ordering::Relaxed);
                     events.push_back(e);
                 }
+                // Keep the newest events that fit the budgets.
+                self.evict(&mut events);
             }
             {
                 let mut seq = self.seq.lock().unwrap();
@@ -639,10 +721,10 @@ impl ChangeLog {
             timestamp: now_iso8601(),
         };
         let returned = event.clone();
+        self.held_bytes
+            .fetch_add(event_bytes(&event), std::sync::atomic::Ordering::Relaxed);
         events.push_back(event);
-        while events.len() > self.capacity {
-            events.pop_front();
-        }
+        self.evict(&mut events);
         // Persist AFTER in-memory push so a slow / failing store
         // never blocks the live broadcast. The mutation hot path
         // pays one INSERT per event; the SQLite impl batches via
@@ -685,10 +767,10 @@ impl ChangeLog {
         if event.seq > *seq {
             *seq = event.seq;
         }
+        self.held_bytes
+            .fetch_add(event_bytes(&event), std::sync::atomic::Ordering::Relaxed);
         events.push_back(event);
-        while events.len() > self.capacity {
-            events.pop_front();
-        }
+        self.evict(&mut events);
     }
 
     /// Pull changes since a cursor, up to a limit.
@@ -913,6 +995,83 @@ fn now_iso8601() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn big_event(seq: u64, bytes: usize) -> ChangeEvent {
+        ChangeEvent {
+            seq,
+            entity: "Message".into(),
+            row_id: format!("r{seq}"),
+            kind: ChangeKind::Update,
+            data: Some(serde_json::json!({ "content": "x".repeat(bytes) })),
+            prev_data: None,
+            timestamp: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn byte_budget_evicts_the_oldest_events() {
+        let log = ChangeLog::with_capacity(1_000).with_max_bytes(10_000);
+        for _ in 0..10 {
+            log.append(
+                "Message",
+                "r",
+                ChangeKind::Update,
+                Some(serde_json::json!({ "content": "x".repeat(3_000) })),
+            );
+        }
+        let held = log.events.lock().unwrap().len();
+        assert!(
+            held <= 3,
+            "held {held} events of ~3 KB under a 10 KB budget"
+        );
+        assert!(held >= 1);
+        assert!(log.held_bytes() <= 10_000 + event_bytes(&big_event(0, 3_000)));
+        // The newest event is always kept.
+        assert_eq!(
+            log.events.lock().unwrap().back().unwrap().seq,
+            log.current_seq()
+        );
+    }
+
+    #[test]
+    fn one_event_over_the_budget_is_still_kept() {
+        let log = ChangeLog::with_capacity(10).with_max_bytes(100);
+        log.append(
+            "Message",
+            "r",
+            ChangeKind::Update,
+            Some(serde_json::json!({ "content": "x".repeat(5_000) })),
+        );
+        assert_eq!(log.events.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn held_bytes_follow_eviction_by_count() {
+        let log = ChangeLog::with_capacity(2);
+        for _ in 0..5 {
+            log.append(
+                "Message",
+                "r",
+                ChangeKind::Insert,
+                Some(serde_json::json!({ "a": 1 })),
+            );
+        }
+        let events = log.events.lock().unwrap();
+        let sum: usize = events.iter().map(event_bytes).sum();
+        assert_eq!(events.len(), 2);
+        assert_eq!(log.held_bytes(), sum);
+    }
+
+    #[test]
+    fn event_bytes_tracks_json_size() {
+        let e = big_event(1, 1_000);
+        let serialized = serde_json::to_string(&e.data).unwrap().len();
+        let estimate = json_bytes(e.data.as_ref().unwrap());
+        assert!(
+            estimate >= serialized - 4 && estimate <= serialized + 16,
+            "estimate {estimate} vs {serialized}"
+        );
+    }
 
     #[test]
     fn empty_log() {

@@ -2287,7 +2287,17 @@ pub(crate) fn build_persistent_change_log(runtime: &Arc<Runtime>) -> Arc<ChangeL
     // on every deploy). Persisted seqs are strictly monotonic across
     // boots so the 410 path only ever fires under genuine retention
     // eviction.
-    let mut change_log_builder = ChangeLog::new();
+    // PYLON_CHANGE_LOG_MEMORY_MB: the byte budget for change events held
+    // in memory (pylon_sync::DEFAULT_MAX_BYTES when unset). Set before the
+    // store attaches, so the events loaded at start fit it too.
+    let mut change_log_builder = match std::env::var("PYLON_CHANGE_LOG_MEMORY_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|mb| *mb > 0)
+    {
+        Some(mb) => ChangeLog::new().with_max_bytes(mb * 1024 * 1024),
+        None => ChangeLog::new(),
+    };
     if runtime.is_postgres() {
         if let Err(e) = runtime.bootstrap_global_change_seq() {
             tracing::warn!(
