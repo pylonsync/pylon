@@ -27,7 +27,7 @@ binary(shard_wasm)
 test-group = 'shared-database'
 
 [[profile.ci.overrides]]
-# Runtime integration tests start servers with their own worker pools.
-# Concurrent pools starve live socket readers on small hosted runners.
+# Runtime integration tests use fixed port ranges and start worker pools.
+# Process isolation resets their port counters, so run each server test alone.
 filter = 'package(pylon-runtime) & kind(test)'
 threads-required = 4
