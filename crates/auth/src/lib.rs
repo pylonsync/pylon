@@ -32,6 +32,7 @@ pub mod apple_jwt;
 pub mod captcha;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod email;
+pub mod integrations;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native_id_token;
 #[cfg(not(target_arch = "wasm32"))]

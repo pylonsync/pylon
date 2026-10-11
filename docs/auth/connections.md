@@ -1,4 +1,11 @@
-# Pylon: `ctx.connections` for per-user OAuth integrations
+# Pylon: `ctx.connections`
+
+> The user-facing page is `apps/docs/auth/connections.mdx`. It covers
+> app connections (`owner: "app"`), API-key connections
+> (`kind: "api_key"`), the business providers (Square, Stripe, Clover,
+> Calendly, Mailchimp, Toast), and hosted connections
+> (`/_pylon/connections` and the refresh broker). This file keeps the
+> design notes for per-user OAuth connections.
 
 `ctx.connections.*` lets server-side actions act on behalf of the
 signed-in user against external services (Google Calendar, GitHub,
@@ -144,7 +151,7 @@ Throws on:
 - `CONNECTION_UNKNOWN`: `name` doesn't match any declared connection
 - `PROVIDER_NOT_CONFIGURED`: missing `PYLON_OAUTH_<PROVIDER>_*` env
 - `ENCRYPTION_REQUIRED`: `PYLON_ENCRYPTION_KEY` is unset
-- `CONNECTION_REQUIRES_AUTH`: caller is anonymous
+- `CONNECTION_FORBIDDEN`: no signed-in caller (user connection), or not an admin (app connection)
 
 ### `ctx.connections.get(name)`
 
@@ -240,7 +247,7 @@ On failure, returns a JSON error envelope.
 | --------------------------- | --------------------------- | -------------------------------------------------------- |
 | `CONNECTIONS_NOT_CONFIGURED`| All ops                     | No `defineConnection(...)` in the manifest.              |
 | `CONNECTION_UNKNOWN`        | All ops                     | `name` doesn't match a declared connection.              |
-| `CONNECTION_REQUIRES_AUTH`  | All ops                     | Caller is anonymous. Use `ctx.auth.elevate` to bypass.   |
+| `CONNECTION_FORBIDDEN`      | All ops                     | No signed-in caller for a user connection, or a change to an app connection without admin. |
 | `CONNECTION_NOT_LINKED`     | `get`, `disconnect`         | User hasn't completed the OAuth flow for this connection.|
 | `PROVIDER_NOT_CONFIGURED`   | All ops                     | `PYLON_OAUTH_<PROVIDER>_*` env is missing.               |
 | `ENCRYPTION_REQUIRED`       | `authorize_url`             | `PYLON_ENCRYPTION_KEY` is unset.                         |

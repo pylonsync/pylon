@@ -38,6 +38,7 @@ fn manifest_with_google() -> AppManifest {
             name: "google".into(),
             provider: "google".into(),
             scopes: "email profile".into(),
+            ..Default::default()
         }],
         crons: vec![],
         fonts: vec![],
@@ -150,7 +151,7 @@ fn build_auth_url_rejects_external_post_redirect() {
         vec![ConnectionDef {
             name: "google".into(),
             provider: "google".into(),
-            scopes: String::new(),
+            ..Default::default()
         }],
         Some(key),
         backend,

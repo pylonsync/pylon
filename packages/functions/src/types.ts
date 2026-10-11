@@ -840,29 +840,35 @@ export interface LlmCompleteResponse {
 // ---------------------------------------------------------------------------
 
 /**
- * Server-side OAuth connection registry. Apps declare connections
- * via `defineConnection({...})` in `app.ts`; this surface lets
- * actions fetch fresh access tokens (auto-refresh) and start the
- * OAuth dance.
+ * Server-side connection registry. Apps declare connections via
+ * `defineConnection({...})` in `app.ts`; this surface fetches fresh
+ * access tokens (auto-refresh), starts OAuth flows, and stores API keys.
  *
  * Available on mutation + action ctx only — connections perform
  * external I/O (token refresh, DB writes) that doesn't belong
  * inside a reactive query.
  *
- * All ops require an authenticated caller (`ctx.auth.userId !==
- * null`). Public functions must `ctx.auth.elevate({ admin: true,
- * reason: "..." })` before reaching `ctx.connections.*`.
+ * Who may do what:
+ * - `owner: "user"` (default): the signed-in caller's own connection.
+ *   Every op needs a signed-in, non-guest caller.
+ * - `owner: "app"`: one connection for the whole app. `get` works for
+ *   any caller, including an anonymous visitor's request, so the
+ *   function decides what the caller may do with it. `authorizeUrl`,
+ *   `setCredentials`, and `disconnect` need an admin
+ *   (`ctx.auth.elevate({ admin: true, reason })`).
  */
 export interface Connections {
   /**
-   * Mint the URL the browser should navigate to so the user can
-   * link an external account. `name` matches a `defineConnection({...})`
-   * entry. `postRedirect` (optional) is where the browser lands
-   * after a successful callback — defaults to `/`.
+   * Mint the URL the browser should navigate to so the account can be
+   * linked. `name` matches an OAuth `defineConnection({...})` entry.
+   * `postRedirect` (optional, a relative path) is where the browser
+   * lands after a successful callback — defaults to `/`.
    *
    * Throws `CONNECTIONS_NOT_CONFIGURED`, `CONNECTION_UNKNOWN`,
-   * `PROVIDER_NOT_CONFIGURED`, or `ENCRYPTION_REQUIRED` (refresh
-   * tokens are not allowed to land in plaintext).
+   * `CONNECTION_FORBIDDEN`, `CONNECTION_WRONG_KIND`,
+   * `CONNECTION_MANAGED` (the hosting platform runs this app
+   * connection's flow), `PROVIDER_NOT_CONFIGURED`, or
+   * `ENCRYPTION_REQUIRED` (tokens are not allowed to land in plaintext).
    */
   authorizeUrl(
     name: string,
@@ -870,32 +876,56 @@ export interface Connections {
   ): Promise<{ url: string }>;
 
   /**
-   * Returns a fresh access token for `(ctx.auth.userId, name)`. If
-   * the stored token expires within 60s, the framework refreshes
-   * via the provider's refresh-token grant FIRST, persists the new
-   * token pair, then returns the new access token.
+   * Returns a fresh access token. If the stored token expires within
+   * 60s, the framework refreshes it first (through the hosting
+   * platform for a brokered app connection), persists the new pair,
+   * then returns it. For an API-key connection `accessToken` is the
+   * first key field and `credentials` holds every field.
    *
-   * Throws `CONNECTION_NOT_LINKED` when the user hasn't started
-   * the OAuth flow, `REFRESH_FAILED` when the provider rejects
-   * the refresh token (user must re-link).
+   * `accountId` is the provider's id for the connected account
+   * (Square merchant, Stripe account, Clover merchant). `metadata`
+   * holds non-secret provider data (Mailchimp's `dc`).
+   *
+   * Throws `CONNECTION_NOT_LINKED` when nothing is connected yet,
+   * `REFRESH_FAILED` when the provider rejects the refresh token (the
+   * account must be linked again).
    */
   get(name: string): Promise<{
     accessToken: string;
     scope: string | null;
     expiresAt: number | null;
+    accountId: string | null;
+    metadata: Record<string, unknown> | null;
+    credentials: Record<string, string> | null;
   }>;
 
-  /** List the signed-in user's linked connections. Token values
-   *  are NOT included — call `get(name)` for those. */
+  /** The linked connections the caller can see: their own and the
+   *  app's. Token values are NOT included — call `get(name)`. */
   list(): Promise<{
     connections: Array<{
       name: string;
       provider: string;
+      owner: "user" | "app";
+      kind: "oauth" | "api_key";
+      accountId: string | null;
       scope: string | null;
       expiresAt: number | null;
       updatedAt: number;
     }>;
   }>;
+
+  /**
+   * Store an API-key connection. `credentials` must have exactly the
+   * connection's fields. For a known provider (`stripe`, `square`,
+   * `toast`) the provider is called first to confirm the key works.
+   *
+   * Throws `CONNECTION_WRONG_KIND`, `INVALID_CREDENTIALS`, or
+   * `CREDENTIAL_CHECK_FAILED`.
+   */
+  setCredentials(
+    name: string,
+    credentials: Record<string, string>
+  ): Promise<{ connected: boolean; accountId: string | null }>;
 
   /** Remove the stored connection. Provider-side revocation is
    *  the caller's responsibility — most providers expose a separate

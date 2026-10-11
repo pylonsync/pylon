@@ -385,6 +385,49 @@ fn ensure_cron_lease_entity(manifest: &mut AppManifest) {
 /// on every open, the same way the CRDT sidecar is bootstrapped. Without it
 /// the cross-replica cron lease insert hits a missing relation and fails
 /// open (every replica fires the cron), and every connection write fails.
+/// Add the optional columns of a framework entity that an existing
+/// SQLite table lacks.
+fn add_missing_framework_columns_sqlite(
+    conn: &rusqlite::Connection,
+    entity: &ManifestEntity,
+) -> Result<(), RuntimeError> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({})", quote_ident(&entity.name)))
+        .map_err(|e| RuntimeError {
+            code: "SCHEMA_INIT_FAILED".into(),
+            message: format!("read columns of {}: {e}", entity.name),
+        })?;
+    let existing: std::collections::HashSet<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .and_then(|rows| rows.collect())
+        .map_err(|e| RuntimeError {
+            code: "SCHEMA_INIT_FAILED".into(),
+            message: format!("read columns of {}: {e}", entity.name),
+        })?;
+    for f in entity
+        .fields
+        .iter()
+        .filter(|f| f.optional && !existing.contains(&f.name))
+    {
+        let col_type = match f.field_type.as_str() {
+            "int" => "INTEGER",
+            "float" => "REAL",
+            "bool" => "INTEGER",
+            _ => "TEXT",
+        };
+        let sql = format!(
+            "ALTER TABLE {} ADD COLUMN {} {col_type}",
+            quote_ident(&entity.name),
+            quote_ident(&f.name)
+        );
+        conn.execute(&sql, []).map_err(|e| RuntimeError {
+            code: "SCHEMA_INIT_FAILED".into(),
+            message: format!("add column {}.{}: {e}", entity.name, f.name),
+        })?;
+    }
+    Ok(())
+}
+
 fn ensure_framework_table_pg(
     store: &pylon_storage::pg_datastore::PostgresDataStore,
     entity: &ManifestEntity,
@@ -404,6 +447,18 @@ fn ensure_framework_table_pg(
         &entity.name,
         &fields,
     )];
+    // CREATE TABLE IF NOT EXISTS leaves an existing table alone; add the
+    // optional columns a later release introduced. Required columns were
+    // all in the first version of every framework table.
+    for f in fields.iter().filter(|f| f.optional) {
+        stmts.push(
+            pylon_storage::postgres::add_column_sql(&entity.name, f).replacen(
+                " ADD COLUMN ",
+                " ADD COLUMN IF NOT EXISTS ",
+                1,
+            ),
+        );
+    }
     for idx in &entity.indexes {
         stmts.push(pylon_storage::postgres::create_index_sql(
             &entity.name,
@@ -461,6 +516,56 @@ fn validate_connection_encryption_present(
 /// fails on the first violating manifest so deploys reject mis-
 /// configurations instead of running with a silently-broken
 /// invariant.
+/// Refuse a connection declaration the runtime would misread: an
+/// unknown `owner` or `kind`, `fields` on an OAuth connection, a
+/// duplicate or empty field name, or a duplicate connection name.
+fn validate_connections(manifest: &AppManifest) -> Result<(), RuntimeError> {
+    let mut violations: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for c in &manifest.connections {
+        if !seen.insert(c.name.as_str()) {
+            violations.push(format!("connection \"{}\" is declared twice", c.name));
+        }
+        if connections::ConnectionOwner::parse(&c.owner).is_none() {
+            violations.push(format!(
+                "connection \"{}\": owner must be \"user\" or \"app\" (got \"{}\")",
+                c.name, c.owner
+            ));
+        }
+        match connections::ConnectionKind::parse(&c.kind) {
+            None => violations.push(format!(
+                "connection \"{}\": kind must be \"oauth\" or \"api_key\" (got \"{}\")",
+                c.name, c.kind
+            )),
+            Some(connections::ConnectionKind::Oauth) if !c.fields.is_empty() => {
+                violations.push(format!(
+                    "connection \"{}\": fields apply to kind \"api_key\" only",
+                    c.name
+                ))
+            }
+            _ => {}
+        }
+        let mut field_names = std::collections::HashSet::new();
+        for f in &c.fields {
+            if f.is_empty() || !field_names.insert(f.as_str()) {
+                violations.push(format!(
+                    "connection \"{}\": field names must be non-empty and unique",
+                    c.name
+                ));
+                break;
+            }
+        }
+    }
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(RuntimeError {
+            code: "INVALID_CONNECTIONS".into(),
+            message: violations.join("; "),
+        })
+    }
+}
+
 fn validate_encrypted_fields(manifest: &AppManifest) -> Result<(), RuntimeError> {
     let mut violations: Vec<String> = Vec::new();
     for entity in &manifest.entities {
@@ -1178,6 +1283,7 @@ impl Runtime {
             ensure_framework_table_pg(&store, &connections::connection_entity())?;
         }
         validate_encrypted_fields(&manifest)?;
+        validate_connections(&manifest)?;
         retention::rules_from_manifest(&manifest)?;
         validate_search_fields(&manifest)?;
         // Encryption-key check happens after key load — see below.
@@ -1943,6 +2049,7 @@ impl Runtime {
         force_vector_fields_server_only(&mut manifest);
         validate_manifest_org_roles(&manifest)?;
         validate_encrypted_fields(&manifest)?;
+        validate_connections(&manifest)?;
         retention::rules_from_manifest(&manifest)?;
         validate_search_fields(&manifest)?;
         // Encryption key + connections requirement check must run
@@ -1986,6 +2093,12 @@ impl Runtime {
                 code: "SCHEMA_INIT_FAILED".into(),
                 message: format!("Failed to create table {}: {e}", entity.name),
             })?;
+            // Framework tables (`_Connection`, `_CronLease`) never go
+            // through `pylon schema push`, so a column a later release
+            // adds would be missing on an existing table.
+            if entity.name.starts_with('_') {
+                add_missing_framework_columns_sqlite(&conn, entity)?;
+            }
 
             // Create indexes.
             for idx in &entity.indexes {
@@ -3311,6 +3424,10 @@ impl Runtime {
                         name: c.name.clone(),
                         provider: c.provider.clone(),
                         scopes: c.scopes.clone(),
+                        // validate_connections refused bad values at boot.
+                        owner: connections::ConnectionOwner::parse(&c.owner).unwrap_or_default(),
+                        kind: connections::ConnectionKind::parse(&c.kind).unwrap_or_default(),
+                        fields: c.fields.clone(),
                     })
                     .collect();
                 let state_backend: std::sync::Arc<dyn pylon_auth::OAuthStateBackend> =

@@ -412,9 +412,9 @@ fn default_true() -> bool {
     true
 }
 
-/// One external OAuth integration. Emitted by the SDK's
+/// One external integration (OAuth or API key). Emitted by the SDK's
 /// `defineConnection({...})` factory in app.ts.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ManifestConnection {
     /// App-facing key — `ctx.connections.get("google")` matches on
     /// this. Different connections can target the same provider
@@ -428,6 +428,18 @@ pub struct ManifestConnection {
     /// Whitespace-separated scopes. Empty = the provider's default.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub scopes: String,
+    /// `"user"` (default): each signed-in user links their own account.
+    /// `"app"`: one account for the whole app, read by any server
+    /// function, changed only by an admin.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub owner: String,
+    /// `"oauth"` (default) or `"api_key"`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+    /// API-key connections: the credential field names. Empty = the
+    /// provider's own list, else `["apiKey"]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<String>,
 }
 
 /// Pylon's auth configuration block — emitted by the SDK's

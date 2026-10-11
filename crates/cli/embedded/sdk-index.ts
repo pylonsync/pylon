@@ -2145,42 +2145,65 @@ export type ManifestLlmConfig = {
 /**
  * Developer-facing config for `defineConnection({...})`. Each entry
  * adds a `ctx.connections.<name>` surface to mutation + action ctx
- * (server-side OAuth tokens, never visible to the browser).
+ * (server-side tokens and keys, never visible to the browser).
  *
- * `provider` selects the OAuth client wire shape from pylon-auth's
- * built-in list (`google`, `github`, `slack`, `microsoft`, etc.).
- * `name` is the app-facing key — different connections can target
- * the same provider with different scopes
+ * `provider` selects the provider: a sign-in provider from pylon-auth's
+ * built-in list (`google`, `github`, `slack`, `microsoft`, etc.) or a
+ * business integration (`square`, `stripe`, `clover`, `calendly`,
+ * `mailchimp`). `name` is the app-facing key — different connections
+ * can target the same provider with different scopes
  * (e.g. `google-calendar` vs `google-drive`).
+ *
+ * `owner: "app"` makes one connection for the whole app — the
+ * business's own Square or Stripe account — that any server function
+ * reads (including for an anonymous visitor) and only an admin changes.
+ * The default `owner: "user"` links each signed-in user's own account.
+ *
+ * `kind: "api_key"` stores key fields instead of running OAuth (Toast's
+ * Standard API access, a Stripe restricted key). `fields` names them;
+ * the default is the provider's own list (`stripe`: `secretKey`,
+ * `square`: `accessToken`, `toast`: `clientId`, `clientSecret`,
+ * `restaurantGuid`), else `apiKey`.
  *
  * Configuration: per-provider client id + secret come from env
  * (`PYLON_OAUTH_<PROVIDER>_CLIENT_ID`, `PYLON_OAUTH_<PROVIDER>_CLIENT_SECRET`).
  * Callback URL is derived from `PYLON_PUBLIC_URL` +
- * `/api/connections/<name>/callback`.
+ * `/api/connections/<name>/callback`. On a platform that brokers
+ * connections (`PYLON_CONNECTIONS_BROKER_URL`), the platform runs the
+ * OAuth flow for app connections and the app needs no client secret.
  *
  * Storage: the framework auto-creates a `_Connection` entity at
- * boot when any connection is declared; token fields are AEAD-
+ * boot when any connection is declared; token and key fields are AEAD-
  * encrypted at rest (`PYLON_ENCRYPTION_KEY` is REQUIRED — boot
  * fails without it when connections are declared).
  */
 export type ConnectionConfig = {
   /** App-facing key. `ctx.connections.get(name)` matches on this. */
   name: string;
-  /** Provider identifier matching pylon-auth's OAuth client. */
+  /** Provider identifier: a pylon-auth OAuth provider or an integration. */
   provider: string;
   /** Whitespace-separated scopes. Empty = provider default. */
   scopes?: string;
+  /** `"user"` (default) or `"app"`. */
+  owner?: "user" | "app";
+  /** `"oauth"` (default) or `"api_key"`. */
+  kind?: "oauth" | "api_key";
+  /** API-key field names, for `kind: "api_key"`. */
+  fields?: string[];
 };
 
 export type ManifestConnection = {
   name: string;
   provider: string;
   scopes?: string;
+  owner?: "user" | "app";
+  kind?: "oauth" | "api_key";
+  fields?: string[];
 };
 
 /**
- * Declare a server-side OAuth integration. Returns the manifest
- * entry the runtime parses. Re-exported through `app.ts`:
+ * Declare a server-side integration. Returns the manifest entry the
+ * runtime parses. Re-exported through `app.ts`:
  *
  * ```ts
  * import { defineConnection } from "@pylonsync/sdk";
@@ -2190,17 +2213,31 @@ export type ManifestConnection = {
  *   provider: "google",
  *   scopes: "email profile https://www.googleapis.com/auth/calendar.readonly",
  * });
+ *
+ * // The business's Square account, used by the store's checkout.
+ * export const square = defineConnection({
+ *   name: "square",
+ *   provider: "square",
+ *   owner: "app",
+ *   scopes: "ITEMS_READ ITEMS_WRITE INVENTORY_READ INVENTORY_WRITE ORDERS_WRITE PAYMENTS_WRITE",
+ * });
  * ```
  *
- * `buildManifest({ connections: [googleConn] })` carries this into
- * the manifest; the runtime auto-creates the `_Connection` entity
- * and exposes `ctx.connections.get("google")` to actions.
+ * `buildManifest({ connections: [googleConn, square] })` carries these
+ * into the manifest; the runtime auto-creates the `_Connection` entity
+ * and exposes `ctx.connections.get("square")` to actions.
  */
 export function defineConnection(cfg: ConnectionConfig): ManifestConnection {
+  if (cfg.fields && cfg.fields.length > 0 && cfg.kind !== "api_key") {
+    throw new Error(`defineConnection("${cfg.name}"): fields apply to kind "api_key" only`);
+  }
   return {
     name: cfg.name,
     provider: cfg.provider,
     ...(cfg.scopes ? { scopes: cfg.scopes } : {}),
+    ...(cfg.owner && cfg.owner !== "user" ? { owner: cfg.owner } : {}),
+    ...(cfg.kind && cfg.kind !== "oauth" ? { kind: cfg.kind } : {}),
+    ...(cfg.fields && cfg.fields.length > 0 ? { fields: [...cfg.fields] } : {}),
   };
 }
 

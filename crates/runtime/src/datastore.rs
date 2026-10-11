@@ -7003,7 +7003,6 @@ fn install_connection_hook(
     runtime: Arc<crate::Runtime>,
 ) {
     use pylon_functions::protocol::AuthInfo;
-    use pylon_http::DataStore as _;
     runner.set_connection_hook(Box::new(
         move |op: &str,
               payload: &serde_json::Value,
@@ -7015,105 +7014,85 @@ fn install_connection_hook(
                     "No defineConnection(...) entries in the manifest.".to_string(),
                 )
             })?;
-            let user_id = auth.user_id.as_deref().ok_or_else(|| {
-                (
-                    "CONNECTION_REQUIRES_AUTH".to_string(),
-                    "ctx.connections.* requires an authenticated user.".to_string(),
-                )
-            })?;
+            let err =
+                |e: crate::connections::ConnectionError| (e.code().to_string(), e.to_string());
+            // A guest id is not an account; treat a guest as signed out.
+            let caller = auth.user_id.as_deref().filter(|_| !auth.is_guest);
+            if op == "list" {
+                return Ok(list_connections(mgr, &runtime, caller));
+            }
+            let name = payload
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    (
+                        "INVALID_REQUEST".to_string(),
+                        format!("{op} requires `name`"),
+                    )
+                })?
+                .to_string();
             match op {
                 "authorize_url" => {
-                    let name = payload
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            (
-                                "INVALID_REQUEST".to_string(),
-                                "authorize_url requires `name`".to_string(),
-                            )
-                        })?;
-                    let post_redirect = payload
-                        .get("post_redirect")
-                        .and_then(|v| v.as_str());
+                    let owner = mgr
+                        .owner_for(&name, caller, auth.is_admin, true)
+                        .map_err(err)?;
+                    let post_redirect = payload.get("post_redirect").and_then(|v| v.as_str());
                     let url = mgr
-                        .build_auth_url(name, user_id, post_redirect)
-                        .map_err(|e| (e.code().to_string(), e.to_string()))?;
+                        .build_auth_url(&name, &owner, post_redirect)
+                        .map_err(err)?;
                     Ok(serde_json::json!({ "url": url }))
                 }
                 "get" => {
-                    let name = payload
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            (
-                                "INVALID_REQUEST".to_string(),
-                                "get requires `name`".to_string(),
-                            )
-                        })?
-                        .to_string();
-                    let user = user_id.to_string();
+                    // An app connection is readable by any server
+                    // function; the function decides what its caller may do.
+                    let owner = mgr
+                        .owner_for(&name, caller, auth.is_admin, false)
+                        .map_err(err)?;
                     let load_runtime = Arc::clone(&runtime);
                     let store_runtime = Arc::clone(&runtime);
-                    let load_user = user.clone();
-                    let load_name = name.clone();
-                    let store_user = user.clone();
-                    let store_name = name.clone();
-                    // load_fn is `Fn` (called twice on the slow path:
-                    // once before taking the per-key lock, once
-                    // after). Move the Arcs + strings into a closure
-                    // that captures by reference internally.
-                    let access_token = mgr
+                    let (load_owner, store_owner) = (owner.clone(), owner.clone());
+                    let (load_name, store_name) = (name.clone(), name.clone());
+                    let row = mgr
                         .ensure_fresh_token(
-                            &user,
+                            &owner,
                             &name,
-                            || load_connection_row(&load_runtime, &load_user, &load_name),
-                            move |row| save_connection_row(&store_runtime, &store_user, &store_name, row),
+                            || load_connection_row(&load_runtime, &load_owner, &load_name),
+                            move |row| {
+                                save_connection_row(&store_runtime, &store_owner, &store_name, row)
+                            },
                         )
-                        .map_err(|e| (e.code().to_string(), e.to_string()))?;
-                    // Fetch the row again for scope + expires_at.
-                    let row = load_connection_row(&runtime, &user, &name)
-                        .map_err(|e| ("STORAGE_FAILED".to_string(), e))?;
-                    let (scope, expires_at) = row
-                        .map(|r| (r.scope.clone(), r.expires_at))
-                        .unwrap_or((None, None));
+                        .map_err(err)?;
+                    let parse = |s: &Option<String>| {
+                        s.as_deref()
+                            .and_then(|t| serde_json::from_str::<serde_json::Value>(t).ok())
+                            .unwrap_or(serde_json::Value::Null)
+                    };
                     Ok(serde_json::json!({
-                        "access_token": access_token,
-                        "scope": scope,
-                        "expires_at": expires_at,
+                        "access_token": row.access_token,
+                        "scope": row.scope,
+                        "expires_at": row.expires_at,
+                        "account_id": row.account_id,
+                        "metadata": parse(&row.metadata),
+                        "credentials": parse(&row.credentials),
                     }))
                 }
-                "list" => {
-                    let rows = runtime
-                        .query_filtered("_Connection", &serde_json::json!({ "userId": user_id }))
-                        .map_err(|e| ("STORAGE_FAILED".to_string(), e.message))?;
-                    let summaries: Vec<serde_json::Value> = rows
-                        .iter()
-                        .map(|r| {
-                            serde_json::json!({
-                                "name": r.get("name").cloned().unwrap_or(serde_json::Value::Null),
-                                "provider": r.get("provider").cloned().unwrap_or(serde_json::Value::Null),
-                                "scope": r.get("scope").cloned().unwrap_or(serde_json::Value::Null),
-                                "expires_at": r.get("expiresAt").cloned().unwrap_or(serde_json::Value::Null),
-                                "updated_at": r.get("updatedAt").cloned().unwrap_or(serde_json::Value::Null),
-                            })
-                        })
-                        .collect();
-                    Ok(serde_json::json!({ "connections": summaries }))
+                "set_credentials" => {
+                    let owner = mgr
+                        .owner_for(&name, caller, auth.is_admin, true)
+                        .map_err(err)?;
+                    let creds = credentials_from_json(payload.get("credentials"))?;
+                    let row = mgr
+                        .row_from_credentials(&name, &owner, &creds, true)
+                        .map_err(err)?;
+                    save_connection_row(&runtime, &owner, &name, &row)
+                        .map_err(|e| ("STORAGE_FAILED".to_string(), e))?;
+                    Ok(serde_json::json!({ "connected": true, "account_id": row.account_id }))
                 }
                 "disconnect" => {
-                    let name = payload
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            (
-                                "INVALID_REQUEST".to_string(),
-                                "disconnect requires `name`".to_string(),
-                            )
-                        })?;
-                    let id = crate::connections::stable_id(user_id, name);
-                    mgr.disconnect(user_id, name, || {
-                        runtime.delete("_Connection", &id).map(|_| ()).map_err(|e| e.message)
-                    }).map_err(|e| (e.code().to_string(), e.to_string()))?;
+                    let owner = mgr
+                        .owner_for(&name, caller, auth.is_admin, true)
+                        .map_err(err)?;
+                    delete_connection_row(mgr, &runtime, &owner, &name).map_err(err)?;
                     Ok(serde_json::json!({ "disconnected": true }))
                 }
                 other => Err((
@@ -7125,7 +7104,87 @@ fn install_connection_hook(
     ));
 }
 
-fn load_connection_row(
+/// The caller's user connections plus the app's connections. No
+/// secrets: names, providers, and state only.
+pub(crate) fn list_connections(
+    mgr: &crate::connections::ConnectionManager,
+    runtime: &Arc<crate::Runtime>,
+    caller: Option<&str>,
+) -> serde_json::Value {
+    use crate::connections::{ConnectionOwner, APP_OWNER};
+    let mut out = Vec::new();
+    let mut defs: Vec<_> = mgr.defs().collect();
+    defs.sort_by(|a, b| a.name.cmp(&b.name));
+    for def in defs {
+        let owner = match def.owner {
+            ConnectionOwner::App => APP_OWNER,
+            ConnectionOwner::User => match caller {
+                Some(u) => u,
+                None => continue,
+            },
+        };
+        let row = load_connection_row(runtime, owner, &def.name)
+            .ok()
+            .flatten();
+        out.push(serde_json::json!({
+            "name": def.name,
+            "provider": def.provider,
+            "owner": def.owner.as_str(),
+            "kind": def.kind.as_str(),
+            "fields": if def.kind == crate::connections::ConnectionKind::ApiKey {
+                def.credential_fields()
+            } else {
+                Vec::new()
+            },
+            "connected": row.is_some(),
+            "account_id": row.as_ref().and_then(|r| r.account_id.clone()),
+            "scope": row.as_ref().and_then(|r| r.scope.clone()),
+            "expires_at": row.as_ref().and_then(|r| r.expires_at),
+            "updated_at": row.as_ref().map(|r| r.updated_at),
+        }));
+    }
+    serde_json::json!({ "connections": out })
+}
+
+/// Read `{ field: "value" }` from a request. Only string values.
+pub(crate) fn credentials_from_json(
+    v: Option<&serde_json::Value>,
+) -> Result<std::collections::HashMap<String, String>, (String, String)> {
+    let obj = v.and_then(|v| v.as_object()).ok_or_else(|| {
+        (
+            "INVALID_CREDENTIALS".to_string(),
+            "`credentials` must be an object of strings".to_string(),
+        )
+    })?;
+    let mut out = std::collections::HashMap::new();
+    for (k, v) in obj {
+        let s = v.as_str().ok_or_else(|| {
+            (
+                "INVALID_CREDENTIALS".to_string(),
+                format!("`{k}` must be a string"),
+            )
+        })?;
+        out.insert(k.clone(), s.to_string());
+    }
+    Ok(out)
+}
+
+pub(crate) fn delete_connection_row(
+    mgr: &crate::connections::ConnectionManager,
+    runtime: &Arc<crate::Runtime>,
+    owner: &str,
+    name: &str,
+) -> Result<(), crate::connections::ConnectionError> {
+    let id = crate::connections::stable_id(owner, name);
+    mgr.disconnect(owner, name, || {
+        runtime
+            .delete("_Connection", &id)
+            .map(|_| ())
+            .map_err(|e| e.message)
+    })
+}
+
+pub(crate) fn load_connection_row(
     runtime: &Arc<crate::Runtime>,
     user_id: &str,
     name: &str,
@@ -7141,7 +7200,7 @@ fn load_connection_row(
     Ok(Some(connection_row_from_json(&row, user_id, name)))
 }
 
-fn save_connection_row(
+pub(crate) fn save_connection_row(
     runtime: &Arc<crate::Runtime>,
     user_id: &str,
     name: &str,
@@ -7166,6 +7225,8 @@ fn save_connection_row(
 }
 
 fn connection_row_to_json(row: &crate::connections::StoredConnection) -> serde_json::Value {
+    // Every column is written, so a reconnect clears what the previous
+    // connection left (a key's credentials, an old account id).
     serde_json::json!({
         "userId": row.user_id,
         "name": row.name,
@@ -7175,6 +7236,9 @@ fn connection_row_to_json(row: &crate::connections::StoredConnection) -> serde_j
         "expiresAt": row.expires_at,
         "scope": row.scope,
         "updatedAt": row.updated_at,
+        "accountId": row.account_id,
+        "metadata": row.metadata,
+        "credentials": row.credentials,
     })
 }
 
@@ -7199,6 +7263,9 @@ fn connection_row_from_json(
         expires_at: opt_u64(row, "expiresAt"),
         scope: opt_str(row, "scope"),
         updated_at: opt_u64(row, "updatedAt").unwrap_or(0),
+        account_id: opt_str(row, "accountId"),
+        metadata: opt_str(row, "metadata"),
+        credentials: opt_str(row, "credentials"),
     }
 }
 

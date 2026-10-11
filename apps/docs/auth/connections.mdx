@@ -1,0 +1,162 @@
+---
+title: Connections
+description: "Let server functions act on a user's or the business's account at Google, Square, Stripe, and other services."
+---
+
+A connection holds the tokens or keys a server function needs to call another service. Pylon runs the OAuth flow, stores the tokens encrypted, and refreshes them before they expire. Your function calls `ctx.connections.get(name)` and uses the token.
+
+A connection belongs to one of two owners:
+
+- **A user** (the default). Each signed-in user links their own account, for example their Google Calendar.
+- **The app** (`owner: "app"`). One account for the whole app, for example the business's Square account. Any server function can read it, including one that serves an anonymous visitor. Only an admin can connect or remove it.
+
+A connection is an OAuth grant (the default) or a set of keys (`kind: "api_key"`).
+
+## Declare a connection
+
+```ts app.ts
+import { defineConnection } from "@pylonsync/sdk";
+
+export const calendar = defineConnection({
+  name: "google-calendar",
+  provider: "google",
+  scopes: "https://www.googleapis.com/auth/calendar.readonly",
+});
+
+// The business's Square account, used by the store checkout.
+export const square = defineConnection({
+  name: "square",
+  provider: "square",
+  owner: "app",
+  scopes: "ITEMS_READ ITEMS_WRITE INVENTORY_READ INVENTORY_WRITE ORDERS_WRITE PAYMENTS_WRITE",
+});
+
+// Toast has no consent screen. The restaurant creates credentials in Toast Web.
+export const toast = defineConnection({
+  name: "toast",
+  provider: "toast",
+  owner: "app",
+  kind: "api_key",
+});
+```
+
+Pass them to `buildManifest({ connections: [calendar, square, toast] })`.
+
+Boot fails when a declaration is wrong: an unknown `owner` or `kind`, `fields` on an OAuth connection, or a name declared twice.
+
+## Providers
+
+| Provider | Kind | Account id | Notes |
+| --- | --- | --- | --- |
+| `square` | OAuth | Square merchant id | Uses the redirect URL registered for the Square app. Asks the seller to sign in each time. |
+| `stripe` | OAuth (Connect) | Stripe account id | The client secret is the platform's secret API key. |
+| `clover` | OAuth | Clover merchant id | North America. Permissions are set on the Clover app. |
+| `calendly` | OAuth with PKCE | Calendly user URI | |
+| `mailchimp` | OAuth | Mailchimp user id | Tokens do not expire. `metadata.dc` is the data center for API calls. |
+| `stripe` | API key | Stripe account id | Field `secretKey`: a secret (`sk_`) or restricted (`rk_`) key. |
+| `square` | API key | Square merchant id | Field `accessToken`. |
+| `toast` | API key | Restaurant GUID | Fields `clientId`, `clientSecret`, `restaurantGuid` (Standard API access). |
+
+Every sign-in provider in [OAuth](/auth/oauth) also works as a connection provider (Google, GitHub, Slack, Microsoft, Notion, and others).
+
+For an API-key connection with a known provider, Pylon calls the provider to check the key before it stores it. For any other provider, declare the field names with `fields`; the default is one field, `apiKey`.
+
+## Configuration
+
+| Variable | Purpose |
+| --- | --- |
+| `PYLON_ENCRYPTION_KEY` | Required. Tokens and keys are encrypted at rest. |
+| `PYLON_PUBLIC_URL` | Base URL for the callback, `/api/connections/<name>/callback`. |
+| `PYLON_OAUTH_<PROVIDER>_CLIENT_ID` | The OAuth client id, for example `PYLON_OAUTH_SQUARE_CLIENT_ID`. |
+| `PYLON_OAUTH_<PROVIDER>_CLIENT_SECRET` | The OAuth client secret. |
+
+## Use a connection
+
+```ts functions/listCatalog.ts
+import { action } from "@pylonsync/functions";
+
+export default action({
+  auth: "public",
+  async handler(ctx) {
+    const { accessToken } = await ctx.connections.get("square");
+    const res = await fetch("https://connect.squareup.com/v2/catalog/list?types=ITEM", {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    return await res.json();
+  },
+});
+```
+
+`get` returns:
+
+| Field | Value |
+| --- | --- |
+| `accessToken` | A fresh access token. For an API-key connection, the first key field. |
+| `credentials` | API-key connections: every field. Otherwise `null`. |
+| `accountId` | The provider's id for the connected account, when it reports one. |
+| `metadata` | Non-secret provider data, such as Mailchimp's `dc`. |
+| `scope`, `expiresAt` | What the provider granted, and when the token expires (Unix seconds). |
+
+## Connect an account
+
+For a user connection, any signed-in user starts their own flow. For an app connection, the function must run as an admin.
+
+```ts functions/connectSquare.ts
+import { action } from "@pylonsync/functions";
+
+export default action({
+  async handler(ctx) {
+    // Decide who may change the shop's account before elevating.
+    if (!ctx.auth.roles.includes("owner")) {
+      throw ctx.error("FORBIDDEN", "Only the owner connects Square.");
+    }
+    await ctx.auth.elevate({ admin: true, reason: "owner connects the shop's Square account" });
+    return await ctx.connections.authorizeUrl("square", { postRedirect: "/admin/settings" });
+  },
+});
+```
+
+The browser goes to the returned URL, the person approves, and the provider sends the browser to `/api/connections/square/callback`. Pylon stores the tokens and sends the browser to `postRedirect`.
+
+Store keys with `ctx.connections.setCredentials(name, { ...fields })`. Remove a connection with `ctx.connections.disconnect(name)`.
+
+<Warning>
+Check who the caller is before you elevate. After `elevate`, the call can change every app connection.
+</Warning>
+
+## Hosted connections
+
+A platform that hosts many Pylon apps can run the OAuth flow for their app connections with its own client credentials, so each app holds no client secret. Pylon Cloud and Stack0 do this.
+
+| Variable | Purpose |
+| --- | --- |
+| `PYLON_CONNECTIONS_TOKEN` | Bearer token for `/_pylon/connections`. At least 32 characters. Unset: the route does not exist. |
+| `PYLON_CONNECTIONS_BROKER_URL` | The platform's refresh endpoint. https, or http on localhost. |
+| `PYLON_CONNECTIONS_BROKER_TOKEN` | Bearer token for the refresh endpoint. |
+
+With the broker set, `authorizeUrl` on an app connection throws `CONNECTION_MANAGED`. The platform hands over the result through the management API:
+
+- `GET /_pylon/connections` lists the app connections: name, provider, kind, key fields, `connected`, `account_id`, and expiry. It never returns a token or a key.
+- `PUT /_pylon/connections/<name>` stores tokens `{ accessToken, refreshToken?, expiresAt?, scope?, accountId?, metadata? }`, or keys `{ credentials: { ... } }`.
+- `DELETE /_pylon/connections/<name>` removes the stored connection.
+
+When an app connection's token is about to expire, Pylon posts `{ connection, provider, accountId, refreshToken }` to the broker URL and stores the `{ accessToken, refreshToken?, expiresAt?, scope? }` it gets back.
+
+## Errors
+
+| Code | Meaning |
+| --- | --- |
+| `CONNECTIONS_NOT_CONFIGURED` | The manifest declares no connections. |
+| `CONNECTION_UNKNOWN` | No connection has this name. |
+| `CONNECTION_FORBIDDEN` | A user connection with no signed-in caller, or a change to an app connection without admin. |
+| `CONNECTION_WRONG_KIND` | An OAuth call on an API-key connection, or the reverse. |
+| `CONNECTION_MANAGED` | The hosting platform runs this connection's OAuth flow. |
+| `CONNECTION_NOT_LINKED` | Nothing is connected yet. |
+| `INVALID_CREDENTIALS` | A key field is missing, extra, or has the wrong shape. |
+| `CREDENTIAL_CHECK_FAILED` | The provider did not accept the key. |
+| `PROVIDER_NOT_CONFIGURED` | `PYLON_OAUTH_<PROVIDER>_*` is missing. |
+| `ENCRYPTION_REQUIRED` | `PYLON_ENCRYPTION_KEY` is unset. |
+| `AUTH_FAILED` | The state is invalid or expired, or the provider refused the code. |
+| `REFRESH_FAILED` | The provider or the broker refused the refresh. Connect the account again. |
+
+`ctx.connections` is available in mutations and actions, not queries.

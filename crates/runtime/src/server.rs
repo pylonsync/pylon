@@ -8368,38 +8368,151 @@ fn start_server(
             }
         }
 
+        // --- /_pylon/connections — the hosting platform's management API ---
+        //
+        //   GET    /_pylon/connections         the app connections and their state
+        //   PUT    /_pylon/connections/<name>  store tokens (OAuth) or keys (API key)
+        //   DELETE /_pylon/connections/<name>  remove the stored connection
+        //
+        // Bearer PYLON_CONNECTIONS_TOKEN. Unset: the route does not exist.
+        // Only app connections (owner "app"); a user's connections are
+        // theirs alone. Responses never carry a token or a key.
+        if url == "/_pylon/connections" || url.starts_with("/_pylon/connections/") {
+            let reply = |request: tiny_http::Request, status: u16, body: String| {
+                let _ = request.respond(with_security_headers(
+                    Response::from_string(body)
+                        .with_status_code(status)
+                        .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+                        .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap()),
+                ));
+            };
+            let expected = std::env::var("PYLON_CONNECTIONS_TOKEN").ok().filter(|t| t.len() >= 32);
+            let Some(expected) = expected else {
+                reply(request, 404, json_error("NOT_FOUND", "Not found"));
+                mt.record_request(method.as_str(), 404);
+                return;
+            };
+            let presented = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Authorization"))
+                .and_then(|h| h.value.as_str().strip_prefix("Bearer ").map(str::to_string))
+                .unwrap_or_default();
+            if !pylon_auth::constant_time_eq(presented.as_bytes(), expected.as_bytes()) {
+                reply(request, 401, json_error("UNAUTHORIZED", "PYLON_CONNECTIONS_TOKEN bearer required"));
+                mt.record_request(method.as_str(), 401);
+                return;
+            }
+            let Some(mgr) = crate::datastore::build_connection_manager(&runtime) else {
+                reply(request, 200, serde_json::json!({ "connections": [] }).to_string());
+                mt.record_request(method.as_str(), 200);
+                return;
+            };
+            let name = url
+                .strip_prefix("/_pylon/connections/")
+                .map(|n| percent_decode_str(n.split('?').next().unwrap_or(n)));
+            let fail = |e: crate::connections::ConnectionError| {
+                let status = match e.code() {
+                    "CONNECTION_UNKNOWN" => 404,
+                    "CONNECTION_FORBIDDEN" => 403,
+                    "CONNECTION_WRONG_KIND" | "INVALID_CREDENTIALS" => 400,
+                    "CREDENTIAL_CHECK_FAILED" => 422,
+                    "ENCRYPTION_REQUIRED" => 503,
+                    _ => 500,
+                };
+                (status, json_error(e.code(), &e.to_string()))
+            };
+            let app_def = |name: &str| -> Result<(), crate::connections::ConnectionError> {
+                match mgr.get_def(name) {
+                    None => Err(crate::connections::ConnectionError::UnknownConnection { name: name.into() }),
+                    Some(d) if d.owner != crate::connections::ConnectionOwner::App => Err(
+                        crate::connections::ConnectionError::Forbidden(format!(
+                            "Connection \"{name}\" belongs to a user, not the app"
+                        )),
+                    ),
+                    Some(_) => Ok(()),
+                }
+            };
+            let (status, out) = match (&method, name.as_deref()) {
+                (Method::Get, None) => {
+                    let mut listed = crate::datastore::list_connections(&mgr, &runtime, None);
+                    if let Some(obj) = listed.as_object_mut() {
+                        obj.insert("brokered".into(), mgr.brokered().into());
+                        obj.insert("encryption".into(), mgr.encryption_configured().into());
+                    }
+                    (200, listed.to_string())
+                }
+                (Method::Put, Some(name)) => {
+                    let parsed: Result<serde_json::Value, _> = serde_json::from_str(&body);
+                    match (app_def(name), parsed) {
+                        (Err(e), _) => fail(e),
+                        (Ok(()), Err(_)) => (400, json_error("INVALID_REQUEST", "body must be JSON")),
+                        (Ok(()), Ok(v)) => {
+                            let row = if v.get("credentials").is_some() {
+                                match crate::datastore::credentials_from_json(v.get("credentials")) {
+                                    Err((code, msg)) => Err((400, json_error(&code, &msg))),
+                                    Ok(creds) => mgr
+                                        .row_from_credentials(name, crate::connections::APP_OWNER, &creds, true)
+                                        .map_err(fail),
+                                }
+                            } else if !mgr.encryption_configured() {
+                                Err(fail(crate::connections::ConnectionError::EncryptionRequired))
+                            } else {
+                                match serde_json::from_value::<crate::connections::HandedTokens>(v) {
+                                    Err(_) => Err((400, json_error("INVALID_REQUEST", "unreadable token body"))),
+                                    Ok(handed) => mgr.row_from_broker(name, handed).map_err(fail),
+                                }
+                            };
+                            match row {
+                                Err(e) => e,
+                                Ok(row) => match crate::datastore::save_connection_row(
+                                    &runtime,
+                                    crate::connections::APP_OWNER,
+                                    name,
+                                    &row,
+                                ) {
+                                    Ok(()) => (
+                                        200,
+                                        serde_json::json!({
+                                            "connected": true,
+                                            "account_id": row.account_id,
+                                        })
+                                        .to_string(),
+                                    ),
+                                    Err(e) => (500, json_error("STORAGE_FAILED", &e)),
+                                },
+                            }
+                        }
+                    }
+                }
+                (Method::Delete, Some(name)) => match app_def(name).and_then(|()| {
+                    crate::datastore::delete_connection_row(
+                        &mgr,
+                        &runtime,
+                        crate::connections::APP_OWNER,
+                        name,
+                    )
+                }) {
+                    Ok(()) => (200, serde_json::json!({ "disconnected": true }).to_string()),
+                    Err(e) => fail(e),
+                },
+                _ => (405, json_error("METHOD_NOT_ALLOWED", "Method not allowed")),
+            };
+            reply(request, status, out);
+            mt.record_request(method.as_str(), status);
+            return;
+        }
+
         // --- POST /api/connections/<name>/auth-url ---
         //
-        // Authed-only. Mints a CSRF state token, persists payload,
-        // returns the URL the browser should navigate to. The
-        // user's OAuth consent flow then redirects to /callback.
+        // A user connection needs a signed-in session; an app
+        // connection needs an admin. Mints a CSRF state token,
+        // persists payload, returns the URL the browser should
+        // navigate to. The consent flow then redirects to /callback.
         if method == Method::Post
             && url.starts_with("/api/connections/")
             && url.ends_with("/auth-url")
         {
-            if auth_ctx.user_id.is_none() {
-                let err = json_error(
-                    "AUTH_REQUIRED",
-                    "/api/connections/*/auth-url requires an authenticated session",
-                );
-                let response = with_security_headers(
-                    Response::from_string(&err)
-                        .with_status_code(401u16)
-                        .with_header(
-                            Header::from_bytes("Content-Type", "application/json").unwrap(),
-                        )
-                        .with_header(
-                            Header::from_bytes(
-                                "Access-Control-Allow-Origin",
-                                cors_origin.as_bytes().to_vec(),
-                            )
-                            .unwrap(),
-                        ),
-                );
-                let _ = request.respond(response);
-                mt.record_request("POST", 401);
-                return;
-            }
             let name = url
                 .trim_start_matches("/api/connections/")
                 .trim_end_matches("/auth-url");
@@ -8436,19 +8549,21 @@ fn start_server(
                     return;
                 }
             };
-            let result = mgr.build_auth_url(
-                name,
-                auth_ctx.user_id.as_deref().unwrap_or(""),
-                post_redirect.as_deref(),
-            );
+            let caller = auth_ctx.user_id.as_deref().filter(|_| !auth_ctx.is_guest);
+            let result = mgr
+                .owner_for(name, caller, auth_ctx.is_admin, true)
+                .and_then(|owner| mgr.build_auth_url(name, &owner, post_redirect.as_deref()));
             let (status, body) = match result {
                 Ok(u) => (200u16, serde_json::json!({"url": u}).to_string()),
                 Err(e) => {
                     let code = e.code();
                     let status = match code {
                         "CONNECTION_UNKNOWN" => 404,
+                        "CONNECTION_FORBIDDEN" if caller.is_none() => 401,
+                        "CONNECTION_FORBIDDEN" => 403,
                         "PROVIDER_NOT_CONFIGURED" => 503,
                         "ENCRYPTION_REQUIRED" => 503,
+                        "CONNECTION_MANAGED" => 409,
                         _ => 400,
                     };
                     (status, json_error(code, &e.to_string()))
@@ -8488,18 +8603,14 @@ fn start_server(
                 .trim_start_matches("/api/connections/")
                 .trim_end_matches("/callback");
             let qs = url.split_once('?').map(|(_, q)| q).unwrap_or("");
-            let mut code: Option<String> = None;
-            let mut state: Option<String> = None;
+            let mut params: std::collections::HashMap<String, String> = std::collections::HashMap::new();
             for pair in qs.split('&') {
                 if let Some((k, v)) = pair.split_once('=') {
-                    let decoded = percent_decode_str(v);
-                    match k {
-                        "code" => code = Some(decoded),
-                        "state" => state = Some(decoded),
-                        _ => {}
-                    }
+                    params.insert(percent_decode_str(k), percent_decode_str(v));
                 }
             }
+            let code = params.get("code").cloned();
+            let state = params.get("state").cloned();
             let mgr = match crate::datastore::build_connection_manager(&runtime) {
                 Some(m) => m,
                 None => {
@@ -8539,29 +8650,19 @@ fn start_server(
                 }
             };
             let runtime_for_store = Arc::clone(&runtime);
-            let _name_owned = name.to_string();
-            let outcome = mgr.complete_callback(&code, &state, move |row| {
-                let id = crate::connections::stable_id(&row.user_id, &row.name);
-                let payload = serde_json::json!({
-                    "id": id.clone(),
-                    "userId": row.user_id,
-                    "name": row.name,
-                    "provider": row.provider,
-                    "accessToken": row.access_token,
-                    "refreshToken": row.refresh_token,
-                    "expiresAt": row.expires_at,
-                    "scope": row.scope,
-                    "updatedAt": row.updated_at,
-                });
-                let updated = runtime_for_store
-                    .update("_Connection", &id, &payload)
-                    .map_err(|e| e.message)?;
-                if !updated {
-                    runtime_for_store
-                        .insert("_Connection", &payload)
-                        .map_err(|e| e.message)?;
+            let outcome = mgr.complete_callback(&code, &state, &params, move |row| {
+                crate::datastore::save_connection_row(&runtime_for_store, &row.user_id, &row.name, row)
+            });
+            // The state names the connection; a callback path naming a
+            // different one is a forged or crossed link.
+            let outcome = outcome.and_then(|o| {
+                if o.connection_name == name {
+                    Ok(o)
+                } else {
+                    Err(crate::connections::ConnectionError::AuthFailed(
+                        "callback path does not match the state".into(),
+                    ))
                 }
-                Ok(())
             });
             let (status, location, body): (u16, Option<String>, String) = match outcome {
                 Ok(o) => {

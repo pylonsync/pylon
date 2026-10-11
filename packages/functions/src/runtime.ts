@@ -1174,11 +1174,21 @@ function buildConnections(callId: string): Connections {
         type: "connection",
         op: "get",
         payload: { name },
-      })) as { access_token: string; scope: string | null; expires_at: number | null };
+      })) as {
+        access_token: string;
+        scope: string | null;
+        expires_at: number | null;
+        account_id: string | null;
+        metadata: Record<string, unknown> | null;
+        credentials: Record<string, string> | null;
+      };
       return {
         accessToken: data.access_token,
         scope: data.scope,
         expiresAt: data.expires_at,
+        accountId: data.account_id ?? null,
+        metadata: data.metadata ?? null,
+        credentials: data.credentials ?? null,
       };
     },
     async list() {
@@ -1190,20 +1200,38 @@ function buildConnections(callId: string): Connections {
         connections: Array<{
           name: string;
           provider: string;
+          owner: "user" | "app";
+          kind: "oauth" | "api_key";
+          connected: boolean;
+          account_id: string | null;
           scope: string | null;
           expires_at: number | null;
-          updated_at: number;
+          updated_at: number | null;
         }>;
       };
+      // Linked connections only, as before app connections existed.
       return {
-        connections: data.connections.map((c) => ({
-          name: c.name,
-          provider: c.provider,
-          scope: c.scope,
-          expiresAt: c.expires_at,
-          updatedAt: c.updated_at,
-        })),
+        connections: data.connections
+          .filter((c) => c.connected)
+          .map((c) => ({
+            name: c.name,
+            provider: c.provider,
+            owner: c.owner,
+            kind: c.kind,
+            accountId: c.account_id,
+            scope: c.scope,
+            expiresAt: c.expires_at,
+            updatedAt: c.updated_at ?? 0,
+          })),
       };
+    },
+    async setCredentials(name, credentials) {
+      const data = (await rpc(callId, {
+        type: "connection",
+        op: "set_credentials",
+        payload: { name, credentials },
+      })) as { connected: boolean; account_id: string | null };
+      return { connected: data.connected, accountId: data.account_id ?? null };
     },
     async disconnect(name) {
       return (await rpc(callId, {

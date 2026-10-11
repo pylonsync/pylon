@@ -2391,18 +2391,10 @@ impl FnRunner {
                 }
 
                 TsMessage::Connection(req) if req.call_id == call_id => {
-                    // Refuse unauthenticated callers. ctx.connections.*
-                    // is bound to ctx.auth.userId — without a user
-                    // identity there's nothing to look up.
-                    if caller_user_id.is_none() && !caller_is_admin {
-                        let reply = DbResultMessage::err(
-                            call_id.clone(),
-                            "CONNECTION_REQUIRES_AUTH",
-                            "ctx.connections.* requires an authenticated user. Public callers must ctx.auth.elevate first.",
-                        );
-                        self.send(&reply)?;
-                        continue;
-                    }
+                    // The hook decides per connection: a user connection
+                    // needs a signed-in caller, an app connection is
+                    // readable by any server function and changed only
+                    // by an admin.
                     let auth_snapshot = current_auth_snapshot(&gate_auth, caller_is_admin);
                     let result: Result<serde_json::Value, (String, String)> = {
                         let hook = self.connection_hook.lock().unwrap().clone();

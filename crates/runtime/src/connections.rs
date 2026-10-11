@@ -1,4 +1,20 @@
-//! Per-user OAuth connection registry.
+//! OAuth and API-key connection registry.
+//!
+//! A connection belongs to one signed-in user (`owner: "user"`, the
+//! default) or to the whole app (`owner: "app"`). An app connection is
+//! the business's own account (its Square, its Stripe): any server
+//! function reads it, including one serving an anonymous visitor, and
+//! only an admin connects or removes it. A connection is an OAuth grant
+//! (`kind: "oauth"`, the default) or a set of key fields
+//! (`kind: "api_key"`).
+//!
+//! Brokered mode: when `PYLON_CONNECTIONS_BROKER_URL` and
+//! `PYLON_CONNECTIONS_BROKER_TOKEN` are set, the platform hosting the
+//! app runs the OAuth flow for app connections with its own client
+//! credentials and hands the tokens over through the management
+//! endpoint (`PYLON_CONNECTIONS_TOKEN`, see server.rs). The app holds no
+//! client secret; refreshes go to the broker. Without the broker the app
+//! runs the flow itself with `PYLON_OAUTH_<PROVIDER>_CLIENT_ID/SECRET`.
 //!
 //! Distinct from the framework's "sign in with Google" flow:
 //! `ctx.connections.*` lets an authenticated user link an external
@@ -40,7 +56,7 @@ use pylon_auth::OAuthStateBackend;
 /// One connection the app declared via `defineConnection({...})`.
 /// Carried inside the manifest so codegen + runtime both see the
 /// same shape.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ConnectionDef {
     /// App-facing name (`"google"`, `"github"`, `"slack-team"`).
     /// This is the key in `ctx.connections.get(name)`.
@@ -54,15 +70,90 @@ pub struct ConnectionDef {
     /// empty the framework uses the provider's default.
     #[serde(default)]
     pub scopes: String,
+    #[serde(default)]
+    pub owner: ConnectionOwner,
+    #[serde(default)]
+    pub kind: ConnectionKind,
+    /// API-key fields. Empty: the known provider's fields
+    /// (`pylon_auth::integrations::api_key_spec`), else `["apiKey"]`.
+    #[serde(default)]
+    pub fields: Vec<String>,
 }
+
+/// Who a connection belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ConnectionOwner {
+    #[default]
+    User,
+    App,
+}
+
+impl ConnectionOwner {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "" | "user" => Some(Self::User),
+            "app" => Some(Self::App),
+            _ => None,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::App => "app",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionKind {
+    #[default]
+    Oauth,
+    ApiKey,
+}
+
+impl ConnectionKind {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "" | "oauth" => Some(Self::Oauth),
+            "api_key" => Some(Self::ApiKey),
+            _ => None,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Oauth => "oauth",
+            Self::ApiKey => "api_key",
+        }
+    }
+}
+
+impl ConnectionDef {
+    /// The key fields an API-key connection stores, in form order.
+    pub fn credential_fields(&self) -> Vec<String> {
+        if !self.fields.is_empty() {
+            return self.fields.clone();
+        }
+        if let Some(spec) = pylon_auth::integrations::api_key_spec(&self.provider) {
+            return spec.fields.iter().map(|f| f.to_string()).collect();
+        }
+        vec!["apiKey".into()]
+    }
+}
+
+/// The `userId` of an app connection's row. Real user ids never start
+/// with `_`.
+pub const APP_OWNER: &str = "_app";
 
 // ---------------------------------------------------------------------------
 // Stored connection row
 // ---------------------------------------------------------------------------
 
-/// Persistent connection row — one per (user, connection name).
-/// Stored in the `_Connection` system entity.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Persistent connection row — one per (owner, connection name), where
+/// the owner is a user id or [`APP_OWNER`]. Stored in the `_Connection`
+/// system entity. `Debug` leaves out the secrets.
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct StoredConnection {
     pub id: String,
     pub user_id: String,
@@ -83,6 +174,31 @@ pub struct StoredConnection {
     pub scope: Option<String>,
     /// Unix seconds when this row was last refreshed.
     pub updated_at: u64,
+    /// The provider's id for the connected account (Square merchant,
+    /// Stripe account, Clover merchant).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Non-secret provider data as a JSON object (Mailchimp's `dc`).
+    #[serde(default)]
+    pub metadata: Option<String>,
+    /// API-key connections: every field as a JSON object. Encrypted at
+    /// rest like the tokens.
+    #[serde(default)]
+    pub credentials: Option<String>,
+}
+
+impl std::fmt::Debug for StoredConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredConnection")
+            .field("id", &self.id)
+            .field("user_id", &self.user_id)
+            .field("name", &self.name)
+            .field("provider", &self.provider)
+            .field("expires_at", &self.expires_at)
+            .field("account_id", &self.account_id)
+            .field("updated_at", &self.updated_at)
+            .finish_non_exhaustive()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +224,21 @@ pub enum ConnectionError {
     /// is unset. Refresh tokens MUST NOT live in plaintext on disk —
     /// the framework refuses to store / fetch.
     EncryptionRequired,
+    /// An OAuth operation on an API-key connection, or the reverse.
+    WrongKind {
+        name: String,
+        expected: ConnectionKind,
+    },
+    /// The broker runs this app connection's OAuth flow.
+    Managed {
+        name: String,
+    },
+    /// The caller may not act on this connection.
+    Forbidden(String),
+    /// The submitted key fields have the wrong shape.
+    InvalidCredentials(String),
+    /// The provider rejected the key.
+    CheckFailed(String),
 }
 
 impl std::fmt::Display for ConnectionError {
@@ -130,6 +261,21 @@ impl std::fmt::Display for ConnectionError {
                 f,
                 "ctx.connections.* requires PYLON_ENCRYPTION_KEY to be set — refresh tokens are persisted encrypted at rest"
             ),
+            Self::WrongKind { name, expected } => write!(
+                f,
+                "Connection \"{name}\" is not an {} connection",
+                match expected {
+                    ConnectionKind::Oauth => "OAuth",
+                    ConnectionKind::ApiKey => "API-key",
+                }
+            ),
+            Self::Managed { name } => write!(
+                f,
+                "Connection \"{name}\" is connected through the platform that hosts this app"
+            ),
+            Self::Forbidden(msg) => write!(f, "{msg}"),
+            Self::InvalidCredentials(msg) => write!(f, "Invalid credentials: {msg}"),
+            Self::CheckFailed(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -147,6 +293,11 @@ impl ConnectionError {
             Self::RefreshFailed(_) => "REFRESH_FAILED",
             Self::StorageFailed(_) => "STORAGE_FAILED",
             Self::EncryptionRequired => "ENCRYPTION_REQUIRED",
+            Self::WrongKind { .. } => "CONNECTION_WRONG_KIND",
+            Self::Managed { .. } => "CONNECTION_MANAGED",
+            Self::Forbidden(_) => "CONNECTION_FORBIDDEN",
+            Self::InvalidCredentials(_) => "INVALID_CREDENTIALS",
+            Self::CheckFailed(_) => "CREDENTIAL_CHECK_FAILED",
         }
     }
 }
@@ -188,6 +339,66 @@ pub fn callback_url(connection_name: &str) -> Result<String, ConnectionError> {
 // Manager
 // ---------------------------------------------------------------------------
 
+/// The platform that runs OAuth for app connections (brokered mode).
+#[derive(Clone)]
+pub struct Broker {
+    /// The refresh endpoint. https, or http on a loopback host.
+    pub url: String,
+    pub token: String,
+}
+
+impl std::fmt::Debug for Broker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Broker")
+            .field("url", &self.url)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Broker {
+    /// Read `PYLON_CONNECTIONS_BROKER_URL` + `PYLON_CONNECTIONS_BROKER_TOKEN`.
+    /// Both or neither: one without the other is a misconfiguration, and
+    /// a plain-http URL to a remote host would send refresh tokens in the
+    /// clear. Either is logged and treated as no broker.
+    pub fn from_env() -> Option<Self> {
+        let url = std::env::var("PYLON_CONNECTIONS_BROKER_URL")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let token = std::env::var("PYLON_CONNECTIONS_BROKER_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty());
+        match (url, token) {
+            (None, None) => None,
+            (Some(url), Some(token)) => {
+                if !broker_url_is_safe(&url) {
+                    tracing::error!(
+                        "[connections] PYLON_CONNECTIONS_BROKER_URL must be https (or http on localhost); ignoring the broker"
+                    );
+                    return None;
+                }
+                Some(Self { url, token })
+            }
+            _ => {
+                tracing::error!(
+                    "[connections] set both PYLON_CONNECTIONS_BROKER_URL and PYLON_CONNECTIONS_BROKER_TOKEN, or neither; ignoring the broker"
+                );
+                None
+            }
+        }
+    }
+}
+
+pub(crate) fn broker_url_is_safe(url: &str) -> bool {
+    if let Some(rest) = url.strip_prefix("https://") {
+        return !rest.is_empty();
+    }
+    if let Some(rest) = url.strip_prefix("http://") {
+        let host = rest.split(['/', ':']).next().unwrap_or("");
+        return host == "localhost" || host == "127.0.0.1" || host == "[::1]";
+    }
+    false
+}
+
 /// Per-process registry of declared connections + state-token store.
 /// State-token reuses the same backend the framework's "sign in
 /// with X" flow uses — that store is the canonical CSRF defender.
@@ -195,16 +406,17 @@ pub struct ConnectionManager {
     defs: HashMap<String, ConnectionDef>,
     encryption_key: Option<EncryptionKey>,
     state_backend: Arc<dyn OAuthStateBackend>,
-    /// Process-wide rate limit per (user, connection) to prevent
+    broker: Option<Broker>,
+    /// Process-wide rate limit per (owner, connection) to prevent
     /// runaway refresh loops. Codex-style defense — refresh on
     /// every read would burn the provider's rate budget.
     last_refresh: Mutex<HashMap<(String, String), std::time::Instant>>,
-    /// Per-(user, connection) lock that serializes the entire
+    /// Per-(owner, connection) lock that serializes the entire
     /// refresh+persist critical section. Two concurrent `get` calls
     /// for the same key serialize on this lock instead of both
-    /// running through `exchange_refresh_token` — without it, the
-    /// provider's refresh-token rotation invalidates the first
-    /// caller's new token between calls. Codex P1.
+    /// running through the refresh — without it, the provider's
+    /// refresh-token rotation invalidates the first caller's new
+    /// token between calls. Codex P1.
     refresh_locks: Mutex<HashMap<(String, String), Arc<Mutex<()>>>>,
 }
 
@@ -214,6 +426,15 @@ impl ConnectionManager {
         encryption_key: Option<EncryptionKey>,
         state_backend: Arc<dyn OAuthStateBackend>,
     ) -> Self {
+        Self::with_broker(defs, encryption_key, state_backend, Broker::from_env())
+    }
+
+    pub fn with_broker(
+        defs: Vec<ConnectionDef>,
+        encryption_key: Option<EncryptionKey>,
+        state_backend: Arc<dyn OAuthStateBackend>,
+        broker: Option<Broker>,
+    ) -> Self {
         let mut map = HashMap::new();
         for d in defs {
             map.insert(d.name.clone(), d);
@@ -222,12 +443,13 @@ impl ConnectionManager {
             defs: map,
             encryption_key,
             state_backend,
+            broker,
             last_refresh: Mutex::new(HashMap::new()),
             refresh_locks: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Get-or-create the per-(user, connection) refresh lock.
+    /// Get-or-create the per-(owner, connection) refresh lock.
     /// Held for the entire exchange+persist sequence so concurrent
     /// `get` calls for the same key serialize.
     fn refresh_lock_for(&self, user_id: &str, connection_name: &str) -> Arc<Mutex<()>> {
@@ -268,6 +490,10 @@ impl ConnectionManager {
         self.defs.get(name)
     }
 
+    pub fn defs(&self) -> impl Iterator<Item = &ConnectionDef> {
+        self.defs.values()
+    }
+
     pub fn names(&self) -> Vec<String> {
         self.defs.keys().cloned().collect()
     }
@@ -276,17 +502,56 @@ impl ConnectionManager {
         self.encryption_key.is_some()
     }
 
-    /// Build the provider's authorization URL for a user. The caller
-    /// is expected to redirect the browser to this URL; the user
-    /// returns to `/api/connections/<name>/callback` after consent.
+    pub fn brokered(&self) -> bool {
+        self.broker.is_some()
+    }
+
+    fn def_or_unknown(&self, name: &str) -> Result<&ConnectionDef, ConnectionError> {
+        self.get_def(name)
+            .ok_or_else(|| ConnectionError::UnknownConnection { name: name.into() })
+    }
+
+    /// The row owner for an operation on `name` by this caller. A user
+    /// connection belongs to the signed-in caller. An app connection
+    /// belongs to the app; `admin_only` operations on it (connect,
+    /// disconnect, set keys) need an admin caller.
+    pub fn owner_for(
+        &self,
+        name: &str,
+        caller_user_id: Option<&str>,
+        caller_is_admin: bool,
+        admin_only: bool,
+    ) -> Result<String, ConnectionError> {
+        let def = self.def_or_unknown(name)?;
+        match def.owner {
+            ConnectionOwner::App => {
+                if admin_only && !caller_is_admin {
+                    return Err(ConnectionError::Forbidden(format!(
+                        "Connection \"{name}\" belongs to the app; only an admin can change it (ctx.auth.elevate)"
+                    )));
+                }
+                Ok(APP_OWNER.to_string())
+            }
+            ConnectionOwner::User => match caller_user_id {
+                Some(u) if !u.is_empty() && !u.starts_with('_') => Ok(u.to_string()),
+                _ => Err(ConnectionError::Forbidden(format!(
+                    "Connection \"{name}\" belongs to a user; the caller must be signed in"
+                ))),
+            },
+        }
+    }
+
+    /// Build the provider's authorization URL for a user, or for the
+    /// app when `owner_id` is [`APP_OWNER`]. The caller is expected to
+    /// redirect the browser to this URL; the browser returns to
+    /// `/api/connections/<name>/callback` after consent.
     ///
-    /// Returns `(auth_url, state_token)`. The state token is also
-    /// persisted to the OAuth state backend so the callback can
-    /// verify it.
+    /// The state token is persisted to the OAuth state backend so the
+    /// callback can verify it.
     pub fn build_auth_url(
         &self,
         connection_name: &str,
-        user_id: &str,
+        owner_id: &str,
         post_callback_redirect: Option<&str>,
     ) -> Result<String, ConnectionError> {
         if !self.encryption_configured() {
@@ -306,80 +571,95 @@ impl ConnectionManager {
                 )));
             }
         }
-        let def =
-            self.get_def(connection_name)
-                .ok_or_else(|| ConnectionError::UnknownConnection {
-                    name: connection_name.into(),
-                })?;
-        let cfg = self.build_oauth_config(def)?;
+        let def = self.def_or_unknown(connection_name)?;
+        if def.kind != ConnectionKind::Oauth {
+            return Err(ConnectionError::WrongKind {
+                name: def.name.clone(),
+                expected: ConnectionKind::Oauth,
+            });
+        }
+        if def.owner == ConnectionOwner::App && self.broker.is_some() {
+            return Err(ConnectionError::Managed {
+                name: def.name.clone(),
+            });
+        }
 
-        // Mint the CSRF state token, embedding user_id + connection
+        // Mint the CSRF state token, embedding owner + connection
         // name + post-callback redirect target inside the token's
         // accompanying state row (NOT the URL state param itself,
-        // which only needs to be opaque + unguessable). Format:
-        // `conn:<random_hex>`. The state backend tracks expiry +
-        // single-use semantics; we add a per-user-per-connection
-        // payload via a wrapper table maintained alongside.
+        // which only needs to be opaque + unguessable). The state
+        // backend tracks expiry + single-use semantics.
         let state_token = mint_random_token();
         let callback = callback_url(connection_name)?;
         let post_redirect = post_callback_redirect.unwrap_or("");
-        // Stash {user_id, connection_name, post_redirect} on the
-        // state row. We use the `callback_url` field for our payload
-        // (a `:` separator-encoded triple) because the existing
-        // OAuthStateBackend already persists that field for the
-        // framework auth flow. The callback handler decodes it.
-        let payload = encode_state_payload(user_id, connection_name, post_redirect);
+        let payload = encode_state_payload(owner_id, connection_name, post_redirect);
         let expires_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0)
             + 10 * 60;
+
+        let (url, pkce_verifier) = if let Some(spec) = pylon_auth::integrations::find(&def.provider)
+        {
+            let (client_id, client_secret) = client_credentials(&def.provider)?;
+            let pkce = spec.pkce.then(pylon_auth::generate_pkce);
+            let client = pylon_auth::integrations::Client {
+                client_id: &client_id,
+                client_secret: &client_secret,
+                redirect_uri: &callback,
+            };
+            let url = pylon_auth::integrations::authorize_url(
+                spec,
+                &client,
+                &def.scopes,
+                &state_token,
+                pkce.as_ref().map(|p| p.code_challenge.as_str()),
+            );
+            (url, pkce.map(|p| p.code_verifier))
+        } else {
+            let cfg = self.build_oauth_config(def)?;
+            let mut url = cfg.auth_url_with_state(&state_token);
+            if url.is_empty() {
+                // OAuthConfig::auth_url returns "" on unknown provider
+                // — surface that as a typed error.
+                return Err(ConnectionError::ProviderNotConfigured {
+                    provider: def.provider.clone(),
+                    missing_env: format!(
+                        "{} (unknown provider \"{}\"; check spelling against pylon-auth providers)",
+                        client_id_env(&def.provider),
+                        def.provider
+                    ),
+                });
+            }
+            // Force prompt=consent for Google so refresh tokens are
+            // issued on every link. Google omits the refresh token on
+            // subsequent authorizations unless the user is explicitly
+            // re-prompted. Without this, second-link flows return
+            // access-only tokens that can't be refreshed.
+            if def.provider == "google" && !url.contains("prompt=") {
+                let sep = if url.contains('?') { '&' } else { '?' };
+                url.push(sep);
+                url.push_str("prompt=consent&access_type=offline");
+            }
+            (url, None)
+        };
+
+        // The payload rides in the state row's `callback_url` slot (the
+        // OAuthStateBackend already persists that field for the
+        // framework auth flow); `error_callback_url` carries the
+        // provider redirect URI. The callback handler decodes both.
         self.state_backend.put(
             &state_token,
             &pylon_auth::OAuthState {
                 provider: def.provider.clone(),
                 callback_url: payload,
-                // error_callback_url field repurposed to carry the
-                // resolved redirect URL so the callback handler can
-                // reach it without re-parsing. Empty when not set.
-                error_callback_url: callback.clone(),
-                pkce_verifier: None,
+                error_callback_url: callback,
+                pkce_verifier,
                 handoff_binding: None,
                 guest_binding: None,
                 expires_at,
             },
         );
-
-        // Build the URL with state. Use auth_url_with_state because
-        // the upstream OAuth client already URL-encodes the state.
-        let mut url = cfg.auth_url_with_state(&state_token);
-        // Apply scope override when the manifest declared scopes.
-        // OAuthConfig's auth_url consumed `scopes_override` from the
-        // cfg we built — already applied via `build_oauth_config`.
-        // But if cfg has no scope and the manifest provided none,
-        // the provider's default scope kicks in.
-        if url.is_empty() {
-            // OAuthConfig::auth_url returns "" on unknown provider
-            // — surface that as a typed error.
-            return Err(ConnectionError::ProviderNotConfigured {
-                provider: def.provider.clone(),
-                missing_env: format!(
-                    "{} (unknown provider \"{}\"; check spelling against pylon-auth providers)",
-                    client_id_env(&def.provider),
-                    def.provider
-                ),
-            });
-        }
-        // Force prompt=consent for Google so refresh tokens are
-        // issued on every link. Google omits the refresh token on
-        // subsequent authorizations unless the user is explicitly
-        // re-prompted. Without this, second-link flows return
-        // access-only tokens that can't be refreshed.
-        if def.provider == "google" && !url.contains("prompt=") {
-            let sep = if url.contains('?') { '&' } else { '?' };
-            url.push(sep);
-            url.push_str("prompt=consent&access_type=offline");
-        }
         Ok(url)
     }
 
@@ -387,6 +667,8 @@ impl ConnectionManager {
     /// HTTP route handler; it consumes the state from the backend
     /// (single-use), validates expiry, then stores the resulting
     /// `StoredConnection` via the provided store callback.
+    /// `callback_params` is the callback URL's whole query (Clover
+    /// puts the merchant id there).
     ///
     /// `store_fn` writes the row to the `_Connection` entity. The
     /// manager doesn't take a `DataStore` directly to avoid a cycle
@@ -395,6 +677,7 @@ impl ConnectionManager {
         &self,
         code: &str,
         state_token: &str,
+        callback_params: &HashMap<String, String>,
         store_fn: F,
     ) -> Result<CallbackOutcome, ConnectionError>
     where
@@ -408,10 +691,7 @@ impl ConnectionManager {
         if !self.encryption_configured() {
             return Err(ConnectionError::EncryptionRequired);
         }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now = now_secs();
         let state = self
             .state_backend
             .take(state_token, now)
@@ -419,26 +699,59 @@ impl ConnectionManager {
         let (user_id, connection_name, post_redirect) =
             decode_state_payload(&state.callback_url)
                 .ok_or_else(|| ConnectionError::AuthFailed("state payload malformed".into()))?;
-        let def =
-            self.get_def(&connection_name)
-                .ok_or_else(|| ConnectionError::UnknownConnection {
-                    name: connection_name.clone(),
-                })?;
-        let cfg = self.build_oauth_config(def)?;
-        let tokens = cfg
-            .exchange_code_full(code)
-            .map_err(|e| ConnectionError::AuthFailed(e))?;
-        let stored = StoredConnection {
+        let def = self.def_or_unknown(&connection_name)?;
+        // The owner in the state must still match the declaration: a
+        // definition switched from user to app (or back) between the
+        // two halves of the flow must not file a user's token as the
+        // app's.
+        let owner_matches = match def.owner {
+            ConnectionOwner::App => user_id == APP_OWNER,
+            ConnectionOwner::User => user_id != APP_OWNER,
+        };
+        if !owner_matches || def.kind != ConnectionKind::Oauth {
+            return Err(ConnectionError::AuthFailed(
+                "connection changed during the flow".into(),
+            ));
+        }
+        let mut stored = StoredConnection {
             id: stable_id(&user_id, &connection_name),
             user_id: user_id.clone(),
             name: connection_name.clone(),
             provider: def.provider.clone(),
-            access_token: tokens.access_token,
-            refresh_token: tokens.refresh_token,
-            expires_at: tokens.expires_at,
-            scope: tokens.scope,
             updated_at: now,
+            ..Default::default()
         };
+        if let Some(spec) = pylon_auth::integrations::find(&def.provider) {
+            let (client_id, client_secret) = client_credentials(&def.provider)?;
+            let client = pylon_auth::integrations::Client {
+                client_id: &client_id,
+                client_secret: &client_secret,
+                redirect_uri: &state.error_callback_url,
+            };
+            let tokens = pylon_auth::integrations::exchange_code(
+                spec,
+                &client,
+                code,
+                state.pkce_verifier.as_deref(),
+                callback_params,
+            )
+            .map_err(ConnectionError::AuthFailed)?;
+            stored.access_token = tokens.access_token;
+            stored.refresh_token = tokens.refresh_token;
+            stored.expires_at = tokens.expires_at;
+            stored.scope = tokens.scope;
+            stored.account_id = tokens.account_id;
+            stored.metadata = tokens.metadata.map(|m| m.to_string());
+        } else {
+            let cfg = self.build_oauth_config(def)?;
+            let tokens = cfg
+                .exchange_code_full(code)
+                .map_err(ConnectionError::AuthFailed)?;
+            stored.access_token = tokens.access_token;
+            stored.refresh_token = tokens.refresh_token;
+            stored.expires_at = tokens.expires_at;
+            stored.scope = tokens.scope;
+        }
         store_fn(&stored).map_err(ConnectionError::StorageFailed)?;
         Ok(CallbackOutcome {
             user_id,
@@ -447,13 +760,125 @@ impl ConnectionManager {
         })
     }
 
-    /// Fetch a fresh access token for `(user_id, connection_name)`.
+    /// Build the row for an app connection's tokens handed over by the
+    /// broker (the management endpoint's PUT). Only for OAuth app
+    /// connections.
+    pub fn row_from_broker(
+        &self,
+        connection_name: &str,
+        handed: HandedTokens,
+    ) -> Result<StoredConnection, ConnectionError> {
+        let def = self.def_or_unknown(connection_name)?;
+        if def.owner != ConnectionOwner::App {
+            return Err(ConnectionError::Forbidden(format!(
+                "Connection \"{connection_name}\" belongs to a user, not the app"
+            )));
+        }
+        if def.kind != ConnectionKind::Oauth {
+            return Err(ConnectionError::WrongKind {
+                name: def.name.clone(),
+                expected: ConnectionKind::Oauth,
+            });
+        }
+        if handed.access_token.is_empty() {
+            return Err(ConnectionError::InvalidCredentials(
+                "accessToken is required".into(),
+            ));
+        }
+        let metadata = match handed.metadata {
+            None | Some(serde_json::Value::Null) => None,
+            Some(v @ serde_json::Value::Object(_)) => Some(v.to_string()),
+            Some(_) => {
+                return Err(ConnectionError::InvalidCredentials(
+                    "metadata must be an object".into(),
+                ))
+            }
+        };
+        Ok(StoredConnection {
+            id: stable_id(APP_OWNER, connection_name),
+            user_id: APP_OWNER.into(),
+            name: connection_name.into(),
+            provider: def.provider.clone(),
+            access_token: handed.access_token,
+            refresh_token: handed.refresh_token.filter(|s| !s.is_empty()),
+            expires_at: handed.expires_at,
+            scope: handed.scope.filter(|s| !s.is_empty()),
+            updated_at: now_secs(),
+            account_id: handed.account_id.filter(|s| !s.is_empty()),
+            metadata,
+            credentials: None,
+        })
+    }
+
+    /// Check an API-key connection's fields and build its row. For a
+    /// known provider the provider's check call runs first
+    /// (`check: false` skips it, for tests).
+    pub fn row_from_credentials(
+        &self,
+        connection_name: &str,
+        owner_id: &str,
+        credentials: &HashMap<String, String>,
+        check: bool,
+    ) -> Result<StoredConnection, ConnectionError> {
+        if !self.encryption_configured() {
+            return Err(ConnectionError::EncryptionRequired);
+        }
+        let def = self.def_or_unknown(connection_name)?;
+        if def.kind != ConnectionKind::ApiKey {
+            return Err(ConnectionError::WrongKind {
+                name: def.name.clone(),
+                expected: ConnectionKind::ApiKey,
+            });
+        }
+        let fields = def.credential_fields();
+        let field_refs: Vec<&str> = fields.iter().map(String::as_str).collect();
+        pylon_auth::integrations::validate_credential_shape(&field_refs, credentials)
+            .map_err(ConnectionError::InvalidCredentials)?;
+        let mut account_id = None;
+        if let Some(spec) = pylon_auth::integrations::api_key_spec(&def.provider) {
+            // A custom field list replaces the provider's, so the
+            // provider's check no longer applies.
+            if def.fields.is_empty() {
+                pylon_auth::integrations::check_known_prefix(spec, credentials)
+                    .map_err(ConnectionError::InvalidCredentials)?;
+                if check {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        account_id = pylon_auth::integrations::check_api_key(spec, credentials)
+                            .map_err(ConnectionError::CheckFailed)?;
+                    }
+                }
+            }
+        }
+        let primary = credentials.get(&fields[0]).cloned().unwrap_or_default();
+        let mut stored = serde_json::Map::new();
+        for f in &fields {
+            stored.insert(f.clone(), serde_json::Value::String(credentials[f].clone()));
+        }
+        Ok(StoredConnection {
+            id: stable_id(owner_id, connection_name),
+            user_id: owner_id.into(),
+            name: connection_name.into(),
+            provider: def.provider.clone(),
+            access_token: primary,
+            refresh_token: None,
+            expires_at: None,
+            scope: None,
+            updated_at: now_secs(),
+            account_id,
+            metadata: None,
+            credentials: Some(serde_json::Value::Object(stored).to_string()),
+        })
+    }
+
+    /// Fetch a fresh access token for `(owner, connection_name)`.
     ///
     /// Returns the stored access token when it's not about to expire
-    /// (>60s remaining). Otherwise calls `exchange_refresh_token`,
-    /// upserts the new token pair via `store_fn`, and returns the new
-    /// access token. Refresh-token rotation is respected — the new
-    /// refresh token (when the provider sends one) replaces the old.
+    /// (>60s remaining). Otherwise refreshes — through the broker for a
+    /// brokered app connection, else with the app's own client
+    /// credentials — upserts the new token pair via `store_fn`, and
+    /// returns the stored row. Refresh-token rotation is respected — the
+    /// new refresh token (when the provider sends one) replaces the old.
     ///
     /// `load_fn` reads the current stored row; the manager doesn't
     /// touch DataStore directly to dodge the dep cycle.
@@ -463,16 +888,12 @@ impl ConnectionManager {
         connection_name: &str,
         load_fn: L,
         store_fn: S,
-    ) -> Result<String, ConnectionError>
+    ) -> Result<StoredConnection, ConnectionError>
     where
         L: Fn() -> Result<Option<StoredConnection>, String>,
         S: FnOnce(&StoredConnection) -> Result<(), String>,
     {
-        let def =
-            self.get_def(connection_name)
-                .ok_or_else(|| ConnectionError::UnknownConnection {
-                    name: connection_name.into(),
-                })?;
+        let def = self.def_or_unknown(connection_name)?;
         // Fast path: read first WITHOUT taking the refresh lock.
         // If the token isn't expiring, we don't need to refresh.
         // Avoids serializing every `get` call behind the per-key
@@ -482,20 +903,12 @@ impl ConnectionManager {
             .ok_or_else(|| ConnectionError::NotConnected {
                 name: connection_name.into(),
             })?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let needs_refresh = match row.expires_at {
-            Some(exp) => exp.saturating_sub(now) <= 60,
-            None => false,
-        };
-        if !needs_refresh {
-            return Ok(row.access_token);
+        if !needs_refresh(&row, now_secs()) {
+            return Ok(row);
         }
 
         // Slow path: serialize the entire exchange+persist via the
-        // per-(user, connection) lock. Codex P1 fix — without this,
+        // per-(owner, connection) lock. Codex P1 fix — without this,
         // two concurrent refreshes both pass the rate-limit gate,
         // both call the provider, and rotation invalidates the
         // first response between calls.
@@ -504,27 +917,20 @@ impl ConnectionManager {
 
         // Re-load INSIDE the lock — another caller may have just
         // refreshed while we were waiting. If the freshly-loaded
-        // row no longer needs refreshing, return its access token
-        // and skip the exchange.
+        // row no longer needs refreshing, return it and skip the
+        // exchange.
         let mut row = load_fn()
             .map_err(ConnectionError::StorageFailed)?
             .ok_or_else(|| ConnectionError::NotConnected {
                 name: connection_name.into(),
             })?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let still_needs_refresh = match row.expires_at {
-            Some(exp) => exp.saturating_sub(now) <= 60,
-            None => false,
-        };
-        if !still_needs_refresh {
-            return Ok(row.access_token);
+        let now = now_secs();
+        if !needs_refresh(&row, now) {
+            return Ok(row);
         }
         let refresh_token = row.refresh_token.clone().ok_or_else(|| {
             ConnectionError::RefreshFailed(
-                "no refresh token available — the provider didn't return one. User must re-link the connection.".into(),
+                "no refresh token available — the provider didn't return one. The connection must be linked again.".into(),
             )
         })?;
 
@@ -540,7 +946,7 @@ impl ConnectionManager {
                 if now_instant.saturating_duration_since(*last) < std::time::Duration::from_secs(1)
                 {
                     return Err(ConnectionError::RefreshFailed(
-                        "refresh rate-limited (1/sec per user+connection)".into(),
+                        "refresh rate-limited (1/sec per owner+connection)".into(),
                     ));
                 }
             }
@@ -552,39 +958,130 @@ impl ConnectionManager {
             guard.retain(|_, t| now_instant.saturating_duration_since(*t) < cutoff);
         }
 
-        let cfg = self.build_oauth_config(def)?;
-        let new_tokens = cfg
-            .exchange_refresh_token(&refresh_token)
-            .map_err(|e| ConnectionError::RefreshFailed(sanitize_provider_message(&e)))?;
-        row.access_token = new_tokens.access_token.clone();
-        if let Some(rt) = new_tokens.refresh_token {
+        let fresh = if def.owner == ConnectionOwner::App && self.broker.is_some() {
+            self.broker_refresh(def, &row, &refresh_token)?
+        } else if let Some(spec) = pylon_auth::integrations::find(&def.provider) {
+            let (client_id, client_secret) = client_credentials(&def.provider)?;
+            let redirect = callback_url(&def.name)?;
+            let client = pylon_auth::integrations::Client {
+                client_id: &client_id,
+                client_secret: &client_secret,
+                redirect_uri: &redirect,
+            };
+            let t = pylon_auth::integrations::refresh(spec, &client, &refresh_token)
+                .map_err(|e| ConnectionError::RefreshFailed(sanitize_provider_message(&e)))?;
+            HandedTokens {
+                access_token: t.access_token,
+                refresh_token: t.refresh_token,
+                expires_at: t.expires_at,
+                scope: t.scope,
+                account_id: t.account_id,
+                metadata: None,
+            }
+        } else {
+            let cfg = self.build_oauth_config(def)?;
+            let t = cfg
+                .exchange_refresh_token(&refresh_token)
+                .map_err(|e| ConnectionError::RefreshFailed(sanitize_provider_message(&e)))?;
+            HandedTokens {
+                access_token: t.access_token,
+                refresh_token: t.refresh_token,
+                expires_at: t.expires_at,
+                scope: t.scope,
+                account_id: None,
+                metadata: None,
+            }
+        };
+        row.access_token = fresh.access_token;
+        if let Some(rt) = fresh.refresh_token.filter(|s| !s.is_empty()) {
             row.refresh_token = Some(rt);
         }
-        row.expires_at = new_tokens.expires_at;
-        if new_tokens.scope.is_some() {
-            row.scope = new_tokens.scope;
+        row.expires_at = fresh.expires_at;
+        if fresh.scope.is_some() {
+            row.scope = fresh.scope;
+        }
+        if fresh.account_id.is_some() {
+            row.account_id = fresh.account_id;
         }
         row.updated_at = now;
         // Persist the rotated token pair. Codex P1: if this fails
-        // AFTER the provider rotated the refresh token, the user
+        // AFTER the provider rotated the refresh token, the owner
         // is silently locked out. Log loudly at error level with
-        // structured data so an operator can re-issue a re-link
-        // prompt; return a distinct error so callers can
-        // distinguish "provider rejected" from "we lost the
-        // rotated token".
+        // structured data so an operator can ask for a re-link;
+        // return a distinct error so callers can distinguish
+        // "provider rejected" from "we lost the rotated token".
         if let Err(e) = store_fn(&row) {
             tracing::error!(
                 user_id = %user_id,
                 connection = %connection_name,
                 provider = %def.provider,
                 error = %e,
-                "[connections] REFRESH_PERSISTENCE_LOST: provider rotated refresh token but we failed to persist. User must re-link.",
+                "[connections] REFRESH_PERSISTENCE_LOST: provider rotated refresh token but we failed to persist. The connection must be linked again.",
             );
             return Err(ConnectionError::RefreshFailed(format!(
-                "Refresh succeeded but persistence failed; user must re-link \"{connection_name}\""
+                "Refresh succeeded but persistence failed; \"{connection_name}\" must be linked again"
             )));
         }
-        Ok(row.access_token)
+        Ok(row)
+    }
+
+    /// Ask the broker for a fresh token pair. The broker checks that the
+    /// refresh token is the one it handed this app.
+    fn broker_refresh(
+        &self,
+        def: &ConnectionDef,
+        row: &StoredConnection,
+        refresh_token: &str,
+    ) -> Result<HandedTokens, ConnectionError> {
+        let broker = self.broker.as_ref().expect("checked by caller");
+        let body = serde_json::json!({
+            "connection": def.name,
+            "provider": def.provider,
+            "accountId": row.account_id,
+            "refreshToken": refresh_token,
+        })
+        .to_string();
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(std::time::Duration::from_secs(10))
+            .timeout_read(std::time::Duration::from_secs(20))
+            .redirects(0)
+            .build();
+        let result = agent
+            .post(&broker.url)
+            .set("Authorization", &format!("Bearer {}", broker.token))
+            .set("Content-Type", "application/json")
+            .send_string(&body);
+        let text = match result {
+            Ok(resp) => resp
+                .into_string()
+                .map_err(|e| ConnectionError::RefreshFailed(format!("broker: read body: {e}")))?,
+            Err(ureq::Error::Status(code, resp)) => {
+                let detail = resp
+                    .into_string()
+                    .ok()
+                    .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok())
+                    .and_then(|v| {
+                        v.pointer("/error/message")
+                            .or_else(|| v.get("message"))
+                            .and_then(|m| m.as_str())
+                            .map(String::from)
+                    })
+                    .unwrap_or_default();
+                return Err(ConnectionError::RefreshFailed(sanitize_provider_message(
+                    &format!("broker refused the refresh (HTTP {code}) {detail}"),
+                )));
+            }
+            Err(e) => return Err(ConnectionError::RefreshFailed(format!("broker: {e}"))),
+        };
+        let handed: HandedTokens = serde_json::from_str(&text).map_err(|_| {
+            ConnectionError::RefreshFailed("broker returned an unreadable response".into())
+        })?;
+        if handed.access_token.is_empty() {
+            return Err(ConnectionError::RefreshFailed(
+                "broker returned no access token".into(),
+            ));
+        }
+        Ok(handed)
     }
 
     // -----------------------------------------------------------------------
@@ -595,20 +1092,7 @@ impl ConnectionManager {
         &self,
         def: &ConnectionDef,
     ) -> Result<pylon_auth::OAuthConfig, ConnectionError> {
-        let client_id = std::env::var(client_id_env(&def.provider))
-            .ok()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| ConnectionError::ProviderNotConfigured {
-                provider: def.provider.clone(),
-                missing_env: client_id_env(&def.provider),
-            })?;
-        let client_secret = std::env::var(client_secret_env(&def.provider))
-            .ok()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| ConnectionError::ProviderNotConfigured {
-                provider: def.provider.clone(),
-                missing_env: client_secret_env(&def.provider),
-            })?;
+        let (client_id, client_secret) = client_credentials(&def.provider)?;
         let redirect_uri = callback_url(&def.name)?;
         let scopes_override = if def.scopes.is_empty() {
             None
@@ -627,6 +1111,67 @@ impl ConnectionManager {
             oidc_issuer: None,
         })
     }
+}
+
+/// Tokens handed to the app by the broker: the management endpoint's
+/// PUT body for an OAuth app connection, and the broker's refresh
+/// response. `Debug` leaves out the tokens.
+#[derive(Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HandedTokens {
+    #[serde(default)]
+    pub access_token: String,
+    #[serde(default)]
+    pub refresh_token: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<u64>,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+}
+
+impl std::fmt::Debug for HandedTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HandedTokens")
+            .field("expires_at", &self.expires_at)
+            .field("account_id", &self.account_id)
+            .finish_non_exhaustive()
+    }
+}
+
+fn client_credentials(provider: &str) -> Result<(String, String), ConnectionError> {
+    let client_id = std::env::var(client_id_env(provider))
+        .ok()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ConnectionError::ProviderNotConfigured {
+            provider: provider.into(),
+            missing_env: client_id_env(provider),
+        })?;
+    let client_secret = std::env::var(client_secret_env(provider))
+        .ok()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ConnectionError::ProviderNotConfigured {
+            provider: provider.into(),
+            missing_env: client_secret_env(provider),
+        })?;
+    Ok((client_id, client_secret))
+}
+
+fn needs_refresh(row: &StoredConnection, now: u64) -> bool {
+    match row.expires_at {
+        Some(exp) => exp.saturating_sub(now) <= 60,
+        None => false,
+    }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Returned by [`ConnectionManager::complete_callback`] so the
@@ -823,6 +1368,33 @@ pub fn connection_entity() -> pylon_kernel::ManifestEntity {
                 },
             ),
             field("updatedAt", "int", FieldOpts::default()),
+            field(
+                "accountId",
+                "string",
+                FieldOpts {
+                    server_only: true,
+                    optional: true,
+                    ..FieldOpts::default()
+                },
+            ),
+            field(
+                "metadata",
+                "string",
+                FieldOpts {
+                    server_only: true,
+                    optional: true,
+                    ..FieldOpts::default()
+                },
+            ),
+            field(
+                "credentials",
+                "string",
+                FieldOpts {
+                    server_only: true,
+                    encrypted: true,
+                    optional: true,
+                },
+            ),
         ],
         indexes: vec![ManifestIndex {
             name: "_Connection_user_name".into(),
@@ -853,6 +1425,9 @@ struct FieldOpts {
 mod tests {
     use super::*;
 
+    /// Tests that set process env hold this so they do not race.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn disconnect_waits_for_refresh_and_keeps_other_users_independent() {
         use std::sync::mpsc;
@@ -862,6 +1437,9 @@ mod tests {
                 name: "google".into(),
                 provider: "google".into(),
                 scopes: String::new(),
+                owner: ConnectionOwner::User,
+                kind: ConnectionKind::Oauth,
+                fields: vec![],
             }],
             None,
             Arc::new(pylon_auth::InMemoryOAuthBackend::new()),
@@ -966,6 +1544,7 @@ mod tests {
 
     #[test]
     fn callback_url_requires_public_url_env() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         std::env::remove_var("PYLON_PUBLIC_URL");
         std::env::remove_var("PYLON_CONNECTIONS_CALLBACK_BASE");
         let err = callback_url("google").unwrap_err();
@@ -984,6 +1563,16 @@ mod tests {
         let refresh = e.fields.iter().find(|f| f.name == "refreshToken").unwrap();
         assert!(refresh.encrypted);
         assert!(refresh.server_only);
+        let creds = e.fields.iter().find(|f| f.name == "credentials").unwrap();
+        assert!(creds.encrypted && creds.server_only && creds.optional);
+        // Columns added after the first release must be optional, or the
+        // column upgrade on an existing table fails.
+        for name in ["accountId", "metadata", "credentials"] {
+            assert!(
+                e.fields.iter().find(|f| f.name == name).unwrap().optional,
+                "{name}"
+            );
+        }
         // userId is queryable — NOT encrypted (we need to find rows
         // by user).
         let uid = e.fields.iter().find(|f| f.name == "userId").unwrap();
@@ -1024,6 +1613,408 @@ mod tests {
         // Header injection via CR/LF.
         assert!(!is_safe_relative_redirect("/ok\r\nLocation: https://evil"));
         assert!(!is_safe_relative_redirect("/ok\nX: y"));
+    }
+
+    fn def(
+        name: &str,
+        provider: &str,
+        owner: ConnectionOwner,
+        kind: ConnectionKind,
+    ) -> ConnectionDef {
+        ConnectionDef {
+            name: name.into(),
+            provider: provider.into(),
+            scopes: String::new(),
+            owner,
+            kind,
+            fields: vec![],
+        }
+    }
+
+    fn key() -> Option<EncryptionKey> {
+        Some(
+            EncryptionKey::from_raw(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            )
+            .unwrap(),
+        )
+    }
+
+    fn manager(defs: Vec<ConnectionDef>, broker: Option<Broker>) -> ConnectionManager {
+        ConnectionManager::with_broker(
+            defs,
+            key(),
+            Arc::new(pylon_auth::InMemoryOAuthBackend::new()),
+            broker,
+        )
+    }
+
+    #[test]
+    fn app_connections_read_by_anyone_changed_by_admins() {
+        let m = manager(
+            vec![
+                def(
+                    "square",
+                    "square",
+                    ConnectionOwner::App,
+                    ConnectionKind::Oauth,
+                ),
+                def(
+                    "google",
+                    "google",
+                    ConnectionOwner::User,
+                    ConnectionKind::Oauth,
+                ),
+            ],
+            None,
+        );
+        // Any caller reads an app connection, signed in or not.
+        assert_eq!(
+            m.owner_for("square", None, false, false).unwrap(),
+            APP_OWNER
+        );
+        assert_eq!(
+            m.owner_for("square", Some("u1"), false, false).unwrap(),
+            APP_OWNER
+        );
+        // Only an admin changes it.
+        assert!(matches!(
+            m.owner_for("square", Some("u1"), false, true),
+            Err(ConnectionError::Forbidden(_))
+        ));
+        assert_eq!(m.owner_for("square", None, true, true).unwrap(), APP_OWNER);
+        // A user connection is the caller's own, and needs a caller.
+        assert_eq!(
+            m.owner_for("google", Some("u1"), false, true).unwrap(),
+            "u1"
+        );
+        assert!(m.owner_for("google", None, true, false).is_err());
+        // A caller id shaped like the app owner never reaches app rows.
+        assert!(m
+            .owner_for("google", Some(APP_OWNER), false, false)
+            .is_err());
+        assert!(matches!(
+            m.owner_for("nope", Some("u1"), true, true),
+            Err(ConnectionError::UnknownConnection { .. })
+        ));
+    }
+
+    #[test]
+    fn credentials_are_checked_before_they_are_stored() {
+        let mut custom = def("pos", "toast", ConnectionOwner::App, ConnectionKind::ApiKey);
+        custom.fields = vec!["token".into(), "site".into()];
+        let m = manager(
+            vec![
+                def(
+                    "stripe-key",
+                    "stripe",
+                    ConnectionOwner::App,
+                    ConnectionKind::ApiKey,
+                ),
+                def(
+                    "mystery",
+                    "acme",
+                    ConnectionOwner::User,
+                    ConnectionKind::ApiKey,
+                ),
+                def(
+                    "square",
+                    "square",
+                    ConnectionOwner::App,
+                    ConnectionKind::Oauth,
+                ),
+                custom,
+            ],
+            None,
+        );
+        let creds = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        // A known provider's prefix rule runs before any network call.
+        assert!(matches!(
+            m.row_from_credentials(
+                "stripe-key",
+                APP_OWNER,
+                &creds(&[("secretKey", "pk_live_x")]),
+                false
+            ),
+            Err(ConnectionError::InvalidCredentials(_))
+        ));
+        let row = m
+            .row_from_credentials(
+                "stripe-key",
+                APP_OWNER,
+                &creds(&[("secretKey", "rk_live_x")]),
+                false,
+            )
+            .unwrap();
+        assert_eq!(row.access_token, "rk_live_x");
+        assert_eq!(row.id, stable_id(APP_OWNER, "stripe-key"));
+        // An unknown provider gets the single apiKey field.
+        let row = m
+            .row_from_credentials("mystery", "u1", &creds(&[("apiKey", "k")]), false)
+            .unwrap();
+        assert_eq!(row.credentials.as_deref(), Some(r#"{"apiKey":"k"}"#));
+        // Declared fields replace the provider's, and the first declared
+        // one is the access token.
+        let row = m
+            .row_from_credentials(
+                "pos",
+                APP_OWNER,
+                &creds(&[("site", "s1"), ("token", "t1")]),
+                false,
+            )
+            .unwrap();
+        assert_eq!(row.access_token, "t1");
+        let stored: serde_json::Value =
+            serde_json::from_str(row.credentials.as_deref().unwrap()).unwrap();
+        assert_eq!(stored, serde_json::json!({"token": "t1", "site": "s1"}));
+        assert!(m
+            .row_from_credentials("pos", APP_OWNER, &creds(&[("token", "t1")]), false)
+            .is_err());
+        // OAuth connections take no keys.
+        assert!(matches!(
+            m.row_from_credentials("square", APP_OWNER, &creds(&[("apiKey", "k")]), false),
+            Err(ConnectionError::WrongKind { .. })
+        ));
+    }
+
+    #[test]
+    fn broker_tokens_only_for_app_oauth_connections() {
+        let m = manager(
+            vec![
+                def(
+                    "square",
+                    "square",
+                    ConnectionOwner::App,
+                    ConnectionKind::Oauth,
+                ),
+                def(
+                    "google",
+                    "google",
+                    ConnectionOwner::User,
+                    ConnectionKind::Oauth,
+                ),
+                def(
+                    "toast",
+                    "toast",
+                    ConnectionOwner::App,
+                    ConnectionKind::ApiKey,
+                ),
+            ],
+            None,
+        );
+        let handed = |token: &str| HandedTokens {
+            access_token: token.into(),
+            refresh_token: Some("r".into()),
+            expires_at: Some(10),
+            account_id: Some("M1".into()),
+            metadata: Some(serde_json::json!({"dc": "us1"})),
+            ..Default::default()
+        };
+        let row = m.row_from_broker("square", handed("a")).unwrap();
+        assert_eq!(row.user_id, APP_OWNER);
+        assert_eq!(row.account_id.as_deref(), Some("M1"));
+        assert_eq!(row.metadata.as_deref(), Some(r#"{"dc":"us1"}"#));
+        assert!(matches!(
+            m.row_from_broker("google", handed("a")),
+            Err(ConnectionError::Forbidden(_))
+        ));
+        assert!(matches!(
+            m.row_from_broker("toast", handed("a")),
+            Err(ConnectionError::WrongKind { .. })
+        ));
+        assert!(m.row_from_broker("square", handed("")).is_err());
+        let mut bad = handed("a");
+        bad.metadata = Some(serde_json::json!(["x"]));
+        assert!(m.row_from_broker("square", bad).is_err());
+    }
+
+    #[test]
+    fn brokered_app_connections_do_not_start_a_local_flow() {
+        let broker = Broker {
+            url: "https://hub.example/refresh".into(),
+            token: "t".into(),
+        };
+        let m = manager(
+            vec![
+                def(
+                    "square",
+                    "square",
+                    ConnectionOwner::App,
+                    ConnectionKind::Oauth,
+                ),
+                def(
+                    "toast",
+                    "toast",
+                    ConnectionOwner::App,
+                    ConnectionKind::ApiKey,
+                ),
+            ],
+            Some(broker),
+        );
+        assert!(matches!(
+            m.build_auth_url("square", APP_OWNER, None),
+            Err(ConnectionError::Managed { .. })
+        ));
+        assert!(matches!(
+            m.build_auth_url("toast", APP_OWNER, None),
+            Err(ConnectionError::WrongKind { .. })
+        ));
+    }
+
+    #[test]
+    fn local_app_flow_uses_the_integration_spec_and_binds_the_app_owner() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("PYLON_PUBLIC_URL", "https://shop.example");
+        std::env::set_var("PYLON_OAUTH_CALENDLY_CLIENT_ID", "cal-id");
+        std::env::set_var("PYLON_OAUTH_CALENDLY_CLIENT_SECRET", "cal-secret");
+        let backend = Arc::new(pylon_auth::InMemoryOAuthBackend::new());
+        let m = ConnectionManager::with_broker(
+            vec![def(
+                "calendly",
+                "calendly",
+                ConnectionOwner::App,
+                ConnectionKind::Oauth,
+            )],
+            key(),
+            backend.clone(),
+            None,
+        );
+        let url = m
+            .build_auth_url("calendly", APP_OWNER, Some("/admin"))
+            .unwrap();
+        std::env::remove_var("PYLON_OAUTH_CALENDLY_CLIENT_ID");
+        std::env::remove_var("PYLON_OAUTH_CALENDLY_CLIENT_SECRET");
+        assert!(url.starts_with("https://auth.calendly.com/oauth/authorize?"));
+        assert!(url.contains(
+            "redirect_uri=https%3A%2F%2Fshop.example%2Fapi%2Fconnections%2Fcalendly%2Fcallback"
+        ));
+        assert!(url.contains("code_challenge="));
+        assert!(!url.contains("cal-secret"));
+        let state = url
+            .split('&')
+            .find_map(|p| p.strip_prefix("state="))
+            .unwrap();
+        let row = pylon_auth::OAuthStateBackend::take(backend.as_ref(), state, 0).unwrap();
+        let (owner, name, redirect) = decode_state_payload(&row.callback_url).unwrap();
+        assert_eq!(
+            (owner.as_str(), name.as_str(), redirect.as_str()),
+            (APP_OWNER, "calendly", "/admin")
+        );
+        assert!(
+            row.pkce_verifier.is_some(),
+            "the PKCE verifier waits in the state row"
+        );
+    }
+
+    #[test]
+    fn refresh_goes_to_the_broker_for_app_connections() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut headers = Vec::new();
+            let mut len = 0usize;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    len = v.trim().parse().unwrap();
+                }
+                headers.push(line);
+            }
+            let mut body = vec![0u8; len];
+            reader.read_exact(&mut body).unwrap();
+            let reply = r#"{"accessToken":"new-access","refreshToken":"new-refresh","expiresAt":4000000000}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                reply.len(),
+                reply
+            )
+            .unwrap();
+            (headers, String::from_utf8(body).unwrap())
+        });
+        let broker = Broker {
+            url: format!("http://127.0.0.1:{port}/refresh"),
+            token: "broker-token".into(),
+        };
+        let m = manager(
+            vec![def(
+                "square",
+                "square",
+                ConnectionOwner::App,
+                ConnectionKind::Oauth,
+            )],
+            Some(broker),
+        );
+        let stored = Mutex::new(StoredConnection {
+            id: stable_id(APP_OWNER, "square"),
+            user_id: APP_OWNER.into(),
+            name: "square".into(),
+            provider: "square".into(),
+            access_token: "old-access".into(),
+            refresh_token: Some("old-refresh".into()),
+            expires_at: Some(1),
+            account_id: Some("M1".into()),
+            ..Default::default()
+        });
+        let row = m
+            .ensure_fresh_token(
+                APP_OWNER,
+                "square",
+                || Ok(Some(stored.lock().unwrap().clone())),
+                |r| {
+                    *stored.lock().unwrap() = r.clone();
+                    Ok(())
+                },
+            )
+            .unwrap();
+        let (headers, body) = server.join().unwrap();
+        assert!(headers
+            .iter()
+            .any(|h| h.trim() == "Authorization: Bearer broker-token"));
+        let sent: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(sent["refreshToken"], "old-refresh");
+        assert_eq!(sent["accountId"], "M1");
+        assert_eq!(row.access_token, "new-access");
+        assert_eq!(
+            stored.lock().unwrap().refresh_token.as_deref(),
+            Some("new-refresh")
+        );
+        assert_eq!(stored.lock().unwrap().account_id.as_deref(), Some("M1"));
+    }
+
+    #[test]
+    fn broker_url_must_be_https_or_loopback() {
+        assert!(broker_url_is_safe("https://cloud.example/api/fn/x"));
+        assert!(broker_url_is_safe("http://127.0.0.1:4321/x"));
+        assert!(broker_url_is_safe("http://localhost/x"));
+        assert!(!broker_url_is_safe("http://cloud.example/x"));
+        assert!(!broker_url_is_safe("http://localhost.evil.example/x"));
+        assert!(!broker_url_is_safe("ftp://x"));
+        assert!(!broker_url_is_safe("https://"));
+    }
+
+    #[test]
+    fn stored_connection_debug_hides_secrets() {
+        let row = StoredConnection {
+            access_token: "very-secret".into(),
+            refresh_token: Some("also-secret".into()),
+            credentials: Some("{\"k\":\"key-secret\"}".into()),
+            ..Default::default()
+        };
+        let dbg = format!("{row:?}");
+        assert!(!dbg.contains("secret"));
     }
 
     #[test]

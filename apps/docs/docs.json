@@ -78,6 +78,7 @@
               "auth/trusted-mint",
               "auth/rbac",
               "auth/api-keys",
+              "auth/connections",
               "auth/organizations",
               "auth/sso",
               "auth/passkeys",
