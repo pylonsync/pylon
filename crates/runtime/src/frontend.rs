@@ -4125,6 +4125,30 @@ fn build_ssr_response_headers(
     // browser, so leaving SAMEORIGIN alongside would still block the frame.
     // Unset (the default) keeps SAMEORIGIN and ships no CSP.
     let ancestors = configured_frame_ancestors();
+    // In `pylon dev` with an allowlist, the builder must be able to show the
+    // app even when the app sets its own policy (an app imported into a
+    // builder often ships `frame-ancestors 'none'`). Rewrite only the
+    // framing parts: the app's CSP keeps every other directive, and its
+    // X-Frame-Options goes, since that header cannot name an allowed origin.
+    // Production keeps the app's own policy as written.
+    if let (Some(list), true) = (ancestors, is_dev_mode()) {
+        let mut rewritten = Vec::with_capacity(out.len());
+        for h in out.drain(..) {
+            let name = h.field.as_str().as_str();
+            if name.eq_ignore_ascii_case("X-Frame-Options") {
+                continue;
+            }
+            if name.eq_ignore_ascii_case("Content-Security-Policy") {
+                let value = csp_with_frame_ancestors(h.value.as_str(), list);
+                if let Ok(nh) = Header::from_bytes("Content-Security-Policy", value.as_bytes()) {
+                    rewritten.push(nh);
+                }
+                continue;
+            }
+            rewritten.push(h);
+        }
+        out = rewritten;
+    }
     match ancestors {
         Some(list) if !has(&out, "Content-Security-Policy") => {
             let value = format!("frame-ancestors 'self' {list}");
@@ -4157,6 +4181,25 @@ fn build_ssr_response_headers(
         }
     }
     out
+}
+
+/// `csp` with its `frame-ancestors` directive set to `'self' <list>`, added
+/// when the policy has none. Every other directive is kept as written.
+/// `list` comes from [`parse_frame_ancestors`], so it cannot carry `;`.
+fn csp_with_frame_ancestors(csp: &str, list: &str) -> String {
+    let mut directives: Vec<String> = csp
+        .split(';')
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .filter(|d| {
+            !d.split_whitespace()
+                .next()
+                .is_some_and(|n| n.eq_ignore_ascii_case("frame-ancestors"))
+        })
+        .map(str::to_string)
+        .collect();
+    directives.push(format!("frame-ancestors 'self' {list}"));
+    directives.join("; ")
 }
 
 /// Origins allowed to frame this app, from `PYLON_FRAME_ANCESTORS`
@@ -7268,6 +7311,23 @@ mod tests {
     #[test]
     fn frame_ancestors_allowlist_parses_and_rejects_injection() {
         use super::parse_frame_ancestors;
+
+        // An app's own CSP keeps its directives; only frame-ancestors changes.
+        assert_eq!(
+            super::csp_with_frame_ancestors(
+                "default-src 'self'; frame-ancestors 'none'; object-src 'none'",
+                "https://build.stack0.dev"
+            ),
+            "default-src 'self'; object-src 'none'; frame-ancestors 'self' https://build.stack0.dev"
+        );
+        assert_eq!(
+            super::csp_with_frame_ancestors("default-src 'self';", "https://a.com"),
+            "default-src 'self'; frame-ancestors 'self' https://a.com"
+        );
+        assert_eq!(
+            super::csp_with_frame_ancestors("FRAME-ANCESTORS 'none'", "https://a.com"),
+            "frame-ancestors 'self' https://a.com"
+        );
 
         // Why this exists: Pylon Cloud's builder shows a running dev-mode env in
         // a live-preview iframe on another origin. The default
