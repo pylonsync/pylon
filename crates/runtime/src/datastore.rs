@@ -7136,6 +7136,9 @@ pub(crate) fn list_connections(
             } else {
                 Vec::new()
             },
+            // What the declaration asks for; a hosting platform that runs
+            // the OAuth flow requests these.
+            "declared_scopes": def.scopes,
             "connected": row.is_some(),
             "account_id": row.as_ref().and_then(|r| r.account_id.clone()),
             "scope": row.as_ref().and_then(|r| r.scope.clone()),

@@ -136,7 +136,7 @@ A platform that hosts many Pylon apps can run the OAuth flow for their app conne
 
 With the broker set, `authorizeUrl` on an app connection throws `CONNECTION_MANAGED`. The platform hands over the result through the management API:
 
-- `GET /_pylon/connections` lists the app connections: name, provider, kind, key fields, `connected`, `account_id`, and expiry. It never returns a token or a key.
+- `GET /_pylon/connections` lists the app connections: name, provider, kind, key fields, `declared_scopes`, `connected`, `account_id`, and expiry. It never returns a token or a key.
 - `PUT /_pylon/connections/<name>` stores tokens `{ accessToken, refreshToken?, expiresAt?, scope?, accountId?, metadata? }`, or keys `{ credentials: { ... } }`.
 - `DELETE /_pylon/connections/<name>` removes the stored connection.
 

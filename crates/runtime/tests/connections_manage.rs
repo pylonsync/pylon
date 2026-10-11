@@ -42,7 +42,10 @@ fn manifest() -> AppManifest {
         name: "connmanage".into(),
         version: "0.1.0".into(),
         connections: vec![
-            conn("square", "square", "app", "", &[]),
+            ManifestConnection {
+                scopes: "ITEMS_READ".into(),
+                ..conn("square", "square", "app", "", &[])
+            },
             // An unknown provider makes no check call, so the test stays offline.
             conn("acme", "acme", "app", "api_key", &["apiKey", "siteId"]),
             conn("google", "google", "", "", &[]),
@@ -157,6 +160,10 @@ fn management_api_hands_over_app_connections_only() {
     let acme = list.iter().find(|c| c["name"] == "acme").unwrap();
     assert_eq!(acme["kind"], "api_key");
     assert_eq!(acme["fields"], json!(["apiKey", "siteId"]));
+    assert_eq!(
+        list.iter().find(|c| c["name"] == "square").unwrap()["declared_scopes"],
+        "ITEMS_READ"
+    );
 
     // OAuth tokens from the platform.
     let (status, body) = send(
