@@ -50,6 +50,13 @@
 #                                /v1/responses API rather than
 #                                /v1/chat/completions (OpenAI GPT-5.x needs
 #                                this to use function tools with reasoning)
+#   PYLON_DEV_CONTEXT_TOKENS     token budget for one model request. Every model
+#                                gets it as its context and input limit, and
+#                                OpenCode summarizes the session when a request
+#                                reaches the budget minus its reserve (20k by
+#                                default). unset = no limit: OpenCode summarizes
+#                                only when the provider rejects a request as too
+#                                long
 #   PYLON_DEV_OPENCODE_PORT      opencode serve port           (default 4096)
 #   PYLON_DEV_OPENCODE_PASSWORD  basic-auth for the opencode server (control plane
 #                                sets + uses it; server is 6PN-private regardless)
@@ -239,6 +246,17 @@ if [ -n "${PYLON_DEV_MODEL_PROXY_URL:-}" ] &&
 	OC_CHAT_JSON=""
 	OC_RESP_JSON=""
 	OC_MSG_JSON=""
+	# A model declared in config has no limits (context 0), and OpenCode does
+	# not summarize a session whose model has no context limit: every step
+	# resends the whole history until the provider refuses it. A budget sets
+	# the limit on every model. Output stays at 32000, the cap OpenCode sends
+	# when a model has no output limit.
+	OC_LIMIT=""
+	case "${PYLON_DEV_CONTEXT_TOKENS:-}" in
+	"") ;;
+	*[!0-9]*) echo "[dev-boot] PYLON_DEV_CONTEXT_TOKENS is not a number; no context limit" >&2 ;;
+	*) OC_LIMIT=", \"limit\": { \"context\": ${PYLON_DEV_CONTEXT_TOKENS}, \"input\": ${PYLON_DEV_CONTEXT_TOKENS}, \"output\": 32000 }" ;;
+	esac
 	OLD_IFS="$IFS"
 	IFS=","
 	for m in ${PYLON_DEV_MODELS:-$PYLON_DEV_MODEL}; do
@@ -260,9 +278,9 @@ if [ -n "${PYLON_DEV_MODEL_PROXY_URL:-}" ] &&
 		# to a screenshot the builder just sent it. Responses models (GPT-5.x)
 		# read images and PDFs; chat models are assumed to read images.
 		if [ "$is_resp" = "1" ] || [ "$is_msg" = "1" ]; then
-			entry="\"$m\": { \"name\": \"$m\", \"attachment\": true, \"modalities\": { \"input\": [\"text\", \"image\", \"pdf\"], \"output\": [\"text\"] } }"
+			entry="\"$m\": { \"name\": \"$m\", \"attachment\": true, \"modalities\": { \"input\": [\"text\", \"image\", \"pdf\"], \"output\": [\"text\"] }${OC_LIMIT} }"
 		else
-			entry="\"$m\": { \"name\": \"$m\", \"attachment\": true, \"modalities\": { \"input\": [\"text\", \"image\"], \"output\": [\"text\"] } }"
+			entry="\"$m\": { \"name\": \"$m\", \"attachment\": true, \"modalities\": { \"input\": [\"text\", \"image\"], \"output\": [\"text\"] }${OC_LIMIT} }"
 		fi
 		if [ "$is_msg" = "1" ]; then
 			if [ -z "$OC_MSG_JSON" ]; then OC_MSG_JSON="$entry"; else OC_MSG_JSON="$OC_MSG_JSON, $entry"; fi
