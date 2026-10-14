@@ -16,8 +16,12 @@ tree="$(cargo tree --locked --color never --target all -p pylon-shard-client-ffi
 # The plugin profile.
 profile="$(sed -n '/^\[profile.plugin\]/,/^\[/p' Cargo.toml)"
 
+# shasum on macOS and Linux; Git Bash on the Windows runner has only sha256sum.
+# Both print "<hash>  -".
+if command -v shasum >/dev/null 2>&1; then sha256() { shasum -a 256; }; else sha256() { sha256sum; }; fi
+
 {
 	printf '%s\n' "$files" | xargs cat
 	printf '%s\n' "$tree"
 	printf '%s\n' "$profile"
-} | shasum -a 256 | cut -d' ' -f1
+} | sha256 | cut -d' ' -f1

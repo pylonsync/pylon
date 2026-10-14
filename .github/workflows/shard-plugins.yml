@@ -39,6 +39,9 @@ jobs:
     container: rust:1-bullseye
     steps:
       - uses: actions/checkout@v5
+      # The container's user does not own the checkout, and git refuses it
+      # ("dubious ownership"); source-hash.sh runs git ls-files.
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - run: crates/shard-client-ffi/build-plugins.sh linux
       - uses: actions/upload-artifact@v6
         with:
