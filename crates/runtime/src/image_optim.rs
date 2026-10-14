@@ -32,7 +32,8 @@
 use std::collections::HashMap;
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use tiny_http::{Header, Request, Response};
@@ -67,6 +68,8 @@ enum OutFormat {
 /// | `PYLON_IMAGE_MAX_BYTES` | `26214400` (25MB) | Source byte cap. |
 /// | `PYLON_IMAGE_MAX_PIXELS` | `40000000` (40M) | Decoded pixel cap (bounds decode memory). Prevents image bombs. |
 /// | `PYLON_IMAGE_FETCH_TIMEOUT_MS` | `15000` | Remote-source fetch timeout. |
+/// | `PYLON_IMAGE_CONCURRENCY` | CPU count | Transforms that run at once. More requests wait their turn. |
+/// | `PYLON_IMAGE_WAIT_MS` | `1500` | How long a request waits for its transform. Past it, the request gets the original file and the transform finishes in the background. |
 #[derive(Debug, Clone)]
 struct ImageConfig {
     remote_allowlist: Vec<RemotePattern>,
@@ -76,6 +79,8 @@ struct ImageConfig {
     max_bytes: u64,
     max_pixels: u64,
     fetch_timeout: std::time::Duration,
+    concurrency: usize,
+    wait: Duration,
 }
 
 /// An entry in `PYLON_IMAGE_REMOTE_ALLOWLIST`. Syntax:
@@ -201,6 +206,23 @@ impl ImageConfig {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(15_000);
 
+        // A transform is CPU-bound. Running more at once than there are
+        // CPUs makes each slower, and on a one-CPU machine a page of ten
+        // pictures took 30 s per picture.
+        let concurrency = std::env::var("PYLON_IMAGE_CONCURRENCY")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(1)
+            });
+        let wait_ms = std::env::var("PYLON_IMAGE_WAIT_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(1_500);
+
         ImageConfig {
             remote_allowlist,
             allowed_widths,
@@ -209,6 +231,8 @@ impl ImageConfig {
             max_bytes,
             max_pixels,
             fetch_timeout: std::time::Duration::from_millis(fetch_timeout_ms),
+            concurrency,
+            wait: Duration::from_millis(wait_ms),
         }
     }
 }
@@ -803,6 +827,10 @@ fn process(
                 .with_quality(quality as f32)
                 .with_alpha_quality(quality as f32)
                 .with_speed(8)
+                // One thread per encode: PYLON_IMAGE_CONCURRENCY already
+                // runs one transform per CPU, and rav1e's own thread pool
+                // on top of that oversubscribed small machines.
+                .with_num_threads(Some(1))
                 .encode_rgba(img)
                 .map_err(|e| format!("avif encode failed: {e}"))?;
             Ok(res.avif_file)
@@ -1022,38 +1050,86 @@ pub fn serve(request: Request, cache_root: &Path, frontend_dir: Option<&Path>, c
     }
     let dest = cache_path(&cache_dir, &parsed.src, parsed.width, parsed.quality, fmt);
 
-    static WORK: OnceLock<ImageWork> = OnceLock::new();
-    let bytes = match WORK.get_or_init(ImageWork::default).get(&dest, || {
-        let source = load_source(&parsed.src, frontend_dir, cfg).map_err(|e| (400, e))?;
-        process(&source, parsed.width, parsed.quality, fmt, cfg).map_err(|e| (500, e))
-    }) {
-        Ok(bytes) => bytes,
+    // A transform made before: serve it.
+    match read_cached_image(&dest) {
+        Ok(Some(bytes)) => {
+            respond_image(request, &bytes, fmt.mime(), true, cors_origin);
+            return;
+        }
+        Ok(None) => {}
         Err((status, message)) => {
             respond_err(request, status, &message);
             return;
         }
+    }
+
+    // The source is read here, so a bad source answers with its error and
+    // the original is at hand if the transform takes too long.
+    let source = match load_source(&parsed.src, frontend_dir, cfg) {
+        Ok(bytes) => Arc::new(bytes),
+        Err(e) => {
+            respond_err(request, 400, &e);
+            return;
+        }
     };
 
+    // Make the transform in the background, one per variant, at most
+    // `concurrency` at once. Wait for it up to `wait`; past that, answer
+    // with the original so a page never waits on the resizer. The next
+    // request gets the transform from the cache.
+    warm(
+        dest.clone(),
+        Arc::clone(&source),
+        parsed.width,
+        parsed.quality,
+        fmt,
+    );
+    let deadline = Instant::now() + cfg.wait;
+    loop {
+        if let Ok(Some(bytes)) = read_cached_image(&dest) {
+            respond_image(request, &bytes, fmt.mime(), true, cors_origin);
+            return;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    let mime = image::guess_format(&source)
+        .map(|f| f.to_mime_type())
+        .unwrap_or("application/octet-stream");
+    respond_image(request, &source, mime, false, cors_origin);
+}
+
+/// Answer with image bytes. A transform is immutable (its URL names the
+/// variant); the original, sent while the transform is still being made,
+/// is cached briefly in the browser and never at a CDN, so the next view
+/// gets the transform.
+fn respond_image(request: Request, bytes: &[u8], mime: &str, transformed: bool, cors_origin: &str) {
+    let (cache, cdn) = if transformed {
+        (
+            "public, max-age=31536000, immutable",
+            "public, max-age=31536000, immutable",
+        )
+    } else {
+        ("public, max-age=60", "no-store")
+    };
     let response = Response::new(
         tiny_http::StatusCode(200),
         Vec::new(),
-        Cursor::new(bytes.as_slice()),
+        Cursor::new(bytes),
         Some(bytes.len()),
         None,
     )
-    .with_header(Header::from_bytes("Content-Type", fmt.mime()).unwrap())
-    .with_header(
-        Header::from_bytes("Cache-Control", "public, max-age=31536000, immutable").unwrap(),
-    )
+    .with_header(Header::from_bytes("Content-Type", mime).unwrap())
+    .with_header(Header::from_bytes("Cache-Control", cache).unwrap())
     // The output format is negotiated from Accept when the URL
     // doesn't pin one — any shared cache MUST key on it or Safari
     // gets the AVIF a Chrome visitor warmed. CDNs that support
     // CDN-Cache-Control (Cloudflare et al.) get an explicit edge
     // TTL so transforms are edge-cacheable without a manual rule.
     .with_header(Header::from_bytes("Vary", "Accept").unwrap())
-    .with_header(
-        Header::from_bytes("CDN-Cache-Control", "public, max-age=31536000, immutable").unwrap(),
-    )
+    .with_header(Header::from_bytes("CDN-Cache-Control", cdn).unwrap())
     .with_header(
         Header::from_bytes(
             "Access-Control-Allow-Origin",
@@ -1062,6 +1138,105 @@ pub fn serve(request: Request, cache_root: &Path, frontend_dir: Option<&Path>, c
         .unwrap(),
     );
     let _ = request.respond(response);
+}
+
+/// The shared transform work (singleflight per cache file).
+fn work() -> &'static ImageWork {
+    static WORK: OnceLock<ImageWork> = OnceLock::new();
+    WORK.get_or_init(ImageWork::default)
+}
+
+/// A counting semaphore: at most `n` transforms run at once.
+struct Permits {
+    free: Mutex<usize>,
+    freed: Condvar,
+}
+
+struct Permit<'a>(&'a Permits);
+
+impl Permits {
+    fn new(n: usize) -> Self {
+        Permits {
+            free: Mutex::new(n.max(1)),
+            freed: Condvar::new(),
+        }
+    }
+
+    fn acquire(&self) -> Permit<'_> {
+        let mut free = self.free.lock().unwrap_or_else(|e| e.into_inner());
+        while *free == 0 {
+            free = self.freed.wait(free).unwrap_or_else(|e| e.into_inner());
+        }
+        *free -= 1;
+        Permit(self)
+    }
+}
+
+impl Drop for Permit<'_> {
+    fn drop(&mut self) {
+        *self.0.free.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        self.0.freed.notify_one();
+    }
+}
+
+fn permits() -> &'static Permits {
+    static PERMITS: OnceLock<Permits> = OnceLock::new();
+    PERMITS.get_or_init(|| Permits::new(config().concurrency))
+}
+
+/// How long a variant whose transform failed is left alone before it is
+/// tried again. Requests for it get the original meanwhile.
+const FAILED_RETRY_AFTER: Duration = Duration::from_secs(600);
+
+#[derive(Default)]
+struct Warming {
+    running: std::collections::HashSet<PathBuf>,
+    failed: HashMap<PathBuf, Instant>,
+}
+
+fn warming() -> &'static Mutex<Warming> {
+    static WARMING: OnceLock<Mutex<Warming>> = OnceLock::new();
+    WARMING.get_or_init(|| Mutex::new(Warming::default()))
+}
+
+/// Start making a variant in the background, unless it is already being
+/// made or failed recently. The thread waits for a permit, so a page of
+/// many pictures queues instead of running every encode at once.
+fn warm(dest: PathBuf, source: Arc<Vec<u8>>, width: u32, quality: u8, fmt: OutFormat) {
+    {
+        let mut w = warming().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(at) = w.failed.get(&dest) {
+            if at.elapsed() < FAILED_RETRY_AFTER {
+                return;
+            }
+            w.failed.remove(&dest);
+        }
+        if !w.running.insert(dest.clone()) {
+            return;
+        }
+    }
+    let claimed = dest.clone();
+    let spawned = std::thread::Builder::new()
+        .name("pylon-image".into())
+        .spawn(move || {
+            let result = {
+                let _permit = permits().acquire();
+                work().get(&dest, || {
+                    process(&source, width, quality, fmt, config()).map_err(|e| (500, e))
+                })
+            };
+            let mut w = warming().lock().unwrap_or_else(|e| e.into_inner());
+            w.running.remove(&dest);
+            if let Err((_, message)) = result {
+                tracing::warn!(error = %message, path = %dest.display(), "image transform failed");
+                w.failed.insert(dest, Instant::now());
+            }
+        });
+    if spawned.is_err() {
+        // No thread: forget the claim so a later request can try again.
+        let mut w = warming().lock().unwrap_or_else(|e| e.into_inner());
+        w.running.remove(&claimed);
+    }
 }
 
 fn respond_err(request: Request, status: u16, msg: &str) {
@@ -1541,5 +1716,111 @@ mod cache_key_tests {
             cache_path(dir, "a.png", 640, 75, OutFormat::Webp),
             cache_path(dir, "a.png", 641, 75, OutFormat::Webp),
         );
+    }
+}
+
+#[cfg(test)]
+mod concurrency_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn permits_bound_the_transforms_that_run_at_once() {
+        let permits = Arc::new(Permits::new(2));
+        let running = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let (permits, running, peak) = (
+                    Arc::clone(&permits),
+                    Arc::clone(&running),
+                    Arc::clone(&peak),
+                );
+                std::thread::spawn(move || {
+                    let _p = permits.acquire();
+                    let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(20));
+                    running.fetch_sub(1, Ordering::SeqCst);
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
+        // Every permit came back.
+        assert_eq!(*permits.free.lock().unwrap(), 2);
+    }
+
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(width, height, image::Rgba([200, 30, 30, 255]));
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
+        out
+    }
+
+    fn wait_for(path: &Path) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if path.exists() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    #[test]
+    fn a_variant_is_made_once_in_the_background_and_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("variant.webp");
+        let source = Arc::new(png(400, 200));
+        warm(dest.clone(), Arc::clone(&source), 200, 75, OutFormat::Webp);
+        // A second request for the same variant while it is made starts nothing new.
+        warm(dest.clone(), Arc::clone(&source), 200, 75, OutFormat::Webp);
+        assert!(wait_for(&dest), "the transform was not cached");
+        let bytes = std::fs::read(&dest).unwrap();
+        assert_eq!(
+            image::guess_format(&bytes).unwrap(),
+            image::ImageFormat::WebP
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while warming().lock().unwrap().running.contains(&dest) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!warming().lock().unwrap().running.contains(&dest));
+    }
+
+    #[test]
+    fn a_failed_variant_is_not_retried_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("broken.webp");
+        warm(
+            dest.clone(),
+            Arc::new(b"not an image".to_vec()),
+            200,
+            75,
+            OutFormat::Webp,
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !warming().lock().unwrap().failed.contains_key(&dest) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(warming().lock().unwrap().failed.contains_key(&dest));
+        warm(
+            dest.clone(),
+            Arc::new(png(10, 10)),
+            200,
+            75,
+            OutFormat::Webp,
+        );
+        assert!(
+            !warming().lock().unwrap().running.contains(&dest),
+            "a recent failure started again"
+        );
+        assert!(!dest.exists());
     }
 }
