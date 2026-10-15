@@ -261,6 +261,12 @@ impl ApiKeyStore {
         self.backend.delete(id)
     }
 
+    /// The key with this id, without verifying a secret. For server code
+    /// that already holds the id (an ownership check before a revoke).
+    pub fn get(&self, id: &str) -> Option<ApiKey> {
+        self.backend.get(id)
+    }
+
     pub fn list_for_user(&self, user_id: &str) -> Vec<ApiKey> {
         self.backend.list_for_user(user_id)
     }

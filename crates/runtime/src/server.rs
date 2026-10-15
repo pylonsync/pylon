@@ -3566,6 +3566,14 @@ fn start_server(
                 crate::app_audit::handle_op(&store, req, auth)
             }));
         }
+        // `ctx.apiKeys.*`: keys for the app's own users, from server code,
+        // in the same store the HTTP routes use.
+        for runner in ops.pool.runners() {
+            let store = Arc::clone(&api_keys);
+            runner.set_api_key_op_hook(Box::new(move |req| {
+                crate::app_api_keys::handle_op(&store, req)
+            }));
+        }
 
         let wf_infos = ops.workflow_infos();
         if !wf_infos.is_empty() {

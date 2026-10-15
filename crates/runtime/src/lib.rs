@@ -1,5 +1,6 @@
 pub mod account_backend;
 pub mod api_key_backend;
+pub mod app_api_keys;
 pub mod app_audit;
 pub mod audit_backend;
 pub mod cache_handlers;

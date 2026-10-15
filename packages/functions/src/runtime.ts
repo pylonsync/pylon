@@ -39,6 +39,7 @@ import type {
   WorkflowRunSummary,
   Audit,
   AuditEntry,
+  ApiKeys,
   Connections,
   Domains,
   TenantDomainResult,
@@ -1102,6 +1103,37 @@ export function buildAudit(callId: string): Audit {
   };
 }
 
+/** Build `ctx.apiKeys` — round-trips `api_key_op` frames to the host. */
+export function buildApiKeys(callId: string): ApiKeys {
+  return {
+    async create(options) {
+      // A value Rust cannot read as u64 would be dropped by the host and
+      // leave the call waiting; NaN would turn into "never expires".
+      const exp = options.expiresAt;
+      if (exp !== undefined && !(Number.isSafeInteger(exp) && exp >= 0)) {
+        const err = new Error("ctx.apiKeys.create expiresAt must be a whole number of unix seconds, 0 or more");
+        (err as { code?: string }).code = "INVALID_ARGS";
+        throw err;
+      }
+      return (await rpc(callId, {
+        type: "api_key_op",
+        op: "create",
+        user_id: options.userId,
+        name: options.name ?? null,
+        expires_at: options.expiresAt ?? null,
+      })) as { key: string; id: string; prefix: string; expiresAt: number | null };
+    },
+    async revoke(options) {
+      return (await rpc(callId, {
+        type: "api_key_op",
+        op: "revoke",
+        user_id: options.userId,
+        key_id: options.keyId,
+      })) as { revoked: boolean };
+    },
+  };
+}
+
 export function buildWorkflows(callId: string): Workflows {
   return {
     async start(name: string, input?: unknown, opts?: { key?: string }) {
@@ -1356,6 +1388,7 @@ function buildActionCtx(
     connections,
     workflows: buildWorkflows(callId),
     audit: buildAudit(callId),
+    apiKeys: buildApiKeys(callId),
     agents: {
       async run(name, options) {
         if (!options || typeof options.as?.userId !== "string") {

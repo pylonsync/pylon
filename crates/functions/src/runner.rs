@@ -298,6 +298,15 @@ pub type AuditOpHook = Box<
         + Sync,
 >;
 
+/// Callback for `ctx.apiKeys.*`. The runner has already refused anything
+/// but actions, and callers that are neither internal nor elevated; the host does the
+/// store work and checks that a revoked key belongs to the named user.
+pub type ApiKeyOpHook = Box<
+    dyn Fn(&crate::protocol::ApiKeyOpMessage) -> Result<serde_json::Value, (String, String)>
+        + Send
+        + Sync,
+>;
+
 /// Callback for `ctx.workflows.*` (start / send_event). Wired to the
 /// runtime's WorkflowEngine; returns the op's JSON result.
 pub type WorkflowOpHook = Box<
@@ -503,6 +512,7 @@ pub struct FnRunner {
     room_broadcast_hook: Mutex<Option<RoomBroadcastHook>>,
     workflow_op_hook: Mutex<Option<WorkflowOpHook>>,
     audit_op_hook: Mutex<Option<AuditOpHook>>,
+    api_key_op_hook: Mutex<Option<ApiKeyOpHook>>,
     /// Hook for `ctx.connections.*`. Wires authorize-url / get /
     /// list / disconnect calls to the runtime's ConnectionManager.
     connection_hook: Mutex<Option<Arc<ConnectionHookFn>>>,
@@ -560,6 +570,7 @@ impl FnRunner {
             room_broadcast_hook: Mutex::new(None),
             workflow_op_hook: Mutex::new(None),
             audit_op_hook: Mutex::new(None),
+            api_key_op_hook: Mutex::new(None),
             connection_hook: Mutex::new(None),
             call_timeout: Mutex::new(DEFAULT_CALL_TIMEOUT),
             started_with: Mutex::new(None),
@@ -729,6 +740,11 @@ impl FnRunner {
     /// Install the `ctx.audit.*` handler.
     pub fn set_audit_op_hook(&self, hook: AuditOpHook) {
         *self.audit_op_hook.lock().unwrap() = Some(hook);
+    }
+
+    /// Install the `ctx.apiKeys.*` handler.
+    pub fn set_api_key_op_hook(&self, hook: ApiKeyOpHook) {
+        *self.api_key_op_hook.lock().unwrap() = Some(hook);
     }
 
     /// Install the `ctx.connections.*` hook. Without it, calls
@@ -2049,6 +2065,39 @@ impl FnRunner {
                     self.send(&reply)?;
                 }
 
+                TsMessage::ApiKeyOp(req) if req.call_id == call_id => {
+                    let reply =
+                        match api_key_op_gate(&req, fn_type, caller_internal, caller_is_admin) {
+                            Err((code, msg)) => DbResultMessage::err(call_id.clone(), code, &msg),
+                            Ok(()) => {
+                                // Every mint and revoke is in the server log with the
+                                // function that asked, so a misuse can be traced.
+                                tracing::info!(
+                                    "[functions] api_key_op: fn=\"{}\" op=\"{}\" user=\"{}\"",
+                                    fn_name,
+                                    req.op,
+                                    req.user_id
+                                );
+                                let result: Option<Result<serde_json::Value, (String, String)>> = {
+                                    let hook = self.api_key_op_hook.lock().unwrap();
+                                    hook.as_ref().map(|cb| cb(&req))
+                                };
+                                match result {
+                                    Some(Ok(value)) => DbResultMessage::ok(call_id.clone(), value),
+                                    Some(Err((code, msg))) => {
+                                        DbResultMessage::err(call_id.clone(), &code, &msg)
+                                    }
+                                    None => DbResultMessage::err(
+                                        call_id.clone(),
+                                        "API_KEYS_NOT_CONFIGURED",
+                                        "this host has no API key store wired",
+                                    ),
+                                }
+                            }
+                        };
+                    self.send(&reply)?;
+                }
+
                 TsMessage::WorkflowOp(req) if req.call_id == call_id => {
                     // `ctx.workflows.start` / `.sendEvent` — app code
                     // driving durable workflows. Trust model matches
@@ -2586,6 +2635,42 @@ impl FnRunner {
 /// client calls cannot pick an identity to act as. `admin: true` needs an
 /// admin caller, so an internal non-admin function cannot mint admin
 /// rights.
+/// Who may use `ctx.apiKeys.*`. Minting a key for any user of the app is a
+/// server-side power, the same trust as `ctx.agents.run`: actions only, and
+/// only a caller that is internal or has elevated to admin. A public action
+/// must authenticate its caller and call `ctx.auth.elevate({ admin: true,
+/// reason })` first. Not in mutations: the key store writes through its own
+/// connection, which waits on a SQLite mutation's write lock and, on
+/// Postgres, would commit even when the mutation rolls back.
+fn api_key_op_gate(
+    req: &crate::protocol::ApiKeyOpMessage,
+    fn_type: FnType,
+    caller_internal: bool,
+    caller_is_admin: bool,
+) -> Result<(), (&'static str, String)> {
+    if !matches!(fn_type, FnType::Action) {
+        return Err((
+            "API_KEYS_ACTIONS_ONLY",
+            "ctx.apiKeys is available in actions only".into(),
+        ));
+    }
+    if !caller_internal && !caller_is_admin {
+        return Err((
+            "API_KEYS_FORBIDDEN",
+            "ctx.apiKeys needs a server-side caller: an internal: true function, or one that called ctx.auth.elevate({ admin: true, reason }) first".into(),
+        ));
+    }
+    if req.user_id.trim().is_empty() {
+        return Err(("INVALID_ARGS", "ctx.apiKeys needs userId".into()));
+    }
+    match req.op.as_str() {
+        "create" => Ok(()),
+        "revoke" if req.key_id.as_deref().is_some_and(|k| !k.trim().is_empty()) => Ok(()),
+        "revoke" => Err(("INVALID_ARGS", "ctx.apiKeys.revoke needs keyId".into())),
+        other => Err(("INVALID_ARGS", format!("unknown ctx.apiKeys op: {other}"))),
+    }
+}
+
 fn run_agent_auth(
     req: &crate::protocol::RunAgentMessage,
     fn_type: FnType,
@@ -3798,6 +3883,73 @@ mod tests {
     fn run_agent_needs_a_user() {
         let err =
             run_agent_auth(&run_agent_req("  ", false), FnType::Action, true, true).unwrap_err();
+        assert_eq!(err.0, "INVALID_ARGS");
+    }
+
+    fn api_key_req(
+        op: &str,
+        user_id: &str,
+        key_id: Option<&str>,
+    ) -> crate::protocol::ApiKeyOpMessage {
+        crate::protocol::ApiKeyOpMessage {
+            call_id: "c_1".into(),
+            op: op.into(),
+            user_id: user_id.into(),
+            name: Some("agent".into()),
+            expires_at: None,
+            key_id: key_id.map(String::from),
+        }
+    }
+
+    #[test]
+    fn api_keys_need_a_server_side_caller() {
+        let req = api_key_req("create", "svc_1", None);
+        // A public action a client can call, without elevation: refused.
+        let err = api_key_op_gate(&req, FnType::Action, false, false).unwrap_err();
+        assert_eq!(err.0, "API_KEYS_FORBIDDEN");
+        // Queries and mutations: refused whoever calls.
+        for fn_type in [FnType::Query, FnType::Mutation] {
+            let err = api_key_op_gate(&req, fn_type, true, true).unwrap_err();
+            assert_eq!(err.0, "API_KEYS_ACTIONS_ONLY");
+        }
+        // An internal action, or an elevated one: allowed.
+        for (internal, admin) in [(true, false), (false, true)] {
+            assert!(api_key_op_gate(&req, FnType::Action, internal, admin).is_ok());
+        }
+    }
+
+    #[test]
+    fn api_key_ops_check_their_args() {
+        let err = api_key_op_gate(
+            &api_key_req("create", " ", None),
+            FnType::Action,
+            true,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(err.0, "INVALID_ARGS");
+        let err = api_key_op_gate(
+            &api_key_req("revoke", "svc_1", None),
+            FnType::Action,
+            true,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(err.0, "INVALID_ARGS");
+        assert!(api_key_op_gate(
+            &api_key_req("revoke", "svc_1", Some("key_1")),
+            FnType::Action,
+            true,
+            false
+        )
+        .is_ok());
+        let err = api_key_op_gate(
+            &api_key_req("list", "svc_1", None),
+            FnType::Action,
+            true,
+            false,
+        )
+        .unwrap_err();
         assert_eq!(err.0, "INVALID_ARGS");
     }
 

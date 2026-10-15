@@ -706,6 +706,37 @@ export interface AuditLog {
 }
 
 /**
+ * `ctx.apiKeys`: API keys for the app's own users, minted from server
+ * code. For a service user the app runs (for example one per AI agent),
+ * where the HTTP route `POST /api/auth/api-keys` does not fit because it
+ * mints a key for the signed-in caller only.
+ *
+ * Actions only. The action must be `internal: true` or have called
+ * `ctx.auth.elevate({ admin: true, reason })` after checking its own
+ * caller; anything else is refused with `API_KEYS_FORBIDDEN`. Not in
+ * mutations: a key is not part of the mutation's transaction.
+ * Every call is in the server log with the function name and user id.
+ */
+export interface ApiKeys {
+  /**
+   * Mint a key for `userId`. The plaintext `key` is returned once and is
+   * never readable again; store it where the key's holder can use it.
+   * `expiresAt` is unix seconds. `name` is a label (at most 100
+   * characters).
+   */
+  create(options: {
+    userId: string;
+    name?: string;
+    expiresAt?: number;
+  }): Promise<{ key: string; id: string; prefix: string; expiresAt: number | null }>;
+  /**
+   * Revoke key `keyId` of `userId`. `revoked` is false when no key of
+   * that user has that id.
+   */
+  revoke(options: { userId: string; keyId: string }): Promise<{ revoked: boolean }>;
+}
+
+/**
  * `ctx.audit` on actions: {@link AuditLog.log} plus reads. Mutations get
  * only `log`: in a Postgres mutation the transaction holds a connection,
  * and a read would need a second.
@@ -1500,6 +1531,8 @@ export interface ActionCtx<R extends AuthRequirement = "optional"> {
   workflows: Workflows;
   /** Application audit log — see {@link Audit}. */
   audit: Audit;
+  /** API keys for the app's own users, from server code — see {@link ApiKeys}. */
+  apiKeys: ApiKeys;
   /** Run an `agent()` as a named user from server code — see {@link Agents}. */
   agents: Agents;
   /** Attach / register custom domains for your app's OWN end-customers

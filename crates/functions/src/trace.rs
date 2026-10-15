@@ -101,6 +101,24 @@ fn trace_error_text(text: &str) -> String {
     bounded
 }
 
+/// Stored traces are readable later through the admin trace endpoint, so a
+/// plaintext API key a function returns (for example the result of
+/// `ctx.apiKeys.create`) must not be kept there. Replace every string that
+/// is or holds a Pylon key (`pk.key_…`) before the value is stored.
+fn redact_api_keys(value: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::String(s) if s.contains("pk.key_") => Value::String("[redacted API key]".into()),
+        Value::Array(items) => Value::Array(items.into_iter().map(redact_api_keys).collect()),
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(k, v)| (k, redact_api_keys(v)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
 fn trace_value_fits(value: &serde_json::Value) -> bool {
     fn visit(
         value: &serde_json::Value,
@@ -269,14 +287,14 @@ impl TraceBuilder {
     /// Finalize the trace. Omit result values that exceed the trace budget.
     pub fn finish_ok(self, value: Option<serde_json::Value>) -> FnTrace {
         self.finish(FnOutcome::Ok {
-            value: value.filter(trace_value_fits),
+            value: value.filter(trace_value_fits).map(redact_api_keys),
         })
     }
 
     /// Inspect the result before cloning it. Large responses need no trace copy.
     pub fn finish_ok_ref(self, value: &serde_json::Value) -> FnTrace {
         self.finish(FnOutcome::Ok {
-            value: trace_value_fits(value).then(|| value.clone()),
+            value: trace_value_fits(value).then(|| redact_api_keys(value.clone())),
         })
     }
 
@@ -443,6 +461,22 @@ impl TraceLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stored_trace_values_hide_api_keys() {
+        let key =
+            "pk.key_abcdefghijklmnopqrstuvwxyz012345.secretsecretsecretsecretsecretsecretsecre";
+        let value = serde_json::json!({
+            "key": key,
+            "id": "key_abc",
+            "nested": [{ "token": format!("Bearer {key}") }, "plain"],
+        });
+        let out = redact_api_keys(value);
+        assert_eq!(out["key"], "[redacted API key]");
+        assert_eq!(out["nested"][0]["token"], "[redacted API key]");
+        assert_eq!(out["id"], "key_abc");
+        assert_eq!(out["nested"][1], "plain");
+    }
 
     fn make_trace(name: &str, duration_ms: f64) -> FnTrace {
         FnTrace {

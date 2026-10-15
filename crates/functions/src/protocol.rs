@@ -539,6 +539,13 @@ pub enum TsMessage {
     #[serde(rename = "audit_op")]
     AuditOp(AuditOpMessage),
 
+    /// `ctx.apiKeys.create` / `ctx.apiKeys.revoke` — mint or revoke an
+    /// API key for one of the app's users from server code, without the
+    /// admin-only `/api/auth/session` route. The host allows it only in
+    /// actions that are internal or have elevated.
+    #[serde(rename = "api_key_op")]
+    ApiKeyOp(ApiKeyOpMessage),
+
     /// `ctx.workflows.*` — start a durable workflow or deliver an event
     /// to a waiting one, from app code (mutations/actions). The host
     /// routes it to the WorkflowEngine via the workflow_op_hook.
@@ -621,6 +628,7 @@ impl TsMessage {
             TsMessage::Connection(m) => Some(&m.call_id),
             TsMessage::WorkflowOp(m) => Some(&m.call_id),
             TsMessage::AuditOp(m) => Some(&m.call_id),
+            TsMessage::ApiKeyOp(m) => Some(&m.call_id),
             TsMessage::Return(m) => Some(&m.call_id),
             TsMessage::Error(m) => Some(&m.call_id),
             TsMessage::ResponseStart(m) => Some(&m.call_id),
@@ -660,6 +668,25 @@ pub struct WorkflowOpMessage {
     pub event: Option<String>,
     #[serde(default)]
     pub data: Option<serde_json::Value>,
+}
+
+/// `ctx.apiKeys.*` from app code. `op` is "create" or "revoke".
+/// Replied to with a `result` frame.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApiKeyOpMessage {
+    pub call_id: String,
+    pub op: String,
+    /// The user the key belongs to (create) or is revoked for (revoke).
+    pub user_id: String,
+    /// create: a label for the key.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// create: optional expiry, unix seconds.
+    #[serde(default)]
+    pub expires_at: Option<u64>,
+    /// revoke: the key id returned by create.
+    #[serde(default)]
+    pub key_id: Option<String>,
 }
 
 /// `ctx.audit.*` from app code. `op` is "log" or "list"; unused fields
