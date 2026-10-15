@@ -804,3 +804,14 @@ describe("nearestBoundaryComponent across route groups", () => {
     ).toBe("app/(marketing)/not-found");
   });
 });
+
+describe("client router popstate", () => {
+  test("a hash-only popstate does not re-render the route", () => {
+    // Clicking a same-page anchor fires popstate. Treating it as a navigation
+    // re-rendered the page and scrolled back to the top.
+    const src = fs.readFileSync(path.join(import.meta.dir, "ssr-client-bundler.ts"), "utf8");
+    const popstate = src.slice(src.indexOf('window.addEventListener("popstate"'));
+    expect(popstate).toContain("if (next === renderedPath) return;");
+    expect(src.match(/renderedPath = location\.pathname \+ location\.search;/g)?.length).toBeGreaterThanOrEqual(3);
+  });
+});

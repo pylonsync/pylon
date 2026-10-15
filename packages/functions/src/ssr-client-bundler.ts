@@ -830,6 +830,12 @@ function renderPendingPlaceholder(pathname, manifest, myEpoch) {
   return true;
 }
 
+// The path and query the page last rendered. A popstate that keeps them and
+// only changes the hash is a same-page jump (an anchor link, a back press
+// between anchors), not a navigation: re-rendering for it would reset the
+// scroll to the top.
+let renderedPath = "";
+
 async function navigate(href, opts) {
   const push = !opts || opts.push !== false;
   const url = new URL(href, location.href);
@@ -891,6 +897,7 @@ async function navigate(href, opts) {
           history.pushState({ component: matched.component }, "", target);
         }
         window.dispatchEvent(new Event("pylon:navigation"));
+        renderedPath = location.pathname + location.search;
         window.scrollTo(0, 0);
         didOptimistic = true;
       }
@@ -915,6 +922,7 @@ async function navigate(href, opts) {
       loadManifest().then((manifest) => {
         if (navState.settled || myEpoch !== navEpoch) return;
         if (renderPendingPlaceholder(url.pathname, manifest, myEpoch)) {
+          renderedPath = location.pathname + location.search;
           window.scrollTo(0, 0);
         }
       });
@@ -1013,6 +1021,7 @@ async function navigate(href, opts) {
     // re-read location after a Link click or a router.push(). popstate already
     // covers back/forward, but pushState/replaceState fire no event.
     window.dispatchEvent(new Event("pylon:navigation"));
+    renderedPath = location.pathname + location.search;
     // After a successful nav, scroll to top (Next.js default).
     window.scrollTo(0, 0);
   }
@@ -1042,8 +1051,11 @@ function installNavHandlers() {
     const seed = seeds ? seeds.get(link) : undefined;
     navigate(href, seed != null ? { seed } : undefined);
   });
+  renderedPath = location.pathname + location.search;
   window.addEventListener("popstate", () => {
-    navigate(location.pathname + location.search, { push: false });
+    const next = location.pathname + location.search;
+    if (next === renderedPath) return;
+    navigate(next, { push: false });
   });
   // Progressive-enhancement form submit (#276): intercept <form data-pylon-form>
   // so the page doesn't full-reload. fetch the same route.ts endpoint, follow
