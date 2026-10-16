@@ -18,7 +18,7 @@
 
 use loro::{
     Container, ExpandType, LoroDoc, LoroList, LoroMap, LoroText, LoroValue, StyleConfig,
-    ValueOrContainer,
+    StyleConfigMap, ValueOrContainer,
 };
 use serde_json::{Map as JsonMap, Value};
 
@@ -28,17 +28,33 @@ const NODE_NAME: &str = "nodeName";
 const ATTRIBUTES: &str = "attributes";
 const CHILDREN: &str = "children";
 
+/// The deepest node nesting a document may have. ProseMirror documents,
+/// tables and nested lists included, stay far below it. Writes past it are
+/// refused; the projection stops there, so a doc a client built deeper
+/// cannot exhaust the server's stack.
+pub const MAX_DEPTH: usize = 64;
+/// The most nodes (text runs included) one write may hold.
+pub const MAX_NODES: usize = 200_000;
+/// The most characters of text one write may hold.
+pub const MAX_TEXT_CHARS: usize = 5_000_000;
+
 /// Replace the document under `key` of `parent` with `value`, a
 /// ProseMirror JSON document. An absolute write, like a text field's: the
 /// tree is rebuilt in the container already under the key, so an editor
 /// bound to that container keeps its binding, but concurrent edits to the
 /// old content are lost.
 ///
-/// A mark needs a text style before it can be written. Styles are not part
-/// of the doc; each peer configures its own. The server marks with
-/// "do not expand" for any mark type it has no style for. Clients set
-/// theirs from the editor schema (`configureProseMirrorMarks` in
-/// `@pylonsync/loro/prosemirror`).
+/// The whole value is checked first ([`validate`]); a value that fails
+/// leaves the document as it was.
+///
+/// A mark needs a text style before it can be written, and the style's
+/// expand rule is recorded with the mark. Styles are not part of the doc;
+/// each peer configures its own. The server has no editor schema, so every
+/// mark it writes expands "after", ProseMirror's default for a mark that is
+/// `inclusive`, which is what `configureProseMirrorMarks` gives an editor
+/// for such a mark. A server function that needs exact behavior for
+/// non-inclusive marks (a link, a suggestion) writes through
+/// `writeProseMirror` in `@pylonsync/loro/prosemirror` with the schema.
 pub(crate) fn write(
     doc: &LoroDoc,
     parent: &LoroMap,
@@ -48,8 +64,14 @@ pub(crate) fn write(
     let node = value.as_object().ok_or_else(|| {
         format!("field {key}: expected a ProseMirror document (a JSON object), got {value}")
     })?;
+    validate(node).map_err(|e| format!("field {key}: {e}"))?;
+    // Loro ships its own styles for a few names ("highlight", "code" and
+    // "link" do not expand), which are not ProseMirror's: there a mark is
+    // inclusive unless its schema says otherwise. The server has no editor
+    // schema, so every mark it writes expands "after".
+    doc.config_text_style(StyleConfigMap::new());
     doc.config_default_text_style(Some(StyleConfig {
-        expand: ExpandType::None,
+        expand: ExpandType::After,
     }));
     let root = match parent.get(key) {
         Some(ValueOrContainer::Container(Container::Map(m))) => m,
@@ -58,6 +80,146 @@ pub(crate) fn write(
             .map_err(|e| format!("field {key}: create the document: {e}"))?,
     };
     fill_node(&root, node).map_err(|e| format!("field {key}: {e}"))
+}
+
+/// Create an empty document container under `key` when there is none. An
+/// empty container (no `nodeName`) projects as null; the `loro-prosemirror`
+/// binding fills it with the editor's document when it binds.
+pub(crate) fn ensure(parent: &LoroMap, key: &str) -> Result<(), String> {
+    if let Some(ValueOrContainer::Container(Container::Map(_))) = parent.get(key) {
+        return Ok(());
+    }
+    parent
+        .insert_container(key, LoroMap::new())
+        .map(|_| ())
+        .map_err(|e| format!("field {key}: create the document: {e}"))
+}
+
+/// Empty the document under `key`, keeping its container.
+pub(crate) fn clear(parent: &LoroMap, key: &str) -> Result<(), String> {
+    match parent.get(key) {
+        Some(ValueOrContainer::Container(Container::Map(m))) => m
+            .clear()
+            .map_err(|e| format!("field {key}: clear the document: {e}")),
+        _ => ensure(parent, key),
+    }
+}
+
+/// Check a ProseMirror JSON document before anything is written: every
+/// node has a string `type`, `attrs` is an object, `content` an array of
+/// nodes, a text node has string `text` and no content, each mark has a
+/// `type` (without ':') and object `attrs`, nesting stays within
+/// [`MAX_DEPTH`], and the size within [`MAX_NODES`] and [`MAX_TEXT_CHARS`].
+pub fn validate(node: &JsonMap<String, Value>) -> Result<(), String> {
+    let mut nodes = 0usize;
+    let mut chars = 0usize;
+    validate_node(node, 1, &mut nodes, &mut chars)
+}
+
+fn validate_node(
+    node: &JsonMap<String, Value>,
+    depth: usize,
+    nodes: &mut usize,
+    chars: &mut usize,
+) -> Result<(), String> {
+    if depth > MAX_DEPTH {
+        return Err(format!("the document nests deeper than {MAX_DEPTH} levels"));
+    }
+    *nodes += 1;
+    if *nodes > MAX_NODES {
+        return Err(format!("the document has more than {MAX_NODES} nodes"));
+    }
+    let name = match node.get("type") {
+        Some(Value::String(s)) if !s.is_empty() => s.as_str(),
+        _ => return Err("every ProseMirror node needs a \"type\" string".into()),
+    };
+    match node.get("attrs") {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(attrs)) => {
+            for (k, v) in attrs {
+                if !v.is_null() && json_to_loro(v).is_none() {
+                    return Err(format!("attr {k} of {name} is too deep"));
+                }
+            }
+        }
+        Some(other) => {
+            return Err(format!(
+                "the attrs of {name} must be an object, got {other}"
+            ))
+        }
+    }
+    if name == "text" {
+        let text = match node.get("text") {
+            Some(Value::String(t)) => t,
+            _ => return Err("a text node needs a \"text\" string".into()),
+        };
+        *chars += text.chars().count();
+        if *chars > MAX_TEXT_CHARS {
+            return Err(format!(
+                "the document has more than {MAX_TEXT_CHARS} characters"
+            ));
+        }
+        if node.get("content").is_some_and(|c| !c.is_null()) {
+            return Err("a text node cannot have content".into());
+        }
+        match node.get("marks") {
+            None | Some(Value::Null) => {}
+            Some(Value::Array(marks)) => {
+                for mark in marks {
+                    let mark = mark.as_object().ok_or("every mark must be an object")?;
+                    let kind = match mark.get("type") {
+                        Some(Value::String(t)) if !t.is_empty() => t,
+                        _ => return Err("every mark needs a \"type\" string".into()),
+                    };
+                    if kind.contains(':') {
+                        return Err(format!("mark type {kind} cannot contain ':'"));
+                    }
+                    match mark.get("attrs") {
+                        None | Some(Value::Null) => {}
+                        Some(a @ Value::Object(_)) => {
+                            if json_to_loro(a).is_none() {
+                                return Err(format!("the attrs of mark {kind} are too deep"));
+                            }
+                        }
+                        Some(other) => {
+                            return Err(format!(
+                                "the attrs of mark {kind} must be an object, got {other}"
+                            ))
+                        }
+                    }
+                }
+            }
+            Some(other) => {
+                return Err(format!(
+                    "the marks of a text node must be an array, got {other}"
+                ))
+            }
+        }
+        return Ok(());
+    }
+    if node.contains_key("marks")
+        && !node["marks"].is_null()
+        && !node["marks"].as_array().is_some_and(Vec::is_empty)
+    {
+        return Err(format!(
+            "only text nodes carry marks here; {name} has marks"
+        ));
+    }
+    match node.get("content") {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::Array(children)) => {
+            for child in children {
+                let child = child
+                    .as_object()
+                    .ok_or_else(|| format!("a child of {name} is not an object"))?;
+                validate_node(child, depth + 1, nodes, chars)?;
+            }
+            Ok(())
+        }
+        Some(other) => Err(format!(
+            "the content of {name} must be an array, got {other}"
+        )),
+    }
 }
 
 fn fill_node(map: &LoroMap, node: &JsonMap<String, Value>) -> Result<(), String> {
@@ -179,7 +341,16 @@ fn child_list(map: &LoroMap, key: &str) -> Result<LoroList, String> {
 
 /// The document in a node map as ProseMirror JSON. Null for a map that is
 /// not a node (no `nodeName`), such as a container no editor has written.
+/// Nodes nested deeper than [`MAX_DEPTH`] are left out, so a doc a client
+/// built deeper cannot exhaust the stack.
 pub(crate) fn project(map: &LoroMap) -> Value {
+    project_node(map, 1)
+}
+
+fn project_node(map: &LoroMap, depth: usize) -> Value {
+    if depth > MAX_DEPTH {
+        return Value::Null;
+    }
     let Some(ValueOrContainer::Value(LoroValue::String(name))) = map.get(NODE_NAME) else {
         return Value::Null;
     };
@@ -197,7 +368,7 @@ pub(crate) fn project(map: &LoroMap) -> Value {
         for i in 0..children.len() {
             match children.get(i) {
                 Some(ValueOrContainer::Container(Container::Map(child))) => {
-                    let node = project(&child);
+                    let node = project_node(&child, depth + 1);
                     if !node.is_null() {
                         content.push(node);
                     }
@@ -376,5 +547,230 @@ mod tests {
         assert_eq!(field_kind("json", a), Ok(CrdtFieldKind::ProseMirror));
         assert!(field_kind("string", a).unwrap_err().contains("prosemirror"));
         assert!(field_kind("int", a).is_err());
+    }
+
+    /// A document nested `levels` deep. Built by hand: `json!` copies an
+    /// interpolated value, which makes a deep build quadratic.
+    fn deep_json(levels: usize) -> serde_json::Value {
+        let mut node = serde_json::Value::Object(
+            [("type".to_string(), json!("paragraph"))]
+                .into_iter()
+                .collect(),
+        );
+        for _ in 0..levels {
+            let mut m = serde_json::Map::new();
+            m.insert("type".into(), json!("blockquote"));
+            m.insert("content".into(), serde_json::Value::Array(vec![node]));
+            node = serde_json::Value::Object(m);
+        }
+        let mut doc = serde_json::Map::new();
+        doc.insert("type".into(), json!("doc"));
+        doc.insert("content".into(), serde_json::Value::Array(vec![node]));
+        serde_json::Value::Object(doc)
+    }
+
+    #[test]
+    fn a_write_nested_past_the_limit_is_refused() {
+        // Building and dropping a 10,000-deep serde_json value recurses in
+        // serde_json itself, so the test runs on a large stack. (JSON that
+        // arrives over HTTP is parsed with serde_json's 128-level limit.)
+        // The check under test stops at MAX_DEPTH whatever the stack.
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(nested_write_is_refused)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn nested_write_is_refused() {
+        let doc = LoroDoc::new();
+        apply_patch(&doc, &fields(), &json!({"body": sample()})).unwrap();
+        // 10,000 levels: the check must refuse it without exhausting the stack.
+        let mut patch = serde_json::Map::new();
+        patch.insert("body".into(), deep_json(10_000));
+        let err = apply_patch(&doc, &fields(), &serde_json::Value::Object(patch)).unwrap_err();
+        assert!(err.contains("deeper than"), "{err}");
+        assert_eq!(project_doc_to_json(&doc, &fields())["body"], sample());
+        // Within the limit is fine.
+        apply_patch(
+            &doc,
+            &fields(),
+            &json!({"body": deep_json(super::MAX_DEPTH - 3)}),
+        )
+        .unwrap();
+    }
+
+    /// A client update with a 10,000-deep chain of node maps under
+    /// `row.body` (tests/fixtures/deep-chain.bin.gz, written once: building
+    /// the chain through Loro's API takes minutes in a debug build). The
+    /// client made 1,000 other ops first, so its write of `row.body`
+    /// outranks a server's earlier one. The runtime's tests read it too.
+    fn deep_chain_update() -> Vec<u8> {
+        use std::io::Read;
+        let mut out = Vec::new();
+        flate2::read::GzDecoder::new(&include_bytes!("../tests/fixtures/deep-chain.bin.gz")[..])
+            .read_to_end(&mut out)
+            .unwrap();
+        out
+    }
+
+    /// A client can send any Loro update. The chain must project without
+    /// exhausting the stack; nodes past the limit are left out.
+    #[test]
+    fn a_doc_nested_past_the_limit_projects_without_overflow() {
+        let update = deep_chain_update();
+        // Projected on a thread with a small stack, as a server worker might be.
+        let projected = std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(move || {
+                let server = LoroDoc::new();
+                server.import(&update).unwrap();
+                project_doc_to_json(&server, &fields())["body"].clone()
+            })
+            .unwrap()
+            .join()
+            .expect("projection overflowed the stack");
+        let mut depth = 0;
+        let mut at = &projected;
+        while let Some(child) = at.get("content").and_then(|c| c.get(0)) {
+            depth += 1;
+            at = child;
+        }
+        assert_eq!(depth, super::MAX_DEPTH - 1);
+    }
+
+    /// The expand rule is recorded with a mark. A mark the server writes
+    /// must behave like an inclusive mark the JS binding writes: text typed
+    /// right after it takes the mark.
+    #[test]
+    fn server_marks_expand_like_the_bindings_inclusive_marks() {
+        fn mark_after_typing(doc: &LoroDoc, word_end: usize) -> serde_json::Value {
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(body))) =
+                root_map(doc).get("body")
+            else {
+                panic!("no body");
+            };
+            let Some(loro::ValueOrContainer::Container(loro::Container::List(blocks))) =
+                body.get("children")
+            else {
+                panic!("no children");
+            };
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(para))) = blocks.get(1)
+            else {
+                panic!("no paragraph");
+            };
+            let Some(loro::ValueOrContainer::Container(loro::Container::List(runs))) =
+                para.get("children")
+            else {
+                panic!("no runs");
+            };
+            let Some(loro::ValueOrContainer::Container(loro::Container::Text(text))) = runs.get(0)
+            else {
+                panic!("no text");
+            };
+            text.insert(word_end, "X").unwrap();
+            doc.commit();
+            let projected = project_doc_to_json(doc, &fields())["body"].clone();
+            projected["content"][1]["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|n| n["text"].as_str().is_some_and(|t| t.contains('X')))
+                .unwrap()
+                .clone()
+        }
+        // The binding's fixture: "Ship Friday ..." with Friday in bold
+        // (inclusive, configured "after" by the binding).
+        let js = LoroDoc::new();
+        js.import(include_bytes!("../tests/fixtures/prosemirror-binding.bin"))
+            .unwrap();
+        let js_node = mark_after_typing(&js, "Ship Friday".chars().count());
+        assert_eq!(js_node["marks"][0]["type"], "bold", "{js_node}");
+
+        // The same shape written by the server, with "highlight", which
+        // Loro's own styles would not expand.
+        let server = LoroDoc::new();
+        let value = json!({"type": "doc", "content": [
+            {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Plan"}]},
+            {"type": "paragraph", "content": [
+                {"type": "text", "text": "Ship "},
+                {"type": "text", "text": "Friday", "marks": [{"type": "highlight"}]},
+                {"type": "text", "text": " later"}
+            ]}
+        ]});
+        apply_patch(&server, &fields(), &json!({"body": value})).unwrap();
+        server.commit();
+        let server_node = mark_after_typing(&server, "Ship Friday".chars().count());
+        assert_eq!(
+            server_node["marks"][0]["type"],
+            "highlight",
+            "{server_node} in {}",
+            project_doc_to_json(&server, &fields())["body"]
+        );
+        assert_eq!(server_node["text"], js_node["text"]);
+    }
+
+    #[test]
+    fn a_bad_write_leaves_the_document_unchanged() {
+        let doc = LoroDoc::new();
+        apply_patch(&doc, &fields(), &json!({"body": sample()})).unwrap();
+        let bad = [
+            (
+                json!({"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text"}]}]}),
+                "\"text\" string",
+            ),
+            (
+                json!({"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": 5}]}]}),
+                "\"text\" string",
+            ),
+            (
+                json!({"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "a", "marks": {"type": "bold"}}]}]}),
+                "must be an array",
+            ),
+            (
+                json!({"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "a", "marks": [{"attrs": {}}]}]}]}),
+                "needs a \"type\"",
+            ),
+            (
+                json!({"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "a", "marks": [{"type": "link", "attrs": "x"}]}]}]}),
+                "must be an object",
+            ),
+            (
+                json!({"type": "doc", "content": [{"type": "heading", "attrs": [1]}]}),
+                "must be an object",
+            ),
+            (
+                json!({"type": "doc", "content": "text"}),
+                "must be an array",
+            ),
+            (
+                json!({"type": "doc", "content": [{"type": "paragraph"}, 3]}),
+                "is not an object",
+            ),
+            (
+                json!({"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "a"}]}, {"type": "paragraph", "content": [{"type": "text", "text": "x".repeat(super::MAX_TEXT_CHARS)}]}]}),
+                "characters",
+            ),
+        ];
+        for (value, expected) in bad {
+            let err = apply_patch(&doc, &fields(), &json!({"body": value})).unwrap_err();
+            assert!(err.contains(expected), "{err} (expected {expected})");
+            assert_eq!(project_doc_to_json(&doc, &fields())["body"], sample());
+        }
+    }
+
+    #[test]
+    fn every_patch_leaves_the_container_in_place() {
+        // A row inserted without a document still gets the container, so a
+        // client never has to create it.
+        let doc = LoroDoc::new();
+        apply_patch(&doc, &fields(), &json!({})).unwrap();
+        let first = format!("{:?}", root_map(&doc).get("body").expect("container"));
+        assert_eq!(project_doc_to_json(&doc, &fields())["body"], json!(null));
+        apply_patch(&doc, &fields(), &json!({"body": sample()})).unwrap();
+        apply_patch(&doc, &fields(), &json!({"body": null})).unwrap();
+        assert_eq!(format!("{:?}", root_map(&doc).get("body").unwrap()), first);
+        assert_eq!(project_doc_to_json(&doc, &fields())["body"], json!(null));
     }
 }

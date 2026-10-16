@@ -8199,6 +8199,46 @@ mod tests {
         assert!(rt.get_by_id("Note", &id).unwrap().unwrap()["body"].is_null());
     }
 
+    /// A client can push any Loro update. A 10,000-deep chain of node maps
+    /// in a ProseMirror field must not exhaust the stack when the server
+    /// projects it into the row; the projection stops at the depth limit.
+    #[test]
+    fn a_deep_prosemirror_push_does_not_overflow_the_stack() {
+        use pylon_http::DataStore;
+        use std::io::Read;
+        let mut update = Vec::new();
+        flate2::read::GzDecoder::new(
+            &include_bytes!("../../crdt/tests/fixtures/deep-chain.bin.gz")[..],
+        )
+        .read_to_end(&mut update)
+        .unwrap();
+        let rt = Runtime::in_memory(note_manifest()).unwrap();
+        let id = rt
+            .insert("Note", &serde_json::json!({"title": "t"}))
+            .unwrap();
+        // A small stack, as a busy server thread might have.
+        let row = std::thread::scope(|s| {
+            std::thread::Builder::new()
+                .stack_size(1024 * 1024)
+                .spawn_scoped(s, || {
+                    rt.crdt_apply_update("Note", &id, &update, &|_| Ok(()))
+                        .unwrap();
+                    rt.get_by_id("Note", &id).unwrap().unwrap()
+                })
+                .unwrap()
+                .join()
+                .expect("the push overflowed the stack")
+        });
+        let mut depth = 0;
+        let mut at = &row["body"];
+        while let Some(child) = at.get("content").and_then(|c| c.get(0)) {
+            depth += 1;
+            at = child;
+        }
+        assert_eq!(depth, pylon_crdt::prosemirror::MAX_DEPTH - 1);
+        assert_eq!(row["title"], "t");
+    }
+
     /// A client push to a row with no doc keeps the row's other fields: the
     /// doc is seeded from the row before the update applies.
     #[test]

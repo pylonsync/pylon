@@ -6,11 +6,16 @@
  * `loro-prosemirror` binding writes. The server reads that tree and
  * projects it to the row as ProseMirror JSON (crates/crdt).
  *
- * In the browser, bind an editor with the binding's `LoroSyncPlugin`:
+ * The server creates the field's container when the row is inserted.
+ * Clients never create it: `useLoroDoc` returns an empty doc before the
+ * server's snapshot arrives, and a container made in it would lose the
+ * key to the server's, leaving the editor bound to a container nothing
+ * reads. Wait for the server's instead, then bind:
  *
  *   const doc = useLoroDoc("Doc", id);
  *   configureProseMirrorMarks(doc, schema);
- *   const plugin = LoroSyncPlugin({ doc, containerId: proseMirrorContainerId(doc, "body") });
+ *   const containerId = await waitForProseMirrorContainer(doc, "body");
+ *   const plugin = LoroSyncPlugin({ doc, containerId });
  *
  * In a server function, read and change the document without an editor
  * with `readProseMirror` and `writeProseMirror`.
@@ -19,7 +24,7 @@
  * cannot overlap. Keep overlapping anchors (comment threads) as Loro
  * cursors next to the document and draw them as decorations.
  */
-import { type ContainerID, type LoroDoc, LoroMap } from "loro-crdt";
+import type { ContainerID, LoroDoc, LoroMap } from "loro-crdt";
 import { createNodeFromLoroObj, updateLoroToPmState } from "loro-prosemirror";
 import type { Node, Schema } from "prosemirror-model";
 import { EditorState } from "prosemirror-state";
@@ -35,17 +40,41 @@ function fieldMap(doc: LoroDoc, field: string): LoroMap | null {
 }
 
 /**
- * The container the editor binds to for `field`, for `LoroSyncPlugin`'s
- * `containerId`. Creates it when the row has none yet; insert rows with
- * an initial document so the server creates it instead, since two
- * peers creating it at once leave one copy orphaned.
+ * The container of `field`'s document, or null when the doc does not hold
+ * it yet (the server's snapshot has not arrived). Never creates it.
  */
-export function proseMirrorContainerId(doc: LoroDoc, field: string): ContainerID {
-  const existing = fieldMap(doc, field);
-  if (existing) return existing.id;
-  const created = doc.getMap(ROOT_MAP).setContainer(field, new LoroMap());
-  doc.commit();
-  return created.id;
+export function findProseMirrorContainer(doc: LoroDoc, field: string): ContainerID | null {
+  return fieldMap(doc, field)?.id ?? null;
+}
+
+/**
+ * The container of `field`'s document, once the doc holds it: at once when
+ * it is there, else when an import or edit brings it. Pass `signal` to stop
+ * waiting (the promise then rejects with the signal's reason).
+ */
+export function waitForProseMirrorContainer(
+  doc: LoroDoc,
+  field: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<ContainerID> {
+  const found = findProseMirrorContainer(doc, field);
+  if (found) return Promise.resolve(found);
+  return new Promise((resolve, reject) => {
+    const { signal } = options;
+    const stop = doc.subscribe(() => {
+      const id = findProseMirrorContainer(doc, field);
+      if (!id) return;
+      stop();
+      signal?.removeEventListener("abort", onAbort);
+      resolve(id);
+    });
+    function onAbort() {
+      stop();
+      reject(signal?.reason ?? new Error("stopped waiting for the document"));
+    }
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 /**
@@ -72,10 +101,15 @@ export function readProseMirror(doc: LoroDoc, field: string, schema: Schema): No
 /**
  * Write `node` into `field` as a diff against what the doc holds, so edits
  * other peers make at the same time still merge. Commits. Configures the
- * schema's marks first.
+ * schema's marks first. Throws when the doc has no container for the field
+ * (a row inserted by a server older than the field, or a doc that has not
+ * loaded); it never creates one.
  */
 export function writeProseMirror(doc: LoroDoc, field: string, schema: Schema, node: Node): void {
+  const containerId = findProseMirrorContainer(doc, field);
+  if (!containerId) {
+    throw new Error(`The doc has no container for ${field}; the server creates it when the row is inserted.`);
+  }
   configureProseMirrorMarks(doc, schema);
-  const containerId = proseMirrorContainerId(doc, field);
   updateLoroToPmState(doc as never, new Map(), EditorState.create({ schema, doc: node }), containerId);
 }

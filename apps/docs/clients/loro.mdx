@@ -174,17 +174,14 @@ A field declared with `.crdt("prosemirror")` holds a ProseMirror document (Tipta
 ```typescript
 const Doc = entity("Doc", {
   title: field.string(),
-  body:  field.richtext().crdt("prosemirror"),  // or field.json().crdt("prosemirror")
+  body:  field.richtext().crdt("prosemirror").optional(),  // or field.json().crdt("prosemirror")
 });
 ```
 
-Insert rows with a starting document, so the server creates the document's container. Two editors that each create it at once leave one copy that nothing reads.
+The server creates the field's container when the row is inserted, with or without a starting document. Clients never create it: they wait for the server's. Declare the field `.optional()` unless every insert carries a document: an empty document reads as `null`.
 
 ```typescript
-await ctx.db.insert("Doc", {
-  title: "Untitled",
-  body: { type: "doc", content: [{ type: "paragraph" }] },
-});
+await ctx.db.insert("Doc", { title: "Untitled" });  // body reads as null until an editor writes
 ```
 
 ### Bind an editor
@@ -197,18 +194,20 @@ bun add loro-prosemirror prosemirror-model prosemirror-state
 
 ```typescript
 import { useLoroDoc } from "@pylonsync/loro";
-import { configureProseMirrorMarks, proseMirrorContainerId } from "@pylonsync/loro/prosemirror";
+import { configureProseMirrorMarks, waitForProseMirrorContainer } from "@pylonsync/loro/prosemirror";
 import { LoroSyncPlugin, LoroUndoPlugin } from "loro-prosemirror";
 
 const doc = useLoroDoc("Doc", docId);
 configureProseMirrorMarks(doc, editor.schema);
-const containerId = proseMirrorContainerId(doc, "body");
+const containerId = await waitForProseMirrorContainer(doc, "body");
 const plugins = [LoroSyncPlugin({ doc, containerId }), LoroUndoPlugin({ doc })];
 ```
 
+`useLoroDoc` returns an empty doc until the server's snapshot arrives. `waitForProseMirrorContainer` resolves once the doc holds the server's container (at once when it already does), so mount the editor after it resolves. A container a client made in the empty doc would lose the key to the server's, and the editor's edits would never reach the row. `findProseMirrorContainer` is the same lookup without waiting; it returns null instead.
+
 With Tiptap, add the plugins through an extension's `addProseMirrorPlugins`, and turn off Tiptap's own undo history.
 
-`configureProseMirrorMarks` tells this copy of the document how each mark behaves at its edges: a mark that is `inclusive` (the ProseMirror default) extends to text typed right after it. Every copy that writes marks needs it; Loro refuses a mark it has no style for.
+`configureProseMirrorMarks` tells this copy of the document how each mark behaves at its edges: a mark that is `inclusive` (the ProseMirror default) extends to text typed right after it. Every copy that writes marks needs it; Loro refuses a mark it has no style for. The rule is recorded with each mark, so it holds for everyone who edits after.
 
 ### Read and write on the server
 
@@ -223,7 +222,13 @@ const tr = EditorState.create({ schema, doc: current }).tr;
 writeProseMirror(loroDoc, "body", schema, tr.doc);         // a diff, so concurrent edits still merge
 ```
 
-`ctx.db.update("Doc", id, { body: json })` with ProseMirror JSON replaces the whole document instead, like writing a text field. An editor that is open keeps its binding, but edits made at the same moment are lost. Use it to reset a document, not to edit one.
+`writeProseMirror` throws when the doc has no container for the field; it never creates one.
+
+`ctx.db.update("Doc", id, { body: json })` with ProseMirror JSON replaces the whole document instead, like writing a text field. An editor that is open keeps its binding, but edits made at the same moment are lost. Use it to reset a document, not to edit one. `null` empties the document and keeps its container.
+
+The server checks the whole value before it writes anything, and a value that fails leaves the document as it was. Every node needs a string `type`; `attrs` is an object, `content` an array of nodes; a text node needs a string `text`; each mark needs a `type` and object `attrs`. A document may nest at most 64 levels and hold at most 200,000 nodes and 5,000,000 characters. A document a client built deeper than 64 levels projects only to that depth.
+
+The server has no editor schema, so every mark it writes extends to text typed right after it, as an `inclusive` mark does. To write marks that must not extend (a link, a suggestion), write from a server function with `writeProseMirror` and the editor schema.
 
 ### What the row holds
 

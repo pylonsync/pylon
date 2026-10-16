@@ -3329,6 +3329,7 @@ dependencies = [
 name = "pylon-crdt"
 version = "0.22.34"
 dependencies = [
+ "flate2",
  "loro",
  "pylon-kernel",
  "serde",
@@ -3467,6 +3468,7 @@ dependencies = [
  "bytes",
  "chrono",
  "fast_image_resize",
+ "flate2",
  "futures-util",
  "hashlink",
  "hmac 0.12.1",

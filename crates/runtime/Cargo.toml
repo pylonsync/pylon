@@ -126,6 +126,8 @@ libc = "0.2"
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [dev-dependencies]
+# Unpacks the deep ProseMirror chain fixture in crates/crdt/tests/fixtures.
+flate2 = { workspace = true }
 rusqlite = { workspace = true, features = ["trace"] }
 rand = { workspace = true }
 # shard_wasm tests write small modules in the text format.

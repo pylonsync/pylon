@@ -96,7 +96,7 @@ use serde_json::{Map as JsonMap, Value};
 pub use loro;
 
 pub mod merge;
-mod prosemirror;
+pub mod prosemirror;
 
 // ---------------------------------------------------------------------------
 // Doc shape
@@ -310,10 +310,14 @@ pub fn apply_patch(doc: &LoroDoc, fields: &[CrdtField], patch: &Value) -> Result
             | CrdtFieldKind::List
             | CrdtFieldKind::MovableList
             | CrdtFieldKind::Tree
-            | CrdtFieldKind::ProseMirror
                 if value.is_null() =>
             {
                 map.delete(&field.name).ok();
+            }
+            // A null document empties the container but keeps it: an
+            // editor bound to it stays bound (see the end of this function).
+            CrdtFieldKind::ProseMirror if value.is_null() => {
+                prosemirror::clear(&map, &field.name)?;
             }
             CrdtFieldKind::ProseMirror => {
                 prosemirror::write(doc, &map, &field.name, value)?;
@@ -452,6 +456,16 @@ pub fn apply_patch(doc: &LoroDoc, fields: &[CrdtField], patch: &Value) -> Result
     }
 
     doc.commit();
+    // The server creates every ProseMirror field's container, on the first
+    // patch a row's doc gets (its insert), whether or not the patch holds a
+    // document. Clients only bind to it: a container a client created in an
+    // empty doc before the server's snapshot arrived would lose the key to
+    // the server's and its edits would never reach the row.
+    for field in fields {
+        if field.kind == CrdtFieldKind::ProseMirror {
+            prosemirror::ensure(&map, &field.name)?;
+        }
+    }
     Ok(())
 }
 

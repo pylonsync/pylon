@@ -1,13 +1,15 @@
-// The ProseMirror helpers against the row-doc contract: the server keeps a
-// prosemirror field's tree under the "row" map (crates/crdt/src/prosemirror.rs).
+// The ProseMirror helpers against the row-doc contract: the server creates
+// a prosemirror field's container under the "row" map when the row is
+// inserted (crates/crdt/src/prosemirror.rs); clients only bind to it.
 import { describe, expect, test } from "bun:test";
-import { LoroDoc } from "loro-crdt";
+import { LoroDoc, LoroMap } from "loro-crdt";
 import { Schema } from "prosemirror-model";
 import { schema as basic } from "prosemirror-schema-basic";
 import {
   configureProseMirrorMarks,
-  proseMirrorContainerId,
+  findProseMirrorContainer,
   readProseMirror,
+  waitForProseMirrorContainer,
   writeProseMirror,
 } from "./prosemirror";
 
@@ -45,27 +47,68 @@ function peer(id: bigint): LoroDoc {
   return d;
 }
 
+/** A row doc as the server makes it on insert: an empty container under row.body. */
+function serverRow(id: bigint): LoroDoc {
+  const d = peer(id);
+  d.getMap("row").set("title", "t");
+  d.getMap("row").setContainer("body", new LoroMap());
+  d.commit();
+  return d;
+}
+
 describe("ProseMirror documents in a row", () => {
-  test("the container lives under the row map and is created once", () => {
+  test("the lookup never creates the container", () => {
     const d = peer(1n);
-    const id = proseMirrorContainerId(d, "body");
-    expect(proseMirrorContainerId(d, "body")).toBe(id);
-    expect((d.getMap("row").get("body") as { id: string }).id).toBe(id);
+    expect(findProseMirrorContainer(d, "body")).toBeNull();
+    expect(d.getMap("row").get("body")).toBeUndefined();
   });
 
-  test("a document round-trips, marks and their attrs included", () => {
+  // The case a review reproduced: useLoroDoc hands the editor an empty doc
+  // before the server's snapshot arrives. A container made then (cid:0@1)
+  // loses the key to the server's (cid:0@2), and the editor's edits never
+  // reach the row. Waiting binds to the server's container instead.
+  test("an editor that loads before the snapshot binds to the server's container", async () => {
+    const client = peer(1n);
+    const bound = waitForProseMirrorContainer(client, "body");
+    const server = serverRow(2n);
+    client.import(server.export({ mode: "snapshot" }));
+    const id = await bound;
+    expect(id).toBe(findProseMirrorContainer(server, "body")!);
+    expect(id).toContain("@2");
+
+    // The editor's first write lands in the container the server reads.
+    writeProseMirror(client, "body", schema, doc([{ text: "Typed " }, { text: "here", marks: ["strong"] }]));
+    server.import(client.export({ mode: "update", from: server.oplogVersion() }));
+    expect(readProseMirror(server, "body", schema)?.toJSON()).toEqual(
+      doc([{ text: "Typed " }, { text: "here", marks: ["strong"] }]).toJSON(),
+    );
+  });
+
+  test("waiting resolves at once when the container is there, and can be stopped", async () => {
+    const d = serverRow(2n);
+    expect(await waitForProseMirrorContainer(d, "body")).toBe(findProseMirrorContainer(d, "body")!);
+    const controller = new AbortController();
+    const pending = waitForProseMirrorContainer(peer(1n), "body", { signal: controller.signal });
+    controller.abort(new Error("closed"));
+    await expect(pending).rejects.toThrow("closed");
+  });
+
+  test("a write into a doc without the container throws instead of creating it", () => {
     const d = peer(1n);
+    expect(() => writeProseMirror(d, "body", schema, doc([{ text: "x" }]))).toThrow("the server creates it");
+    expect(d.getMap("row").get("body")).toBeUndefined();
+  });
+
+  test("the server's empty container reads as null and takes a document", () => {
+    const d = serverRow(2n);
+    expect(readProseMirror(d, "body", schema)).toBeNull();
     const source = doc([{ text: "Hello " }, { text: "world", marks: ["strong", "suggestion"] }], [{ text: "Second" }]);
     writeProseMirror(d, "body", schema, source);
     expect(readProseMirror(d, "body", schema)?.toJSON()).toEqual(source.toJSON());
   });
 
-  test("no document reads as null", () => {
-    expect(readProseMirror(peer(1n), "body", schema)).toBeNull();
-  });
-
   test("concurrent edits from two peers converge", () => {
-    const a = peer(1n);
+    const a = serverRow(1n);
     writeProseMirror(a, "body", schema, doc([{ text: "One" }], [{ text: "Two" }]));
     const b = peer(2n);
     b.import(a.export({ mode: "snapshot" }));
@@ -79,7 +122,7 @@ describe("ProseMirror documents in a row", () => {
   });
 
   test("a server write reaches an editor's copy", () => {
-    const editor = peer(1n);
+    const editor = serverRow(1n);
     writeProseMirror(editor, "body", schema, doc([{ text: "Draft" }]));
     const server = peer(2n);
     server.import(editor.export({ mode: "snapshot" }));
