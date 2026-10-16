@@ -2,12 +2,14 @@ import type { LlmsTxt } from "@pylonsync/react";
 import {
   CLOUD_URL,
   DOCS_URL,
-  GITHUB_URL,
+  CSHARP_SDK_URL,
   MCP_URL,
   NPM_CLI_URL,
   OPENAPI_URL,
   SITE_URL,
   SUPPORT_EMAIL,
+  SWIFT_SDK_URL,
+  TEMPLATES_REPO_URL,
   siteUrl,
 } from "../lib/site";
 
@@ -166,9 +168,19 @@ export default function llms(): LlmsTxt {
             notes: "Every command and flag, including `--json` output for scripting.",
           },
           {
-            title: "Source on GitHub",
-            url: GITHUB_URL,
-            notes: "The Rust runtime, the TypeScript SDKs, the templates, and the examples.",
+            title: "Swift SDK",
+            url: SWIFT_SDK_URL,
+            notes: "The client for iOS and macOS apps, added with Swift Package Manager. MIT licensed.",
+          },
+          {
+            title: "C# SDK",
+            url: CSHARP_SDK_URL,
+            notes: "The client for Unity and .NET apps, added with the Unity Package Manager. MIT licensed.",
+          },
+          {
+            title: "Starter template source",
+            url: TEMPLATES_REPO_URL,
+            notes: "The source of every create-pylon template. MIT licensed.",
           },
         ],
       },

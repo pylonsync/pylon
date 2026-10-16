@@ -14,7 +14,7 @@ import {
   templateRepoUrl,
   type Example,
 } from "@pylon-site/ui/lib/examples-content";
-import { DOCS_URL, GITHUB_URL, SITE_URL } from "../site";
+import { DOCS_URL, SITE_URL, SKILLS_REPO_URL } from "../site";
 
 export interface DocHit {
   title: string;
@@ -109,7 +109,7 @@ export async function readSkill(): Promise<{ url: string; markdown: string }> {
   // skill is empty".
   return {
     url,
-    markdown: `# Pylon skill\n\nThe skill file is not on disk in this deployment. Read it at ${url} or at ${GITHUB_URL}/blob/main/skills/pylon/SKILL.md.\n`,
+    markdown: `# Pylon skill\n\nThe skill file is not on disk in this deployment. Read it at ${url} or at ${SKILLS_REPO_URL}/blob/main/pylon/SKILL.md.\n`,
   };
 }
 
@@ -121,5 +121,5 @@ export const AGENT_RESOURCES = {
   mcp: `${SITE_URL}/mcp`,
   skill: `${SITE_URL}/pylon-skill.md`,
   install: `${SITE_URL}/install.sh`,
-  github: GITHUB_URL,
+  skillRepo: SKILLS_REPO_URL,
 } as const;

@@ -8,9 +8,8 @@
 #   PYLON_INSTALL=/usr/local install prefix; binary lands at $PYLON_INSTALL/bin/pylon
 #                            (default: $HOME/.pylon)
 #
-# Canonical source: https://github.com/pylonsync/pylon/blob/main/scripts/install.sh
-# The copy served by www.pylonsync.com lives in the control-plane app's
-# public/ dir — keep the two in sync.
+# Served at https://www.pylonsync.com/install.sh. The canonical copy is
+# scripts/install.sh in the Pylon repo; apps/site/public/install.sh must match it.
 set -eu
 
 REPO="pylonsync/pylon-releases"

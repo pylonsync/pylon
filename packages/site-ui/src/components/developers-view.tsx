@@ -56,10 +56,24 @@ const BUILD: Resource[] = [
 		icon: Boxes,
 	},
 	{
-		name: "Source on GitHub",
-		href: "https://github.com/pylonsync/pylon",
+		name: "Swift SDK",
+		href: "https://github.com/pylonsync/pylon-swift",
 		external: true,
-		what: "The Rust runtime, the TypeScript SDKs, the templates, and the example apps. MIT licensed.",
+		what: "The client for iOS and macOS apps. Add it with Swift Package Manager. MIT licensed.",
+		icon: Github,
+	},
+	{
+		name: "C# SDK",
+		href: "https://github.com/pylonsync/pylon-csharp",
+		external: true,
+		what: "The client for Unity and .NET apps. Add it with the Unity Package Manager. MIT licensed.",
+		icon: Github,
+	},
+	{
+		name: "Template source",
+		href: "https://github.com/pylonsync/pylon-templates",
+		external: true,
+		what: "The source of every starter template. MIT licensed.",
 		icon: Github,
 	},
 	{

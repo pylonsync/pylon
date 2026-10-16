@@ -28,7 +28,7 @@ describe("organization", () => {
   });
 
   test("sameAs points only at profiles we control", () => {
-    expect(org.sameAs).toContain("https://github.com/pylonsync/pylon");
+    expect(org.sameAs).toContain("https://github.com/pylonsync");
     for (const url of org.sameAs) expect(url).toStartWith("https://");
   });
 });
@@ -36,13 +36,14 @@ describe("organization", () => {
 describe("software application", () => {
   const app = softwareApplicationLd() as any;
 
-  test("is a free developer application with a licence and a repo", () => {
+  test("is a free developer application", () => {
     expect(app["@type"]).toBe("SoftwareApplication");
     expect(app.applicationCategory).toBe("DeveloperApplication");
     expect(app.offers.price).toBe("0");
     expect(app.offers.priceCurrency).toBe("USD");
-    expect(app.license).toContain("mit");
-    expect(app.codeRepository).toBe("https://github.com/pylonsync/pylon");
+    // The framework source is private, so there is no repo or open licence to claim.
+    expect(app.codeRepository).toBeUndefined();
+    expect(app.license).toBeUndefined();
   });
 
   test("claims no rating", () => {

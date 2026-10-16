@@ -4,11 +4,21 @@ pylon runs as a single binary behind a TLS-terminating reverse proxy.
 This doc covers the supported self-hosted deploy shapes plus the
 experimental Workers path.
 
+## Installing
+
+Prebuilt binaries cover macOS arm64, Linux x64 and Windows x64. Install one
+with the install script:
+
+```sh
+curl -fsSL https://www.pylonsync.com/install.sh | bash
+```
+
+On Windows, use `powershell -c "irm https://www.pylonsync.com/install.ps1 | iex"`.
+
 ## Building from source
 
-Prebuilt binaries cover macOS arm64, Linux x64 and Windows x64. Everywhere
-else, build with `cargo install --git https://github.com/pylonsync/pylon
-pylon-cli`.
+The source repo is private. With access to it, build other platforms from a
+checkout with `cargo install --path crates/cli`.
 
 The build links libxmlsec1 for SAML 2.0 signature verification, so that
 library and libxml2 have to be present first. libxmlsec1 1.3.x or newer is
@@ -32,7 +42,7 @@ with LLVM:
 vcpkg install xmlsec:x64-windows-static-md
 $env:VCPKG_ROOT = "C:\path\to\vcpkg"
 $env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
-cargo install --git https://github.com/pylonsync/pylon pylon-cli
+cargo install --path crates/cli
 ```
 
 The `x64-windows-static-md` triplet links those libraries into `pylon.exe`

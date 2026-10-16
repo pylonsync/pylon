@@ -6,7 +6,7 @@ Pylon is the open-source application framework from [Stack0](https://stack0.dev)
 
 [![CI](https://github.com/pylonsync/pylon/actions/workflows/ci.yml/badge.svg)](https://github.com/pylonsync/pylon/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
-[![skills.sh](https://skills.sh/b/pylonsync/pylon)](https://skills.sh/pylonsync/pylon)
+[![skills.sh](https://skills.sh/b/pylonsync/pylon-skills)](https://skills.sh/pylonsync/pylon-skills)
 
 Like Convex, Firebase, and Supabase, pylon gives you declarative schema,
 real-time sync, server functions, auth, and file storage. It packages them in a
@@ -38,7 +38,7 @@ Codex, and Cursor on schema, policies, server functions, SSR, and common
 gotchas. Add it to your agent with one command:
 
 ```sh
-npx skills add pylonsync/pylon
+npx skills add pylonsync/pylon-skills
 ```
 
 `npm create @pylonsync/pylon@latest` also offers to install it during scaffold.
@@ -79,7 +79,6 @@ binary. Bun ≥ 1.0 is also required at runtime for TypeScript and SSR:
 
 ```sh
 curl -fsSL https://www.pylonsync.com/install.sh | bash
-# or: cargo install --git https://github.com/pylonsync/pylon pylon-cli
 # or: docker pull ghcr.io/pylonsync/pylon:latest
 ```
 

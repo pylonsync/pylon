@@ -91,7 +91,7 @@ describe("tools", () => {
     expect(result.structuredContent.templates.length).toBeGreaterThan(3);
     for (const t of result.structuredContent.templates) {
       expect(t.command).toContain(`--template ${t.template}`);
-      expect(t.source).toStartWith("https://github.com/pylonsync/pylon");
+      expect(t.source).toStartWith("https://github.com/pylonsync/pylon-templates/tree/main/");
     }
   });
 

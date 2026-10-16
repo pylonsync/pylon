@@ -24,7 +24,7 @@ framework: schema, row-level policies, server functions, live queries,
 and server-rendered React on one port.
 
 Load the skill first:
-  npx skills add pylonsync/pylon
+  npx skills add pylonsync/pylon-skills
 
 References:
   Docs index (agent-readable)  https://docs.pylonsync.com/llms.txt

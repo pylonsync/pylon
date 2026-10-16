@@ -13,7 +13,7 @@
 import {
   CLOUD_URL,
   DOCS_URL,
-  GITHUB_URL,
+  GITHUB_ORG_URL,
   NPM_CLI_URL,
   SITE_URL,
   SUPPORT_EMAIL,
@@ -54,23 +54,16 @@ export function organizationLd() {
         url: `${SITE_URL}/contact`,
         availableLanguage: ["English"],
       },
-      {
-        "@type": "ContactPoint",
-        contactType: "technical support",
-        email: SUPPORT_EMAIL,
-        url: `${GITHUB_URL}/issues`,
-        availableLanguage: ["English"],
-      },
     ],
     address: {
       "@type": "PostalAddress",
       addressCountry: "US",
     },
-    sameAs: [GITHUB_URL, X_URL, NPM_CLI_URL, CLOUD_URL],
+    sameAs: [GITHUB_ORG_URL, X_URL, NPM_CLI_URL, CLOUD_URL],
   };
 }
 
-/** The framework itself. Free and open source, so `offers` is a zero price. */
+/** The framework itself. It is free to use, so `offers` is a zero price. */
 export function softwareApplicationLd() {
   return {
     "@type": "SoftwareApplication",
@@ -83,9 +76,7 @@ export function softwareApplicationLd() {
     downloadUrl: NPM_CLI_URL,
     installUrl: `${SITE_URL}/install.sh`,
     softwareHelp: { "@type": "CreativeWork", url: DOCS_URL },
-    codeRepository: GITHUB_URL,
     programmingLanguage: ["TypeScript", "Rust"],
-    license: "https://opensource.org/license/mit",
     description:
       "Pylon is a realtime full-stack framework built for coding agents. A realtime full-stack framework with a Rust core. The database, transactions, and sync engine are Rust; the typed schema, row-level policies, and server functions are TypeScript on top of them. Live queries, auth, an API, and React server rendering are included. SQLite by default, Postgres when you need it.",
     featureList: [
@@ -103,7 +94,7 @@ export function softwareApplicationLd() {
       price: "0",
       priceCurrency: "USD",
       availability: "https://schema.org/InStock",
-      description: "The framework is free and open source under the MIT licence.",
+      description: "The framework is free to use. The client libraries are MIT licensed.",
     },
     publisher: { "@id": ORG_ID },
     author: { "@id": ORG_ID },

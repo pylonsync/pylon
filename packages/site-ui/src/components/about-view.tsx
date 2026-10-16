@@ -7,16 +7,20 @@ import { MarketingShell } from "./marketing-shell";
 //
 // This page exists for people deciding whether to depend on us, and for the
 // agents that answer them. So it says the checkable things: the licence, where
-// the source is, what the hosted product is, and how to reach a human. No
-// claims a reader cannot verify from the repo.
+// the client libraries are, what the hosted product is, and how to reach a
+// human. No claims a reader cannot verify from the published packages.
 
 const FACTS: { label: string; value: React.ReactNode }[] = [
 	{ label: "What it is", value: "A full-stack web framework" },
-	{ label: "Licence", value: "MIT" },
+	{ label: "Licence", value: "The client libraries are MIT licensed" },
 	{
-		label: "Source",
+		label: "Client libraries",
 		value: (
-			<a href="https://github.com/pylonsync/pylon">github.com/pylonsync/pylon</a>
+			<>
+				<a href="https://www.npmjs.com/org/pylonsync">npm</a>,{" "}
+				<a href="https://github.com/pylonsync/pylon-swift">Swift</a>,{" "}
+				<a href="https://github.com/pylonsync/pylon-csharp">C#</a>
+			</>
 		),
 	},
 	{ label: "Runtime", value: "A Rust server that runs your TypeScript on Bun" },
@@ -52,12 +56,18 @@ export function AboutView({ signedIn = false }: { signedIn?: boolean }) {
 						work instead of guessing.
 					</p>
 					<p>
-						The framework is free and open source under the MIT licence. The
-						source is on{" "}
-						<a href="https://github.com/pylonsync/pylon">GitHub</a>, including
-						the Rust runtime, the TypeScript SDKs, eighteen starter templates,
-						and the example apps. Anyone can read it, fork it, self-host it, or
-						run it with no account at all.
+						The framework is free to use and to self-host, with no account. The
+						client libraries are MIT licensed: the TypeScript SDKs are on{" "}
+						<a href="https://www.npmjs.com/org/pylonsync">npm</a>, and the{" "}
+						<a href="https://github.com/pylonsync/pylon-swift">Swift SDK</a>{" "}
+						and <a href="https://github.com/pylonsync/pylon-csharp">C# SDK</a>{" "}
+						are on GitHub. The{" "}
+						<a href="https://github.com/pylonsync/pylon-templates">
+							starter templates
+						</a>{" "}
+						and{" "}
+						<a href="https://github.com/pylonsync/pylon-examples">example apps</a>{" "}
+						are on GitHub too.
 					</p>
 					<p>
 						The work is paid for by{" "}
@@ -68,13 +78,17 @@ export function AboutView({ signedIn = false }: { signedIn?: boolean }) {
 						is not a trial of it. Nothing in Pylon is gated behind an account,
 						and nothing about self-hosting is second-class — the deploy targets
 						for Fly, Docker, Compose, and a plain systemd unit are maintained
-						in the same repo.
+						with the framework.
 					</p>
 					<p>
 						Pylon is built in Dallas, Texas. It is early software under active
-						development: releases are frequent, the changelog is public, and
-						the fastest way to change its direction is an issue or a pull
-						request on the repo. If you are evaluating it for something that
+						development: releases are frequent, the{" "}
+						<a href="https://github.com/pylonsync/pylon-releases/releases">
+							changelog
+						</a>{" "}
+						is public, and the fastest way to change its direction is an email
+						to <a href="mailto:support@pylonsync.com">support@pylonsync.com</a>.
+						If you are evaluating it for something that
 						matters, read the{" "}
 						<a href="https://docs.pylonsync.com/introduction">docs</a>, run{" "}
 						<code className="font-mono text-[13.5px]">

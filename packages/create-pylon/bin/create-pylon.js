@@ -257,9 +257,9 @@ const flags = {
 	platforms: takeValue(args, "--platforms"),
 	skipInstall: args.includes("--skip-install"),
 	// --skill / --no-skill: install the Pylon skill into the new project via
-	// `npx skills add pylonsync/pylon` — the skills.sh CLI detects the coding
-	// agent (Claude Code / Codex / Cursor) and drops the always-current skill
-	// from this repo's skills/pylon/SKILL.md. undefined => prompt (default yes).
+	// `npx skills add pylonsync/pylon-skills` — the skills.sh CLI detects the
+	// coding agent (Claude Code / Codex / Cursor) and drops the skill from the
+	// public pylon-skills repo, which each release copies from skills/. undefined => prompt (default yes).
 	skill: args.includes("--skill")
 		? true
 		: args.includes("--no-skill")
@@ -611,7 +611,7 @@ function mustCopy(srcSubpath, destSubpath = "", label = srcSubpath) {
 				`       (expected ${join(TEMPLATES, srcSubpath)}).\n` +
 				`       This usually means a corrupt or partial create-pylon install.\n` +
 				`       Re-run with @latest:  npm create @pylonsync/pylon@latest\n` +
-				`       or report it:         https://github.com/pylonsync/pylon/issues\n`,
+				`       or report it:         support@pylonsync.com\n`,
 		);
 		exit(1);
 	}
@@ -736,20 +736,21 @@ if (!flags.skipInstall) {
 // ---------------------------------------------------------------------------
 // Optional: install the Pylon skill into the project's coding agent.
 //
-// `npx skills add pylonsync/pylon` (skills.sh) detects the installed agent
-// (Claude Code / Codex / Cursor) and drops the canonical skill from this
-// repo's skills/pylon/SKILL.md — always current, no stale bundled copy. We
+// `npx skills add pylonsync/pylon-skills` (skills.sh) detects the installed
+// agent (Claude Code / Codex / Cursor) and drops the skill from the public
+// pylon-skills repo, which each release copies from this repo's skills/. We
 // only auto-run it when stdin is a TTY: the skills CLI prompts for scope and
 // agent, which would hang a non-interactive scaffold (CI, piped input). When
 // we can't run it, the footer prints the one-liner so the user can opt in.
 // ---------------------------------------------------------------------------
 
-const SKILL_INSTALL_CMD = "npx skills add pylonsync/pylon";
+const SKILL_REPO = "pylonsync/pylon-skills";
+const SKILL_INSTALL_CMD = `npx skills add ${SKILL_REPO}`;
 let skillInstalled = false;
 if (flags.skill && stdin.isTTY) {
 	console.log("\nAdding the Pylon skill to your coding agent...");
 	const { spawnSync } = await import("node:child_process");
-	const result = spawnSync("npx", ["-y", "skills", "add", "pylonsync/pylon"], {
+	const result = spawnSync("npx", ["-y", "skills", "add", SKILL_REPO], {
 		cwd: root,
 		stdio: "inherit",
 	});

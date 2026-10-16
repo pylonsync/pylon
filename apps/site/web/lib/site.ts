@@ -12,7 +12,12 @@ export const SITE_URL = "https://www.pylonsync.com";
 export const DOCS_URL = "https://docs.pylonsync.com";
 /** Managed Pylon. Different brand, different app, same framework. */
 export const CLOUD_URL = "https://cloud.stack0.dev";
-export const GITHUB_URL = "https://github.com/pylonsync/pylon";
+/** The GitHub organization. The framework source is private; these repos are public. */
+export const GITHUB_ORG_URL = "https://github.com/pylonsync";
+export const SKILLS_REPO_URL = "https://github.com/pylonsync/pylon-skills";
+export const TEMPLATES_REPO_URL = "https://github.com/pylonsync/pylon-templates";
+export const SWIFT_SDK_URL = "https://github.com/pylonsync/pylon-swift";
+export const CSHARP_SDK_URL = "https://github.com/pylonsync/pylon-csharp";
 export const NPM_CLI_URL = "https://www.npmjs.com/package/@pylonsync/cli";
 export const NPM_ORG_URL = "https://www.npmjs.com/org/pylonsync";
 export const X_URL = "https://x.com/pylonsync";

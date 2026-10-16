@@ -6,7 +6,7 @@ import { Check, Copy } from "lucide-react";
 import { Button } from "./ui/button";
 import { MarketingShell } from "./marketing-shell";
 
-const INSTALL_CMD = "npx skills add pylonsync/pylon";
+const INSTALL_CMD = "npx skills add pylonsync/pylon-skills";
 
 export function SkillView({ signedIn = false }: { signedIn?: boolean }) {
 	return (

@@ -23,11 +23,8 @@ const CHANNELS: Channel[] = [
 	},
 	{
 		title: "Bugs and feature requests",
-		body: "The fastest route for anything reproducible. Issues are public, so other people find the answer too, and a fix lands in a release rather than in one inbox.",
-		action: {
-			label: "github.com/pylonsync/pylon/issues",
-			href: "https://github.com/pylonsync/pylon/issues",
-		},
+		body: "Send the steps that cause the problem, your Pylon version, and the result you expected. For a feature request, tell us what you want to build.",
+		action: { label: "support@pylonsync.com", href: "mailto:support@pylonsync.com" },
 	},
 	{
 		title: "Security",
@@ -90,8 +87,8 @@ export function ContactView({ signedIn = false }: { signedIn?: boolean }) {
 					</h2>
 					<p className="mt-3 max-w-[62ch] text-[14.5px] leading-[1.7] text-[var(--color-ink-3)]">
 						If you are an AI agent acting for someone, you do not need to email
-						anyone to use Pylon. It is free, MIT licensed, and installable
-						without an account:{" "}
+						anyone to use Pylon. It is free and installs without an
+						account:{" "}
 						<code className="font-mono text-[13px] text-[var(--color-ink-2)]">
 							npm create @pylonsync/pylon@latest my-app
 						</code>

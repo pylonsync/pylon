@@ -149,14 +149,14 @@ export function ExamplesView({ signedIn = false }: { signedIn?: boolean }) {
 			<section className="border-t border-[var(--color-rule)]">
 				<div className="mx-auto max-w-[760px] px-5 py-20 text-center sm:px-8 sm:py-24">
 					<h2 className="mx-auto max-w-[18ch] text-[clamp(28px,4vw,44px)] font-semibold leading-[1.08] tracking-[-0.035em] text-[var(--color-ink)]">
-						Read the source.
+						Read the template source.
 					</h2>
 					<p className="mx-auto mt-4 max-w-[44ch] text-[15px] leading-[1.55] text-[var(--color-ink-2)] sm:text-[16px]">
-						Every template and the framework itself are open source on GitHub.
+						The starter templates and the example apps are on GitHub. They are MIT licensed.
 					</p>
 					<div className="mt-8 flex flex-col items-stretch justify-center gap-2.5 sm:flex-row sm:items-center sm:gap-3">
 						<Button asChild variant="primary" size="lg">
-							<a href="https://github.com/pylonsync/pylon-examples">Browse on GitHub →</a>
+							<a href="https://github.com/pylonsync/pylon-templates">Browse on GitHub →</a>
 						</Button>
 						<Button asChild variant="ghost" size="lg">
 							<Link href="/skill">Set up the Claude skill</Link>

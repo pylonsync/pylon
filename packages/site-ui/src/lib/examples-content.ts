@@ -25,9 +25,12 @@ export interface Example {
 	shot?: string;
 }
 
-/** Where a template's source lives on GitHub. */
+/**
+ * Where a template's source lives on GitHub: the public pylon-templates repo,
+ * which each release copies from packages/create-pylon/templates.
+ */
 export function templateRepoUrl(template: string): string {
-	return `https://github.com/pylonsync/pylon/tree/main/packages/create-pylon/templates/${template}`;
+	return `https://github.com/pylonsync/pylon-templates/tree/main/${template}`;
 }
 
 /**

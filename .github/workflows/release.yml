@@ -375,11 +375,12 @@ jobs:
 
   # Public mirrors of the parts of this private repo that people fetch
   # straight from git: the Swift SDK (SwiftPM), the C# SDK (Unity's package
-  # manager) and the example apps the docs link to. Each release copies the
-  # tracked files of the folder to its public repo and tags the version
-  # without the "v" (SwiftPM's and Unity's form). MIRROR_REPOS_TOKEN needs
-  # contents:write on the three repos; RELEASES_REPO_TOKEN works if it covers
-  # them.
+  # manager), the example apps the docs link to, the agent skill
+  # (`npx skills add pylonsync/pylon-skills`) and the create-pylon templates
+  # the site links to. Each release copies the tracked files of the folder to
+  # its public repo and tags the version without the "v" (SwiftPM's and
+  # Unity's form). MIRROR_REPOS_TOKEN needs contents:write on the five repos;
+  # RELEASES_REPO_TOKEN works if it covers them.
   publish-mirrors:
     name: Mirror ${{ matrix.folder }}
     needs: verify
@@ -395,6 +396,10 @@ jobs:
             repo: pylonsync/pylon-csharp
           - folder: examples
             repo: pylonsync/pylon-examples
+          - folder: skills
+            repo: pylonsync/pylon-skills
+          - folder: packages/create-pylon/templates
+            repo: pylonsync/pylon-templates
     steps:
       - uses: actions/checkout@v5
       - name: Copy ${{ matrix.folder }} to ${{ matrix.repo }}

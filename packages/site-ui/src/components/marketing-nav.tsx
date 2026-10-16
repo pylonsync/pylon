@@ -8,7 +8,7 @@ import {
 	useState,
 } from "react";
 import { Link } from "@pylonsync/react";
-import { ChevronDown, Github, Menu, X } from "lucide-react";
+import { ChevronDown, Menu, X } from "lucide-react";
 import { PylonMark } from "./brand";
 import { Button } from "./ui/button";
 import { cn } from "../lib/utils";
@@ -196,15 +196,6 @@ export function MarketingNav({ signedIn = false }: { signedIn?: boolean }) {
 				</div>
 
 				<div className="flex items-center gap-2">
-					<a
-							href="https://github.com/pylonsync/pylon"
-							target="_blank"
-							rel="noreferrer"
-							aria-label="Pylon on GitHub"
-							className="hidden size-8 items-center justify-center rounded-[var(--radius-sm)] text-[var(--color-ink-3)] transition-colors hover:bg-[var(--color-paper-1)] hover:text-[var(--color-ink)] sm:inline-flex"
-						>
-							<Github className="size-[18px]" />
-						</a>
 					{cta}
 					<button
 						type="button"

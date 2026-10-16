@@ -17,7 +17,6 @@ import {
 	Cloud,
 	Database,
 	FileCode2,
-	Github,
 	HardDrive,
 	History,
 	LayoutDashboard,
@@ -212,13 +211,6 @@ export const DEVELOPERS: NavLink[] = [
 		desc: "What shipped, release by release.",
 		external: true,
 		icon: History,
-	},
-	{
-		label: "GitHub",
-		href: "https://github.com/pylonsync/pylon",
-		desc: "Star the repo, read the source, open an issue.",
-		external: true,
-		icon: Github,
 	},
 ];
 

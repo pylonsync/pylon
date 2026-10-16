@@ -64,15 +64,9 @@ export function SiteFooter() {
 							</span>
 						</Link>
 						<p className="mt-4 max-w-[28ch] text-[13px] leading-[1.55] text-[var(--color-ink-3)]">
-							The open source full-stack framework for coding agents. Define the app in TypeScript and deploy it anywhere.
+							The full-stack framework for coding agents. Define the app in TypeScript and deploy it anywhere.
 						</p>
 						<div className="mt-5 flex items-center gap-4">
-							<a
-								href="https://github.com/pylonsync/pylon"
-								className="text-[13px] text-[var(--color-ink-3)] transition-colors hover:text-[var(--color-ink)]"
-							>
-								GitHub
-							</a>
 							<a
 								href="https://x.com/pylonsync"
 								className="text-[13px] text-[var(--color-ink-3)] transition-colors hover:text-[var(--color-ink)]"

@@ -8,9 +8,9 @@
 #                          $PYLON_INSTALL\bin\pylon.exe
 #                          (default: $env:USERPROFILE\.pylon)
 #
-# Canonical source: https://github.com/pylonsync/pylon/blob/main/scripts/install.ps1
-# The copy served by www.pylonsync.com lives in the control-plane app's
-# public/ dir — keep the two in sync, and in sync with install.sh.
+# Served at https://www.pylonsync.com/install.ps1. The canonical copy is
+# scripts/install.ps1 in the Pylon repo; apps/site/public/install.ps1 must match
+# it, and it must stay in sync with install.sh.
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
