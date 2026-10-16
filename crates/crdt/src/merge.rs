@@ -417,7 +417,9 @@ fn container_type(kind: CrdtFieldKind) -> Option<ContainerType> {
         K::MovableList => Some(ContainerType::MovableList),
         K::Tree => Some(ContainerType::Tree),
         K::Counter => Some(ContainerType::Counter),
-        K::LwwString | K::LwwNumber | K::LwwBool | K::LwwJson => None,
+        // A ProseMirror document is a tree of maps; two of them under one
+        // key are not merged (the key's document wins, as Loro decides).
+        K::LwwString | K::LwwNumber | K::LwwBool | K::LwwJson | K::ProseMirror => None,
     }
 }
 

@@ -36,6 +36,10 @@ export type FieldType =
  * - `"list"`, `"movable-list"`, `"tree"` are reserved for ordered /
  *   reorderable / hierarchical collections — wire format locked in,
  *   server-side projection still pending implementation.
+ * - `"prosemirror"` makes a `richtext` or `json` field a ProseMirror
+ *   (Tiptap) document that editors merge character by character. Bind an
+ *   editor with `@pylonsync/loro/prosemirror`; the row reads the document
+ *   as ProseMirror JSON, and a write replaces the whole document.
  * - `"lww"` is explicit (matches the default for most scalar types).
  */
 export type CrdtAnnotation =
@@ -44,7 +48,8 @@ export type CrdtAnnotation =
   | "counter"
   | "list"
   | "movable-list"
-  | "tree";
+  | "tree"
+  | "prosemirror";
 
 /**
  * Insert-time default marker stored on a field definition. Apps never

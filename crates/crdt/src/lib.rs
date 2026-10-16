@@ -37,6 +37,7 @@
 //! | `"list"`         | `LoroList`        | Ordered collections |
 //! | `"movable-list"` | `LoroMovableList` | Reorderable lists (kanban, prioritized todo) |
 //! | `"tree"`         | `LoroTree`        | Hierarchical data (folders, threaded comments) |
+//! | `"prosemirror"`  | `LoroMap` tree    | ProseMirror/Tiptap documents (`richtext`/`json`), in `loro-prosemirror`'s layout |
 //! | `"lww"`          | LWW register      | Explicit (matches default for most types) |
 //!
 //! ## Wire-shape semantics for the non-LWW kinds
@@ -95,6 +96,7 @@ use serde_json::{Map as JsonMap, Value};
 pub use loro;
 
 pub mod merge;
+mod prosemirror;
 
 // ---------------------------------------------------------------------------
 // Doc shape
@@ -160,6 +162,13 @@ pub enum CrdtFieldKind {
     /// never a structural merge. Apps that need mergeable structure
     /// should use `crdt: "list"` / `"tree"` or separate entities.
     LwwJson,
+    /// A ProseMirror (Tiptap) document. Opt-in for `richtext`/`json` via
+    /// `crdt: "prosemirror"`. The doc holds a tree of maps in the layout
+    /// the `loro-prosemirror` binding writes (see [`prosemirror`]), so
+    /// editors merge character by character. Patch value = a whole
+    /// ProseMirror JSON document (an absolute write); projection = the
+    /// document as ProseMirror JSON.
+    ProseMirror,
 }
 
 impl CrdtFieldKind {
@@ -178,6 +187,7 @@ impl CrdtFieldKind {
                 | Self::List
                 | Self::MovableList
                 | Self::Tree
+                | Self::ProseMirror
         )
     }
 }
@@ -240,6 +250,14 @@ pub fn field_kind(
             }
             CrdtFieldKind::Counter
         }
+        CrdtAnnotation::ProseMirror => {
+            if !matches!(base, "richtext" | "json") {
+                return Err(format!(
+                    "crdt: \"prosemirror\" only valid on richtext/json fields, got {base}"
+                ));
+            }
+            CrdtFieldKind::ProseMirror
+        }
         CrdtAnnotation::List => CrdtFieldKind::List,
         CrdtAnnotation::MovableList => CrdtFieldKind::MovableList,
         CrdtAnnotation::Tree => CrdtFieldKind::Tree,
@@ -292,9 +310,13 @@ pub fn apply_patch(doc: &LoroDoc, fields: &[CrdtField], patch: &Value) -> Result
             | CrdtFieldKind::List
             | CrdtFieldKind::MovableList
             | CrdtFieldKind::Tree
+            | CrdtFieldKind::ProseMirror
                 if value.is_null() =>
             {
                 map.delete(&field.name).ok();
+            }
+            CrdtFieldKind::ProseMirror => {
+                prosemirror::write(doc, &map, &field.name, value)?;
             }
             CrdtFieldKind::Text => {
                 let s = value
@@ -828,6 +850,11 @@ pub fn project_doc_to_json(doc: &LoroDoc, fields: &[CrdtField]) -> Value {
                 Value::Array(l.to_vec().into_iter().filter_map(loro_to_json).collect())
             }
             Some(ValueOrContainer::Container(loro::Container::Tree(t))) => project_tree(&t),
+            Some(ValueOrContainer::Container(loro::Container::Map(m)))
+                if field.kind == CrdtFieldKind::ProseMirror =>
+            {
+                prosemirror::project(&m)
+            }
             Some(ValueOrContainer::Container(_)) => {
                 // Map / unknown container in a scalar slot — schema
                 // mismatch. Return null; an explicit nested-map field

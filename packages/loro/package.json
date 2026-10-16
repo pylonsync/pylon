@@ -11,7 +11,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./wire": "./src/wire.ts",
-    "./registry": "./src/registry.ts"
+    "./registry": "./src/registry.ts",
+    "./prosemirror": "./src/prosemirror.ts"
   },
   "scripts": {
     "check": "tsc -p tsconfig.json --noEmit"
@@ -22,10 +23,28 @@
     "loro-crdt": "^1.10.6"
   },
   "peerDependencies": {
-    "react": ">=19.0.0"
+    "react": ">=19.0.0",
+    "loro-prosemirror": ">=0.4.4 <1.0.0",
+    "prosemirror-model": "^1.22.0",
+    "prosemirror-state": "^1.4.0"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",
-    "typescript": "^5.5"
+    "typescript": "^5.5",
+    "loro-prosemirror": "^0.4.4",
+    "prosemirror-model": "^1.25.0",
+    "prosemirror-state": "^1.4.3",
+    "prosemirror-schema-basic": "^1.2.4"
+  },
+  "peerDependenciesMeta": {
+    "loro-prosemirror": {
+      "optional": true
+    },
+    "prosemirror-model": {
+      "optional": true
+    },
+    "prosemirror-state": {
+      "optional": true
+    }
   }
 }

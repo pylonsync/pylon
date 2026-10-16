@@ -1263,6 +1263,11 @@ pub enum CrdtAnnotation {
     /// `LoroTree` for hierarchical data (folders, threaded comments).
     /// Reserved.
     Tree,
+    /// A ProseMirror (Tiptap) document: a tree of `LoroMap` nodes in the
+    /// layout the `loro-prosemirror` binding writes. Valid on `richtext`
+    /// and `json` fields.
+    #[serde(rename = "prosemirror")]
+    ProseMirror,
 }
 
 impl CrdtAnnotation {
@@ -1276,6 +1281,7 @@ impl CrdtAnnotation {
             Self::List => "list",
             Self::MovableList => "movable-list",
             Self::Tree => "tree",
+            Self::ProseMirror => "prosemirror",
         }
     }
 }

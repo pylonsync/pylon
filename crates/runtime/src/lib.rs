@@ -3030,7 +3030,8 @@ impl Runtime {
                     &tree_for_compare(if want.is_null() { &empty_list } else { want }),
                     &tree_for_compare(if have.is_null() { &empty_list } else { have }),
                 ),
-                K::Counter | K::List | K::MovableList | K::Tree => false,
+                K::ProseMirror if lists_and_trees => !same_json_value(want, have),
+                K::Counter | K::List | K::MovableList | K::Tree | K::ProseMirror => false,
             };
             if differs {
                 let value = match f.kind {
@@ -6020,14 +6021,14 @@ pub(crate) fn parse_json_fields_in_row(
     ent: &pylon_kernel::ManifestEntity,
     row: &mut serde_json::Value,
 ) {
-    if !ent.fields.iter().any(|f| f.field_type == "json") {
+    if !ent.fields.iter().any(field_holds_json) {
         return;
     }
     let Some(obj) = row.as_object_mut() else {
         return;
     };
     for f in &ent.fields {
-        if f.field_type != "json" {
+        if !field_holds_json(f) {
             continue;
         }
         let Some(serde_json::Value::String(s)) = obj.get(&f.name) else {
@@ -6042,7 +6043,14 @@ pub(crate) fn parse_json_fields_in_row(
 fn entity_field_is_json(ent: &pylon_kernel::ManifestEntity, key: &str) -> bool {
     ent.fields
         .iter()
-        .any(|f| f.name == key && f.field_type == "json")
+        .any(|f| f.name == key && field_holds_json(f))
+}
+
+/// Whether a field's column stores JSON text: a `json` field, and a
+/// ProseMirror document (`crdt: "prosemirror"`, also on a `richtext`
+/// field), which reads and writes as a JSON object.
+pub(crate) fn field_holds_json(f: &pylon_kernel::ManifestField) -> bool {
+    f.field_type == "json" || f.crdt == Some(pylon_kernel::CrdtAnnotation::ProseMirror)
 }
 
 /// Declared dims when `key` is a `vector(dims)` field, else `None`.
@@ -6172,7 +6180,7 @@ pub(crate) fn serialize_json_fields_for_storage(
 ) -> Option<serde_json::Value> {
     let obj = data.as_object()?;
     let needs_ser = |f: &pylon_kernel::ManifestField| {
-        f.field_type == "json" || f.field_type.starts_with("vector(")
+        field_holds_json(f) || f.field_type.starts_with("vector(")
     };
     if !ent
         .fields
@@ -6244,7 +6252,12 @@ pub(crate) fn crdt_container_corrections(
     let null = serde_json::Value::Null;
     let out: serde_json::Map<String, serde_json::Value> = fields
         .iter()
-        .filter(|f| matches!(f.kind, K::Counter | K::List | K::MovableList | K::Tree))
+        .filter(|f| {
+            matches!(
+                f.kind,
+                K::Counter | K::List | K::MovableList | K::Tree | K::ProseMirror
+            )
+        })
         .filter_map(|f| {
             let written = data.get(&f.name)?;
             let value = projected.get(&f.name).unwrap_or(&null);
@@ -6414,8 +6427,9 @@ pub(crate) fn same_json_value(a: &serde_json::Value, b: &serde_json::Value) -> b
     }
 }
 
-/// Parse the stored text of list and tree CRDT fields, whatever the field's
-/// declared type (a `string` field can carry `.crdt("list")`).
+/// Parse the stored text of list, tree and ProseMirror CRDT fields, whatever
+/// the field's declared type (a `string` field can carry `.crdt("list")`, a
+/// `richtext` field `.crdt("prosemirror")`).
 pub(crate) fn parse_crdt_containers_in_row(
     fields: &[pylon_crdt::CrdtField],
     row: &mut serde_json::Value,
@@ -6425,7 +6439,7 @@ pub(crate) fn parse_crdt_containers_in_row(
         return;
     };
     for f in fields {
-        if !matches!(f.kind, K::List | K::MovableList | K::Tree) {
+        if !matches!(f.kind, K::List | K::MovableList | K::Tree | K::ProseMirror) {
             continue;
         }
         if let Some(serde_json::Value::String(text)) = obj.get(&f.name) {
@@ -8083,6 +8097,106 @@ mod tests {
             });
         }
         assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)), Ok(true));
+    }
+
+    /// A manifest with a `Note` whose `body` is a ProseMirror document.
+    fn note_manifest() -> AppManifest {
+        let mut manifest = serde_json::to_value(doc_manifest(true)).unwrap();
+        let mut note = manifest["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == "Doc")
+            .unwrap()
+            .clone();
+        let mut body = note["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == "body")
+            .unwrap()
+            .clone();
+        body["crdt"] = serde_json::json!("prosemirror");
+        let title = note["fields"][0].clone();
+        note["name"] = serde_json::json!("Note");
+        note["fields"] = serde_json::json!([title, body]);
+        manifest["entities"].as_array_mut().unwrap().push(note);
+        serde_json::from_value(manifest).unwrap()
+    }
+
+    /// A ProseMirror field stores the document a function writes, reads it
+    /// back as JSON, and takes an editor's character-level edit through the
+    /// same push path a browser uses.
+    #[test]
+    fn a_prosemirror_field_stores_reads_and_takes_an_editor_edit() {
+        use pylon_crdt::loro::{Container, ValueOrContainer};
+        use pylon_http::DataStore;
+        let rt = Runtime::in_memory(note_manifest()).unwrap();
+        let first = serde_json::json!({"type": "doc", "content": [
+            {"type": "paragraph", "content": [
+                {"type": "text", "text": "Hello "},
+                {"type": "text", "text": "world", "marks": [{"type": "bold"}]}
+            ]}
+        ]});
+        let id = rt
+            .insert("Note", &serde_json::json!({"title": "t", "body": first}))
+            .unwrap();
+        assert_eq!(rt.get_by_id("Note", &id).unwrap().unwrap()["body"], first);
+
+        let second = serde_json::json!({"type": "doc", "content": [
+            {"type": "heading", "attrs": {"level": 1}, "content": [{"type": "text", "text": "Plan"}]}
+        ]});
+        rt.update("Note", &id, &serde_json::json!({"body": second}))
+            .unwrap();
+        assert_eq!(rt.get_by_id("Note", &id).unwrap().unwrap()["body"], second);
+
+        // An editor: load the row's doc, type into the heading, push the update.
+        let snapshot: Vec<u8> = rt
+            .lock_write_conn()
+            .unwrap()
+            .query_row(
+                "SELECT snapshot FROM _pylon_crdt_snapshots WHERE entity = 'Note' AND row_id = ?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let editor = pylon_crdt::loro::LoroDoc::new();
+        editor.import(&snapshot).unwrap();
+        let from = editor.oplog_vv();
+        let Some(ValueOrContainer::Container(Container::Map(body))) =
+            pylon_crdt::root_map(&editor).get("body")
+        else {
+            panic!("no document under body");
+        };
+        let Some(ValueOrContainer::Container(Container::List(children))) = body.get("children")
+        else {
+            panic!("no children");
+        };
+        let Some(ValueOrContainer::Container(Container::Map(heading))) = children.get(0) else {
+            panic!("no heading");
+        };
+        let Some(ValueOrContainer::Container(Container::List(runs))) = heading.get("children")
+        else {
+            panic!("no heading text");
+        };
+        let Some(ValueOrContainer::Container(Container::Text(text))) = runs.get(0) else {
+            panic!("no text run");
+        };
+        text.insert(4, " v2").unwrap();
+        editor.commit();
+        let update = editor
+            .export(pylon_crdt::loro::ExportMode::updates(&from))
+            .unwrap();
+        rt.crdt_apply_update("Note", &id, &update, &|_| Ok(()))
+            .unwrap();
+        let row = rt.get_by_id("Note", &id).unwrap().unwrap();
+        assert_eq!(row["body"]["content"][0]["content"][0]["text"], "Plan v2");
+        assert_eq!(row["title"], "t");
+
+        // Null removes the document.
+        rt.update("Note", &id, &serde_json::json!({"body": null}))
+            .unwrap();
+        assert!(rt.get_by_id("Note", &id).unwrap().unwrap()["body"].is_null());
     }
 
     /// A client push to a row with no doc keeps the row's other fields: the

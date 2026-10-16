@@ -41,7 +41,7 @@ const Document = entity("Document", {
 });
 ```
 
-Set CRDT container overrides with `.crdt(annotation)` on a field builder. `"text"` and `"counter"` are wired end-to-end today. `"list"`, `"movable-list"`, and `"tree"` are reserved (the wire format is locked in, the server-side projection is in progress). You can still edit list, map, and tree containers on the per-row `LoroDoc` (see below), because the server never interprets CRDT payloads.
+Set CRDT container overrides with `.crdt(annotation)` on a field builder. `"text"` and `"counter"` are wired end-to-end today, and so is `"prosemirror"` for editor documents (see [ProseMirror and Tiptap documents](#prosemirror-and-tiptap-documents)). `"list"`, `"movable-list"`, and `"tree"` are reserved (the wire format is locked in, the server-side projection is in progress). You can still edit list, map, and tree containers on the per-row `LoroDoc` (see below), because the server never interprets CRDT payloads.
 
 The Pylon server stores CRDT fields as opaque bytes and does not interpret them. Clients decode the bytes into Loro containers and edit them locally. Updates broadcast to other subscribers via the binary WebSocket channel.
 
@@ -166,6 +166,72 @@ const resolved = doc.getCursorPos(myCursor);
 ```
 
 Combined with `engine.setPresence({ cursor: myCursor })`, you get the multiplayer-cursor effect.
+
+## ProseMirror and Tiptap documents
+
+A field declared with `.crdt("prosemirror")` holds a ProseMirror document (Tiptap is built on ProseMirror). Editors merge it character by character, and the row reads it as ProseMirror JSON.
+
+```typescript
+const Doc = entity("Doc", {
+  title: field.string(),
+  body:  field.richtext().crdt("prosemirror"),  // or field.json().crdt("prosemirror")
+});
+```
+
+Insert rows with a starting document, so the server creates the document's container. Two editors that each create it at once leave one copy that nothing reads.
+
+```typescript
+await ctx.db.insert("Doc", {
+  title: "Untitled",
+  body: { type: "doc", content: [{ type: "paragraph" }] },
+});
+```
+
+### Bind an editor
+
+The document uses the layout of the [`loro-prosemirror`](https://github.com/loro-dev/loro-prosemirror) binding, so its plugins work as they are. `@pylonsync/loro/prosemirror` finds the field's container and sets up the marks:
+
+```bash
+bun add loro-prosemirror prosemirror-model prosemirror-state
+```
+
+```typescript
+import { useLoroDoc } from "@pylonsync/loro";
+import { configureProseMirrorMarks, proseMirrorContainerId } from "@pylonsync/loro/prosemirror";
+import { LoroSyncPlugin, LoroUndoPlugin } from "loro-prosemirror";
+
+const doc = useLoroDoc("Doc", docId);
+configureProseMirrorMarks(doc, editor.schema);
+const containerId = proseMirrorContainerId(doc, "body");
+const plugins = [LoroSyncPlugin({ doc, containerId }), LoroUndoPlugin({ doc })];
+```
+
+With Tiptap, add the plugins through an extension's `addProseMirrorPlugins`, and turn off Tiptap's own undo history.
+
+`configureProseMirrorMarks` tells this copy of the document how each mark behaves at its edges: a mark that is `inclusive` (the ProseMirror default) extends to text typed right after it. Every copy that writes marks needs it; Loro refuses a mark it has no style for.
+
+### Read and write on the server
+
+A server function reads and changes the document without an editor:
+
+```typescript
+import { readProseMirror, writeProseMirror } from "@pylonsync/loro/prosemirror";
+
+const current = readProseMirror(loroDoc, "body", schema);  // a ProseMirror Node, or null
+const tr = EditorState.create({ schema, doc: current }).tr;
+// ...change the document with the transaction...
+writeProseMirror(loroDoc, "body", schema, tr.doc);         // a diff, so concurrent edits still merge
+```
+
+`ctx.db.update("Doc", id, { body: json })` with ProseMirror JSON replaces the whole document instead, like writing a text field. An editor that is open keeps its binding, but edits made at the same moment are lost. Use it to reset a document, not to edit one.
+
+### What the row holds
+
+The row holds the document as ProseMirror JSON: `{ type, attrs?, content? }`, with text nodes as `{ type: "text", text, marks?: [{ type, attrs? }] }`. Attributes that are null are left out, and marks are in type order. A row without a document reads as `null`.
+
+### One mark of a type per character
+
+Each mark type is a Loro text style, which holds one value per character. Two marks of the same type cannot cover the same characters: two comment threads on the same words would leave only one. Keep anchors that can overlap, such as comment threads, as [cursors](#cursors) stored next to the document, and draw them as decorations.
 
 ## Awareness / presence
 
