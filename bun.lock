@@ -456,39 +456,39 @@
     },
     "packages/cli": {
       "name": "@pylonsync/cli",
-      "version": "0.22.34",
+      "version": "0.22.35",
       "bin": {
         "pylon": "./bin/pylon.js",
       },
       "optionalDependencies": {
-        "@pylonsync/cli-darwin-arm64": "0.22.34",
-        "@pylonsync/cli-linux-x64": "0.22.34",
-        "@pylonsync/cli-win32-x64": "0.22.34",
+        "@pylonsync/cli-darwin-arm64": "0.22.35",
+        "@pylonsync/cli-linux-x64": "0.22.35",
+        "@pylonsync/cli-win32-x64": "0.22.35",
       },
     },
     "packages/cli-darwin-arm64": {
       "name": "@pylonsync/cli-darwin-arm64",
-      "version": "0.22.34",
+      "version": "0.22.35",
     },
     "packages/cli-darwin-x64": {
       "name": "@pylonsync/cli-darwin-x64",
-      "version": "0.22.34",
+      "version": "0.22.35",
     },
     "packages/cli-linux-arm64": {
       "name": "@pylonsync/cli-linux-arm64",
-      "version": "0.22.34",
+      "version": "0.22.35",
     },
     "packages/cli-linux-x64": {
       "name": "@pylonsync/cli-linux-x64",
-      "version": "0.22.34",
+      "version": "0.22.35",
     },
     "packages/cli-win32-x64": {
       "name": "@pylonsync/cli-win32-x64",
-      "version": "0.22.34",
+      "version": "0.22.35",
     },
     "packages/client": {
       "name": "@pylonsync/client",
-      "version": "0.22.34",
+      "version": "0.22.35",
       "dependencies": {
         "@pylonsync/react": "workspace:*",
         "@pylonsync/sync": "workspace:*",
@@ -503,14 +503,14 @@
     },
     "packages/create-pylon": {
       "name": "@pylonsync/create-pylon",
-      "version": "0.22.34",
+      "version": "0.22.35",
       "bin": {
         "create-pylon": "./bin/create-pylon.js",
       },
     },
     "packages/functions": {
       "name": "@pylonsync/functions",
-      "version": "0.22.34",
+      "version": "0.22.35",
       "bin": {
         "pylon-functions-runtime": "src/runtime.ts",
       },
@@ -539,7 +539,7 @@
     },
     "packages/loro": {
       "name": "@pylonsync/loro",
-      "version": "0.22.34",
+      "version": "0.22.35",
       "dependencies": {
         "@pylonsync/react": "workspace:*",
         "@pylonsync/sync": "workspace:*",
@@ -567,7 +567,7 @@
     },
     "packages/next": {
       "name": "@pylonsync/next",
-      "version": "0.22.34",
+      "version": "0.22.35",
       "dependencies": {
         "@pylonsync/react": "workspace:*",
         "@pylonsync/sdk": "workspace:*",
@@ -587,7 +587,7 @@
     },
     "packages/plugins/feature-flags": {
       "name": "@pylonsync/feature-flags",
-      "version": "0.22.34",
+      "version": "0.22.35",
       "dependencies": {
         "@pylonsync/functions": "workspace:*",
         "@pylonsync/sdk": "workspace:*",
@@ -601,7 +601,7 @@
     },
     "packages/plugins/revenuecat": {
       "name": "@pylonsync/revenuecat",
-      "version": "0.22.34",
+      "version": "0.22.35",
       "dependencies": {
         "@pylonsync/functions": "workspace:*",
         "@pylonsync/sdk": "workspace:*",
@@ -615,7 +615,7 @@
     },
     "packages/plugins/stripe": {
       "name": "@pylonsync/stripe",
-      "version": "0.22.34",
+      "version": "0.22.35",
       "dependencies": {
         "@pylonsync/functions": "workspace:*",
         "@pylonsync/sdk": "workspace:*",
@@ -629,7 +629,7 @@
     },
     "packages/plugins/webhooks": {
       "name": "@pylonsync/webhooks",
-      "version": "0.22.34",
+      "version": "0.22.35",
       "dependencies": {
         "@pylonsync/functions": "workspace:*",
         "@pylonsync/sdk": "workspace:*",
@@ -643,7 +643,7 @@
     },
     "packages/react": {
       "name": "@pylonsync/react",
-      "version": "0.22.34",
+      "version": "0.22.35",
       "dependencies": {
         "@pylonsync/realtime": "workspace:*",
         "@pylonsync/sdk": "workspace:*",
@@ -663,7 +663,7 @@
     },
     "packages/react-native": {
       "name": "@pylonsync/react-native",
-      "version": "0.22.34",
+      "version": "0.22.35",
       "dependencies": {
         "@pylonsync/react": "workspace:*",
         "@pylonsync/sdk": "workspace:*",
@@ -681,18 +681,18 @@
     },
     "packages/realtime": {
       "name": "@pylonsync/realtime",
-      "version": "0.22.34",
+      "version": "0.22.35",
       "dependencies": {
         "@msgpack/msgpack": "^3.1.3",
       },
     },
     "packages/sdk": {
       "name": "@pylonsync/sdk",
-      "version": "0.22.34",
+      "version": "0.22.35",
     },
     "packages/site-ui": {
       "name": "@pylon-site/ui",
-      "version": "0.22.34",
+      "version": "0.22.35",
       "dependencies": {
         "@radix-ui/react-dropdown-menu": "^2.1.4",
         "@radix-ui/react-slot": "^1.2.3",
@@ -722,14 +722,14 @@
     },
     "packages/sync": {
       "name": "@pylonsync/sync",
-      "version": "0.22.34",
+      "version": "0.22.35",
       "devDependencies": {
         "fake-indexeddb": "^6.2.5",
       },
     },
     "packages/workflows": {
       "name": "@pylonsync/workflows",
-      "version": "0.22.34",
+      "version": "0.22.35",
       "peerDependencies": {
         "bun-types": ">=1.0.0",
       },
@@ -1424,7 +1424,7 @@
 
     "ee-first": ["ee-first@1.1.1", "", {}, "sha512-WMwm9LhRUo+WUaRN+vRuETqG89IgZphVSNkdFgeb6sS/E4OrDIN7t48CAewSHXc6C8lefD8KKfr5vY61brQlow=="],
 
-    "electron-to-chromium": ["electron-to-chromium@1.5.457", "", {}, "sha512-RNKsgErRmkzRgC8nOV1wzFhSbfGlYJ6k4LT/aE7oFrDYaQgHhTh5oTp0ZgSbRRybKR8HlZIdCWc38Y+CDTk1Jw=="],
+    "electron-to-chromium": ["electron-to-chromium@1.5.458", "", {}, "sha512-/hIH2gRSmxrf4/X4Nw/t/Wc8PVS22l8/3HnWjWTWsTOM5dsnMUPZF/+u+yr3LqweNuTBJE1rq6qAQzKkZVwMfA=="],
 
     "emoji-regex": ["emoji-regex@8.0.0", "", {}, "sha512-MSjYzcWNOA0ewAHpz0MxpYFvwg6yjy1NG3xteoqz644VCo/RPgnr1/GGt+ic3iJTzQ8Eu3TdM14SawnVUmGE6A=="],
 
@@ -1448,7 +1448,7 @@
 
     "exponential-backoff": ["exponential-backoff@3.1.3", "", {}, "sha512-ZgEeZXj30q+I0EN+CbSSpIyPaJ5HVQD18Z1m+u1FXbAeT94mr1zw50q4q6jiiC447Nl/YTcIYSAftiGqetwXCA=="],
 
-    "fake-indexeddb": ["fake-indexeddb@6.2.5", "", {}, "sha512-CGnyrvbhPlWYMngksqrSSUT1BAVP49dZocrHuK0SvtR0D5TMs5wP0o3j7jexDJW01KSadjBp1M/71o/KR3nD1w=="],
+    "fake-indexeddb": ["fake-indexeddb@6.2.6", "", {}, "sha512-ihhmr0KoET51jT8R4YhbUYuLLvr1qqO6INISygtN16i8loR8kAxtAUr4+EKHTSMjL+lggaAn4OC7DRqzrNgnuQ=="],
 
     "fb-dotslash": ["fb-dotslash@0.5.8", "", { "bin": { "dotslash": "bin/dotslash" } }, "sha512-XHYLKk9J4BupDxi9bSEhkfss0m+Vr9ChTrjhf9l2iw3jB5C7BnY4GVPoMcqbrTutsKJso6yj2nAB6BI/F2oZaA=="],
 
@@ -1796,7 +1796,7 @@
 
     "typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
 
-    "undici-types": ["undici-types@8.12.2", "", {}, "sha512-VoMeD2O0KdHhcn+oPqOrpivN+7aDOklVSwOLD7JNjbzV1CboAFek9IFOXnreoufTUtAsCsOK0iETiERPNR/fDA=="],
+    "undici-types": ["undici-types@6.21.0", "", {}, "sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ=="],
 
     "unicode-trie": ["unicode-trie@2.0.0", "", { "dependencies": { "pako": "^0.2.5", "tiny-inflate": "^1.0.0" } }, "sha512-x7bc76x0bm4prf1VLg79uhAzKw8DVboClSN5VxJuQ+LKDOVEW9CdH+VY7SP+vX7xCYQqzzgQpFqz15zeLvAtZQ=="],
 
@@ -1881,8 +1881,6 @@
     "@tailwindcss/oxide-wasm32-wasi/tslib": ["tslib@2.8.1", "", { "bundled": true }, "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w=="],
 
     "@testing-library/dom/pretty-format": ["pretty-format@27.5.1", "", { "dependencies": { "ansi-regex": "^5.0.1", "ansi-styles": "^5.0.0", "react-is": "^17.0.1" } }, "sha512-Qb1gy5OrP5+zDf2Bvnzdl3jsTf1qXVMazbvCoKhtKqVs4/YK4ozX4gKQJJVyNe+cajNPn0KoC0MC3FUmaHWEmQ=="],
-
-    "@types/node/undici-types": ["undici-types@6.21.0", "", {}, "sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ=="],
 
     "@vitejs/plugin-react/react-refresh": ["react-refresh@0.17.0", "", {}, "sha512-z6F7K9bV85EfseRCp2bzrpyQ0Gkw1uLoCel9XBVWPg/TjRj94SkJzUTGfOa4bs7iJvBWtQG0Wq7wnI0syw3EBQ=="],
 
