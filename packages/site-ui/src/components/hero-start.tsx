@@ -29,8 +29,7 @@ Load the skill first:
 References:
   Docs index (agent-readable)  https://docs.pylonsync.com/llms.txt
   Raw skill file               https://www.pylonsync.com/pylon-skill.md
-  SDK source                   https://github.com/pylonsync/pylon/tree/main/packages
-  Example apps                 https://github.com/pylonsync/pylon/tree/main/examples
+  Example apps                 https://github.com/pylonsync/pylon-examples
 
 Scaffold:
   npm create @pylonsync/pylon@latest my-app

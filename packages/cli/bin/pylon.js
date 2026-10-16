@@ -110,7 +110,7 @@ function resolveBinary() {
 		throw new Error(
 			`@pylonsync/cli: no prebuilt binary for ${key}.${hint}\n` +
 				`Supported via npm: ${Object.keys(PLATFORM_PACKAGES).join(", ")}.\n` +
-				`Build from source: https://github.com/pylonsync/pylon`,
+				`Other platforms: https://github.com/pylonsync/pylon-releases/releases`,
 		);
 	}
 

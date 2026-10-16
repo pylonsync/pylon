@@ -54,19 +54,10 @@ COPY --chown=pylon:pylon packages/site-ui /app/packages/site-ui
 COPY --chown=pylon:pylon apps/site/public /app/public
 
 # /pylon-skill.md is the agent skill we tell people to load ("Teach Claude to
-# write Pylon"), and it LIVES in the framework repo at skills/pylon/SKILL.md.
-# The committed copy under public/ is a hand-sync, and hand-syncs rot — the
-# control plane's was found 363 lines behind canonical. Refresh from the source
-# of truth at build time. Deliberately best-effort: `|| true` keeps a GitHub
-# blip from failing a deploy, and the committed copy remains as the fallback —
-# stale at worst, never missing.
-RUN curl -fsSL --max-time 20 \
-      https://raw.githubusercontent.com/pylonsync/pylon/main/skills/pylon/SKILL.md \
-      -o /tmp/pylon-skill.md \
-    && test -s /tmp/pylon-skill.md \
-    && install -o pylon -g pylon -m 0644 /tmp/pylon-skill.md /app/public/pylon-skill.md \
-    && echo "[build] pylon-skill.md refreshed from canonical" \
-    || echo "[build] pylon-skill.md: keeping the committed copy"
+# write Pylon"). The canonical file is skills/pylon/SKILL.md in this repo, and
+# the build context is the repo root, so copy it over the committed copy under
+# public/ instead of keeping a hand-synced duplicate current.
+COPY --chown=pylon:pylon skills/pylon/SKILL.md /app/public/pylon-skill.md
 
 # Install frontend deps (react, react-dom, radix, lucide, next-themes,
 # @tailwindcss/cli, …). The base image symlinks @pylonsync/* into node_modules

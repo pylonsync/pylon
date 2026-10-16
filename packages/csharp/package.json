@@ -8,10 +8,10 @@
   "license": "MIT",
   "author": {
     "name": "Stack0",
-    "url": "https://github.com/pylonsync/pylon"
+    "url": "https://www.pylonsync.com"
   },
-  "documentationUrl": "https://github.com/pylonsync/pylon/tree/main/packages/csharp#readme",
-  "changelogUrl": "https://github.com/pylonsync/pylon/tree/main/packages/csharp/CHANGELOG.md",
+  "documentationUrl": "https://github.com/pylonsync/pylon-csharp#readme",
+  "changelogUrl": "https://github.com/pylonsync/pylon-csharp/blob/main/CHANGELOG.md",
   "keywords": ["pylon", "multiplayer", "realtime", "networking", "backend"],
   "samples": [
     {

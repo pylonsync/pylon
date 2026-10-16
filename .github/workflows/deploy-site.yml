@@ -22,6 +22,7 @@ on:
     paths:
       - "apps/site/**"
       - "packages/site-ui/**"
+      - "skills/pylon/**"
       - ".github/workflows/deploy-site.yml"
   workflow_dispatch: {}
 

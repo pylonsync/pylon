@@ -208,7 +208,7 @@ export const DEVELOPERS: NavLink[] = [
 	},
 	{
 		label: "Changelog",
-		href: "https://github.com/pylonsync/pylon/releases",
+		href: "https://github.com/pylonsync/pylon-releases/releases",
 		desc: "What shipped, release by release.",
 		external: true,
 		icon: History,

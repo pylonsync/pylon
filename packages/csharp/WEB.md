@@ -97,7 +97,7 @@ In a Unity 6 project, install the package from a release tag that includes
 Unity Web support (see the changelog), or from a local checkout:
 
 ```json
-"com.pylonsync.pylon": "https://github.com/pylonsync/pylon.git?path=/packages/csharp#v<version>"
+"com.pylonsync.pylon": "https://github.com/pylonsync/pylon-csharp.git#<version>"
 ```
 
 Install Unity Web Build Support for the same editor version. Import the

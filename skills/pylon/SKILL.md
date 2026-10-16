@@ -15,8 +15,8 @@ This skill is a starting point, not the ceiling. When the user asks something th
 
 - **Full docs index + concept map:** <https://docs.pylonsync.com/llms.txt> — fetch this first for a condensed overview of every doc page with links.
 - **Docs site:** <https://docs.pylonsync.com/> — human docs covering Get started, Core concepts, Auth, Plugins, Clients, Cloud, Operations, and Compare-vs-X pages.
-- **Source of truth for APIs:** <https://github.com/pylonsync/pylon/tree/main/packages> — the actual `@pylonsync/sdk`, `@pylonsync/functions`, `@pylonsync/react`, `@pylonsync/react-native`, `@pylonsync/next`, the Swift SDK at `packages/swift/`, and the C# / Unity SDK at `packages/csharp/`. When in doubt about a method name or signature, read the source, not your training data.
-- **Working example apps:** <https://github.com/pylonsync/pylon/tree/main/examples> — full apps covering CRM, ERP, chat, 3D, dashboards, plus `examples/swift-todo` for the iOS/macOS SDK.
+- **Source of truth for APIs:** the TypeScript source that ships in each npm package (`node_modules/@pylonsync/sdk`, `@pylonsync/functions`, `@pylonsync/react`, `@pylonsync/react-native`, `@pylonsync/next`), the Swift SDK at <https://github.com/pylonsync/pylon-swift>, and the C# / Unity SDK at <https://github.com/pylonsync/pylon-csharp>. When in doubt about a method name or signature, read the source, not your training data.
+- **Working example apps:** <https://github.com/pylonsync/pylon-examples> — full apps covering CRM, ERP, chat, 3D, dashboards, plus `examples/swift-todo` for the iOS/macOS SDK.
 - **Stack0 Cloud:** <https://cloud.stack0.dev> — managed Pylon. Same binary, same APIs, no infra to run.
 - **This skill file (latest):** <https://www.pylonsync.com/pylon-skill.md> — re-fetch if the user reports the skill is out of date.
 
@@ -1094,7 +1094,7 @@ Keeping a project current: `pylon update` bumps every @pylonsync/* dependency (w
   | richtext | `field.richtext()` | `v.richtext()` or `v.string()` |
   | FK id | `field.id("X")` | `v.id("X")` |
 
-  What still **doesn't exist**: `v.money()`, `v.enum()`, `v.timestamp()`. When in doubt, source is at <https://github.com/pylonsync/pylon/tree/main/packages>.
+  What still **doesn't exist**: `v.money()`, `v.enum()`, `v.timestamp()`. When in doubt, read the package source in `node_modules/@pylonsync/`.
 - **Every function file must `export default`** the `mutation()/query()/action()` result. Named exports are ignored.
 - **`functions/*.ts` file names are the RPC names.** `functions/create-issue.ts` would be called as `create-issue` — prefer camelCase to match JS identifier conventions.
 - **Generated files** (`pylon.manifest.json`, `pylon.client.ts`) are rebuilt on every `pylon dev` invocation. Never edit by hand.
@@ -1224,7 +1224,7 @@ Built-ins, declared in `manifest.plugins`:
 - `@pylonsync/sync` — sync engine standalone (Vue, Svelte, Solid, vanilla)
 - `@pylonsync/loro` — Loro CRDT integration for collaborative editing
 - **Swift SDK** at `packages/swift/` — `PylonClient`, `PylonSync`, `PylonRealtime`, `PylonSwiftUI`. iOS 16+, macOS 13+, tvOS 16+, watchOS 9+, Linux. Codegen via `pylon codegen client --target swift`.
-- **C# / Unity SDK** at `packages/csharp/` (UPM package `com.pylonsync.pylon`, install from `https://github.com/pylonsync/pylon.git?path=/packages/csharp#v<version>`) — `PylonClient` (guest/magic-code/password/Apple/Google/Steam sign-in, functions, entities) and `ShardConnection` (shard wire v2, JSON + MessagePack, replication, transfers), plus `Predictor`, `ShardClock`, `EntityInterpolator`. No reflection, IL2CPP-safe; values are `PylonValue`, typed calls take an `IPylonConverter<T>` (`JsonUtilityConverter<T>` in Unity). Create clients on Unity's main thread and events run there. No WebGL, no offline sync engine.
+- **C# / Unity SDK** at `packages/csharp/` (UPM package `com.pylonsync.pylon`, install from `https://github.com/pylonsync/pylon-csharp.git#<version>`) — `PylonClient` (guest/magic-code/password/Apple/Google/Steam sign-in, functions, entities) and `ShardConnection` (shard wire v2, JSON + MessagePack, replication, transfers), plus `Predictor`, `ShardClock`, `EntityInterpolator`. No reflection, IL2CPP-safe; values are `PylonValue`, typed calls take an `IPylonConverter<T>` (`JsonUtilityConverter<T>` in Unity). Create clients on Unity's main thread and events run there. No WebGL, no offline sync engine.
 
 ### Stack0 Cloud
 Managed Pylon at `cloud.stack0.dev`. Same binary, same APIs.

@@ -156,7 +156,7 @@ export function ExamplesView({ signedIn = false }: { signedIn?: boolean }) {
 					</p>
 					<div className="mt-8 flex flex-col items-stretch justify-center gap-2.5 sm:flex-row sm:items-center sm:gap-3">
 						<Button asChild variant="primary" size="lg">
-							<a href="https://github.com/pylonsync/pylon">Browse on GitHub →</a>
+							<a href="https://github.com/pylonsync/pylon-examples">Browse on GitHub →</a>
 						</Button>
 						<Button asChild variant="ghost" size="lg">
 							<Link href="/skill">Set up the Claude skill</Link>

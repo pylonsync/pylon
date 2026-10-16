@@ -1,6 +1,6 @@
 # Pylon for C# and Unity
 
-A C# client for [Pylon](https://github.com/pylonsync/pylon) apps. It uses
+A C# client for [Pylon](https://www.pylonsync.com) apps. It uses
 the same routes and wire format as the TypeScript and Swift clients:
 
 - `PylonClient`: guest, magic-code, and password sign-in, session refresh,
@@ -28,13 +28,13 @@ In Unity, open **Window > Package Manager**, click **+**, choose **Install
 package from git URL**, and enter:
 
 ```
-https://github.com/pylonsync/pylon.git?path=/packages/csharp#v0.22.12
+https://github.com/pylonsync/pylon-csharp.git#0.22.35
 ```
 
-Any release tag from `v0.22.12` on works. Or add it to `Packages/manifest.json`:
+Any release tag from `0.22.34` on works. Or add it to `Packages/manifest.json`:
 
 ```json
-"com.pylonsync.pylon": "https://github.com/pylonsync/pylon.git?path=/packages/csharp#v0.22.12"
+"com.pylonsync.pylon": "https://github.com/pylonsync/pylon-csharp.git#0.22.35"
 ```
 
 Unity 2021.3 or later. Supported platforms: Windows, macOS, Linux, iOS, and
@@ -69,7 +69,7 @@ Other sign-in methods:
 - `SignInWithPasswordAsync(email, password)`
 - `RegisterWithPasswordAsync(email, password)`
 
-Platform accounts (see the server's [native sign-in docs](https://github.com/pylonsync/pylon/blob/main/apps/docs/auth/native.mdx)):
+Platform accounts (see the server's [native sign-in docs](https://docs.pylonsync.com/auth/native)):
 
 - `SignInWithAppleAsync(idToken, name)`: the identity token from Sign in with Apple. Pass the name on the first sign-in; Apple sends it only then.
 - `SignInWithGoogleAsync(idToken)`: the ID token from Google Sign-In.

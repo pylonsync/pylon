@@ -1,10 +1,10 @@
 // swift-tools-version:5.9
 import PackageDescription
 
-// Root-level Package.swift so SwiftPM consumers can pull the Swift SDK
-// directly from this monorepo:
+// Root-level Package.swift for the Swift SDK. Consumers use the public
+// mirror, which the release workflow copies from packages/swift:
 //
-//     .package(url: "https://github.com/pylonsync/pylon.git", from: "0.3.0")
+//     .package(url: "https://github.com/pylonsync/pylon-swift.git", from: "0.22.34")
 //
 // SwiftPM looks for Package.swift at the repo root by default — without
 // this file, `swift package resolve` fails with "the package manifest

@@ -64,7 +64,7 @@ const BUILD: Resource[] = [
 	},
 	{
 		name: "Changelog",
-		href: "https://github.com/pylonsync/pylon/releases",
+		href: "https://github.com/pylonsync/pylon-releases/releases",
 		external: true,
 		what: "What shipped, release by release.",
 		icon: History,
