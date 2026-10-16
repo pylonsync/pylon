@@ -204,6 +204,27 @@ side effect and stop before Pylon records its result. Pylon can then run
 that step again. Make step bodies idempotent when they call an external
 system.
 
+## Catching errors around steps
+
+The engine pauses a workflow between steps by throwing a signal through its body. A `try`/`catch` around steps catches that signal too, so it must rethrow it before treating anything as a failure:
+
+```ts
+import { isWorkflowSignal, workflow } from "@pylonsync/functions";
+
+export default workflow("provision", async (wf, ctx) => {
+  try {
+    await wf.step("create", () => createMachine());
+    await wf.step("deploy", () => deploy());
+  } catch (err) {
+    if (isWorkflowSignal(err)) throw err; // a pause, not a failure
+    await markFailed(ctx, err);
+    throw err;
+  }
+});
+```
+
+Without the check, every pause runs the failure branch, and the workflow then resumes and finishes as if nothing happened.
+
 ## Multiple replicas
 
 Postgres replicas share workflow state. A replica takes a short lease

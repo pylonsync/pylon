@@ -15,6 +15,7 @@ import { describe, expect, test } from "bun:test";
 import {
   executeWorkflowSlice,
   isWorkflowDefinition,
+  isWorkflowSignal,
   workflow,
   type WorkflowRunRequest,
   type WorkflowStepResult,
@@ -264,3 +265,41 @@ describe("executeWorkflowSlice", () => {
     expect(res).toEqual({ action: "complete", output: { echoed: 42 } });
   });
 });
+
+describe("catching errors around steps", () => {
+  test("a pause is a workflow signal, not a failure, when the body catches it", async () => {
+    const failures: unknown[] = [];
+    const guarded = workflow("guarded", async (wf) => {
+      try {
+        await wf.step("one", () => 1);
+        await wf.step("two", () => 2);
+        return { ok: true };
+      } catch (err) {
+        if (isWorkflowSignal(err)) throw err;
+        failures.push(err);
+        throw err;
+      }
+    });
+    // Slice 0 runs step one and pauses at step two's boundary.
+    const res = await executeWorkflowSlice(guarded, req(0, []), ctx);
+    expect(res).toMatchObject({ action: "step_complete", step_name: "one" });
+    expect(failures).toEqual([]);
+  });
+
+  test("without the check, the body sees the pause as an error (the bug the helper prevents)", async () => {
+    const seen: string[] = [];
+    const careless = workflow("careless", async (wf) => {
+      try {
+        await wf.step("one", () => 1);
+        await wf.step("two", () => 2);
+      } catch (err) {
+        seen.push((err as Error).message);
+        throw err;
+      }
+    });
+    await executeWorkflowSlice(careless, req(0, []), ctx);
+    expect(seen).toEqual(["slice boundary"]);
+    expect(isWorkflowSignal(new Error("slice boundary"))).toBe(false);
+  });
+});
+

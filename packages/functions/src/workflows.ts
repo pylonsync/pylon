@@ -179,6 +179,20 @@ class SliceBoundary extends Error {
 }
 
 /**
+ * Whether `err` is the engine pausing the workflow (a slice boundary or a
+ * wait), not a failure. A `try`/`catch` around steps in a workflow body must
+ * rethrow these untouched, or the workflow treats every pause as a crash:
+ *
+ *   catch (err) {
+ *     if (isWorkflowSignal(err)) throw err;
+ *     // real failure handling
+ *   }
+ */
+export function isWorkflowSignal(err: unknown): boolean {
+  return err instanceof SliceBoundary || err instanceof WorkflowPaused;
+}
+
+/**
  * Execute one slice of `def` for `request`, returning the engine verdict.
  * Never throws for handler errors — a step failure becomes
  * `{action: "fail"}` so the engine's retry accounting runs.
