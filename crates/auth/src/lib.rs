@@ -4013,6 +4013,8 @@ mod tests {
                 scopes: "openid email profile".into(),
                 userinfo_parser: provider::UserinfoParser::Oidc,
                 token_exchange: provider::TokenExchangeShape::Standard,
+                issuer: issuer.into(),
+                jwks_uri: Some("https://acme.test.invalid/jwks".into()),
             },
         );
         let cfg = OAuthConfig {

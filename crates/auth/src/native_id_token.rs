@@ -156,15 +156,17 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Verify `id_token` against `jwks_json` (the provider's JWKS document)
-/// and the expected issuer/audience set. `now` is injectable for tests.
-pub fn verify_id_token_with_jwks(
-    provider: NativeProvider,
+/// Check an RS256 id_token's signature against `jwks_json`, then its
+/// issuer (one of `issuers`), audience (one of `allowed_audiences`) and
+/// expiry. Returns the verified claims. Shared by native sign-in (Apple,
+/// Google) and federated sign-in with a token from a Pylon IdP.
+pub fn verify_jwt_claims(
     id_token: &str,
     jwks_json: &str,
+    issuers: &[&str],
     allowed_audiences: &[String],
     now: u64,
-) -> Result<NativeIdentity, NativeTokenError> {
+) -> Result<serde_json::Value, NativeTokenError> {
     let mut parts = id_token.split('.');
     let (header_b64, payload_b64, sig_b64) = match (parts.next(), parts.next(), parts.next()) {
         (Some(h), Some(p), Some(s)) if parts.next().is_none() => (h, p, s),
@@ -209,7 +211,7 @@ pub fn verify_id_token_with_jwks(
         .map_err(|e| NativeTokenError::Malformed(format!("claims: {e}")))?;
 
     let iss = claims.get("iss").and_then(|v| v.as_str()).unwrap_or("");
-    if !provider.issuers().contains(&iss) {
+    if !issuers.contains(&iss) {
         return Err(NativeTokenError::WrongIssuer(iss.to_string()));
     }
     // `aud` is a string or an array of strings.
@@ -233,6 +235,25 @@ pub fn verify_id_token_with_jwks(
         return Err(NativeTokenError::Expired);
     }
 
+    Ok(claims)
+}
+
+/// Verify `id_token` against `jwks_json` (the provider's JWKS document)
+/// and the expected issuer/audience set. `now` is injectable for tests.
+pub fn verify_id_token_with_jwks(
+    provider: NativeProvider,
+    id_token: &str,
+    jwks_json: &str,
+    allowed_audiences: &[String],
+    now: u64,
+) -> Result<NativeIdentity, NativeTokenError> {
+    let claims = verify_jwt_claims(
+        id_token,
+        jwks_json,
+        provider.issuers(),
+        allowed_audiences,
+        now,
+    )?;
     let sub = claims
         .get("sub")
         .and_then(|v| v.as_str())
@@ -324,6 +345,28 @@ pub fn verify_id_token(
     let fresh = fetch_jwks(url)?;
     seed_jwks_cache(url, &fresh);
     verify_id_token_with_jwks(provider, id_token, &fresh, allowed_audiences, now)
+}
+
+/// Verify an id_token from an OIDC issuer (a Pylon IdP such as the hub a
+/// federated app signs in with) against the issuer's live JWKS at
+/// `jwks_url`. Like [`verify_id_token`], an unknown `kid` refetches once.
+pub fn verify_issuer_id_token(
+    issuer: &str,
+    jwks_url: &str,
+    id_token: &str,
+    allowed_audiences: &[String],
+) -> Result<serde_json::Value, NativeTokenError> {
+    let now = now_secs();
+    let issuers = [issuer];
+    if let Some(cached) = cached_jwks(jwks_url) {
+        match verify_jwt_claims(id_token, &cached, &issuers, allowed_audiences, now) {
+            Err(NativeTokenError::UnknownKey(_)) => {}
+            other => return other,
+        }
+    }
+    let fresh = fetch_jwks(jwks_url)?;
+    seed_jwks_cache(jwks_url, &fresh);
+    verify_jwt_claims(id_token, &fresh, &issuers, allowed_audiences, now)
 }
 
 #[cfg(test)]

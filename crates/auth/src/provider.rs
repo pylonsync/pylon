@@ -830,6 +830,13 @@ pub struct DiscoveredSpec {
     pub scopes: String,
     pub userinfo_parser: UserinfoParser,
     pub token_exchange: TokenExchangeShape,
+    /// The `issuer` the discovery document declares. An id_token from this
+    /// provider must carry it as `iss`.
+    pub issuer: String,
+    /// Where the provider publishes its signing keys. Needed to verify an
+    /// id_token that did not come through the back-channel code exchange
+    /// (`POST /api/auth/federated/<provider>`).
+    pub jwks_uri: Option<String>,
 }
 
 impl ResolvedSpec {
@@ -988,6 +995,8 @@ impl OidcDiscoveryDoc {
             },
             userinfo_parser: UserinfoParser::Oidc,
             token_exchange,
+            issuer: self.issuer,
+            jwks_uri: self.jwks_uri,
         }
     }
 }

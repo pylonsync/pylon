@@ -120,18 +120,69 @@ public actor PylonClient {
         return resp
     }
 
-    /// Exchange a Google ID token for a Pylon session.
-    public func signInWithGoogle(idToken: String) async throws -> SessionResponse {
-        let resp: SessionResponse = try await request(.post, "/api/auth/oauth/google", body: OAuthGoogleRequest(id_token: idToken))
+    /// Sign in with the `identityToken` from Sign in with Apple
+    /// (`ASAuthorizationAppleIDCredential`), via `POST /api/auth/native/apple`.
+    /// Apple gives the person's name to the app only on the first sign-in and
+    /// never puts it in the token, so pass it when you have it. The server
+    /// needs `PYLON_APPLE_NATIVE_CLIENT_IDS` set to the app's bundle id.
+    public func signInWithApple(idToken: String, name: String? = nil) async throws -> SessionResponse {
+        let resp: SessionResponse = try await request(.post, "/api/auth/native/apple", body: NativeIdTokenRequest(id_token: idToken, name: name))
         setSession(token: resp.token)
         return resp
     }
 
-    /// Exchange a GitHub OAuth code for a Pylon session.
-    public func signInWithGitHub(code: String) async throws -> SessionResponse {
-        let resp: SessionResponse = try await request(.post, "/api/auth/oauth/github", body: OAuthGitHubRequest(code: code))
+    /// Sign in with a Google id token from Google Sign-In, via
+    /// `POST /api/auth/native/google`. The server needs
+    /// `PYLON_GOOGLE_NATIVE_CLIENT_IDS` set to the app's Google client id.
+    public func signInWithGoogle(idToken: String) async throws -> SessionResponse {
+        let resp: SessionResponse = try await request(.post, "/api/auth/native/google", body: NativeIdTokenRequest(id_token: idToken, name: nil))
         setSession(token: resp.token)
         return resp
+    }
+
+    /// Trade this client's session for an id_token addressed to another app
+    /// (`clientId`), at this server's `/oidc/token` (RFC 8693 token exchange).
+    /// This server must be an IdP (`PYLON_OIDC_ISSUER`) and the client must
+    /// have `token_exchange: true` in `PYLON_OIDC_CLIENTS`. Pass the result to
+    /// `signInFederated(provider:idToken:accessToken:)` on a client for that app.
+    public func exchangeSession(forClient clientId: String, scope: String? = nil) async throws -> TokenExchangeResponse {
+        guard let token = currentToken() else {
+            throw PylonError.invalidArgument("exchangeSession needs a signed-in session")
+        }
+        var fields = [
+            ("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange"),
+            ("client_id", clientId),
+            ("subject_token", token),
+            ("subject_token_type", "urn:ietf:params:oauth:token-type:access_token"),
+        ]
+        if let scope { fields.append(("scope", scope)) }
+        var req = try await makeRequest(.post, "/oidc/token", body: Optional<EmptyBody>.none, token: .some(nil))
+        req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        req.httpBody = Data(Self.formEncode(fields).utf8)
+        return try await execute(req)
+    }
+
+    /// Sign in to a federated app with an id_token from its IdP, via
+    /// `POST /api/auth/federated/<provider>`. The app verifies the token
+    /// against the IdP's keys and signs the person in as a browser sign-in
+    /// would, workspaces included. `accessToken` lets the app keep reading the
+    /// IdP's userinfo for workspace changes.
+    public func signInFederated(provider: String, idToken: String, accessToken: String? = nil) async throws -> SessionResponse {
+        let resp: SessionResponse = try await request(
+            .post,
+            "/api/auth/federated/\(percentEncode(provider))",
+            body: FederatedSignInRequest(id_token: idToken, access_token: accessToken)
+        )
+        setSession(token: resp.token)
+        return resp
+    }
+
+    static func formEncode(_ fields: [(String, String)]) -> String {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        return fields
+            .map { "\($0.0.addingPercentEncoding(withAllowedCharacters: allowed) ?? "")=\($0.1.addingPercentEncoding(withAllowedCharacters: allowed) ?? "")" }
+            .joined(separator: "&")
     }
 
     /// Resolve the current session — userId, tenantId, roles, isAdmin.

@@ -255,14 +255,34 @@ public struct PasswordSignInRequest: Sendable, Codable {
     }
 }
 
-public struct OAuthGoogleRequest: Sendable, Codable {
+/// Body of `POST /api/auth/native/<apple|google>`.
+public struct NativeIdTokenRequest: Sendable, Codable {
     public var id_token: String
-    public init(id_token: String) { self.id_token = id_token }
+    public var name: String?
+    public init(id_token: String, name: String? = nil) {
+        self.id_token = id_token
+        self.name = name
+    }
 }
 
-public struct OAuthGitHubRequest: Sendable, Codable {
-    public var code: String
-    public init(code: String) { self.code = code }
+/// Body of `POST /api/auth/federated/<provider>`.
+public struct FederatedSignInRequest: Sendable, Codable {
+    public var id_token: String
+    public var access_token: String?
+    public init(id_token: String, access_token: String? = nil) {
+        self.id_token = id_token
+        self.access_token = access_token
+    }
+}
+
+/// An IdP's answer to a token exchange at `/oidc/token`.
+public struct TokenExchangeResponse: Sendable, Codable {
+    public var id_token: String
+    /// Reads the IdP's `/oidc/userinfo`. Lasts an hour.
+    public var access_token: String
+    public var expires_in: Int?
+    public var scope: String?
+    public var issued_token_type: String?
 }
 
 // ---------------------------------------------------------------------------

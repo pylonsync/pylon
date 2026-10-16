@@ -107,6 +107,27 @@ Authorization: Bearer <access_token>
 }
 ```
 
+## Token exchange for native apps
+
+A native app that signs in to the IdP (Sign in with Apple, Google, an email code) can sign in to a client app without a browser. It trades its IdP session for an id_token addressed to the client, with an RFC 8693 token exchange:
+
+```http
+POST /oidc/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=urn:ietf:params:oauth:grant-type:token-exchange
+&client_id=my-app
+&subject_token=<IdP session token>
+&subject_token_type=urn:ietf:params:oauth:token-type:access_token
+&scope=openid email profile orgs
+```
+
+The answer carries `id_token`, `access_token` and `issued_token_type`. `scope` is optional and defaults to `openid email profile orgs`; it must include `openid`.
+
+Token exchange is off for every client. Turn it on per client in `PYLON_OIDC_CLIENTS` with `"token_exchange": true`. The request carries no client secret, because the caller is the person's own device, so enable it only for your own apps. Guest sessions and API keys are refused.
+
+The app then posts the id_token to the client's `POST /api/auth/federated/<provider>` ([Native sign-in](/auth/native#federated-apps)).
+
 ## Userinfo claim projection
 
 `/oidc/userinfo` projects the User row through the same `auth.user.expose` / `auth.user.hide` config that protects `/api/auth/session` from leaking secrets. `passwordHash` and underscore-prefixed fields never reach a downstream service through userinfo.

@@ -32,6 +32,24 @@ Apple gives your app the user's name only on the first sign-in, and never puts i
 
 An account links to an existing user with the same email address. A Google account with an unverified email is refused.
 
+## Federated apps
+
+An app whose users come from another Pylon app acting as its IdP (its `auth.org.federation` provider) cannot use the routes above: they sign in a local user, and the IdP's workspaces never arrive. Sign in to the IdP instead, then:
+
+1. Trade the IdP session for an id_token addressed to the app with a [token exchange](/auth/oidc-provider#token-exchange-for-native-apps).
+2. Post it to the app:
+
+```http
+POST /api/auth/federated/<provider>
+Content-Type: application/json
+
+{ "id_token": "<jwt>", "access_token": "<IdP access token>" }
+```
+
+`<provider>` is the app's OIDC provider name (`PYLON_OAUTH_<NAME>_OIDC_ISSUER`). The app checks the token against the IdP's published keys: signature, issuer, audience (its own client id) and expiry. The email must be verified. The sign-in then runs the same path as the browser callback, including the org federation mirror from the `orgs` claim. The answer is `{ token, user_id, expires_at, provider }`; send the token as `Authorization: Bearer`.
+
+In Swift: `exchangeSession(forClient:)` on a client for the IdP, then `signInFederated(provider:idToken:accessToken:)` on a client for the app.
+
 ## Steam
 
 The game gets a ticket from Steam with `ISteamUser::GetAuthTicketForWebApi(identity)`. Pylon checks the ticket with Steam's `ISteamUserAuth/AuthenticateUserTicket` Web API.

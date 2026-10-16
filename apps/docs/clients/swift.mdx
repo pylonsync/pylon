@@ -133,9 +133,16 @@ let session = try await client.verifyMagicCode(email: "alice@example.com", code:
 // Password
 let session = try await client.signInWithPassword(email: ..., password: ...)
 
-// OAuth (use ASWebAuthenticationSession to capture the callback URL)
+// Sign in with Apple and Google Sign-In: pass the platform's id token.
+// See Native sign-in for the server settings.
+let session = try await client.signInWithApple(idToken: credentialIdentityToken, name: fullName)
 let session = try await client.signInWithGoogle(idToken: idTokenFromGoogleSignIn)
-let session = try await client.signInWithGitHub(code: codeFromCallback)
+
+// A federated app (its users come from another Pylon app acting as IdP):
+// sign in to the IdP, trade that session for an id_token addressed to the
+// app, then sign in to the app with it.
+let exchanged = try await idpClient.exchangeSession(forClient: "my-app")
+let session = try await appClient.signInFederated(provider: "stack0", idToken: exchanged.id_token, accessToken: exchanged.access_token)
 
 // Resolve current session
 let me = try await client.me()

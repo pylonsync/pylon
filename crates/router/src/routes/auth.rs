@@ -2919,6 +2919,208 @@ pub(crate) fn handle(
         );
     }
 
+    // POST /api/auth/federated/<provider> — sign in to a federated app with
+    // an id_token from its Pylon IdP, without a browser. A native app signs
+    // in to the IdP (Apple, Google, email code), trades that session at the
+    // IdP's `/oidc/token` (token exchange) for an id_token addressed to this
+    // app's client id, and posts it here.
+    //
+    // The token is verified against the IdP's published keys: signature,
+    // `iss` (the issuer's discovery document), `aud` (this app's client
+    // id), expiry. The sign-in then runs the same path as the browser
+    // callback, including the org federation mirror from the `orgs` claim,
+    // so the user lands with the same workspaces as on the web.
+    //
+    // Body: { "id_token": "<jwt>", "access_token"?: "<IdP access token>" }.
+    // The access token is stored on the account link so the periodic org
+    // resync can read the IdP's userinfo, as after a browser sign-in.
+    //
+    // 404 unless `<provider>` is configured with PYLON_OAUTH_<NAME>_OIDC_ISSUER.
+    if let Some(provider_name) = url
+        .strip_prefix("/api/auth/federated/")
+        .filter(|p| !p.is_empty() && !p.contains('/'))
+    {
+        if method != HttpMethod::Post {
+            return Some((405, json_error("METHOD_NOT_ALLOWED", "POST only")));
+        }
+        let registry = pylon_auth::OAuthRegistry::shared();
+        let (client_id, issuer) = match registry
+            .get(provider_name)
+            .and_then(|c| c.oidc_issuer.clone().map(|i| (c.client_id.clone(), i)))
+        {
+            Some(found) => found,
+            None => {
+                return Some((
+                    404,
+                    json_error(
+                        "PROVIDER_NOT_FOUND",
+                        &format!("\"{provider_name}\" is not an OIDC provider on this server"),
+                    ),
+                ));
+            }
+        };
+        let rl = pylon_auth::rate_limit::AuthRateLimiter::shared();
+        if let pylon_auth::rate_limit::RateLimitDecision::Deny { retry_after_secs } = rl.check(
+            pylon_auth::rate_limit::AuthBucket::Verify,
+            ctx.peer_ip,
+            None,
+        ) {
+            return Some((
+                429,
+                json_error_with_hint(
+                    "RATE_LIMITED",
+                    "Too many sign-in attempts",
+                    &format!("Try again in {retry_after_secs}s"),
+                ),
+            ));
+        }
+        let data: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => {
+                return Some((
+                    400,
+                    json_error_safe(
+                        "INVALID_JSON",
+                        "Invalid request body",
+                        &format!("Invalid JSON: {e}"),
+                    ),
+                ));
+            }
+        };
+        let id_token = match data.get("id_token").and_then(|v| v.as_str()) {
+            Some(t) if !t.is_empty() => t,
+            _ => return Some((400, json_error("MISSING_FIELD", "id_token is required"))),
+        };
+        let spec = match pylon_auth::provider::oidc_cache::resolve(&issuer) {
+            Ok(pylon_auth::provider::ResolvedSpec::Oidc(spec)) => spec,
+            Ok(_) | Err(_) => {
+                tracing::warn!("[auth] federated {provider_name}: discovery for {issuer} failed");
+                return Some((
+                    502,
+                    json_error(
+                        "PROVIDER_KEYS_UNAVAILABLE",
+                        "Could not load the identity provider's settings; try again",
+                    ),
+                ));
+            }
+        };
+        let Some(jwks_uri) = spec.jwks_uri.clone() else {
+            return Some((
+                502,
+                json_error(
+                    "PROVIDER_KEYS_UNAVAILABLE",
+                    "The identity provider publishes no signing keys",
+                ),
+            ));
+        };
+        let claims = match pylon_auth::native_id_token::verify_issuer_id_token(
+            &spec.issuer,
+            &jwks_uri,
+            id_token,
+            std::slice::from_ref(&client_id),
+        ) {
+            Ok(c) => c,
+            Err(pylon_auth::native_id_token::NativeTokenError::Jwks(msg)) => {
+                tracing::warn!("[auth] federated {provider_name} JWKS unavailable: {msg}");
+                return Some((
+                    502,
+                    json_error(
+                        "PROVIDER_KEYS_UNAVAILABLE",
+                        "Could not load the identity provider's signing keys; try again",
+                    ),
+                ));
+            }
+            Err(err) => {
+                tracing::warn!("[auth] federated {provider_name} id_token rejected: {err}");
+                return Some((
+                    401,
+                    json_error("INVALID_ID_TOKEN", "The sign-in token was not accepted"),
+                ));
+            }
+        };
+        let sub = claims
+            .get("sub")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let email = claims
+            .get("email")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let email_verified = matches!(
+            claims.get("email_verified"),
+            Some(serde_json::Value::Bool(true))
+        );
+        if sub.is_empty() || email.is_empty() {
+            return Some((
+                401,
+                json_error(
+                    "INVALID_ID_TOKEN",
+                    "The sign-in token has no subject or email",
+                ),
+            ));
+        }
+        // An unverified address must not join an existing account by email.
+        if !email_verified {
+            return Some((
+                401,
+                json_error(
+                    "EMAIL_NOT_VERIFIED",
+                    "The account's email address is not verified",
+                ),
+            ));
+        }
+        let userinfo = pylon_auth::UserInfo {
+            provider: provider_name.to_string(),
+            provider_account_id: sub.to_string(),
+            email: email.to_string(),
+            name: claims
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            avatar_url: claims
+                .get("picture")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            orgs: pylon_auth::parse_external_orgs(claims.get("orgs")),
+        };
+        let tokens = pylon_auth::TokenSet {
+            access_token: data
+                .get("access_token")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            refresh_token: None,
+            id_token: Some(id_token.to_string()),
+            expires_at: None,
+            scope: None,
+        };
+        return Some(
+            match crate::complete_login_from_userinfo(ctx, provider_name, &userinfo, &tokens) {
+                Ok((user_id, session)) => {
+                    complete_sign_in(
+                        ctx,
+                        &user_id,
+                        &format!("oauth:{provider_name}"),
+                        &[],
+                        GuestMerge::Caller,
+                    );
+                    ctx.maybe_set_session_cookie(&session.token);
+                    (
+                        200,
+                        serde_json::json!({
+                            "token": session.token,
+                            "user_id": user_id,
+                            "expires_at": session.expires_at,
+                            "provider": provider_name,
+                        })
+                        .to_string(),
+                    )
+                }
+                Err(err) => (err.status, json_error(err.code, &err.message)),
+            },
+        );
+    }
+
     // POST /api/auth/native/<apple|google> — sign in with an id_token the
     // platform SDK handed a native app (Sign in with Apple, Google
     // Sign-In). The token never went through a back-channel exchange, so
@@ -6630,12 +6832,15 @@ pub(crate) fn handle(
         // RFC 6749 §4.1.3. Reuse the existing query-string parser.
         let form = crate::parse_query(body);
         let grant_type = form.get("grant_type").map(String::as_str).unwrap_or("");
+        if grant_type == pylon_auth::oidc_provider::TOKEN_EXCHANGE_GRANT {
+            return Some(oidc_token_exchange(ctx, &provider, &form));
+        }
         if grant_type != "authorization_code" {
             return Some((
                 400,
                 json_error(
                     "unsupported_grant_type",
-                    "pylon only supports grant_type=authorization_code",
+                    "pylon supports grant_type=authorization_code and token exchange (RFC 8693)",
                 ),
             ));
         }
@@ -6699,92 +6904,14 @@ pub(crate) fn handle(
             return Some((400, json_error("invalid_grant", "PKCE verifier mismatch")));
         }
 
-        // Mint id_token + access_token.
-        let issuer = std::env::var("PYLON_OIDC_ISSUER").unwrap_or_default();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let id_token_ttl: u64 = 600; // 10 min
-        let access_token_ttl: u64 = 3600; // 1 hour
-
-        // Pull email + name from the user row when scope requested.
-        let user_entity = &ctx.store.manifest().auth.user.entity;
-        let user_row = ctx
-            .store
-            .get_by_id(user_entity, &stored.user_id)
-            .ok()
-            .flatten();
-        let email = user_row
-            .as_ref()
-            .and_then(|r| r.get("email"))
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let name = user_row
-            .as_ref()
-            .and_then(|r| r.get("displayName").or_else(|| r.get("name")))
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let email_verified = oidc_email_is_verified(user_row.as_ref());
-
-        let mut claims = serde_json::Map::new();
-        claims.insert("iss".into(), serde_json::Value::String(issuer));
-        claims.insert(
-            "sub".into(),
-            serde_json::Value::String(stored.user_id.clone()),
-        );
-        claims.insert(
-            "aud".into(),
-            serde_json::Value::String(client.client_id.clone()),
-        );
-        claims.insert(
-            "exp".into(),
-            serde_json::Value::Number((now + id_token_ttl).into()),
-        );
-        claims.insert("iat".into(), serde_json::Value::Number(now.into()));
-        if let Some(n) = stored.nonce.as_ref() {
-            claims.insert("nonce".into(), serde_json::Value::String(n.clone()));
-        }
-        if stored.scopes.iter().any(|s| s == "email") {
-            insert_oidc_email_claims(&mut claims, &email, email_verified);
-        }
-        if stored.scopes.iter().any(|s| s == "profile") {
-            if let Some(n) = name.as_ref() {
-                claims.insert("name".into(), serde_json::Value::String(n.clone()));
-            }
-        }
-        if stored.scopes.iter().any(|s| s == "orgs") {
-            claims.insert("orgs".into(), oidc_orgs_claim(ctx, &stored.user_id));
-        }
-        let id_token = match provider
-            .keystore
-            .sign_jwt(&serde_json::Value::Object(claims))
-        {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::error!("[oidc] id_token signing failed: {e}");
-                return Some((500, json_error("server_error", "id_token signing failed")));
-            }
-        };
-        let access_token = pylon_auth::oidc_provider::mint_random_token();
-        provider
-            .access_tokens
-            .put(pylon_auth::oidc_provider::AccessToken {
-                token: access_token.clone(),
-                user_id: stored.user_id.clone(),
-                client_id: client.client_id.clone(),
-                scopes: stored.scopes.clone(),
-                expires_at: now + access_token_ttl,
-            });
-        let body = serde_json::json!({
-            "access_token": access_token,
-            "token_type": "Bearer",
-            "expires_in": access_token_ttl,
-            "id_token": id_token,
-            "scope": stored.scopes.join(" "),
-        });
-        return Some((200, body.to_string()));
+        return Some(mint_oidc_tokens(
+            ctx,
+            &provider,
+            &client.client_id,
+            &stored.user_id,
+            &stored.scopes,
+            stored.nonce.as_deref(),
+        ));
     }
 
     if url == "/oidc/userinfo" && method == HttpMethod::Get {
@@ -8042,4 +8169,201 @@ fn newest_avatar(accounts: Vec<pylon_auth::Account>) -> Option<String> {
         .filter(|a| a.avatar_url.as_deref().is_some_and(|u| !u.is_empty()))
         .max_by_key(|a| a.updated_at)
         .and_then(|a| a.avatar_url)
+}
+
+/// Mint the id_token (and the opaque access token for `/oidc/userinfo`)
+/// this IdP returns from `/oidc/token`, for either grant.
+#[cfg(not(target_arch = "wasm32"))]
+fn mint_oidc_tokens(
+    ctx: &RouterContext,
+    provider: &pylon_auth::oidc_provider::OidcProvider,
+    client_id: &str,
+    user_id: &str,
+    scopes: &[String],
+    nonce: Option<&str>,
+) -> (u16, String) {
+    let issuer = std::env::var("PYLON_OIDC_ISSUER").unwrap_or_default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let id_token_ttl: u64 = 600; // 10 min
+    let access_token_ttl: u64 = 3600; // 1 hour
+
+    // Pull email + name from the user row when scope requested.
+    let user_entity = &ctx.store.manifest().auth.user.entity;
+    let user_row = ctx.store.get_by_id(user_entity, user_id).ok().flatten();
+    let email = user_row
+        .as_ref()
+        .and_then(|r| r.get("email"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let name = user_row
+        .as_ref()
+        .and_then(|r| r.get("displayName").or_else(|| r.get("name")))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let email_verified = oidc_email_is_verified(user_row.as_ref());
+
+    let mut claims = serde_json::Map::new();
+    claims.insert("iss".into(), serde_json::Value::String(issuer));
+    claims.insert("sub".into(), serde_json::Value::String(user_id.to_string()));
+    claims.insert(
+        "aud".into(),
+        serde_json::Value::String(client_id.to_string()),
+    );
+    claims.insert(
+        "exp".into(),
+        serde_json::Value::Number((now + id_token_ttl).into()),
+    );
+    claims.insert("iat".into(), serde_json::Value::Number(now.into()));
+    if let Some(n) = nonce {
+        claims.insert("nonce".into(), serde_json::Value::String(n.to_string()));
+    }
+    if scopes.iter().any(|s| s == "email") {
+        insert_oidc_email_claims(&mut claims, &email, email_verified);
+    }
+    if scopes.iter().any(|s| s == "profile") {
+        if let Some(n) = name.as_ref() {
+            claims.insert("name".into(), serde_json::Value::String(n.clone()));
+        }
+    }
+    if scopes.iter().any(|s| s == "orgs") {
+        claims.insert("orgs".into(), oidc_orgs_claim(ctx, user_id));
+    }
+    let id_token = match provider
+        .keystore
+        .sign_jwt(&serde_json::Value::Object(claims))
+    {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("[oidc] id_token signing failed: {e}");
+            return (500, json_error("server_error", "id_token signing failed"));
+        }
+    };
+    let access_token = pylon_auth::oidc_provider::mint_random_token();
+    provider
+        .access_tokens
+        .put(pylon_auth::oidc_provider::AccessToken {
+            token: access_token.clone(),
+            user_id: user_id.to_string(),
+            client_id: client_id.to_string(),
+            scopes: scopes.to_vec(),
+            expires_at: now + access_token_ttl,
+        });
+    let body = serde_json::json!({
+        "access_token": access_token,
+        "token_type": "Bearer",
+        "expires_in": access_token_ttl,
+        "id_token": id_token,
+        "scope": scopes.join(" "),
+    });
+    (200, body.to_string())
+}
+
+/// `POST /oidc/token` with `grant_type` = token exchange (RFC 8693): a
+/// native app that signed in to this IdP (Apple, Google, email code) trades
+/// that session for an id_token addressed to a first-party client, so it
+/// can sign in to the client app without a browser
+/// (`POST /api/auth/federated/<provider>` on the client).
+///
+/// Form fields: `client_id`, `subject_token` (a session token from this
+/// IdP), `subject_token_type` = `urn:ietf:params:oauth:token-type:access_token`,
+/// optional `scope`. The client must set `token_exchange: true` in
+/// `PYLON_OIDC_CLIENTS`.
+#[cfg(not(target_arch = "wasm32"))]
+fn oidc_token_exchange(
+    ctx: &RouterContext,
+    provider: &pylon_auth::oidc_provider::OidcProvider,
+    form: &std::collections::HashMap<String, String>,
+) -> (u16, String) {
+    use pylon_auth::oidc_provider as op;
+    let rl = pylon_auth::rate_limit::AuthRateLimiter::shared();
+    if let pylon_auth::rate_limit::RateLimitDecision::Deny { retry_after_secs } = rl.check(
+        pylon_auth::rate_limit::AuthBucket::Verify,
+        ctx.peer_ip,
+        None,
+    ) {
+        return (
+            429,
+            json_error_with_hint(
+                "slow_down",
+                "Too many token requests",
+                &format!("Try again in {retry_after_secs}s"),
+            ),
+        );
+    }
+    let client_id = form.get("client_id").map(String::as_str).unwrap_or("");
+    let client = match provider.find_client(client_id) {
+        Some(c) => c,
+        None => return (401, json_error("invalid_client", "unknown client_id")),
+    };
+    if !client.token_exchange {
+        return (
+            400,
+            json_error(
+                "unauthorized_client",
+                "token exchange is not enabled for this client",
+            ),
+        );
+    }
+    if form.get("subject_token_type").map(String::as_str) != Some(op::ACCESS_TOKEN_TYPE) {
+        return (
+            400,
+            json_error(
+                "invalid_request",
+                "subject_token_type must be urn:ietf:params:oauth:token-type:access_token",
+            ),
+        );
+    }
+    let subject = form.get("subject_token").map(String::as_str).unwrap_or("");
+    // A session on this IdP. API keys are not sessions, so they never
+    // resolve here; guests are refused below.
+    let session = match ctx.session_store.get(subject) {
+        Some(s) => s,
+        None => {
+            return (
+                400,
+                json_error("invalid_grant", "subject_token is not a valid session"),
+            )
+        }
+    };
+    let auth = session.to_auth_context();
+    if !auth.is_authenticated() {
+        return (
+            400,
+            json_error("invalid_grant", "a guest session cannot be exchanged"),
+        );
+    }
+    let scopes = match op::exchange_scopes(form.get("scope").map(String::as_str)) {
+        Some(s) => s,
+        None => {
+            return (
+                400,
+                json_error("invalid_scope", "scope must include openid"),
+            )
+        }
+    };
+    let (status, body) = mint_oidc_tokens(
+        ctx,
+        provider,
+        &client.client_id,
+        &session.user_id,
+        &scopes,
+        None,
+    );
+    if status != 200 {
+        return (status, body);
+    }
+    // RFC 8693 §2.2.1: say what was issued. The id_token is the token the
+    // client app signs in with; access_token reads /oidc/userinfo.
+    let mut value: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "issued_token_type".into(),
+            serde_json::Value::String(op::ACCESS_TOKEN_TYPE.into()),
+        );
+    }
+    (200, value.to_string())
 }

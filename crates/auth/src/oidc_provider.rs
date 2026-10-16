@@ -418,6 +418,32 @@ fn b64url(bytes: &[u8]) -> String {
 // Registered clients + PKCE
 // ---------------------------------------------------------------------------
 
+/// RFC 8693 grant type for trading an IdP session for a client's id_token.
+pub const TOKEN_EXCHANGE_GRANT: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
+/// RFC 8693 token type of the subject token: a session on this IdP.
+pub const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
+/// The scopes a token exchange may ask for. `openid` is required.
+pub const EXCHANGE_SCOPES: &[&str] = &["openid", "email", "profile", "orgs"];
+
+/// The scopes for a token exchange: the requested ones this IdP knows, or
+/// all of [`EXCHANGE_SCOPES`] when none were requested. `None` when the
+/// request leaves out `openid`.
+pub fn exchange_scopes(requested: Option<&str>) -> Option<Vec<String>> {
+    let scopes: Vec<String> = match requested.map(str::trim).filter(|s| !s.is_empty()) {
+        None => EXCHANGE_SCOPES.iter().map(|s| s.to_string()).collect(),
+        Some(list) => {
+            let mut out: Vec<String> = Vec::new();
+            for s in list.split_whitespace() {
+                if EXCHANGE_SCOPES.contains(&s) && !out.iter().any(|o| o == s) {
+                    out.push(s.to_string());
+                }
+            }
+            out
+        }
+    };
+    scopes.iter().any(|s| s == "openid").then_some(scopes)
+}
+
 /// One OIDC client registered with this pylon instance. The pylon
 /// manifest's `auth.oidc.clients` array deserializes into a Vec of
 /// these. Confidential clients have a `client_secret`; public
@@ -434,6 +460,15 @@ pub struct OidcClient {
     #[serde(default)]
     pub client_secret: Option<String>,
     pub redirect_uris: Vec<String>,
+    /// Allow RFC 8693 token exchange for this client: a caller holding a
+    /// session on this IdP (a native app that signed in here with Apple,
+    /// Google or an email code) trades it at `/oidc/token` for an id_token
+    /// addressed to this client, then signs in to the client app with
+    /// `POST /api/auth/federated/<provider>`. No client secret is involved,
+    /// because the caller is the user's own device, so turn it on only for
+    /// first-party apps. Default off.
+    #[serde(default)]
+    pub token_exchange: bool,
 }
 
 impl OidcClient {
@@ -859,11 +894,35 @@ mod tests {
     }
 
     #[test]
+    fn exchange_scopes_default_to_all_and_require_openid() {
+        assert_eq!(
+            exchange_scopes(None).unwrap(),
+            vec!["openid", "email", "profile", "orgs"]
+        );
+        assert_eq!(
+            exchange_scopes(Some("openid orgs admin orgs")).unwrap(),
+            vec!["openid", "orgs"]
+        );
+        assert!(exchange_scopes(Some("email orgs")).is_none());
+    }
+
+    #[test]
+    fn token_exchange_is_off_unless_the_client_turns_it_on() {
+        let clients: Vec<OidcClient> = serde_json::from_str(
+            r#"[{"client_id":"a","redirect_uris":[]},{"client_id":"b","redirect_uris":[],"token_exchange":true}]"#,
+        )
+        .unwrap();
+        assert!(!clients[0].token_exchange);
+        assert!(clients[1].token_exchange);
+    }
+
+    #[test]
     fn oidc_client_public_client_authenticates_without_secret() {
         let c = OidcClient {
             client_id: "c1".into(),
             client_secret: None,
             redirect_uris: vec!["https://app/cb".into()],
+            token_exchange: false,
         };
         assert!(c.authenticate(None));
         assert!(c.authenticate(Some("anything")));
@@ -875,6 +934,7 @@ mod tests {
             client_id: "c1".into(),
             client_secret: Some("shh".into()),
             redirect_uris: vec![],
+            token_exchange: false,
         };
         assert!(c.authenticate(Some("shh")));
         assert!(!c.authenticate(Some("wrong")));
@@ -926,6 +986,7 @@ mod tests {
             client_id: "c1".into(),
             client_secret: None,
             redirect_uris: vec!["https://app.example.com/cb".into()],
+            token_exchange: false,
         };
         assert!(c.is_registered_redirect("https://app.example.com/cb"));
         // Path-suffix variations rejected — open-redirect prevention.

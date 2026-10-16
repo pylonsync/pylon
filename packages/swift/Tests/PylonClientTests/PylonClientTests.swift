@@ -33,6 +33,66 @@ final class PylonClientTests: XCTestCase {
         XCTAssertEqual(storage.get(StorageKeys.token()), "tok_abc")
     }
 
+    func testAppleAndGoogleSignInUseTheNativeRoutes() async throws {
+        let transport = MockTransport()
+        transport.setHandler { req in
+            let body = try JSONSerialization.jsonObject(with: req.httpBody ?? Data()) as? [String: Any]
+            switch req.url?.path {
+            case "/api/auth/native/apple":
+                XCTAssertEqual(body?["id_token"] as? String, "apple-jwt")
+                XCTAssertEqual(body?["name"] as? String, "Jane Doe")
+                return try jsonResponse(["token": "tok_apple", "user_id": "u1"])
+            case "/api/auth/native/google":
+                XCTAssertEqual(body?["id_token"] as? String, "google-jwt")
+                return try jsonResponse(["token": "tok_google", "user_id": "u1"])
+            default:
+                XCTFail("Unexpected path: \(req.url?.path ?? "")")
+                return (404, Data())
+            }
+        }
+        let storage = MemoryStorage()
+        let client = makeClient(transport: transport, storage: storage)
+        _ = try await client.signInWithApple(idToken: "apple-jwt", name: "Jane Doe")
+        XCTAssertEqual(storage.get(StorageKeys.token()), "tok_apple")
+        _ = try await client.signInWithGoogle(idToken: "google-jwt")
+        XCTAssertEqual(storage.get(StorageKeys.token()), "tok_google")
+    }
+
+    func testExchangeSessionPostsAnRFC8693Form() async throws {
+        let transport = MockTransport()
+        transport.setHandler { req in
+            XCTAssertEqual(req.url?.path, "/oidc/token")
+            XCTAssertEqual(req.value(forHTTPHeaderField: "Content-Type"), "application/x-www-form-urlencoded")
+            XCTAssertNil(req.value(forHTTPHeaderField: "Authorization"), "the session goes in the form, not a header")
+            let form = String(data: req.httpBody ?? Data(), encoding: .utf8) ?? ""
+            XCTAssertTrue(form.contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange"), form)
+            XCTAssertTrue(form.contains("client_id=agents"), form)
+            XCTAssertTrue(form.contains("subject_token=tok_idp"), form)
+            return try jsonResponse(["id_token": "jwt", "access_token": "at", "expires_in": 3600])
+        }
+        let storage = MemoryStorage()
+        let client = makeClient(transport: transport, storage: storage)
+        await client.setSession(token: "tok_idp")
+        let exchanged = try await client.exchangeSession(forClient: "agents")
+        XCTAssertEqual(exchanged.id_token, "jwt")
+        XCTAssertEqual(exchanged.access_token, "at")
+    }
+
+    func testFederatedSignInStoresTheAppSession() async throws {
+        let transport = MockTransport()
+        transport.setHandler { req in
+            XCTAssertEqual(req.url?.path, "/api/auth/federated/stack0")
+            let body = try JSONSerialization.jsonObject(with: req.httpBody ?? Data()) as? [String: Any]
+            XCTAssertEqual(body?["id_token"] as? String, "jwt")
+            XCTAssertEqual(body?["access_token"] as? String, "at")
+            return try jsonResponse(["token": "tok_app", "user_id": "u1"])
+        }
+        let storage = MemoryStorage()
+        let client = makeClient(transport: transport, storage: storage)
+        _ = try await client.signInFederated(provider: "stack0", idToken: "jwt", accessToken: "at")
+        XCTAssertEqual(storage.get(StorageKeys.token()), "tok_app")
+    }
+
     func testLogoutRevokesTheSessionAndForgetsTheToken() async throws {
         let transport = MockTransport()
         transport.setHandler { req in
