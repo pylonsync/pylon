@@ -2,13 +2,8 @@
   "name": "@pylonsync/cli",
   "version": "0.22.34",
   "description": "Pylon CLI — `pylon dev`, `pylon start`, `pylon migrate`, etc. Bundles the native binary for your platform via optionalDependencies, no postinstall script required.",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE.md",
   "homepage": "https://pylonsync.com",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/pylonsync/pylon.git",
-    "directory": "packages/cli"
-  },
   "publishConfig": {
     "access": "public"
   },
@@ -19,7 +14,8 @@
   },
   "files": [
     "bin/pylon.js",
-    "README.md"
+    "README.md",
+    "LICENSE.md"
   ],
   "engines": {
     "node": ">=18"

@@ -253,5 +253,16 @@ notes. **Do not file security issues publicly.** Email security@pylonsync.com.
 
 ## License
 
-Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE)
-at your option.
+Pylon's server and CLI are licensed under the
+[Functional Source License 1.1, Apache 2.0 Future License](LICENSE.md)
+from version 0.22.35. You may use them for anything except a product or
+service that competes with Pylon or with a product Campbell Venture
+Studio, LLC offers using Pylon. Each version becomes available under
+Apache 2.0 two years after its release.
+
+The libraries apps import are MIT ([LICENSE-MIT](LICENSE-MIT)): the npm
+packages under `packages/` other than the CLI, the Swift and C# SDKs,
+`pylon-replication` and `pylon-shard-guest`.
+
+Versions up to 0.22.34 were released under MIT or Apache-2.0, and stay
+under those terms.

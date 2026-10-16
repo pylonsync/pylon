@@ -19,7 +19,7 @@ options:
 
 packages:
   pylon:
-    url: https://github.com/pylonsync/pylon.git
+    url: https://github.com/pylonsync/pylon-swift.git
     from: "__PYLON_VERSION__"
 
 targets:

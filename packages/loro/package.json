@@ -46,5 +46,6 @@
     "prosemirror-state": {
       "optional": true
     }
-  }
+  },
+  "license": "MIT"
 }

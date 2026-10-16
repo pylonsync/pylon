@@ -19,14 +19,14 @@ let package = Package(
 		.macOS(.v13),
 	],
 	dependencies: [
-		.package(url: "https://github.com/pylonsync/pylon.git", from: "0.3.0"),
+		.package(url: "https://github.com/pylonsync/pylon-swift.git", from: "0.3.0"),
 	],
 	targets: [
 		.executableTarget(
 			name: "__APP_NAME_PASCAL__",
 			dependencies: [
-				.product(name: "PylonClient", package: "pylon"),
-				.product(name: "PylonSwiftUI", package: "pylon"),
+				.product(name: "PylonClient", package: "pylon-swift"),
+				.product(name: "PylonSwiftUI", package: "pylon-swift"),
 			],
 			path: "Sources/__APP_NAME_PASCAL__"
 		),

@@ -15,7 +15,7 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$Repo = 'pylonsync/pylon'
+$Repo = 'pylonsync/pylon-releases'
 $InstallPrefix = if ($env:PYLON_INSTALL) { $env:PYLON_INSTALL } else { Join-Path $env:USERPROFILE '.pylon' }
 $BinDir = Join-Path $InstallPrefix 'bin'
 

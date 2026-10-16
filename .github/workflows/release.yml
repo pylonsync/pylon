@@ -131,7 +131,7 @@ jobs:
     runs-on: ubuntu-24.04
     # NPM_TOKEN lives under the `Production` environment (not as a
     # repository secret). Declaring the environment here is what grants
-    # this job access. Same story for publish-crates below.
+    # this job access.
     environment: Production
     permissions:
       contents: read
@@ -369,78 +369,61 @@ jobs:
 
           rm -f .npmrc
 
-  # ---------------------------------------------------------------
-  # crates.io publish. katyo/publish-crates walks the workspace,
-  # sorts topologically, skips unchanged crates, honors publish=false.
-  #
-  # CURRENTLY DISABLED. `cargo publish` runs a verification build
-  # against the published versions of every dependency — it ignores
-  # `[patch.crates-io]` in the workspace root. Our patch points
-  # `samael` at vendor/samael/ to fix the libxmlsec 1.2.x vs 1.3.x
-  # `xmlSecSize` type mismatch (u32 vs usize), but the publish
-  # verifier sees plain crates.io samael 0.0.20 and fails on
-  # `predigest_xml_from_raw_buffer(data_ptr, data_size)` —
-  # `expected usize, found u32`.
-  #
-  # Re-enable when ANY of these is true:
-  #   - samael upstream merges a fix that handles both libxmlsec1
-  #     versions (track the upstream PR / issue)
-  #   - we fork samael and publish under our own crate name, then
-  #     swap the dependency in pylon-auth to that fork
-  #   - we replace samael's xmlsec feature with an in-process
-  #     XMLDSig verifier that doesn't depend on system libxmlsec1
-  #
-  # Until then: the binary + npm + Docker publish paths still ship,
-  # which is what users actually consume. Crates.io publication is
-  # for downstream Rust consumers embedding pylon as a library —
-  # zero of those exist today.
-  # ---------------------------------------------------------------
-  publish-crates:
-    name: Publish crates.io
+  # The server crates are never published: the source repo is private and
+  # they are licensed under the FSL (LICENSE.md). Only the MIT crates apps
+  # link are, below.
+
+  # Public mirrors of the parts of this private repo that people fetch
+  # straight from git: the Swift SDK (SwiftPM), the C# SDK (Unity's package
+  # manager) and the example apps the docs link to. Each release copies the
+  # tracked files of the folder to its public repo and tags the version
+  # without the "v" (SwiftPM's and Unity's form). MIRROR_REPOS_TOKEN needs
+  # contents:write on the three repos; RELEASES_REPO_TOKEN works if it covers
+  # them.
+  publish-mirrors:
+    name: Mirror ${{ matrix.folder }}
     needs: verify
     runs-on: ubuntu-24.04
     environment: Production
-    if: false # see block comment above; re-enable when samael upstream is fixed
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - folder: packages/swift
+            repo: pylonsync/pylon-swift
+          - folder: packages/csharp
+            repo: pylonsync/pylon-csharp
+          - folder: examples
+            repo: pylonsync/pylon-examples
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # samael's xmlsec feature requires libxml2 + libxmlsec1 dev
-      # headers. publish-crates runs `cargo publish --dry-run`-style
-      # verification builds, which need these to compile pylon-auth.
-      # Ubuntu 24.04 (noble) ships libxmlsec1 1.3.x — matches what
-      # samael 0.0.20's bindgen expects.
-      - name: Install xmlsec deps
+      - name: Copy ${{ matrix.folder }} to ${{ matrix.repo }}
+        env:
+          TOKEN: ${{ secrets.MIRROR_REPOS_TOKEN || secrets.RELEASES_REPO_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          FOLDER: ${{ matrix.folder }}
+          REPO: ${{ matrix.repo }}
         run: |
-          sudo apt-get update && sudo apt-get install -y \
-            libxml2-dev libxmlsec1-dev libxmlsec1-openssl \
-            libclang-dev clang
-      # `pylon-studio-api`'s build.rs requires `web/dist/index.html` to
-      # exist (the Studio UI bundle). dist/ is gitignored, so CI must
-      # build it before any cargo step runs. Without this, the entire
-      # workspace fails to compile.
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.3.14"
-      - name: Build Studio UI bundle
-        working-directory: crates/studio_api/web
-        run: bun install --frozen-lockfile && bun run build
-      - uses: katyo/publish-crates@v2
-        with:
-          registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-          ignore-unpublished-changes: true
-          check-repo: false
-          # Studio UI bundle (`crates/studio_api/web/dist/`) is built
-          # in the previous step but is gitignored — the workspace
-          # is therefore "dirty" from cargo's perspective. Allow it,
-          # otherwise pylon-studio-api never publishes.
-          args: "--allow-dirty"
+          version="${TAG#v}"
+          git clone "https://x-access-token:${TOKEN}@github.com/${REPO}.git" mirror
+          if git -C mirror ls-remote --tags origin "refs/tags/${version}" | grep -q .; then
+            echo "${version} is already mirrored to ${REPO}"
+            exit 0
+          fi
+          git -C mirror rm -r -q --ignore-unmatch -- .
+          depth=$(echo "$FOLDER" | awk -F/ '{print NF}')
+          git archive HEAD "$FOLDER" | tar -x --strip-components="$depth" -C mirror
+          cd mirror
+          git config user.name "pylon-release"
+          git config user.email "release@pylonsync.com"
+          git add -A
+          git diff --cached --quiet || git commit -q -m "Pylon ${version}"
+          git tag -a "${version}" -m "Pylon ${version}"
+          git push origin HEAD:main "refs/tags/${version}"
 
   # pylon-replication and pylon-shard-guest: the crates apps use to write
-  # WebAssembly shard logic. Published on their own because the workspace
-  # publish above is off: they depend only on serde crates, so the samael
-  # problem does not reach them. pylon-replication first: the guest crate
-  # depends on it.
+  # WebAssembly shard logic. They are MIT and the only crates published.
+  # pylon-replication first: the guest crate depends on it.
   publish-shard-guest:
     name: Publish pylon-replication + pylon-shard-guest
     needs: verify

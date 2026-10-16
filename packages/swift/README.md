@@ -1,6 +1,6 @@
 # pylon-swift
 
-Native Swift SDK for [Pylon](https://github.com/pylonsync/pylon). Drop-in
+Native Swift SDK for [Pylon](https://pylonsync.com). Drop-in
 parity with the TypeScript client (`@pylonsync/sync` + `@pylonsync/react`):
 auth, entity CRUD, server functions, file uploads, real-time sync with an
 offline-safe write queue, SwiftUI hooks, and Loro CRDT subscriptions via
@@ -23,17 +23,17 @@ Pylon is the open-source application framework from [Stack0](https://stack0.dev)
 In `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/pylonsync/pylon.git", from: "0.3.0"),
+.package(url: "https://github.com/pylonsync/pylon-swift.git", from: "0.3.0"),
 ```
 
 Then per-target:
 
 ```swift
 .target(name: "MyApp", dependencies: [
-    .product(name: "PylonClient",   package: "pylon"),
-    .product(name: "PylonSync",     package: "pylon"),
-    .product(name: "PylonRealtime", package: "pylon"),
-    .product(name: "PylonSwiftUI",  package: "pylon"),  // optional
+    .product(name: "PylonClient",   package: "pylon-swift"),
+    .product(name: "PylonSync",     package: "pylon-swift"),
+    .product(name: "PylonRealtime", package: "pylon-swift"),
+    .product(name: "PylonSwiftUI",  package: "pylon-swift"),  // optional
 ])
 ```
 

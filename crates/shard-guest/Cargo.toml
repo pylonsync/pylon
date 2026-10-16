@@ -2,7 +2,8 @@
 name = "pylon-shard-guest"
 description = "Write Pylon realtime shard logic in Rust and compile it to WebAssembly."
 edition.workspace = true
-license.workspace = true
+# MIT, unlike the rest of the workspace: apps link this crate.
+license = "MIT"
 homepage.workspace = true
 repository.workspace = true
 keywords = ["pylon", "realtime", "game", "wasm", "shard"]

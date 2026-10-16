@@ -17,6 +17,8 @@
   },
   "files": [
     "src",
-    "dist"
-  ]
+    "dist",
+    "LICENSE"
+  ],
+  "license": "MIT"
 }

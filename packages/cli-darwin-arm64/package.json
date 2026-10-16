@@ -2,13 +2,8 @@
   "name": "@pylonsync/cli-darwin-arm64",
   "version": "0.22.34",
   "description": "Pylon CLI binary for darwin-arm64. Installed automatically by @pylonsync/cli on Apple Silicon Macs.",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE.md",
   "homepage": "https://pylonsync.com",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/pylonsync/pylon.git",
-    "directory": "packages/cli-darwin-arm64"
-  },
   "publishConfig": {
     "access": "public"
   },
@@ -21,7 +16,8 @@
   "files": [
     "bin/pylon",
     "bin/lib",
-    "README.md"
+    "README.md",
+    "LICENSE.md"
   ],
   "engines": {
     "node": ">=18"

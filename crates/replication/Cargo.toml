@@ -2,7 +2,8 @@
 name = "pylon-replication"
 description = "Pylon realtime entity replication: the entity store, change log, and frame format shared by the server and WebAssembly shard modules."
 edition.workspace = true
-license.workspace = true
+# MIT, unlike the rest of the workspace: apps link this crate.
+license = "MIT"
 homepage.workspace = true
 repository.workspace = true
 keywords = ["pylon", "realtime", "game", "replication", "netcode"]

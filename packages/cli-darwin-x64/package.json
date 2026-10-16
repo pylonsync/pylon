@@ -2,21 +2,21 @@
   "name": "@pylonsync/cli-darwin-x64",
   "version": "0.22.34",
   "description": "Pylon CLI binary for darwin-x64. Installed automatically by @pylonsync/cli on Intel Macs.",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE.md",
   "homepage": "https://pylonsync.com",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/pylonsync/pylon.git",
-    "directory": "packages/cli-darwin-x64"
-  },
   "publishConfig": {
     "access": "public"
   },
-  "os": ["darwin"],
-  "cpu": ["x64"],
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
   "files": [
     "bin/pylon",
-    "README.md"
+    "README.md",
+    "LICENSE.md"
   ],
   "engines": {
     "node": ">=18"

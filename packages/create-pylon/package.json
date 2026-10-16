@@ -1,7 +1,7 @@
 {
   "name": "@pylonsync/create-pylon",
   "version": "0.22.34",
-  "description": "Scaffold a new Pylon app \u2014 realtime backend + web/mobile/expo frontends in one command. Run via `npm create @pylonsync/pylon@latest`.",
+  "description": "Scaffold a new Pylon app — realtime backend + web/mobile/expo frontends in one command. Run via `npm create @pylonsync/pylon@latest`.",
   "publishConfig": {
     "access": "public"
   },
@@ -14,7 +14,8 @@
   },
   "files": [
     "bin",
-    "templates"
+    "templates",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=18"
@@ -28,10 +29,5 @@
     "backend"
   ],
   "homepage": "https://pylonsync.com",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/pylonsync/pylon",
-    "directory": "packages/create-pylon"
-  },
   "license": "MIT"
 }

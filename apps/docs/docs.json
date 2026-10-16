@@ -168,17 +168,12 @@
       "anchors": [
         {
           "anchor": "Examples",
-          "href": "https://github.com/pylonsync/pylon/tree/main/examples",
+          "href": "https://github.com/pylonsync/pylon-examples",
           "icon": "code"
         },
         {
-          "anchor": "GitHub",
-          "href": "https://github.com/pylonsync/pylon",
-          "icon": "github"
-        },
-        {
           "anchor": "Changelog",
-          "href": "https://github.com/pylonsync/pylon/releases",
+          "href": "https://github.com/pylonsync/pylon-releases/releases",
           "icon": "timeline"
         }
       ]
@@ -186,10 +181,6 @@
   },
   "navbar": {
     "links": [
-      {
-        "label": "GitHub",
-        "href": "https://github.com/pylonsync/pylon"
-      },
       {
         "label": "Cloud",
         "href": "https://www.pylonsync.com"
@@ -199,11 +190,6 @@
       "type": "button",
       "label": "Get started",
       "href": "/quickstart"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/pylonsync/pylon"
     }
   }
 }

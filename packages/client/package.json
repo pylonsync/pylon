@@ -33,6 +33,8 @@
   "files": [
     "src",
     "dist",
-    "README.md"
-  ]
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT"
 }

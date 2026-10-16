@@ -2,13 +2,8 @@
   "name": "@pylonsync/cli-linux-x64",
   "version": "0.22.34",
   "description": "Pylon CLI binary for linux-x64. Installed automatically by @pylonsync/cli on x86_64 Linux (most VPS, Fly, ECS, etc.).",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE.md",
   "homepage": "https://pylonsync.com",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/pylonsync/pylon.git",
-    "directory": "packages/cli-linux-x64"
-  },
   "publishConfig": {
     "access": "public"
   },
@@ -20,7 +15,8 @@
   ],
   "files": [
     "bin/pylon",
-    "README.md"
+    "README.md",
+    "LICENSE.md"
   ],
   "engines": {
     "node": ">=18"

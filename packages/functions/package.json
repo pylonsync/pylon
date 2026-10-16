@@ -30,7 +30,8 @@
     "src",
     "dist",
     "assets",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "check": "tsc --noEmit",
@@ -45,7 +46,7 @@
     "functions",
     "database"
   ],
-  "license": "MIT OR Apache-2.0",
+  "license": "MIT",
   "dependencies": {
     "satori": "^0.26.0",
     "@resvg/resvg-wasm": "^2.6.2",

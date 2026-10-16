@@ -2,21 +2,21 @@
   "name": "@pylonsync/cli-linux-arm64",
   "version": "0.22.34",
   "description": "Pylon CLI binary for linux-arm64. Installed automatically by @pylonsync/cli on ARM64 Linux (e.g. Fly arm machines, Raspberry Pi).",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE.md",
   "homepage": "https://pylonsync.com",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/pylonsync/pylon.git",
-    "directory": "packages/cli-linux-arm64"
-  },
   "publishConfig": {
     "access": "public"
   },
-  "os": ["linux"],
-  "cpu": ["arm64"],
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
   "files": [
     "bin/pylon",
-    "README.md"
+    "README.md",
+    "LICENSE.md"
   ],
   "engines": {
     "node": ">=18"

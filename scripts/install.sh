@@ -13,7 +13,7 @@
 # public/ dir — keep the two in sync.
 set -eu
 
-REPO="pylonsync/pylon"
+REPO="pylonsync/pylon-releases"
 INSTALL_PREFIX="${PYLON_INSTALL:-$HOME/.pylon}"
 BIN_DIR="$INSTALL_PREFIX/bin"
 

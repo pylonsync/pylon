@@ -22,7 +22,8 @@ use pylon_kernel::ExitCode;
 
 use crate::output;
 
-const REPO: &str = "pylonsync/pylon";
+// Binaries are published to the public release repo; the source repo is private.
+const REPO: &str = "pylonsync/pylon-releases";
 
 /// Refuse anything larger than this. The real archive is ~20MB; the cap
 /// only exists so a redirect to something unexpected can't be read into
