@@ -139,9 +139,12 @@ public actor PylonClient {
         try await request(.get, "/api/auth/me")
     }
 
+    /// Revoke this session on the server (`DELETE /api/auth/session`, the
+    /// route the TypeScript client uses) and forget the token. The token is
+    /// forgotten even when the server cannot be reached.
     public func logout() async throws {
-        let _: EmptyResponse = try await request(.post, "/api/auth/logout")
-        clearSession()
+        defer { clearSession() }
+        let _: EmptyResponse = try await request(.delete, "/api/auth/session")
     }
 
     /// Periodically re-fetch `/api/auth/me` to keep the session warm.

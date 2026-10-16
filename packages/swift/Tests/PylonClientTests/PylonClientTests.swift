@@ -33,6 +33,24 @@ final class PylonClientTests: XCTestCase {
         XCTAssertEqual(storage.get(StorageKeys.token()), "tok_abc")
     }
 
+    func testLogoutRevokesTheSessionAndForgetsTheToken() async throws {
+        let transport = MockTransport()
+        transport.setHandler { req in
+            // The server's sign-out route. /api/auth/logout does not exist.
+            if req.url?.path == "/api/auth/session", req.httpMethod == "DELETE" {
+                XCTAssertEqual(req.value(forHTTPHeaderField: "Authorization"), "Bearer tok_abc")
+                return try jsonResponse(["revoked": true])
+            }
+            XCTFail("Unexpected request: \(req.httpMethod ?? "") \(req.url?.path ?? "")")
+            return (404, Data())
+        }
+        let storage = MemoryStorage()
+        let client = makeClient(transport: transport, storage: storage)
+        await client.setSession(token: "tok_abc")
+        try await client.logout()
+        XCTAssertNil(storage.get(StorageKeys.token()))
+    }
+
     func testGuestSignInStoresTokenAndRefreshReplacesIt() async throws {
         let transport = MockTransport()
         transport.setHandler { req in
