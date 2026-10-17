@@ -82,25 +82,56 @@ pub(crate) fn write(
     fill_node(&root, node).map_err(|e| format!("field {key}: {e}"))
 }
 
-/// Create an empty document container under `key` when there is none. An
-/// empty container (no `nodeName`) projects as null; the `loro-prosemirror`
-/// binding fills it with the editor's document when it binds.
+/// The top node an empty document gets: ProseMirror's and Tiptap's default
+/// top node type.
+const TOP_NODE: &str = "doc";
+
+/// Create the document under `key` when there is none, as an empty document
+/// (a top node with its `attributes` map and its `children` list). Editors
+/// then only insert into containers the server made. When two editors made
+/// them, as they did when the server left an empty map, one copy won and the
+/// other's edits went with the losing containers.
 pub(crate) fn ensure(parent: &LoroMap, key: &str) -> Result<(), String> {
-    if let Some(ValueOrContainer::Container(Container::Map(_))) = parent.get(key) {
-        return Ok(());
-    }
-    parent
-        .insert_container(key, LoroMap::new())
-        .map(|_| ())
-        .map_err(|e| format!("field {key}: create the document: {e}"))
+    let root = match parent.get(key) {
+        Some(ValueOrContainer::Container(Container::Map(m))) => m,
+        _ => parent
+            .insert_container(key, LoroMap::new())
+            .map_err(|e| format!("field {key}: create the document: {e}"))?,
+    };
+    skeleton(&root).map_err(|e| format!("field {key}: create the document: {e}"))
 }
 
-/// Empty the document under `key`, keeping its container.
+/// The containers every document has. Keeps a top node name an editor wrote.
+fn skeleton(root: &LoroMap) -> Result<(), String> {
+    if !matches!(
+        root.get(NODE_NAME),
+        Some(ValueOrContainer::Value(LoroValue::String(_)))
+    ) {
+        root.insert(NODE_NAME, TOP_NODE)
+            .map_err(|e| e.to_string())?;
+    }
+    child_map(root, ATTRIBUTES)?;
+    child_list(root, CHILDREN)?;
+    Ok(())
+}
+
+/// Empty the document under `key`, keeping its containers: the content and
+/// the attributes go, the top node and its children list stay.
 pub(crate) fn clear(parent: &LoroMap, key: &str) -> Result<(), String> {
     match parent.get(key) {
-        Some(ValueOrContainer::Container(Container::Map(m))) => m
-            .clear()
-            .map_err(|e| format!("field {key}: clear the document: {e}")),
+        Some(ValueOrContainer::Container(Container::Map(m))) => {
+            skeleton(&m).map_err(|e| format!("field {key}: clear the document: {e}"))?;
+            let attrs = child_map(&m, ATTRIBUTES)?;
+            let keys: Vec<String> = attrs.keys().map(|k| k.to_string()).collect();
+            for k in keys {
+                attrs
+                    .delete(&k)
+                    .map_err(|e| format!("field {key}: clear the document: {e}"))?;
+            }
+            child_list(&m, CHILDREN)?
+                .clear()
+                .map_err(|e| format!("field {key}: clear the document: {e}"))
+        }
         _ => ensure(parent, key),
     }
 }
@@ -343,8 +374,14 @@ fn child_list(map: &LoroMap, key: &str) -> Result<LoroList, String> {
 /// not a node (no `nodeName`), such as a container no editor has written.
 /// Nodes nested deeper than [`MAX_DEPTH`] are left out, so a doc a client
 /// built deeper cannot exhaust the stack.
+///
+/// A document with no content and no attributes is empty and reads as null.
 pub(crate) fn project(map: &LoroMap) -> Value {
-    project_node(map, 1)
+    let node = project_node(map, 1);
+    match &node {
+        Value::Object(o) if o.len() == 1 && o.contains_key("type") => Value::Null,
+        _ => node,
+    }
 }
 
 fn project_node(map: &LoroMap, depth: usize) -> Value {
@@ -430,8 +467,9 @@ fn project_text(text: &LoroText) -> Vec<Value> {
 
 #[cfg(test)]
 mod tests {
+    use super::{ATTRIBUTES, CHILDREN, NODE_NAME};
     use crate::{apply_patch, field_kind, project_doc_to_json, root_map, CrdtField, CrdtFieldKind};
-    use loro::LoroDoc;
+    use loro::{Container, LoroDoc, LoroList, LoroMap, LoroText, LoroValue, ValueOrContainer};
     use serde_json::json;
 
     fn fields() -> Vec<CrdtField> {
@@ -772,5 +810,85 @@ mod tests {
         apply_patch(&doc, &fields(), &json!({"body": null})).unwrap();
         assert_eq!(format!("{:?}", root_map(&doc).get("body").unwrap()), first);
         assert_eq!(project_doc_to_json(&doc, &fields())["body"], json!(null));
+    }
+
+    fn body_map(doc: &LoroDoc) -> LoroMap {
+        match root_map(doc).get("body") {
+            Some(ValueOrContainer::Container(Container::Map(m))) => m,
+            other => panic!("no body map: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_empty_document_has_its_containers_and_reads_as_null() {
+        // Editors insert into these; they never create them.
+        let doc = LoroDoc::new();
+        apply_patch(&doc, &fields(), &json!({})).unwrap();
+        let body = body_map(&doc);
+        assert!(
+            matches!(body.get(NODE_NAME), Some(ValueOrContainer::Value(LoroValue::String(s))) if &*s == "doc")
+        );
+        assert!(matches!(
+            body.get(ATTRIBUTES),
+            Some(ValueOrContainer::Container(Container::Map(_)))
+        ));
+        let children = match body.get(CHILDREN) {
+            Some(ValueOrContainer::Container(Container::List(l))) => l,
+            other => panic!("no children list: {other:?}"),
+        };
+        assert_eq!(project_doc_to_json(&doc, &fields())["body"], json!(null));
+
+        // Null empties the document and keeps the same children list.
+        apply_patch(&doc, &fields(), &json!({"body": sample()})).unwrap();
+        apply_patch(&doc, &fields(), &json!({"body": null})).unwrap();
+        let after = match body_map(&doc).get(CHILDREN) {
+            Some(ValueOrContainer::Container(Container::List(l))) => l,
+            other => panic!("no children list: {other:?}"),
+        };
+        assert_eq!(
+            loro::ContainerTrait::id(&after),
+            loro::ContainerTrait::id(&children)
+        );
+        assert_eq!(after.len(), 0);
+        assert_eq!(project_doc_to_json(&doc, &fields())["body"], json!(null));
+    }
+
+    #[test]
+    fn two_editors_starting_an_empty_document_keep_both_paragraphs() {
+        // The server's empty document, copied to two peers that each add a
+        // paragraph before they see the other's.
+        let server = LoroDoc::new();
+        apply_patch(&server, &fields(), &json!({})).unwrap();
+        server.commit();
+        let snapshot = server.export(loro::ExportMode::Snapshot).unwrap();
+        let peers: Vec<LoroDoc> = (0..2)
+            .map(|_| {
+                let d = LoroDoc::new();
+                d.import(&snapshot).unwrap();
+                d
+            })
+            .collect();
+        for (i, peer) in peers.iter().enumerate() {
+            let children = match body_map(peer).get(CHILDREN) {
+                Some(ValueOrContainer::Container(Container::List(l))) => l,
+                other => panic!("no children list: {other:?}"),
+            };
+            let para = children.insert_container(0, LoroMap::new()).unwrap();
+            para.insert(NODE_NAME, "paragraph").unwrap();
+            let runs = para.insert_container(CHILDREN, LoroList::new()).unwrap();
+            let text = runs.insert_container(0, LoroText::new()).unwrap();
+            text.insert(0, &format!("from peer {i}")).unwrap();
+            peer.commit();
+        }
+        for peer in &peers {
+            server
+                .import(&peer.export(loro::ExportMode::all_updates()).unwrap())
+                .unwrap();
+        }
+        let body = project_doc_to_json(&server, &fields())["body"].to_string();
+        assert!(
+            body.contains("from peer 0") && body.contains("from peer 1"),
+            "{body}"
+        );
     }
 }
