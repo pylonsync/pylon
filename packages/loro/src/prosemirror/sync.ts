@@ -156,12 +156,14 @@ function field(doc: LoroDoc, containerId: ContainerID): LoroMap {
 
 /**
  * The browser's selection in the editor, when it differs from the editor
- * state's. A click or an arrow key moves the DOM selection first, and the
- * editor reads it a little later; a remote change in between would put the
- * caret back where it was.
+ * state's and the window has focus. A click or an arrow key moves the DOM
+ * selection first, and the editor reads it a little later; a remote change
+ * in between would put the caret back where it was.
  */
 function domSelectionIfMoved(view: EditorView): { anchor: number; head: number } | null {
-  if (!view.hasFocus()) return null;
+  // A window without focus keeps a stale DOM selection: the editor does not
+  // write its selection to the DOM while it is in the background.
+  if (!view.hasFocus() || !view.dom.ownerDocument.hasFocus()) return null;
   const sel = (view.root as Document).getSelection?.();
   if (!sel?.anchorNode || !sel.focusNode || !view.dom.contains(sel.anchorNode)) return null;
   try {
