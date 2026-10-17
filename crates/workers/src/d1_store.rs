@@ -340,6 +340,10 @@ impl<E: D1Executor> DataStore for D1DataStore<E> {
                     if let Some(op_obj) = v.as_object() {
                         for (op, op_val) in op_obj {
                             match op.as_str() {
+                                // `{ $not: null }` is "has a value".
+                                "$not" if op_val.is_null() => {
+                                    where_clauses.push(format!("{qk} IS NOT NULL"));
+                                }
                                 "$not" => {
                                     where_clauses.push(format!("{qk} != ?{idx}"));
                                     params.push(op_val.clone());
@@ -391,6 +395,9 @@ impl<E: D1Executor> DataStore for D1DataStore<E> {
                                 _ => {}
                             }
                         }
+                    } else if v.is_null() {
+                        // `{ field: null }` is "has no value".
+                        where_clauses.push(format!("{qk} IS NULL"));
                     } else {
                         where_clauses.push(format!("{qk} = ?{idx}"));
                         params.push(v.clone());

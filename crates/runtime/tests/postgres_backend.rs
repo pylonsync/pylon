@@ -394,6 +394,24 @@ fn typed_columns_roundtrip_correctly() {
         "ownerId should be SQL NULL after update with null, got {:?}",
         row["ownerId"]
     );
+
+    // `{ field: null }` is IS NULL and `{ $not: null }` IS NOT NULL. Bound
+    // as `= $1` with a NULL parameter, the first matched nothing.
+    rt.insert(
+        "Typed",
+        &serde_json::json!({"count": 1, "active": false, "score": 1.0, "ownerId": "owner_b"}),
+    )
+    .unwrap();
+    let unset = rt
+        .query_filtered("Typed", &serde_json::json!({"ownerId": null}))
+        .expect("null filter");
+    assert_eq!(unset.len(), 1);
+    assert_eq!(unset[0]["id"], serde_json::json!(id));
+    let set = rt
+        .query_filtered("Typed", &serde_json::json!({"ownerId": {"$not": null}}))
+        .expect("$not null filter");
+    assert_eq!(set.len(), 1);
+    assert_eq!(set[0]["ownerId"], "owner_b");
 }
 
 #[test]

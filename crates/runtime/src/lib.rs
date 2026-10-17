@@ -5230,6 +5230,11 @@ impl Runtime {
                     } else if let Some(op_obj) = val.as_object() {
                         for (op, op_val) in op_obj {
                             match op.as_str() {
+                                // `{ $not: null }` is "has a value". SQL's
+                                // `!= NULL` is never true.
+                                "$not" if op_val.is_null() => {
+                                    where_clauses.push(format!("{qk} IS NOT NULL"));
+                                }
                                 "$not" => {
                                     where_clauses.push(format!("{qk} != ?{idx}"));
                                     values.push(json_to_sql_typed(ent, key, op_val));
@@ -5281,6 +5286,10 @@ impl Runtime {
                                 _ => {}
                             }
                         }
+                    } else if val.is_null() {
+                        // `{ field: null }` is "has no value". SQL's
+                        // `= NULL` is never true.
+                        where_clauses.push(format!("{qk} IS NULL"));
                     } else {
                         where_clauses.push(format!("{qk} = ?{idx}"));
                         values.push(json_to_sql_typed(ent, key, val));
@@ -6547,6 +6556,11 @@ fn build_filtered_query_sql(
                 } else if let Some(op_obj) = val.as_object() {
                     for (op, op_val) in op_obj {
                         match op.as_str() {
+                            // `{ $not: null }` is "has a value". SQL's
+                            // `!= NULL` is never true.
+                            "$not" if op_val.is_null() => {
+                                where_clauses.push(format!("{quoted_key} IS NOT NULL"));
+                            }
                             "$not" => {
                                 where_clauses.push(format!("{quoted_key} != ?{idx}"));
                                 values.push(json_to_sql_typed(ent, key, op_val));
@@ -6610,6 +6624,10 @@ fn build_filtered_query_sql(
                             _ => {}
                         }
                     }
+                } else if val.is_null() {
+                    // `{ field: null }` is "has no value". SQL's `= NULL`
+                    // is never true.
+                    where_clauses.push(format!("{quoted_key} IS NULL"));
                 } else {
                     // Simple equality.
                     where_clauses.push(format!("{quoted_key} = ?{idx}"));
@@ -9773,6 +9791,60 @@ mod tests {
             .query_filtered("User", &serde_json::json!({"bad_col": "x"}))
             .unwrap_err();
         assert_eq!(err.code, "INVALID_COLUMN");
+    }
+
+    #[test]
+    fn query_filtered_null_matches_missing_values() {
+        // `{ field: null }` must mean IS NULL and `{ $not: null }` IS NOT
+        // NULL. Bound as `= ?` the first matched nothing, which left a
+        // billing push finding no unsent rows for weeks.
+        let mut manifest = test_manifest();
+        manifest.entities[0].fields.push(ManifestField {
+            name: "nickname".into(),
+            field_type: "string".into(),
+            optional: true,
+            unique: false,
+            crdt: None,
+            server_only: false,
+            readonly: false,
+            default: None,
+            enum_values: None,
+            encrypted: false,
+            sync_omit: false,
+            max_length: None,
+        });
+        manifest.entities[0].crdt = false;
+        let rt = Runtime::in_memory(manifest).unwrap();
+        rt.insert(
+            "User",
+            &serde_json::json!({"email": "a@b.com", "displayName": "A"}),
+        )
+        .unwrap();
+        rt.insert(
+            "User",
+            &serde_json::json!({"email": "b@b.com", "displayName": "B", "nickname": "bee"}),
+        )
+        .unwrap();
+
+        let unset = rt
+            .query_filtered("User", &serde_json::json!({"nickname": null}))
+            .unwrap();
+        assert_eq!(unset.len(), 1);
+        assert_eq!(unset[0]["email"], "a@b.com");
+
+        let set = rt
+            .query_filtered("User", &serde_json::json!({"nickname": {"$not": null}}))
+            .unwrap();
+        assert_eq!(set.len(), 1);
+        assert_eq!(set[0]["email"], "b@b.com");
+
+        let both = rt
+            .query_filtered(
+                "User",
+                &serde_json::json!({"nickname": null, "displayName": "A"}),
+            )
+            .unwrap();
+        assert_eq!(both.len(), 1);
     }
 
     #[test]

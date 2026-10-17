@@ -1840,6 +1840,10 @@ pub mod live {
                             serde_json::Value::Object(ops) => {
                                 for (op, v) in ops {
                                     match op.as_str() {
+                                        // `{ $not: null }` is "has a value".
+                                        // SQL's `!= NULL` is never true.
+                                        "$not" if v.is_null() => where_clauses
+                                            .push(format!("{} IS NOT NULL", quote_ident(field))),
                                         "$not" => planned.push((
                                             field.into(),
                                             "!=".into(),
@@ -1920,6 +1924,11 @@ pub mod live {
                                         _ => {}
                                     }
                                 }
+                            }
+                            // `{ field: null }` is "has no value". SQL's
+                            // `= NULL` is never true.
+                            serde_json::Value::Null => {
+                                where_clauses.push(format!("{} IS NULL", quote_ident(field)))
                             }
                             _ => planned.push((field.into(), "=".into(), value_to_pg(val))),
                         }
