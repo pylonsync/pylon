@@ -3,7 +3,7 @@
  *
  *   const { doc, containerId } = useProseMirrorDoc("Doc", id, "body", schema);
  *   if (!containerId) return <Loading />;
- *   const plugins = [LoroSyncPlugin({ doc, containerId }), LoroUndoPlugin({ doc })];
+ *   const plugins = [ProseMirrorSyncPlugin({ doc, containerId }), ProseMirrorUndoPlugin({ doc })];
  *
  * `containerId` is null until the server's snapshot brings the field's
  * container; mount the editor after that (see ./index.ts for why a client

@@ -546,23 +546,27 @@
         "loro-crdt": "^1.10.6",
       },
       "devDependencies": {
+        "@happy-dom/global-registrator": "^20.10.0",
         "@types/react": "^19.0.0",
         "loro-prosemirror": "^0.4.4",
         "prosemirror-model": "^1.25.0",
         "prosemirror-schema-basic": "^1.2.4",
         "prosemirror-state": "^1.4.3",
+        "prosemirror-view": "^1.42.3",
         "typescript": "^5.5",
       },
       "peerDependencies": {
         "loro-prosemirror": ">=0.4.4 <1.0.0",
         "prosemirror-model": "^1.22.0",
         "prosemirror-state": "^1.4.0",
+        "prosemirror-view": "^1.33.0",
         "react": ">=19.0.0",
       },
       "optionalPeers": [
         "loro-prosemirror",
         "prosemirror-model",
         "prosemirror-state",
+        "prosemirror-view",
       ],
     },
     "packages/next": {

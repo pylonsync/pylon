@@ -13,7 +13,8 @@
     "./wire": "./src/wire.ts",
     "./registry": "./src/registry.ts",
     "./prosemirror": "./src/prosemirror/index.ts",
-    "./prosemirror/react": "./src/prosemirror/react.ts"
+    "./prosemirror/react": "./src/prosemirror/react.ts",
+    "./prosemirror/sync": "./src/prosemirror/sync.ts"
   },
   "scripts": {
     "check": "tsc -p tsconfig.json --noEmit"
@@ -27,7 +28,8 @@
     "react": ">=19.0.0",
     "loro-prosemirror": ">=0.4.4 <1.0.0",
     "prosemirror-model": "^1.22.0",
-    "prosemirror-state": "^1.4.0"
+    "prosemirror-state": "^1.4.0",
+    "prosemirror-view": "^1.33.0"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",
@@ -35,7 +37,9 @@
     "loro-prosemirror": "^0.4.4",
     "prosemirror-model": "^1.25.0",
     "prosemirror-state": "^1.4.3",
-    "prosemirror-schema-basic": "^1.2.4"
+    "prosemirror-schema-basic": "^1.2.4",
+    "prosemirror-view": "^1.42.3",
+    "@happy-dom/global-registrator": "^20.10.0"
   },
   "peerDependenciesMeta": {
     "loro-prosemirror": {
@@ -45,6 +49,9 @@
       "optional": true
     },
     "prosemirror-state": {
+      "optional": true
+    },
+    "prosemirror-view": {
       "optional": true
     }
   },

@@ -15,7 +15,7 @@
  *   const doc = useLoroDoc("Doc", id);
  *   configureProseMirrorMarks(doc, schema);
  *   const containerId = await waitForProseMirrorContainer(doc, "body");
- *   const plugin = LoroSyncPlugin({ doc, containerId });
+ *   const plugin = ProseMirrorSyncPlugin({ doc, containerId }); // ./sync
  *
  * In a server function, read and change the document without an editor
  * with `readProseMirror` and `writeProseMirror`.

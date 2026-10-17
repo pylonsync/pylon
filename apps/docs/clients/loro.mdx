@@ -194,7 +194,13 @@ const Doc = entity("Doc", {
 });
 ```
 
-The server creates the field's container when the row is inserted, with or without a starting document. Clients never create it: they wait for the server's. Declare the field `.optional()` unless every insert carries a document: an empty document reads as `null`.
+The server creates the field's document when the row is inserted: the starting document you pass, or an empty one (a `doc` node with no content). Clients never create its containers, they only edit inside the server's: two editors that each created them would keep only one copy, and the other's edits would be lost. Declare the field `.optional()` unless every insert carries a document: an empty document reads as `null`.
+
+Insert a document with one empty block when several people may open it at once, so every editor starts from the same block:
+
+```typescript
+await ctx.db.insert("Doc", { title: "Untitled", body: { type: "doc", content: [{ type: "paragraph" }] } });
+```
 
 ```typescript
 await ctx.db.insert("Doc", { title: "Untitled" });  // body reads as null until an editor writes
@@ -202,26 +208,30 @@ await ctx.db.insert("Doc", { title: "Untitled" });  // body reads as null until 
 
 ### Bind an editor
 
-The document uses the layout of the [`loro-prosemirror`](https://github.com/loro-dev/loro-prosemirror) binding, so its plugins work as they are. `useProseMirrorDoc` from `@pylonsync/loro/prosemirror/react` returns the row's doc with the editor's marks set up, and the field's container once the server's snapshot has brought it:
+`useProseMirrorDoc` from `@pylonsync/loro/prosemirror/react` returns the row's doc with the editor's marks set up, and the field's container once the server's snapshot has brought it. `ProseMirrorSyncPlugin` and `ProseMirrorUndoPlugin` from `@pylonsync/loro/prosemirror/sync` bind the editor to it:
 
 ```bash
-bun add loro-prosemirror prosemirror-model prosemirror-state
+bun add loro-prosemirror prosemirror-model prosemirror-state prosemirror-view
 ```
 
 ```tsx
 import { useProseMirrorDoc } from "@pylonsync/loro/prosemirror/react";
-import { LoroSyncPlugin, LoroUndoPlugin } from "loro-prosemirror";
+import { ProseMirrorSyncPlugin, ProseMirrorUndoPlugin } from "@pylonsync/loro/prosemirror/sync";
 
 function Body({ docId }: { docId: string }) {
   const { doc, containerId } = useProseMirrorDoc("Doc", docId, "body", schema);
   if (!containerId) return <Loading />;
-  return <Editor plugins={[LoroSyncPlugin({ doc, containerId }), LoroUndoPlugin({ doc })]} />;
+  return <Editor plugins={[ProseMirrorSyncPlugin({ doc, containerId }), ProseMirrorUndoPlugin({ doc })]} />;
 }
 ```
 
-`containerId` is null until the snapshot arrives. Mount the editor after that: a container a client made in the empty doc would lose the key to the server's, and the editor's edits would never reach the row. Outside React, `configureProseMirrorMarks`, `findProseMirrorContainer` and `waitForProseMirrorContainer` from `@pylonsync/loro/prosemirror` do the same steps.
+`containerId` is null until the snapshot arrives. Mount the editor after that. Outside React, `configureProseMirrorMarks`, `findProseMirrorContainer` and `waitForProseMirrorContainer` from `@pylonsync/loro/prosemirror` do the same steps.
 
-With Tiptap, add the plugins through an extension's `addProseMirrorPlugins`, and turn off Tiptap's own undo history.
+`ProseMirrorSyncPlugin` replaces loro-prosemirror's `LoroSyncPlugin` and keeps its plugin state, so loro-prosemirror's undo and cursor plugins work with it. It applies a change from someone else as a replace of the range that changed, and keeps this person's caret on the character it follows, so two people typing at one spot keep their words whole. `LoroSyncPlugin` replaced the whole document on every remote change and put the caret back on a timer: text typed before the timer ran went to the end of the document.
+
+`ProseMirrorUndoPlugin` is loro-prosemirror's `LoroUndoPlugin` with typing grouped into steps of 500 ms. Undo takes back only this person's edits. While someone else types in the same paragraph, each undo step is smaller: Loro does not merge an undo step across another person's change to the same text.
+
+With Tiptap, add the plugins through an extension's `addProseMirrorPlugins`, and turn off Tiptap's own undo history (`StarterKit.configure({ undoRedo: false })`).
 
 `configureProseMirrorMarks` (which `useProseMirrorDoc` calls) tells this copy of the document how each mark behaves at its edges: a mark that is `inclusive` (the ProseMirror default) extends to text typed right after it. Every copy that writes marks needs it; Loro refuses a mark it has no style for. The rule is recorded with each mark, so it holds for everyone who edits after.
 
