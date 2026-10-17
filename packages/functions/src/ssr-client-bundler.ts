@@ -89,6 +89,18 @@ type BunBuildOutput = {
   logs?: Array<{ level: string; message: string }>;
 };
 
+/** The part of Bun's plugin builder the client build uses. */
+type BunPluginBuild = {
+  onResolve(
+    opts: { filter: RegExp; namespace?: string },
+    callback: (args: { path: string; importer: string }) => void,
+  ): void;
+  onLoad(
+    opts: { filter: RegExp; namespace?: string },
+    callback: (args: { path: string }) => { contents: string; loader: "js" },
+  ): void;
+};
+
 declare const Bun: {
   build(opts: {
     entrypoints: string[];
@@ -111,12 +123,7 @@ declare const Bun: {
     root?: string;
     plugins?: Array<{
       name: string;
-      setup(build: {
-        onResolve(
-          opts: { filter: RegExp; namespace?: string },
-          callback: (args: { path: string; importer: string }) => void,
-        ): void;
-      }): void;
+      setup(build: BunPluginBuild): void;
     }>;
   }): Promise<BunBuildOutput>;
   file(path: string): { exists(): Promise<boolean> };
@@ -1644,12 +1651,15 @@ export async function _doBuildInner(
       naming: {
         entry: "[name]-[hash].js",
         chunk: "chunks/[name]-[hash].js",
-        asset: "assets/[name]-[hash][ext]",
+        // Bun's `[ext]` has no leading dot.
+        asset: "assets/[name]-[hash].[ext]",
       },
+
       // Refuse to bundle a server-only module into a client-reachable page —
       // secrets / server config in a page's import graph would otherwise ship
       // to the browser.
       plugins: [
+        absoluteAssetPlugin(outdir, fs, path, (await import("node:crypto")).createHash),
         {
           name: "pylon-server-only",
           setup(build) {
@@ -1811,7 +1821,7 @@ export async function _doBuildInner(
     const manifest: PylonBundleManifest = {
       build_id: makeBuildId(),
       outdir: outdirRel,
-      public_prefix: "/_pylon/build/",
+      public_prefix: BUILD_PREFIX,
       routes: {},
       ...(polyfills ? { polyfills } : {}),
     };
@@ -2090,6 +2100,45 @@ function makeBuildId(): string {
  * was pruned, breaking hydration). A trailing slash is enforced so
  * `${prefix}${file}` always joins correctly.
  */
+/** Where the Rust host serves the client build (`/_pylon/build/<path>`). The
+ *  manifest's `public_prefix` and the bundler's `publicPath` must agree. */
+const BUILD_PREFIX = "/_pylon/build/";
+
+/** Files a page can import as a URL (Bun's `file` loader). */
+const ASSET_RE = /\.(wasm|png|jpe?g|gif|webp|avif|ico|svg|woff2?|ttf|otf|mp3|mp4|webm|wav|ogg)$/i;
+
+/**
+ * Imported assets (a `.wasm`, an image) as absolute URLs under the build
+ * prefix. Bun's own `file` loader exports a RELATIVE path ("assets/x.wasm"),
+ * and code that fetches it resolves it against the page: loro-crdt's browser
+ * build fetched /dashboard/orgs/acme/assets/loro_wasm_bg-….wasm and 404'd.
+ * Bun's `publicPath` would make it absolute, but it also rewrites imports
+ * between split chunks and drops their `chunks/` directory (Bun 1.3.14), so
+ * this plugin writes the file itself, named by its content hash, and exports
+ * the absolute URL.
+ */
+function absoluteAssetPlugin(
+  outdir: string,
+  fs: typeof import("node:fs"),
+  path: typeof import("node:path"),
+  createHash: typeof import("node:crypto").createHash,
+): { name: string; setup(build: BunPluginBuild): void } {
+  return {
+    name: "pylon-absolute-assets",
+    setup(build) {
+      build.onLoad({ filter: ASSET_RE }, (args) => {
+        const bytes = fs.readFileSync(args.path);
+        const hash = createHash("sha256").update(bytes).digest("hex").slice(0, 12);
+        const ext = path.extname(args.path);
+        const rel = `assets/${path.basename(args.path, ext)}-${hash}${ext}`;
+        fs.mkdirSync(path.join(outdir, "assets"), { recursive: true });
+        fs.writeFileSync(path.join(outdir, rel), bytes);
+        return { contents: `export default ${JSON.stringify(BUILD_PREFIX + rel)};`, loader: "js" };
+      });
+    },
+  };
+}
+
 function resolvePublicPrefix(): string {
   const raw = (process.env.PYLON_PUBLIC_PREFIX ?? "").trim();
   if (!raw) return "/_pylon/build/";

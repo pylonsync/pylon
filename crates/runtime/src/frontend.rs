@@ -4856,29 +4856,13 @@ pub fn derive_app_dir(routes: &[pylon_kernel::ManifestRoute]) -> String {
     }
 }
 
-/// Pick a content-type for a build asset based on its extension.
-/// Phase 1.5e emits `.js` entries + `.js` chunks; `.json` for the
-/// manifest; `.css` reserved for 1.5f.
+/// Content-type for a file of the client build: the entries and chunks, the
+/// manifest, fonts, and the assets pages import (a `.wasm`, an image). One
+/// map with the static-file server, so a type added there serves here too.
+/// A `.wasm` must be `application/wasm`: `WebAssembly.compileStreaming`
+/// refuses any other type, which left every Loro editor page blank.
 fn bundle_content_type_for(name: &str) -> &'static str {
-    if name.ends_with(".js") || name.ends_with(".mjs") {
-        "application/javascript; charset=utf-8"
-    } else if name.ends_with(".css") {
-        "text/css; charset=utf-8"
-    } else if name.ends_with(".json") {
-        "application/json; charset=utf-8"
-    } else if name.ends_with(".map") {
-        "application/json; charset=utf-8"
-    } else if name.ends_with(".woff2") {
-        "font/woff2"
-    } else if name.ends_with(".woff") {
-        "font/woff"
-    } else if name.ends_with(".ttf") {
-        "font/ttf"
-    } else if name.ends_with(".otf") {
-        "font/otf"
-    } else {
-        "application/octet-stream"
-    }
+    content_type_for(Path::new(name))
 }
 
 /// Serve any file under the bundle outdir. Calls `bundle_client`
@@ -5259,6 +5243,39 @@ fn hex_nibble(b: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn client_build_files_get_their_content_types() {
+        use super::bundle_content_type_for;
+        assert_eq!(
+            bundle_content_type_for("client-entry-app__page-ab12.js"),
+            "application/javascript; charset=utf-8"
+        );
+        assert_eq!(
+            bundle_content_type_for("chunks/x-ab12.js"),
+            "application/javascript; charset=utf-8"
+        );
+        assert_eq!(
+            bundle_content_type_for("manifest.json"),
+            "application/json; charset=utf-8"
+        );
+        assert_eq!(
+            bundle_content_type_for("styles-ab12.css"),
+            "text/css; charset=utf-8"
+        );
+        assert_eq!(
+            bundle_content_type_for("assets/loro_wasm_bg-ab12.wasm"),
+            "application/wasm"
+        );
+        assert_eq!(bundle_content_type_for("assets/logo-ab12.png"), "image/png");
+        assert_eq!(
+            bundle_content_type_for("fonts/inter-ab12.woff2"),
+            "font/woff2"
+        );
+        assert_eq!(
+            bundle_content_type_for("assets/unknown-ab12.bin"),
+            "application/octet-stream"
+        );
+    }
 
     #[test]
     fn dev_api_echoes_origin_only_when_a_token_guards_it() {

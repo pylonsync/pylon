@@ -335,6 +335,66 @@ describe("ssr-client-bundler (Phase 1.5e)", () => {
 // inlines; the build test guards the boundary wiring + not-found.tsx entry.
 // ---------------------------------------------------------------------------
 
+describe("imported assets", () => {
+  // loro-crdt's browser build imports its .wasm; Bun turns that into a URL
+  // string. It must be absolute under the build prefix and name a file the
+  // build wrote, or the page fetches it relative to its own path and 404s.
+  test("an imported .wasm gets an absolute URL that exists in the build", async () => {
+    tempDir = makeFixture(
+      {
+        "page.tsx": PAGE_BODY("Home"),
+        "hello/page.tsx": PAGE_BODY("Hello"),
+        "docs/[id]/page.tsx": `
+import React from "react";
+import wasmUrl from "./engine.wasm";
+export default function Doc() {
+  return <div data-wasm={wasmUrl}>doc</div>;
+}
+`,
+      },
+      { "layout.tsx": LAYOUT_BODY },
+    );
+    fs.writeFileSync(path.join(tempDir, "app", "docs", "[id]", "engine.wasm"), new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]));
+    originalCwd = process.cwd();
+    process.chdir(tempDir);
+
+    const { outdir, manifestPath } = await buildClientBundle();
+
+    const built = [
+      ...fs.readdirSync(outdir).filter((n) => n.endsWith(".js")).map((n) => path.join(outdir, n)),
+      ...fs.readdirSync(path.join(outdir, "chunks")).map((n) => path.join(outdir, "chunks", n)),
+    ]
+      .map((f) => fs.readFileSync(f, "utf8"))
+      .join("\n");
+    const urls = built.match(/["'](\/_pylon\/build\/assets\/engine-[A-Za-z0-9]+\.wasm)["']/);
+    expect(urls).not.toBeNull();
+    const rel = urls![1].slice("/_pylon/build/".length);
+    expect(fs.existsSync(path.join(outdir, rel))).toBe(true);
+    // Every import between built files resolves to a file the build wrote,
+    // the way the browser resolves it (relative to the importing file).
+    const jsFiles = [
+      ...fs.readdirSync(outdir).filter((n) => n.endsWith(".js")).map((n) => path.join(outdir, n)),
+      ...fs.readdirSync(path.join(outdir, "chunks")).filter((n) => n.endsWith(".js")).map((n) => path.join(outdir, "chunks", n)),
+    ];
+    for (const file of jsFiles) {
+      const src = fs.readFileSync(file, "utf8");
+      for (const m of src.matchAll(/(?:from\s*|import\s*\(?\s*)["']([^"']+\.js)["']/g)) {
+        const spec = m[1];
+        const target = spec.startsWith("/_pylon/build/")
+          ? path.join(outdir, spec.slice("/_pylon/build/".length))
+          : path.resolve(path.dirname(file), spec);
+        expect(`${path.relative(outdir, file)} -> ${spec}: ${fs.existsSync(target)}`).toBe(`${path.relative(outdir, file)} -> ${spec}: true`);
+      }
+    }
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as PylonBundleManifest;
+    expect(manifest.public_prefix).toBe("/_pylon/build/");
+    for (const route of Object.values(manifest.routes)) {
+      expect(route.imports.length).toBeGreaterThan(0);
+      for (const imp of route.imports) expect(fs.existsSync(path.join(outdir, imp))).toBe(true);
+    }
+  });
+});
+
 describe("nearestBoundaryComponent (client boundary resolution)", () => {
   const routes = new Set([
     "web/app/not-found",
