@@ -108,6 +108,9 @@ export interface PylonRequestInit {
   accept?: string;
   /** AbortController signal for cancellation. */
   signal?: AbortSignal;
+  /** Let the request outlive the page (fetch `keepalive`). The body must
+   *  stay under the browser's 64 KB keepalive limit. */
+  keepalive?: boolean;
 }
 
 /**
@@ -164,6 +167,7 @@ export function buildRequest(
       credentials: "include",
       body,
       signal: init.signal,
+      ...(init.keepalive ? { keepalive: true } : {}),
     },
   };
 }

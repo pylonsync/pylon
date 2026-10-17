@@ -71,6 +71,22 @@ function DocumentEditor({ docId }: { docId: string }) {
 
 Multiple `useLoroDoc` callers on the same row share one subscription (refcounted). Opening the same document in two tabs doesn't double-subscribe.
 
+### How edits reach the server
+
+Every edit committed on a `useLoroDoc` doc goes to the server, whatever made it: an editor binding, `useCollabText`, or your own code. Each row has an outbox that sends this tab's edits with `POST /api/crdt/<entity>/<id>`:
+
+- One request at a time, so edits arrive in order. Edits made while a request is in flight go out together in the next one.
+- Each request carries every edit of this tab the server has not confirmed, so a failed request loses nothing.
+- A network error, a 5xx, a 408 or a 429 retries with backoff (500 ms, doubling to 10 s), and at once when the browser comes back online. Any other 4xx stops the outbox, because the same edits would fail the same way: for example the person lost edit access (403).
+- When the page is hidden for the last time, unsent edits go out with `keepalive`.
+
+`useLoroSendState(entity, id)` returns `"idle"`, `"sending"`, `"retrying"` or `"rejected"`, for a saving indicator or a notice that edits did not save:
+
+```tsx
+const state = useLoroSendState("Doc", docId);
+{state === "rejected" && <Notice>The server did not accept your changes.</Notice>}
+```
+
 ## Container types
 
 ### Text — collaborative rich text
@@ -186,28 +202,28 @@ await ctx.db.insert("Doc", { title: "Untitled" });  // body reads as null until 
 
 ### Bind an editor
 
-The document uses the layout of the [`loro-prosemirror`](https://github.com/loro-dev/loro-prosemirror) binding, so its plugins work as they are. `@pylonsync/loro/prosemirror` finds the field's container and sets up the marks:
+The document uses the layout of the [`loro-prosemirror`](https://github.com/loro-dev/loro-prosemirror) binding, so its plugins work as they are. `useProseMirrorDoc` from `@pylonsync/loro/prosemirror/react` returns the row's doc with the editor's marks set up, and the field's container once the server's snapshot has brought it:
 
 ```bash
 bun add loro-prosemirror prosemirror-model prosemirror-state
 ```
 
-```typescript
-import { useLoroDoc } from "@pylonsync/loro";
-import { configureProseMirrorMarks, waitForProseMirrorContainer } from "@pylonsync/loro/prosemirror";
+```tsx
+import { useProseMirrorDoc } from "@pylonsync/loro/prosemirror/react";
 import { LoroSyncPlugin, LoroUndoPlugin } from "loro-prosemirror";
 
-const doc = useLoroDoc("Doc", docId);
-configureProseMirrorMarks(doc, editor.schema);
-const containerId = await waitForProseMirrorContainer(doc, "body");
-const plugins = [LoroSyncPlugin({ doc, containerId }), LoroUndoPlugin({ doc })];
+function Body({ docId }: { docId: string }) {
+  const { doc, containerId } = useProseMirrorDoc("Doc", docId, "body", schema);
+  if (!containerId) return <Loading />;
+  return <Editor plugins={[LoroSyncPlugin({ doc, containerId }), LoroUndoPlugin({ doc })]} />;
+}
 ```
 
-`useLoroDoc` returns an empty doc until the server's snapshot arrives. `waitForProseMirrorContainer` resolves once the doc holds the server's container (at once when it already does), so mount the editor after it resolves. A container a client made in the empty doc would lose the key to the server's, and the editor's edits would never reach the row. `findProseMirrorContainer` is the same lookup without waiting; it returns null instead.
+`containerId` is null until the snapshot arrives. Mount the editor after that: a container a client made in the empty doc would lose the key to the server's, and the editor's edits would never reach the row. Outside React, `configureProseMirrorMarks`, `findProseMirrorContainer` and `waitForProseMirrorContainer` from `@pylonsync/loro/prosemirror` do the same steps.
 
 With Tiptap, add the plugins through an extension's `addProseMirrorPlugins`, and turn off Tiptap's own undo history.
 
-`configureProseMirrorMarks` tells this copy of the document how each mark behaves at its edges: a mark that is `inclusive` (the ProseMirror default) extends to text typed right after it. Every copy that writes marks needs it; Loro refuses a mark it has no style for. The rule is recorded with each mark, so it holds for everyone who edits after.
+`configureProseMirrorMarks` (which `useProseMirrorDoc` calls) tells this copy of the document how each mark behaves at its edges: a mark that is `inclusive` (the ProseMirror default) extends to text typed right after it. Every copy that writes marks needs it; Loro refuses a mark it has no style for. The rule is recorded with each mark, so it holds for everyone who edits after.
 
 ### Read and write on the server
 

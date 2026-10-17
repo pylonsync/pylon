@@ -27,6 +27,7 @@ import {
 import { db, getBaseUrl, getReactStorage, storageKey } from "@pylonsync/react";
 import { pylonFetch, type SyncEngine } from "@pylonsync/sync";
 import { globalRegistry, LoroRegistry } from "./registry";
+import { CrdtOutbox, type OutboxState } from "./outbox";
 
 export { LoroRegistry, globalRegistry } from "./registry";
 export {
@@ -36,6 +37,8 @@ export {
   CRDT_FRAME_UPDATE,
 } from "./wire";
 export type { CrdtFrame } from "./wire";
+export { CrdtOutbox, isRetryable } from "./outbox";
+export type { OutboxSend, OutboxState, OutboxOptions } from "./outbox";
 
 // ---------------------------------------------------------------------------
 // Sync engine ↔ registry wiring
@@ -73,10 +76,59 @@ function ensureAttached(): void {
   // lingering with stale state until the tab closes.
   unsubscribeRowEviction = sync.addRowEvictionListener(
     (entity: string, rowId: string) => {
+      disposeOutbox(entity, rowId);
       globalRegistry.evict(entity, rowId);
     },
   );
+  attachPageListeners();
   attachedSync = sync;
+}
+
+// ---------------------------------------------------------------------------
+// Outboxes — one per row doc, sending its local edits (see ./outbox.ts)
+//
+// Created the first time a component reads the row's doc and kept as long
+// as the doc: an editor that unmounts must not drop edits still in flight.
+// A row eviction (policy revoked) disposes both.
+// ---------------------------------------------------------------------------
+
+const outboxes = new Map<string, { doc: LoroDoc; outbox: CrdtOutbox }>();
+
+function outboxKey(entity: string, rowId: string): string {
+  return `${entity}:${rowId}`;
+}
+
+function outboxFor(entity: string, rowId: string, doc: LoroDoc): CrdtOutbox {
+  const key = outboxKey(entity, rowId);
+  const existing = outboxes.get(key);
+  if (existing && existing.doc === doc) return existing.outbox;
+  existing?.outbox.dispose();
+  const outbox = new CrdtOutbox(doc, (update, { keepalive }) =>
+    pushCrdtUpdate(entity, rowId, update, keepalive),
+  );
+  // A state change re-renders the row's readers (useLoroSendState).
+  outbox.subscribe(() => globalRegistry.touch(entity, rowId));
+  outboxes.set(key, { doc, outbox });
+  return outbox;
+}
+
+function disposeOutbox(entity: string, rowId: string): void {
+  const key = outboxKey(entity, rowId);
+  outboxes.get(key)?.outbox.dispose();
+  outboxes.delete(key);
+}
+
+let pageListenersAttached = false;
+
+function attachPageListeners(): void {
+  if (pageListenersAttached || typeof window === "undefined") return;
+  pageListenersAttached = true;
+  window.addEventListener("online", () => {
+    for (const { outbox } of outboxes.values()) outbox.retryNow();
+  });
+  window.addEventListener("pagehide", () => {
+    for (const { outbox } of outboxes.values()) outbox.flushOnHide();
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -133,7 +185,24 @@ export function useLoroDoc(entity: string, id: string): LoroDoc {
     globalRegistry.subscribe(entity, id, notify);
   const getVersion = () => globalRegistry.version(entity, id);
   useSyncExternalStore(subscribe, getVersion, getVersion);
-  return globalRegistry.doc(entity, id);
+  const doc = globalRegistry.doc(entity, id);
+  // Local edits (an editor binding's included) reach the server through
+  // the row's outbox.
+  useEffect(() => {
+    outboxFor(entity, id, doc);
+  }, [entity, id, doc]);
+  return doc;
+}
+
+/**
+ * Whether this tab's edits to a row have reached the server, for a
+ * "Saving" indicator or an error notice. See {@link OutboxState}.
+ * `rejected` means the server refused them (for example the person lost
+ * edit access); they stay in this tab only.
+ */
+export function useLoroSendState(entity: string, id: string): OutboxState {
+  useLoroDoc(entity, id);
+  return outboxes.get(outboxKey(entity, id))?.outbox.state ?? "idle";
 }
 
 /**
@@ -235,11 +304,6 @@ export function useCollabText(
   const value = resolveLoroText(doc, field)?.toString() ?? "";
   const setValue = (next: string): void => {
     const text = getLoroText(doc, field);
-    // Capture the version vector BEFORE the mutation so we can ship
-    // exactly the new ops to the server (incremental delta, not the
-    // whole snapshot). Loro's `export({mode: "update", from: vv})`
-    // returns the bytes the server hasn't seen.
-    const beforeVv = doc.oplogVersion();
     const len = text.length;
     if (len > 0) {
       text.delete(0, len);
@@ -248,14 +312,9 @@ export function useCollabText(
       text.insert(0, next);
     }
     doc.commit();
-    // Optimistic render: notify every consumer of this row NOW.
+    // Optimistic render: notify every consumer of this row NOW. The
+    // row's outbox sends the edit.
     globalRegistry.touch(entity, id);
-
-    const update = doc.export({ mode: "update", from: beforeVv });
-    if (update.length === 0) {
-      return; // No-op (e.g. setValue called with the same value)
-    }
-    void pushCrdtUpdate(entity, id, update);
   };
   return [value, setValue];
 }
@@ -343,20 +402,16 @@ export function useCollabTextarea<
     const prev = domValue.current;
     if (next === prev) return;
     const { index, deleteCount, insert } = spliceDiff(prev, next);
-    // Resolve the container per keystroke (see resolveLoroText) and
-    // capture the version vector BEFORE mutating so we ship exactly the
-    // new ops.
+    // Resolve the container per keystroke (see resolveLoroText).
     const text = getLoroText(doc, field);
-    const beforeVv = doc.oplogVersion();
     if (deleteCount > 0) text.delete(index, deleteCount);
     if (insert.length > 0) text.insert(index, insert);
     doc.commit();
     domValue.current = next;
     // Optimistic render: the preview (and any other consumer of this
-    // row) updates on the local commit, not on the server echo.
+    // row) updates on the local commit, not on the server echo. The row's
+    // outbox sends the edit.
     globalRegistry.touch(entity, id);
-    const update = doc.export({ mode: "update", from: beforeVv });
-    if (update.length > 0) void pushCrdtUpdate(entity, id, update);
   };
 
   return { ref, value, onInput };
@@ -416,29 +471,27 @@ async function pushCrdtUpdate(
   entity: string,
   id: string,
   update: Uint8Array,
+  keepalive: boolean,
 ): Promise<void> {
-  try {
-    // Server acknowledges with {ok: true}. The merged-state broadcast
-    // arrives over the WS, applied automatically by the registry — no
-    // need to read the response body here, but pylonFetch surfaces
-    // structured errors so failed pushes log instead of vanishing.
-    await pylonFetch(
-      {
-        baseUrl: getBaseUrl(),
-        getToken: () =>
-          (getReactStorage().get(storageKey("token")) ?? undefined) as
-            | string
-            | undefined,
-      },
-      `/api/crdt/${encodeURIComponent(entity)}/${encodeURIComponent(id)}`,
-      {
-        method: "POST",
-        json: { update: bytesToHex(update) },
-      },
-    );
-  } catch (err) {
-    console.warn(`[loro] CRDT push failed for ${entity}/${id}:`, err);
-  }
+  // Server acknowledges with {ok: true}. The merged-state broadcast
+  // arrives over the WS, applied automatically by the registry. A
+  // failure throws (PylonHttpError carries the status); the outbox
+  // decides whether to retry.
+  await pylonFetch(
+    {
+      baseUrl: getBaseUrl(),
+      getToken: () =>
+        (getReactStorage().get(storageKey("token")) ?? undefined) as
+          | string
+          | undefined,
+    },
+    `/api/crdt/${encodeURIComponent(entity)}/${encodeURIComponent(id)}`,
+    {
+      method: "POST",
+      json: { update: bytesToHex(update) },
+      keepalive,
+    },
+  );
 }
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -455,6 +508,8 @@ function bytesToHex(bytes: Uint8Array): string {
  * need to call it.
  */
 export function detachLoro(): void {
+  for (const { outbox } of outboxes.values()) outbox.dispose();
+  outboxes.clear();
   if (unsubscribeBinaryHandler) {
     unsubscribeBinaryHandler();
     unsubscribeBinaryHandler = null;

@@ -12,7 +12,8 @@
     ".": "./src/index.ts",
     "./wire": "./src/wire.ts",
     "./registry": "./src/registry.ts",
-    "./prosemirror": "./src/prosemirror.ts"
+    "./prosemirror": "./src/prosemirror/index.ts",
+    "./prosemirror/react": "./src/prosemirror/react.ts"
   },
   "scripts": {
     "check": "tsc -p tsconfig.json --noEmit"

@@ -11,7 +11,7 @@ import {
   readProseMirror,
   waitForProseMirrorContainer,
   writeProseMirror,
-} from "./prosemirror";
+} from "./index";
 
 // The basic schema plus a mark with an id, like a suggestion.
 const schema = new Schema({
