@@ -503,6 +503,7 @@ impl Shard {
         ws: WebSocket<Box<dyn WsStream>>,
         auth: AuthContext,
         token: Option<String>,
+        base_roles: Vec<String>,
     ) -> ClientSocket {
         let (outbound_tx, outbound_rx) = mpsc::sync_channel(PER_CLIENT_OUTBOUND_DEPTH);
         let handle = Arc::new(WsClient {
@@ -512,7 +513,7 @@ impl Shard {
             auth: RwLock::new(auth),
             token,
             revoked: std::sync::atomic::AtomicBool::new(false),
-            base_roles: RwLock::new(Vec::new()),
+            base_roles: RwLock::new(base_roles),
         });
         self.clients.lock().unwrap().insert(id, Arc::clone(&handle));
         handle
@@ -1843,17 +1844,21 @@ impl WsHub {
     /// `auth` is captured at registration time and lives for the
     /// connection's lifetime so per-client filtering can evaluate
     /// against the same identity that authenticated the handshake.
+    /// Register a connection. `base_roles` are the credential's own roles
+    /// (before the org role was added), set before the socket is visible so
+    /// no role refresh can see it without them.
     fn add_client(
         &self,
         ws: WebSocket<Box<dyn WsStream>>,
         auth: AuthContext,
         token: Option<String>,
+        base_roles: Vec<String>,
     ) -> (u64, ClientSocket) {
         let mut next_id = self.next_id.lock().unwrap();
         let id = *next_id;
         *next_id += 1;
         let shard_idx = (id as usize) % NUM_SHARDS;
-        let handle = self.shards[shard_idx].add(id, ws, auth, token);
+        let handle = self.shards[shard_idx].add(id, ws, auth, token, base_roles);
         (id, handle)
     }
 
@@ -2264,11 +2269,7 @@ fn run_authenticated_session(
     // allows. Pre-fix the WS layer rejected anonymous upgrades up
     // front, contradicting the rest of the stack and making the live
     // sync demo silently fall back to no-broadcasts.
-    let (client_id, socket_handle) = hub.add_client(ws, auth_ctx.clone(), token);
-    *socket_handle
-        .base_roles
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = base_roles;
+    let (client_id, socket_handle) = hub.add_client(ws, auth_ctx.clone(), token, base_roles);
 
     // Dual-thread path: spawn the writer thread on the cloned TcpStream.
     // It owns `outbound_rx` and `WebSocket::from_raw_socket`-wraps the
@@ -3207,6 +3208,7 @@ mod tests {
             WebSocket::from_raw_socket(stream, Role::Server, None),
             AuthContext::admin(),
             None,
+            Vec::new(),
         )
     }
 
@@ -3820,6 +3822,7 @@ mod tests {
             WebSocket::from_raw_socket(stream, Role::Server, None),
             auth,
             None,
+            Vec::new(),
         );
         // The enricher behaves like `enrich_active_org_role`: it fills empty
         // roles from the org store and leaves populated ones alone.
@@ -3848,13 +3851,13 @@ mod tests {
         let stream: Box<dyn WsStream> = Box::new(std::io::Cursor::new(Vec::<u8>::new()));
         let mut jwt = AuthContext::user("bob".into()).with_tenant("org1".into());
         jwt.roles = vec!["editor".into()];
-        let handle = hub.shards[1].add(
+        hub.shards[1].add(
             1,
             WebSocket::from_raw_socket(stream, Role::Server, None),
             jwt,
             None,
+            vec!["editor".into()],
         );
-        *handle.base_roles.write().unwrap() = vec!["editor".into()];
         assert!(hub.client_may_use_room(1, "@Doc/d1", true));
     }
 

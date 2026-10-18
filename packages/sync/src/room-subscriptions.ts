@@ -299,7 +299,7 @@ export class RoomSubscriptions {
           // back.
           entry.members = [
             ...entry.members,
-            { joined_at: "", ...member, ...(presence ? { data: presence } : {}) },
+            { ...member, joined_at: member.joined_at ?? "", ...(presence ? { data: presence } : {}) },
           ];
         }
         break;
