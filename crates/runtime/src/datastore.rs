@@ -2118,11 +2118,22 @@ pub(crate) fn translate_and_push_room_event(
     if kind == "leave" && local {
         if let Some(user_id) = payload.get("user_id").and_then(|v| v.as_str()) {
             let clients = ws.room_subscriptions().unsubscribe_user(room, user_id);
+            // Told: only the clients that fail a fresh check. A client of the
+            // same user that may use the room (it connected after the check,
+            // or is signed in another way) gets NOT_IN_ROOM instead, so it
+            // rejoins and resubscribes. Its heartbeat cannot be relied on:
+            // once another of the user's clients rejoins, it answers alive.
             if payload.get("revoked").and_then(|v| v.as_bool()) == Some(true) {
-                let frame = serde_json::json!({ "type": "room-revoked", "room": room });
-                if let Ok(text) = serde_json::to_string(&frame) {
-                    for client in clients {
-                        ws.send_text_to(client, &text);
+                let revoked =
+                    serde_json::json!({ "type": "room-revoked", "room": room }).to_string();
+                let rejoin =
+                    serde_json::json!({ "type": "error", "code": "NOT_IN_ROOM", "room": room })
+                        .to_string();
+                for client in clients {
+                    if ws.client_may_use_room(client, room, true) {
+                        ws.send_text_to(client, &rejoin);
+                    } else {
+                        ws.send_text_to(client, &revoked);
                     }
                 }
             }
@@ -2224,6 +2235,73 @@ pub fn sweep_idle_room_members(
     events.len()
 }
 
+/// How often [`sweep_revoked_room_members`] runs: the room access cache's
+/// lifetime, so each (client, room) check runs at most once per interval.
+pub const ROOM_REVOKE_SWEEP_INTERVAL: std::time::Duration = crate::ws::ROOM_ACCESS_TTL;
+
+/// Remove members of rooms tied to a row (`@Entity/id`) who lost access since
+/// they joined (the row was unshared, they left the workspace), the way the
+/// heartbeat route does: the leave is marked `revoked`, so the others drop
+/// them at once and their clients that fail the check get `room-revoked`.
+/// Without the sweep a member who sends nothing is told only at their next
+/// heartbeat, and the others see them until the idle timeout.
+///
+/// Works from this machine's room membership. A member is removed when they
+/// have a WebSocket connection here and none of their connections may use
+/// the room; a member with no connection here (the HTTP polling fallback) is
+/// left to their heartbeat. A polling tab of the same user signed in another
+/// way rejoins at its next heartbeat. Returns the number of members removed.
+pub fn sweep_revoked_room_members(
+    rooms: &RoomManager,
+    ws: &crate::ws::WsHub,
+    notifier: &dyn pylon_router::ChangeNotifier,
+) -> usize {
+    let row_rooms: Vec<(String, Vec<String>)> = rooms
+        .list_rooms()
+        .into_iter()
+        .filter(|room| room.starts_with('@'))
+        .map(|room| {
+            let members = rooms
+                .members(&room)
+                .into_iter()
+                .map(|p| p.user_id)
+                .collect();
+            (room, members)
+        })
+        .collect();
+    if row_rooms.is_empty() {
+        return 0;
+    }
+    let users: std::collections::HashSet<String> = row_rooms
+        .iter()
+        .flat_map(|(_, m)| m.iter().cloned())
+        .collect();
+    let clients = ws.connected_clients_by_user(&users);
+    let mut removed = 0;
+    for (room, members) in row_rooms {
+        for user in members {
+            let Some(ids) = clients.get(&user) else {
+                continue;
+            };
+            if ws.clients_may_use_room(ids, &room) != Some(false) {
+                continue;
+            }
+            let Some(event) = rooms.leave(&room, &user) else {
+                continue;
+            };
+            let Ok(mut value) = serde_json::to_value(&event) else {
+                continue;
+            };
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("revoked".into(), serde_json::Value::Bool(true));
+            }
+            notifier.notify_presence(&value.to_string());
+            removed += 1;
+        }
+    }
+    removed
+}
+
 #[cfg(test)]
 mod room_leave_tests {
     use super::*;
@@ -2282,6 +2360,38 @@ mod room_sweep_tests {
             _seq: u64,
         ) {
         }
+    }
+
+    fn hub() -> Arc<crate::ws::WsHub> {
+        let manifest = Arc::new(pylon_kernel::AppManifest::default());
+        crate::ws::WsHub::new(
+            Arc::new(pylon_policy::PolicyEngine::from_manifest(&manifest)),
+            manifest.clone(),
+            manifest.auth.user.clone(),
+        )
+    }
+
+    /// A member with no connection on this machine (the HTTP polling
+    /// fallback, or a socket that already closed) is left to their
+    /// heartbeat: not removed, not told.
+    #[test]
+    fn the_revoke_sweep_leaves_members_without_a_connection_alone() {
+        let ws = hub();
+        let rooms = RoomManager::new(120);
+        rooms.join("@Note/n1", "alice", None).unwrap();
+        rooms.join("lobby", "bob", None).unwrap();
+        ws.room_subscriptions()
+            .subscribe(7, "@Note/n1", Some("alice"));
+        let log = PresenceLog::default();
+        assert_eq!(sweep_revoked_room_members(&rooms, &ws, &log), 0);
+        assert_eq!(rooms.members("@Note/n1").len(), 1);
+        assert_eq!(rooms.members("lobby").len(), 1);
+        assert_eq!(ws.room_subscriptions().subscribers("@Note/n1"), vec![7]);
+        assert!(log.frames.lock().unwrap().is_empty());
+        assert_eq!(ws.clients_may_use_room(&[7], "@Note/n1"), None);
+        assert!(ws
+            .connected_clients_by_user(&std::collections::HashSet::from(["alice".to_string()]))
+            .is_empty());
     }
 
     /// Members dropped by the idle sweep produce a leave event through

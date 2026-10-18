@@ -520,6 +520,22 @@ impl Shard {
     }
 
     /// A connected client's auth and its credential's own roles.
+    /// Add this shard's clients authenticated as one of `users` to `out`.
+    fn client_ids_by_user(&self, users: &HashSet<String>, out: &mut HashMap<String, Vec<u64>>) {
+        let clients = self.clients.lock().unwrap();
+        for (id, handle) in clients.iter() {
+            let auth = match handle.auth.read() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if let Some(user) = auth.user_id.as_deref() {
+                if users.contains(user) {
+                    out.entry(user.to_string()).or_default().push(*id);
+                }
+            }
+        }
+    }
+
     fn auth_and_base_roles(&self, id: u64) -> Option<(pylon_auth::AuthContext, Vec<String>)> {
         let handle = self.clients.lock().unwrap().get(&id).map(Arc::clone)?;
         let auth = match handle.auth.read() {
@@ -1228,8 +1244,16 @@ impl WsHub {
     /// A room tied to a row runs the row's read policy; the answer is cached
     /// per (client, room) for [`ROOM_ACCESS_TTL`] unless `fresh` is set.
     pub(crate) fn client_may_use_room(&self, id: u64, room: &str, fresh: bool) -> bool {
+        self.connected_client_room_access(id, room, fresh)
+            .unwrap_or(false)
+    }
+
+    /// [`Self::client_may_use_room`], or None when client `id` is no longer
+    /// connected (its socket closed and the reader has not yet released its
+    /// subscriptions). A gone client is neither allowed nor revoked.
+    fn connected_client_room_access(&self, id: u64, room: &str, fresh: bool) -> Option<bool> {
         if !room.starts_with('@') {
-            return true;
+            return Some(true);
         }
         let now = std::time::Instant::now();
         let key = (id, room.to_string());
@@ -1242,21 +1266,45 @@ impl WsHub {
                 .filter(|(_, at)| now.duration_since(*at) < ROOM_ACCESS_TTL)
                 .map(|(ok, _)| *ok);
             if let Some(ok) = cached {
-                return ok;
+                return Some(ok);
             }
         }
-        let Some((auth, base_roles)) =
-            self.shards[(id as usize) % NUM_SHARDS].auth_and_base_roles(id)
-        else {
-            return false;
-        };
+        let (auth, base_roles) = self.shards[(id as usize) % NUM_SHARDS].auth_and_base_roles(id)?;
         let auth = self.current_auth(&auth, base_roles);
         let ok = auth.is_unscoped_admin() || self.room_allowed(&auth, room);
         self.room_access_cache
             .lock()
             .unwrap()
             .insert(key, (ok, now));
-        ok
+        Some(ok)
+    }
+
+    /// Every connected client of each of `users`, by user, in one pass over
+    /// the shards.
+    pub fn connected_clients_by_user(&self, users: &HashSet<String>) -> HashMap<String, Vec<u64>> {
+        let mut out: HashMap<String, Vec<u64>> = HashMap::new();
+        if users.is_empty() {
+            return out;
+        }
+        for shard in self.shards.iter() {
+            shard.client_ids_by_user(users, &mut out);
+        }
+        out
+    }
+
+    /// Whether any of `clients` (one user's connections) may use room `room`
+    /// now: None when none of them is still connected. Checks are cached for
+    /// [`ROOM_ACCESS_TTL`].
+    pub fn clients_may_use_room(&self, clients: &[u64], room: &str) -> Option<bool> {
+        let mut seen = false;
+        for id in clients {
+            match self.connected_client_room_access(*id, room, false) {
+                Some(true) => return Some(true),
+                Some(false) => seen = true,
+                None => {}
+            }
+        }
+        seen.then_some(false)
     }
 
     /// The subscribers of a room tied to a row who may still read the row.

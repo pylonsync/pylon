@@ -11,12 +11,7 @@ fn private_entities(manifest: &AppManifest) -> Vec<&str> {
             .entities
             .iter()
             .filter(|entity| {
-                entity.name != manifest.auth.user.entity
-                    && entity.fields.iter().any(|field| {
-                        field.server_only
-                            || field.sync_omit
-                            || field.field_type.starts_with("vector(")
-                    })
+                entity.name != manifest.auth.user.entity && entity.has_private_fields()
             })
             .map(|entity| entity.name.as_str()),
     );

@@ -29,6 +29,14 @@
 //!           writes, but the developer may have forgotten to add the
 //!           write rules — flagging makes the gap visible.
 //!
+//!   PYL007  An entity with a collaborative field (`richtext`,
+//!           `.crdt("text")`, `.crdt("prosemirror")`, ...) that also has private fields
+//!           (`serverOnly`, `syncOmit`, vectors), or is the account
+//!           entity. Its Loro doc keeps every field's history, so Pylon
+//!           does not replicate it: live editors subscribe and never
+//!           load, with no error. Move the private fields to their own
+//!           entity.
+//!
 //! Runs standalone (`pylon lint`) and also at `pylon dev` startup
 //! (via a small invocation in `commands/dev.rs`) so issues land in
 //! front of the developer the moment they save app.ts.
@@ -111,6 +119,43 @@ pub fn lint_manifest(manifest: &AppManifest) -> Vec<Finding> {
             continue;
         }
         let policies = policies_by_entity.get(name);
+
+        // PYL007 — collaborative fields Pylon will not replicate.
+        let collaborative: Vec<&str> = entity
+            .fields
+            .iter()
+            .filter(|f| f.is_collaborative())
+            .map(|f| f.name.as_str())
+            .collect();
+        if entity.crdt && entity.sync && !collaborative.is_empty() {
+            let private: Vec<&str> = entity.private_fields().map(|f| f.name.as_str()).collect();
+            if name == manifest.auth.user.entity {
+                findings.push(Finding {
+                    rule: "PYL007",
+                    severity: Severity::Warning,
+                    entity: Some(name.to_string()),
+                    policy: None,
+                    message: format!(
+                        "Entity \"{name}\" is the account entity and has collaborative fields ({}). Pylon never replicates the account entity's Loro doc, so live editors of them never load.",
+                        collaborative.join(", ")
+                    ),
+                    fix: "Keep collaborative fields on their own entity, keyed by the user id.",
+                });
+            } else if !private.is_empty() {
+                findings.push(Finding {
+                    rule: "PYL007",
+                    severity: Severity::Warning,
+                    entity: Some(name.to_string()),
+                    policy: None,
+                    message: format!(
+                        "Entity \"{name}\" has collaborative fields ({}) and private fields ({}). Its Loro doc keeps every field's history, so Pylon does not replicate it: live editors subscribe and never load.",
+                        collaborative.join(", "),
+                        private.join(", ")
+                    ),
+                    fix: "Move the private fields to their own entity (sync: false), keyed by this entity's id.",
+                });
+            }
+        }
 
         // PYL002 — no policy declared.
         if policies.is_none() || policies.is_some_and(|v| v.is_empty()) {
@@ -636,6 +681,81 @@ mod tests {
                 "expected PYL001 for expression {expr:?}",
             );
         }
+    }
+
+    fn collaborative(name: &str) -> ManifestField {
+        ManifestField {
+            crdt: Some(pylon_kernel::CrdtAnnotation::ProseMirror),
+            ..field(name)
+        }
+    }
+
+    fn crdt_entity(fields: Vec<ManifestField>) -> ManifestEntity {
+        entity_with("Doc", fields)
+    }
+
+    #[test]
+    fn pyl007_flags_a_crdt_entity_with_private_fields() {
+        let mut secret = field("linkToken");
+        secret.server_only = true;
+        let mut heavy = field("plan");
+        heavy.sync_omit = true;
+        let m = manifest(
+            vec![crdt_entity(vec![collaborative("body"), secret, heavy])],
+            vec![policy_with(
+                "doc",
+                "Doc",
+                &[("read", "true"), ("update", "true")],
+            )],
+        );
+        let pyl007: Vec<_> = lint_manifest(&m)
+            .into_iter()
+            .filter(|f| f.rule == "PYL007")
+            .collect();
+        assert_eq!(pyl007.len(), 1, "{pyl007:?}");
+        assert!(
+            pyl007[0].message.contains("(body)"),
+            "{}",
+            pyl007[0].message
+        );
+        assert!(
+            pyl007[0].message.contains("(linkToken, plan)"),
+            "{}",
+            pyl007[0].message
+        );
+    }
+
+    #[test]
+    fn pyl007_skips_public_collaborative_entities_and_private_plain_ones() {
+        // Every entity is a CRDT entity by default; only one with a
+        // collaborative field needs its Loro doc replicated.
+        let mut secret = field("tokenHash");
+        secret.server_only = true;
+        let plain_with_secret = entity_with("Link", vec![field("documentId"), secret]);
+        let m = manifest(
+            vec![crdt_entity(vec![collaborative("body")]), plain_with_secret],
+            vec![
+                policy_with("doc", "Doc", &[("read", "true"), ("update", "true")]),
+                policy_with("link", "Link", &[("read", "false"), ("update", "false")]),
+            ],
+        );
+        assert!(lint_manifest(&m).iter().all(|f| f.rule != "PYL007"));
+    }
+
+    #[test]
+    fn pyl007_flags_a_crdt_account_entity() {
+        let mut account = crdt_entity(vec![field("email"), collaborative("bio")]);
+        account.name = "User".into();
+        let mut m = manifest(
+            vec![account],
+            vec![policy_with(
+                "user",
+                "User",
+                &[("read", "true"), ("update", "true")],
+            )],
+        );
+        m.auth.user.entity = "User".into();
+        assert!(lint_manifest(&m).iter().any(|f| f.rule == "PYL007"));
     }
 
     #[test]

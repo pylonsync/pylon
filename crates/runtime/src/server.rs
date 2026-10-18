@@ -3371,14 +3371,38 @@ fn start_server(
     // and not a scheduler job: cron runs only on the cluster leader and
     // its jobs run on whichever machine takes them from the shared
     // queue. Each removed member's leave goes to the room's subscribers.
+    // Weak references, so the thread ends with the server.
     {
-        let rooms = Arc::clone(&room_mgr);
-        let notifier = Arc::clone(&rooms_notifier);
+        let rooms = Arc::downgrade(&room_mgr);
+        let notifier = Arc::downgrade(&rooms_notifier);
         let _ = std::thread::Builder::new()
             .name("pylon-rooms-sweep".into())
             .spawn(move || loop {
                 std::thread::sleep(ROOMS_SWEEP_INTERVAL);
+                let (Some(rooms), Some(notifier)) = (rooms.upgrade(), notifier.upgrade()) else {
+                    break;
+                };
                 crate::datastore::sweep_idle_room_members(&rooms, &*notifier);
+            });
+    }
+    // Revoked-access sweep for rooms tied to a row, every few seconds on
+    // every machine (room membership and WebSocket subscriptions are per
+    // machine). See `sweep_revoked_room_members`.
+    // Weak references, so the thread ends with the server.
+    {
+        let rooms = Arc::downgrade(&room_mgr);
+        let notifier = Arc::downgrade(&rooms_notifier);
+        let hub = Arc::downgrade(&ws_hub);
+        let _ = std::thread::Builder::new()
+            .name("pylon-rooms-revoke-sweep".into())
+            .spawn(move || loop {
+                std::thread::sleep(crate::datastore::ROOM_REVOKE_SWEEP_INTERVAL);
+                let (Some(rooms), Some(notifier), Some(hub)) =
+                    (rooms.upgrade(), notifier.upgrade(), hub.upgrade())
+                else {
+                    break;
+                };
+                crate::datastore::sweep_revoked_room_members(&rooms, &hub, &*notifier);
             });
     }
     // Subscriber: inbound peer events → local hubs. Idempotent —

@@ -227,7 +227,7 @@ if (room.denied) return <p>You do not have access to this document.</p>;
 
 The room is named `@Document/<id>` (`rowRoom(entity, id)` builds the name), and the server runs the row's read policy on every room operation: join, presence, heartbeat, messages, the member list, the room list and the WebSocket subscription. A missing row and a row the caller may not read get the same answer, `ROOM_FORBIDDEN`. A name that starts with `@` and does not name a row is refused (`INVALID_ROOM`), so `@` cannot start a free room.
 
-Someone who loses access while in the room (the document is unshared) stops receiving its events at the next one, within 5 seconds of the change, and their next heartbeat removes them from the member list. The hook sets `denied`, clears `peers`, and stops rejoining.
+Someone who loses access while in the room (the document is unshared) stops receiving its events within 5 seconds of the change. Within 10 seconds the server removes them from the room, even when nobody in it acts: the others get their leave, and their own hook sets `denied`, clears `peers`, and stops rejoining. A member on the HTTP polling fallback (no WebSocket) is removed at their next heartbeat.
 
 On a deployment with more than one machine, room membership is kept per machine. When someone connected through two machines closes the connection on one, people on the other machines can stop seeing them until their next presence update.
 

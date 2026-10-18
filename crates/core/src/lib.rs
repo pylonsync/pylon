@@ -1174,6 +1174,18 @@ fn is_false_ref(b: &bool) -> bool {
 }
 
 impl ManifestField {
+    /// Whether the field merges as a collaborative container (text,
+    /// ProseMirror, list, ...) rather than one LWW value: an annotation
+    /// other than `lww`, or an unannotated `richtext` (LoroText by default;
+    /// see `pylon-crdt`'s type mapping).
+    pub fn is_collaborative(&self) -> bool {
+        match self.crdt {
+            Some(CrdtAnnotation::Lww) => false,
+            Some(_) => true,
+            None => self.field_type == "richtext",
+        }
+    }
+
     /// When `value` is a string longer than this field's `maxLength`,
     /// the message for the `FIELD_TOO_LONG` error. Length counts
     /// characters (Unicode code points). Non-strings, `null`, and fields
@@ -1198,6 +1210,20 @@ impl ManifestField {
 }
 
 impl ManifestEntity {
+    /// The fields a reader of the row may not see in full: `serverOnly`,
+    /// `syncOmit`, and vectors. A CRDT entity's Loro doc holds every field's
+    /// history, so Pylon does not replicate the doc of an entity with any of
+    /// these (`pylon lint` PYL007 says so).
+    pub fn private_fields(&self) -> impl Iterator<Item = &ManifestField> {
+        self.fields
+            .iter()
+            .filter(|f| f.server_only || f.sync_omit || f.field_type.starts_with("vector("))
+    }
+
+    pub fn has_private_fields(&self) -> bool {
+        self.private_fields().next().is_some()
+    }
+
     /// [`ManifestField::max_length_violation`] for every field `data`
     /// (a row or a patch) sets. Fields the write omits pass.
     pub fn max_length_violation(&self, data: &serde_json::Value) -> Option<String> {
@@ -1470,6 +1496,63 @@ pub struct ManifestPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collaborative_fields_are_the_non_lww_containers() {
+        let field = |field_type: &str, crdt: Option<CrdtAnnotation>| ManifestField {
+            name: "f".into(),
+            field_type: field_type.into(),
+            crdt,
+            ..Default::default()
+        };
+        assert!(field("richtext", None).is_collaborative());
+        assert!(!field("richtext", Some(CrdtAnnotation::Lww)).is_collaborative());
+        assert!(field("string", Some(CrdtAnnotation::Text)).is_collaborative());
+        assert!(field("json", Some(CrdtAnnotation::ProseMirror)).is_collaborative());
+        assert!(!field("string", None).is_collaborative());
+        assert!(!field("json", None).is_collaborative());
+    }
+
+    #[test]
+    fn private_fields_are_server_only_sync_omit_and_vectors() {
+        let entity = ManifestEntity {
+            name: "Doc".into(),
+            fields: vec![
+                ManifestField {
+                    name: "title".into(),
+                    ..Default::default()
+                },
+                ManifestField {
+                    name: "secret".into(),
+                    server_only: true,
+                    ..Default::default()
+                },
+                ManifestField {
+                    name: "plan".into(),
+                    sync_omit: true,
+                    ..Default::default()
+                },
+                ManifestField {
+                    name: "embedding".into(),
+                    field_type: "vector(3)".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let names: Vec<&str> = entity.private_fields().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["secret", "plan", "embedding"]);
+        assert!(entity.has_private_fields());
+        let public = ManifestEntity {
+            name: "Doc".into(),
+            fields: vec![ManifestField {
+                name: "title".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(!public.has_private_fields());
+    }
 
     #[test]
     fn build_config_round_trips_and_stays_out_of_default_manifests() {

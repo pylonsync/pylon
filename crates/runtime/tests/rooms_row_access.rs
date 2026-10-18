@@ -4,9 +4,10 @@
 //!   list the room or see its members; a malformed `@` name is refused.
 //! - The WebSocket subscription checks the same access.
 //! - A member who loses access (here: the row changes owner) is refused on
-//!   presence, removed on their next heartbeat, and their socket is told
+//!   presence and removed on their next heartbeat; their socket is told
 //!   (`room-revoked`) and stops receiving the room's events within the
-//!   access re-check window.
+//!   access re-check window, and the server's sweep removes them from the
+//!   room even when nobody acts.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -516,4 +517,103 @@ fn a_viewer_who_loses_access_stops_receiving_events_within_the_window() {
         later.is_none(),
         "no room events after revocation: {later:?}"
     );
+
+    // The delivery check ended the viewer's subscription; the sweep still
+    // removes the viewer's membership, so the owner stops seeing them.
+    let encoded = room.replace('@', "%40").replace('/', "%2F");
+    let started = Instant::now();
+    let mut members: Vec<String> = Vec::new();
+    while started.elapsed() < Duration::from_secs(12) {
+        let (status, body) = get(&base, &format!("/api/rooms/{encoded}"), &owner_token);
+        assert_eq!(status, 200, "{body}");
+        members = body["members"]
+            .as_array()
+            .expect("members list")
+            .iter()
+            .filter_map(|m| m["user_id"].as_str().map(str::to_string))
+            .collect();
+        if members == vec![owner.clone()] {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    assert_eq!(
+        members,
+        vec![owner.clone()],
+        "the viewer leaves the member list"
+    );
+}
+
+/// In a room where nobody acts after an unshare, the server's sweep still
+/// removes the viewer within two re-check windows: the viewer is told
+/// (`room-revoked`), the owner gets the viewer's leave, and the member list
+/// drops the viewer. Before the sweep this took until the viewer's next
+/// heartbeat, and the others saw the viewer until the idle timeout.
+#[test]
+fn an_idle_room_still_removes_a_member_who_lost_access() {
+    let (port, rt) = start_server();
+    let base = format!("http://127.0.0.1:{port}");
+    let (owner_token, owner) = guest_session(&base);
+    let (viewer_token, viewer) = guest_session(&base);
+    let note = rt
+        .insert(
+            "Note",
+            &serde_json::json!({ "title": "plan", "ownerId": owner, "viewerId": viewer }),
+        )
+        .unwrap();
+    let room = format!("@Note/{note}");
+    for token in [&owner_token, &viewer_token] {
+        let (status, body) = post(
+            &base,
+            "/api/rooms/join",
+            &format!(r#"{{"room":"{room}"}}"#),
+            token,
+        );
+        assert_eq!(status, 200, "{body}");
+    }
+    let mut owner_ws = connect_ws_token(port, &owner_token);
+    let mut viewer_ws = connect_ws_token(port, &viewer_token);
+    for ws in [&mut owner_ws, &mut viewer_ws] {
+        ws.send(Message::Text(
+            serde_json::json!({"type":"room-subscribe","room":room}).to_string(),
+        ))
+        .unwrap();
+        assert!(wait_for_frame(ws, Duration::from_secs(2), |v| {
+            v.get("type").and_then(|t| t.as_str()) == Some("room-snapshot")
+        })
+        .is_some());
+    }
+
+    rt.update("Note", &note, &serde_json::json!({ "viewerId": "" }))
+        .unwrap();
+
+    let revoked = wait_for_frame(&mut viewer_ws, Duration::from_secs(12), |v| {
+        v.get("type").and_then(|t| t.as_str()) == Some("room-revoked")
+    });
+    assert_eq!(
+        revoked.expect("the viewer is told without anyone acting")["room"].as_str(),
+        Some(room.as_str())
+    );
+    let leave = wait_for_frame(&mut owner_ws, Duration::from_secs(2), |v| {
+        v.get("type").and_then(|t| t.as_str()) == Some("room-update")
+            && v.get("action").and_then(|a| a.as_str()) == Some("leave")
+    });
+    let leave = leave.expect("the owner gets the viewer's leave");
+    assert_eq!(
+        leave["member"]["user_id"]
+            .as_str()
+            .or(leave["data"]["user_id"].as_str()),
+        Some(viewer.as_str()),
+        "{leave}"
+    );
+    let encoded = room.replace('@', "%40").replace('/', "%2F");
+    let (status, body) = get(&base, &format!("/api/rooms/{encoded}"), &owner_token);
+    assert_eq!(status, 200, "{body}");
+    let members: Vec<&str> = body["members"]
+        .as_array()
+        .expect("members list")
+        .iter()
+        .filter_map(|m| m["user_id"].as_str())
+        .collect();
+    assert_eq!(members, vec![owner.as_str()], "{body}");
 }

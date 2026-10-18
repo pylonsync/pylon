@@ -2684,9 +2684,7 @@ pub fn supports_crdt_replication(
             definition.name == entity
                 && definition.crdt
                 && definition.sync
-                && !definition.fields.iter().any(|field| {
-                    field.server_only || field.sync_omit || field.field_type.starts_with("vector(")
-                })
+                && !definition.has_private_fields()
         })
 }
 
