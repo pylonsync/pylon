@@ -319,6 +319,19 @@ function PresenceLayer({ docId, me }: { docId: string; me: User }) {
 
 Each `peer.presence` is the last object that peer pushed via `setPresence`. Presence rides the same WebSocket as CRDT updates but doesn't go into the CRDT itself. It's transient. Peers who disconnect drop out of `room.peers`.
 
+For carets in a ProseMirror editor, `ProseMirrorCursorsPlugin` from `@pylonsync/loro/prosemirror/cursors` sends this person's selection as Loro cursors (`onSelection`) and draws everyone else's (`setRemoteCursors`). A cursor points at a character, so a caret stays on its words while anyone edits before it:
+
+```tsx
+const room = useRoom({ entity: "Doc", id: docId }, me.id);
+const cursors = ProseMirrorCursorsPlugin({
+  doc,
+  containerId,
+  onSelection: (selection) => room.setPresence({ name: me.name, color: me.color, selection }),
+});
+// whenever room.peers changes:
+setRemoteCursors(view, room.peers.map((p) => ({ id: p.user_id, ...p.data })));
+```
+
 `useRoom({ entity, id })` is the room tied to that row: only people who may read the row join it, see who is there, or receive its messages, and someone who loses access is removed (see [Presence + rooms](/clients/react#presence--rooms)). Use it for a document's cursors; a free room name like `doc:${docId}` lets any signed-in user in.
 
 ## Saving and loading
