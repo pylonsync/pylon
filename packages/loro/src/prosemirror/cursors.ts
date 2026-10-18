@@ -106,7 +106,11 @@ function resolve(encoded: string | null | undefined, doc: LoroDoc, containerId: 
   const sync = loroSyncPluginKey.getState(state) as { mapping?: Map<ContainerID, Node | Node[]> } | undefined;
   if (!sync?.mapping) return null;
   try {
-    const pos = cursorToPosition(Cursor.decode(fromBase64(encoded)), doc, containerId, sync.mapping);
+    // A deleted character's cursor moves to Loro's nearest position, so the
+    // caret stays visible until its owner sends a new selection.
+    const pos = cursorToPosition(Cursor.decode(fromBase64(encoded)), doc, containerId, sync.mapping, {
+      acceptMoved: true,
+    });
     return pos != null && pos >= 0 && pos <= state.doc.content.size ? pos : null;
   } catch {
     return null;

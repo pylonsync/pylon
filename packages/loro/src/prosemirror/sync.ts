@@ -424,7 +424,13 @@ function mappedSize(mapping: Mapping, id: ContainerID): number | null {
  * The document position a cursor points at now. Uses the mapping, which
  * createNodeFromLoroObj has just filled for the whole tree.
  */
-export function cursorToPosition(cursor: Cursor, doc: LoroDoc, containerId: ContainerID, mapping: Mapping): number | null {
+export function cursorToPosition(
+  cursor: Cursor,
+  doc: LoroDoc,
+  containerId: ContainerID,
+  mapping: Mapping,
+  options: { acceptMoved?: boolean } = {},
+): number | null {
   const rootId = field(doc, containerId).id;
   const target = cursor.containerId();
   let index: number;
@@ -434,7 +440,7 @@ export function cursorToPosition(cursor: Cursor, doc: LoroDoc, containerId: Cont
     const list = doc.getContainerById(target) as LoroList | undefined;
     const pos = doc.getCursorPos(cursor);
     const owner = list?.parent() as LoroMap | undefined;
-    if (!list || !pos || pos.update || !owner) return null;
+    if (!list || !pos || (pos.update && !options.acceptMoved) || !owner) return null;
     // Inside a node with no text, or before an inline node: count the
     // children before it.
     index = 0;
@@ -452,9 +458,11 @@ export function cursorToPosition(cursor: Cursor, doc: LoroDoc, containerId: Cont
     const text = doc.getContainerById(target) as LoroText | undefined;
     const pos = doc.getCursorPos(cursor);
     // `update` means the character was deleted (a split moves text into a
-    // new paragraph as a delete and an insert). ProseMirror's own mapping
-    // through the replace places the caret better then.
-    if (!text || !pos || pos.update) return null;
+    // new paragraph as a delete and an insert). For this editor's own caret,
+    // ProseMirror's mapping through the replace places it better; another
+    // person's caret has no mapping, so it takes Loro's nearest position
+    // (`acceptMoved`).
+    if (!text || !pos || (pos.update && !options.acceptMoved)) return null;
     // The cursor names a character; side 1 means just after it, which is
     // two UTF-16 units for a surrogate pair.
     const width =

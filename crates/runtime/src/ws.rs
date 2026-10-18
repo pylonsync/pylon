@@ -249,6 +249,15 @@ impl RoomSubscriptions {
         }
     }
 
+    /// Whether any client subscribed to `room` as `user_id` on this machine.
+    pub fn user_subscribed(&self, room: &str, user_id: &str) -> bool {
+        let state = self.state.lock().unwrap();
+        state.by_room.get(room).is_some_and(|set| {
+            set.iter()
+                .any(|c| state.user_by_client.get(c).map(String::as_str) == Some(user_id))
+        })
+    }
+
     /// Drop every subscription `user_id`'s clients hold to `room`, and
     /// return those clients. Called when the user leaves the room (or is
     /// removed from it): a subscription without membership would keep
@@ -1188,6 +1197,11 @@ impl WsHub {
     /// `auth` with the caller's roles as they are now. A socket keeps the
     /// roles it had when it connected (or last switched org); someone removed
     /// from an org, or demoted, must not keep a role-gated room on them.
+    ///
+    /// Roles on a socket are the active org's (a tenant switch replaces them
+    /// the same way, see `update_tenant_for_user`), and the enricher only
+    /// fills empty roles, so they are cleared before it runs. Admin and
+    /// API-key identities keep theirs.
     fn current_auth(&self, auth: &pylon_auth::AuthContext) -> pylon_auth::AuthContext {
         let mut fresh = auth.clone();
         let enrich = match self.auth_enricher.lock() {
@@ -1195,6 +1209,9 @@ impl WsHub {
             Err(poisoned) => poisoned.into_inner().clone(),
         };
         if let Some(enrich) = enrich {
+            if !fresh.is_admin && !fresh.is_api_key_auth() {
+                fresh.roles.clear();
+            }
             enrich(&mut fresh);
         }
         fresh
@@ -3789,9 +3806,23 @@ mod tests {
             auth,
             None,
         );
+        // The enricher behaves like `enrich_active_org_role`: it fills empty
+        // roles from the org store and leaves populated ones alone.
+        let store_role: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(Some("editor".into())));
+        let role_for_enricher = Arc::clone(&store_role);
+        hub.set_auth_enricher(Arc::new(move |c: &mut AuthContext| {
+            if c.roles.is_empty() {
+                if let Some(role) = role_for_enricher.lock().unwrap().clone() {
+                    c.roles = vec![role];
+                }
+            }
+        }));
         assert!(hub.client_may_use_room(0, "@Doc/d1", true));
-        // Alice is removed from the org: the enricher finds no role.
-        hub.set_auth_enricher(Arc::new(|c: &mut AuthContext| c.roles.clear()));
+        // Alice is demoted in the org store; her socket still says "editor".
+        *store_role.lock().unwrap() = Some("viewer".into());
+        assert!(!hub.client_may_use_room(0, "@Doc/d1", true));
+        // Removed from the org entirely.
+        *store_role.lock().unwrap() = None;
         assert!(!hub.client_may_use_room(0, "@Doc/d1", true));
         // Free rooms are not checked.
         assert!(hub.client_may_use_room(0, "chat-1", true));

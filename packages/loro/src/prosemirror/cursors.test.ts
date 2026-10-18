@@ -97,3 +97,16 @@ test("no peers, no decorations", async () => {
   setRemoteCursors(b, []);
   expect(caretPositions(b)).toEqual([]);
 });
+
+test("a remote caret stays when the character it follows is deleted", async () => {
+  const { a, b, docs, containerId, sync } = setup();
+  await tick();
+  type(a, "hello world");
+  sync();
+  caretAt(a, 7); // after "hello "
+  setRemoteCursors(b, [{ id: "a", name: "Ann", color: "#2563eb", selection: encodeSelection(a.state, docs[0], containerId) }]);
+  expect(caretPositions(b)).toEqual([7]);
+  // B deletes the space Ann's caret follows.
+  b.dispatch(b.state.tr.delete(6, 7));
+  expect(caretPositions(b)).toEqual([6]);
+});
