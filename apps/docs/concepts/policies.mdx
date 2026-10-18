@@ -98,6 +98,14 @@ policy({
 });
 ```
 
+Adding or removing a membership changes who may read the documents without changing the documents. When a synced entity's read policy or sync scope uses `exists(Source where ... field == auth.userId)`, a change to a `Source` row tells the user that row names (before and after the change) to re-sync that entity: their open pages get the rows they may now read and drop the rows they may not. Three limits apply:
+
+- The user is told only if they may read the `Source` row, so a private row never reveals itself.
+- An update is told only when it changes a field the `exists()` conditions name.
+- An `exists()` with no `== auth.userId` condition names no user.
+
+In those cases the change reaches open pages at the next reconnect or tab focus.
+
 ### Admin override
 
 ```ts

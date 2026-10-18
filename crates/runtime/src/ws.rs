@@ -896,6 +896,16 @@ impl Shard {
     /// each engine refreshes without app-level notifySessionChanged
     /// calls. Admin-token connections (no user_id) are skipped.
     fn send_text_to_user(&self, user_id: &str, msg: &Arc<str>) {
+        self.send_text_to_user_if(user_id, msg, |_| true);
+    }
+
+    /// [`Self::send_text_to_user`] to the clients whose auth passes `allow`.
+    fn send_text_to_user_if(
+        &self,
+        user_id: &str,
+        msg: &Arc<str>,
+        allow: impl Fn(&AuthContext) -> bool,
+    ) {
         let handles: Vec<(u64, ClientSocket)> = {
             let clients = self.clients.lock().unwrap();
             clients
@@ -912,6 +922,18 @@ impl Shard {
         };
         let mut dead: Vec<u64> = Vec::new();
         for (id, handle) in handles {
+            // Checked outside the clients lock: a read policy can query
+            // the store.
+            let allowed = {
+                let auth = match handle.auth.read() {
+                    Ok(g) => g,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                allow(&auth)
+            };
+            if !allowed {
+                continue;
+            }
             match handle
                 .outbound_tx
                 .try_send(OutboundMessage::Text(Arc::clone(msg)))
@@ -1065,6 +1087,14 @@ pub enum BroadcastJob {
         user_id: Arc<str>,
         msg: Arc<str>,
     },
+    /// A `sync-reconcile` hint for one user's clients that may read one of
+    /// `rows` of `source` (see `WsHub::hint_dependent_reconcile`).
+    DependencyHint {
+        user_id: Arc<str>,
+        frame: Arc<str>,
+        source: Arc<str>,
+        rows: Arc<Vec<serde_json::Value>>,
+    },
 }
 
 pub struct WsHub {
@@ -1092,6 +1122,10 @@ pub struct WsHub {
     /// a row re-checks its recipients at most every [`ROOM_ACCESS_TTL`]
     /// instead of on every cursor move.
     room_access_cache: Mutex<HashMap<(u64, String), (bool, std::time::Instant)>>,
+    /// Synced entities whose read rules depend on other entities through
+    /// `exists(... == auth.userId)`, by source entity. See
+    /// [`WsHub::hint_dependent_reconcile`].
+    sync_dependencies: HashMap<String, Vec<pylon_policy::SyncDependency>>,
     /// Auth-user manifest config, used by `maybe_project_user_row`
     /// inside the wire projection.
     auth_user: pylon_kernel::ManifestAuthUserConfig,
@@ -1155,6 +1189,26 @@ impl WsHub {
                             BroadcastJob::PerUser { user_id, msg } => {
                                 shard_clone.send_text_to_user(&user_id, &msg);
                             }
+                            BroadcastJob::DependencyHint {
+                                user_id,
+                                frame,
+                                source,
+                                rows,
+                            } => {
+                                shard_clone.send_text_to_user_if(&user_id, &frame, |auth| {
+                                    auth.is_unscoped_admin()
+                                        || rows.iter().any(|row| {
+                                            matches!(
+                                                policy_clone.check_entity_read(
+                                                    &source,
+                                                    auth,
+                                                    Some(row)
+                                                ),
+                                                PolicyResult::Allowed
+                                            )
+                                        })
+                                });
+                            }
                         }
                     }
                 })
@@ -1164,6 +1218,7 @@ impl WsHub {
             broadcast_txs.push(tx);
         }
 
+        let sync_dependencies = pylon_policy::sync_dependencies(&manifest);
         Arc::new(Self {
             shards,
             next_id: Mutex::new(0),
@@ -1174,6 +1229,7 @@ impl WsHub {
             crdt_private_entities: std::sync::OnceLock::new(),
             room_access: std::sync::OnceLock::new(),
             room_access_cache: Mutex::new(HashMap::new()),
+            sync_dependencies,
             auth_user,
             auth_enricher: Mutex::new(None),
             auth_resolver: Mutex::new(None),
@@ -1428,9 +1484,37 @@ impl WsHub {
     pub fn broadcast(&self, event: &ChangeEvent) {
         // `sync: false` entities never reach a client replica; the pull
         // path skips them, and so does the live fan-out.
-        if !pylon_router::is_replicated_entity(&self.manifest, &event.entity) {
-            return;
+        if pylon_router::is_replicated_entity(&self.manifest, &event.entity) {
+            self.broadcast_replicated(event);
         }
+        self.hint_dependent_reconcile(event);
+    }
+
+    /// When `event` changes a row that other synced entities' read rules
+    /// depend on (`exists(Source where ... userId == auth.userId)`), tell
+    /// the users the row names, before and after the change, to re-sync
+    /// those entities: `{"type":"sync-reconcile","entities":[...]}`. A
+    /// share or an unshare changes who may read a document without
+    /// changing the document, so no change event of its own reaches them.
+    /// Queued after the change event on the same per-shard channels.
+    fn hint_dependent_reconcile(&self, event: &ChangeEvent) {
+        let source: Arc<str> = Arc::from(event.entity.as_str());
+        for hint in dependent_reconcile_hints(&self.sync_dependencies, event) {
+            let user_id: Arc<str> = Arc::from(hint.user_id);
+            let frame: Arc<str> = Arc::from(hint.frame);
+            let rows = Arc::new(hint.rows);
+            for tx in &self.broadcast_txs {
+                let _ = tx.try_send(BroadcastJob::DependencyHint {
+                    user_id: Arc::clone(&user_id),
+                    frame: Arc::clone(&frame),
+                    source: Arc::clone(&source),
+                    rows: Arc::clone(&rows),
+                });
+            }
+        }
+    }
+
+    fn broadcast_replicated(&self, event: &ChangeEvent) {
         // Project NOW for wire serialization. The raw event in the
         // `BroadcastJob` keeps `data` / `prev_data` intact so the
         // per-client policy check evaluates against the unprojected
@@ -3243,6 +3327,67 @@ impl Write for ReadHalfStream {
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
+}
+
+/// A `sync-reconcile` frame for one user: their sockets get it only if
+/// they may read one of `rows` (the changed source row, before or after),
+/// so a hint never reveals activity on a row the reader cannot see.
+pub(crate) struct DependencyHint {
+    pub user_id: String,
+    pub frame: String,
+    pub rows: Vec<serde_json::Value>,
+}
+
+/// The `sync-reconcile` hints a change event calls for: for each synced
+/// entity whose read rules depend on `event.entity` through
+/// `exists(... field == auth.userId)`, and that the change can affect (an
+/// insert, a delete, or an update to a condition field), the users the
+/// row names in those fields, before and after the change. Shared by the
+/// WebSocket and SSE hubs.
+pub(crate) fn dependent_reconcile_hints(
+    dependencies: &HashMap<String, Vec<pylon_policy::SyncDependency>>,
+    event: &ChangeEvent,
+) -> Vec<DependencyHint> {
+    let Some(deps) = dependencies.get(&event.entity) else {
+        return Vec::new();
+    };
+    // user -> (dependent entities, the rows naming them)
+    let mut by_user: std::collections::BTreeMap<
+        String,
+        (std::collections::BTreeSet<&str>, Vec<&serde_json::Value>),
+    > = std::collections::BTreeMap::new();
+    for dep in deps {
+        if !dep.affected_by(event.data.as_ref(), event.prev_data.as_ref()) {
+            continue;
+        }
+        for field in &dep.user_fields {
+            for row in [event.data.as_ref(), event.prev_data.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                let user = field
+                    .split('.')
+                    .try_fold(row, |value, key| value.get(key))
+                    .and_then(|v| v.as_str());
+                if let Some(user) = user.filter(|u| !u.is_empty()) {
+                    let entry = by_user.entry(user.to_string()).or_default();
+                    entry.0.insert(dep.dependent.as_str());
+                    if !entry.1.iter().any(|r| std::ptr::eq(*r, row)) {
+                        entry.1.push(row);
+                    }
+                }
+            }
+        }
+    }
+    by_user
+        .into_iter()
+        .map(|(user_id, (entities, rows))| DependencyHint {
+            user_id,
+            frame: serde_json::json!({ "type": "sync-reconcile", "entities": entities })
+                .to_string(),
+            rows: rows.into_iter().cloned().collect(),
+        })
+        .collect()
 }
 
 #[cfg(test)]

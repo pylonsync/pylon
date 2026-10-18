@@ -668,3 +668,148 @@ describe("SyncEngine cookie auth", () => {
     expect(notifications).toBe(1);
   });
 });
+
+// The server sends `sync-reconcile` when a row of another entity changed
+// which rows of these entities the user may read (a share, an unshare):
+// no change event of the rows themselves will come.
+describe("sync-reconcile hint", () => {
+  let restore: (() => void) | null = null;
+
+  afterEach(() => {
+    restore?.();
+    restore = null;
+  });
+
+  type Internals = {
+    dispatchInboundMessage(m: Record<string, unknown>): void;
+    running: boolean;
+    cursor: { last_seq: number };
+    hintPending: Set<string>;
+  };
+  const inner = (engine: SyncEngine) => engine as unknown as Internals;
+  const deliver = (engine: SyncEngine, msg: Record<string, unknown>) => inner(engine).dispatchInboundMessage(msg);
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  function documentServer(onFetch: (n: number) => void = () => {}) {
+    let fetches = 0;
+    restore = installFetch(async (url) => {
+      if (url.includes("/api/entities/Document/cursor")) {
+        fetches += 1;
+        onFetch(fetches);
+        return {
+          status: 200,
+          body: { data: [{ id: "shared", title: "Now shared" }], next_cursor: null, has_more: false },
+        };
+      }
+      return { status: 404, body: {} };
+    });
+    return () => fetches;
+  }
+
+  test("reconciles the named entities: the shared row arrives, the unshared one leaves", async () => {
+    const fetches = documentServer();
+    const engine = makeEngine();
+    inner(engine).running = true;
+    seedStore(engine, "Document", [{ id: "unshared", title: "No longer shared" }]);
+
+    deliver(engine, { type: "sync-reconcile", entities: ["Document"] });
+    await sleep(250);
+
+    expect(fetches()).toBe(1);
+    expect(engine.store.list("Document").map((r) => (r as { id: string }).id)).toEqual(["shared"]);
+    engine.stop();
+  });
+
+  test("hints that arrive together share one fetch", async () => {
+    const fetches = documentServer();
+    const engine = makeEngine();
+    inner(engine).running = true;
+    for (let i = 0; i < 5; i++) deliver(engine, { type: "sync-reconcile", entities: ["Document"] });
+    await sleep(250);
+    expect(fetches()).toBe(1);
+    engine.stop();
+  });
+
+  test("keeps retrying while newer changes race the fetch, then lands", async () => {
+    const engine = makeEngine();
+    // The first two fetches race a change event: the cursor moves.
+    const fetches = documentServer((n) => {
+      if (n <= 2) inner(engine).cursor.last_seq += 1;
+    });
+    inner(engine).running = true;
+
+    deliver(engine, { type: "sync-reconcile", entities: ["Document"] });
+    await sleep(250);
+    expect(fetches()).toBe(1);
+    expect(engine.store.list("Document")).toEqual([]);
+    expect([...inner(engine).hintPending]).toEqual(["Document"]);
+
+    // Retries run at most once a second.
+    await sleep(2300);
+    expect(fetches()).toBe(3);
+    expect(engine.store.list("Document").map((r) => (r as { id: string }).id)).toEqual(["shared"]);
+    expect(inner(engine).hintPending.size).toBe(0);
+    engine.stop();
+  });
+
+  test("stop drops pending hints", async () => {
+    const fetches = documentServer();
+    const engine = makeEngine();
+    inner(engine).running = true;
+    deliver(engine, { type: "sync-reconcile", entities: ["Document"] });
+    engine.stop();
+    await sleep(250);
+    expect(fetches()).toBe(0);
+    expect(inner(engine).hintPending.size).toBe(0);
+  });
+
+  test("ignores a hint without entity names", async () => {
+    const fetches = documentServer();
+    const engine = makeEngine();
+    inner(engine).running = true;
+    deliver(engine, { type: "sync-reconcile", entities: [42, null] });
+    deliver(engine, { type: "sync-reconcile" });
+    await sleep(250);
+    expect(fetches()).toBe(0);
+    engine.stop();
+  });
+});
+
+describe("sync-reconcile hint after a failed fetch", () => {
+  let restore: (() => void) | null = null;
+  afterEach(() => {
+    restore?.();
+    restore = null;
+  });
+
+  test("a 5xx keeps the hint pending and the retry lands", async () => {
+    let fetches = 0;
+    restore = installFetch(async (url) => {
+      if (url.includes("/api/entities/Document/cursor")) {
+        fetches += 1;
+        if (fetches === 1) return { status: 503, body: {} };
+        return { status: 200, body: { data: [], next_cursor: null, has_more: false } };
+      }
+      return { status: 404, body: {} };
+    });
+    const engine = makeEngine();
+    const inner = engine as unknown as {
+      running: boolean;
+      hintPending: Set<string>;
+      dispatchInboundMessage(m: Record<string, unknown>): void;
+    };
+    inner.running = true;
+    seedStore(engine, "Document", [{ id: "unshared", title: "No longer shared" }]);
+
+    inner.dispatchInboundMessage({ type: "sync-reconcile", entities: ["Document"] });
+    await new Promise((r) => setTimeout(r, 250));
+    expect(fetches).toBe(1);
+    expect([...inner.hintPending]).toEqual(["Document"]);
+    expect(engine.store.list("Document").length).toBe(1);
+
+    await new Promise((r) => setTimeout(r, 1200));
+    expect(fetches).toBe(2);
+    expect(engine.store.list("Document")).toEqual([]);
+    engine.stop();
+  });
+});

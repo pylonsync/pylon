@@ -1651,6 +1651,12 @@ export class SyncEngine {
   /** Stop the sync engine. */
   stop(): void {
     this.running = false;
+    if (this.hintTimer !== null) {
+      clearTimeout(this.hintTimer);
+      this.hintTimer = null;
+    }
+    this.hintPending.clear();
+    this.hintRetries = 0;
     if (this.identityRetryTimer !== null) {
       clearTimeout(this.identityRetryTimer);
       this.identityRetryTimer = null;
@@ -2303,10 +2309,75 @@ export class SyncEngine {
   }
 
   async reconcile(entities?: string[]): Promise<void> {
+    await this.reconcileReportingSkips(entities);
+  }
+
+  /** Entities a server hint (`sync-reconcile`) asked to reconcile that
+   *  have not reconciled yet. */
+  private hintPending = new Set<string>();
+  private hintTimer: ReturnType<typeof setTimeout> | null = null;
+  private hintRetries = 0;
+  private lastHintReconcileAt = 0;
+  /** Hints that arrive this close together share one reconcile. */
+  private static readonly HINT_DEBOUNCE_MS = 100;
+  /** At most one hinted reconcile per this interval. */
+  private static readonly HINT_MIN_INTERVAL_MS = 1_000;
+  /** Backoff for entities whose fetch raced a newer change: doubling from
+   *  the base, capped. */
+  private static readonly HINT_RETRY_BASE_MS = 250;
+  private static readonly HINT_RETRY_MAX_MS = 10_000;
+
+  /**
+   * The server said a change elsewhere (a share, an unshare, a folder
+   * membership) changed which rows of `entities` this user may read
+   * (`sync-reconcile`). No other event will tell this replica, so the
+   * entities stay pending until a reconcile of them completes: hints are
+   * merged, run at most once a second, and an entity whose fetch raced a
+   * newer change is retried with backoff until it lands or the engine
+   * stops.
+   */
+  private queueHintReconcile(entities: string[]): void {
+    for (const e of entities) this.hintPending.add(e);
+    this.scheduleHintReconcile(SyncEngine.HINT_DEBOUNCE_MS);
+  }
+
+  private scheduleHintReconcile(delayMs: number): void {
+    if (this.hintTimer !== null || !this.running) return;
+    const wait = Math.max(delayMs, this.lastHintReconcileAt + SyncEngine.HINT_MIN_INTERVAL_MS - Date.now());
+    this.hintTimer = setTimeout(() => {
+      this.hintTimer = null;
+      void this.flushHintReconcile();
+    }, wait);
+  }
+
+  private async flushHintReconcile(): Promise<void> {
+    if (!this.running || this.hintPending.size === 0) return;
+    const entities = [...this.hintPending];
+    this.hintPending.clear();
+    this.lastHintReconcileAt = Date.now();
+    let skipped: string[];
+    try {
+      skipped = await this.reconcileReportingSkips(entities);
+    } catch {
+      skipped = entities;
+    }
+    for (const e of skipped) this.hintPending.add(e);
+    this.hintRetries = skipped.length > 0 ? this.hintRetries + 1 : 0;
+    if (this.hintPending.size === 0) return;
+    const delay =
+      skipped.length > 0
+        ? Math.min(SyncEngine.HINT_RETRY_BASE_MS * 2 ** (this.hintRetries - 1), SyncEngine.HINT_RETRY_MAX_MS)
+        : SyncEngine.HINT_DEBOUNCE_MS;
+    this.scheduleHintReconcile(delay);
+  }
+
+  /** `reconcile`, resolving with the entities skipped because the cursor
+   *  moved during their fetch. */
+  private async reconcileReportingSkips(entities?: string[]): Promise<string[]> {
     const minIntervalMs = this.config.reconcileMinIntervalMs ?? 2_000;
     const now = Date.now();
     if (entities === undefined && now - this.lastReconcileAt < minIntervalMs) {
-      return;
+      return [];
     }
     // Reconcile waits behind any in-flight pull / refresh / push so it
     // can't apply rows captured under a stale session.
@@ -2315,7 +2386,7 @@ export class SyncEngine {
       // the same window share one fetch per entity.
       return this.opQueue.enqueue("reconcile", async () => {
         try {
-          await this.reconcileInner();
+          return await this.reconcileInner();
         } finally {
           this.lastReconcileAt = Date.now();
         }
@@ -2330,9 +2401,9 @@ export class SyncEngine {
       for (const e of entities) open.entities.add(e);
       return open.promise;
     }
-    const batch: { entities: Set<string>; promise: Promise<void> } = {
+    const batch: { entities: Set<string>; promise: Promise<string[]> } = {
       entities: new Set(entities),
-      promise: Promise.resolve(),
+      promise: Promise.resolve([]),
     };
     this.scopedReconcileBatch = batch;
     this.scopedReconcileSeq += 1;
@@ -2341,7 +2412,7 @@ export class SyncEngine {
       async () => {
         if (this.scopedReconcileBatch === batch) this.scopedReconcileBatch = null;
         try {
-          await this.reconcileInner([...batch.entities]);
+          return await this.reconcileInner([...batch.entities]);
         } finally {
           this.lastReconcileAt = Date.now();
         }
@@ -2353,14 +2424,14 @@ export class SyncEngine {
   /** Scoped reconcile batch that has not started running yet. */
   private scopedReconcileBatch: {
     entities: Set<string>;
-    promise: Promise<void>;
+    promise: Promise<string[]>;
   } | null = null;
   private scopedReconcileSeq = 0;
 
-  private async reconcileInner(entities?: string[]): Promise<void> {
+  private async reconcileInner(entities?: string[]): Promise<string[]> {
     // Same reasoning as pullInner: the leader reconciles, broadcasts
     // results, and follower replicas converge via the channel.
-    if (!this.isMultiTabLeader) return;
+    if (!this.isMultiTabLeader) return [];
     // Sweep entities with local rows PLUS entities the app has observed
     // via useQuery (even when empty locally). Without the observed set,
     // a server row in a never-cached entity is never reconciled and
@@ -2368,7 +2439,8 @@ export class SyncEngine {
     const names =
       entities ??
       [...new Set([...this.store.entityNames(), ...this.observedEntities])];
-    if (names.length === 0) return;
+    if (names.length === 0) return [];
+    const skipped: string[] = [];
     // Tombstone seq for any local row the server doesn't return. Using
     // the current cursor means future inserts (which have higher seqs)
     // bypass the tombstone — re-creation server-side still propagates.
@@ -2444,11 +2516,16 @@ export class SyncEngine {
             const streak = (this.reconcile403Streak.get(entity) ?? 0) + 1;
             if (streak < 2) {
               this.reconcile403Streak.set(entity, streak);
+              skipped.push(entity);
               return;
             }
             this.reconcile403Streak.delete(entity);
             await this.dropEntity(entity, tombstoneSeq);
+            return;
           }
+          // Not reconciled (offline, a 5xx): reported, so a server hint
+          // stays pending and retries.
+          skipped.push(entity);
           return;
         }
         // Successful fetch — the entity is readable, so any prior 403 streak
@@ -2460,7 +2537,9 @@ export class SyncEngine {
           // for a row our snapshot just captured. Bail out for this
           // entity; reconcile() is triggered again on visibility-change
           // and reconnect, and the WS event already carried the latest
-          // state for the affected row.
+          // state for the affected row. Reported, so a server hint can
+          // retry (flushHintReconcile).
+          skipped.push(entity);
           return;
         }
         if (this.session.signature() !== sessionBeforeFetch) {
@@ -2479,6 +2558,7 @@ export class SyncEngine {
         );
       }),
     );
+    return skipped;
   }
 
   /** Fetch every row for an entity. Uses cursor pagination so big tables
@@ -4105,6 +4185,15 @@ export class SyncEngine {
     // fresh /api/auth/me read which updates the cached session AND,
     // on tenant flip, resets the replica so stale rows from the
     // previous tenant disappear.
+    // A change elsewhere (a share, an unshare, a folder membership)
+    // changed which rows of these entities this user may read, without a
+    // change event for the rows themselves. Reconcile them.
+    if (msg.type === "sync-reconcile" && Array.isArray(msg.entities)) {
+      const entities = msg.entities.filter((e): e is string => typeof e === "string");
+      if (entities.length > 0) this.queueHintReconcile(entities);
+      return;
+    }
+
     if (msg.type === "session-changed") {
       void this.refreshResolvedSession();
       return;

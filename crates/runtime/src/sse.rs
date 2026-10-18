@@ -195,6 +195,47 @@ impl SseShard {
     /// Send SSE-formatted data to every client in this shard.
     /// Full or closed client queues are removed and their IDs returned.
     /// Used for non-tenant-scoped messages (e.g. presence relays).
+    /// Send `frame` to this shard's clients signed in as `user_id` whose
+    /// auth passes `allow`. `allow` runs outside the clients lock: a read
+    /// policy can query the store.
+    fn send_to_user_if(
+        &self,
+        user_id: &str,
+        frame: &Arc<str>,
+        allow: impl Fn(&AuthContext) -> bool,
+    ) -> Vec<u64> {
+        let candidates: Vec<(u64, AuthContext)> = {
+            let clients = self.clients.lock().unwrap();
+            clients
+                .iter()
+                .filter(|(_, c)| c.auth.user_id.as_deref() == Some(user_id))
+                .map(|(id, c)| (*id, c.auth.clone()))
+                .collect()
+        };
+        let allowed: Vec<u64> = candidates
+            .into_iter()
+            .filter(|(_, auth)| allow(auth))
+            .map(|(id, _)| id)
+            .collect();
+        if allowed.is_empty() {
+            return Vec::new();
+        }
+        let mut clients = self.clients.lock().unwrap();
+        let mut dead = Vec::new();
+        for id in allowed {
+            let Some(client) = clients.get_mut(&id) else {
+                continue;
+            };
+            if !client.enqueue(frame) {
+                dead.push(id);
+            }
+        }
+        for id in &dead {
+            clients.remove(id);
+        }
+        dead
+    }
+
     fn broadcast(&self, frame: &Arc<str>) -> Vec<u64> {
         let mut clients = self.clients.lock().unwrap();
         let mut dead = Vec::new();
@@ -312,6 +353,14 @@ pub enum SseJob {
         synth_delete_sse: Option<Arc<str>>,
     },
     Plain(Arc<str>),
+    /// A `sync-reconcile` hint for one user's clients that may read one
+    /// of `rows` of `source` (see `WsHub::hint_dependent_reconcile`).
+    DependencyHint {
+        user_id: Arc<str>,
+        frame: Arc<str>,
+        source: Arc<str>,
+        rows: Arc<Vec<serde_json::Value>>,
+    },
 }
 
 /// Sharded SSE broadcast hub.
@@ -334,6 +383,8 @@ pub struct SseHub {
     manifest: Arc<pylon_kernel::AppManifest>,
     /// Auth-user manifest config for `maybe_project_user_row`.
     auth_user: pylon_kernel::ManifestAuthUserConfig,
+    /// See `WsHub::hint_dependent_reconcile`.
+    sync_dependencies: HashMap<String, Vec<pylon_policy::SyncDependency>>,
 }
 
 impl SseHub {
@@ -373,6 +424,26 @@ impl SseHub {
                             SseJob::Plain(msg) => {
                                 shard_clone.broadcast(&msg);
                             }
+                            SseJob::DependencyHint {
+                                user_id,
+                                frame,
+                                source,
+                                rows,
+                            } => {
+                                shard_clone.send_to_user_if(&user_id, &frame, |auth| {
+                                    auth.is_unscoped_admin()
+                                        || rows.iter().any(|row| {
+                                            matches!(
+                                                policy_clone.check_entity_read(
+                                                    &source,
+                                                    auth,
+                                                    Some(row)
+                                                ),
+                                                PolicyResult::Allowed
+                                            )
+                                        })
+                                });
+                            }
                         }
                     }
                 })
@@ -396,6 +467,7 @@ impl SseHub {
             broadcast_txs.push(tx);
         }
 
+        let sync_dependencies = pylon_policy::sync_dependencies(&manifest);
         Arc::new(Self {
             shards,
             next_id: Mutex::new(0),
@@ -403,6 +475,7 @@ impl SseHub {
             policy,
             manifest,
             auth_user,
+            sync_dependencies,
         })
     }
 
@@ -412,9 +485,26 @@ impl SseHub {
     pub fn broadcast(&self, event: &ChangeEvent) {
         // `sync: false` entities never reach a client replica (see
         // `WsHub::broadcast`).
-        if !pylon_router::is_replicated_entity(&self.manifest, &event.entity) {
-            return;
+        if pylon_router::is_replicated_entity(&self.manifest, &event.entity) {
+            self.broadcast_replicated(event);
         }
+        let source: Arc<str> = Arc::from(event.entity.as_str());
+        for hint in crate::ws::dependent_reconcile_hints(&self.sync_dependencies, event) {
+            let user_id: Arc<str> = Arc::from(hint.user_id);
+            let frame: Arc<str> = Arc::from(format!("data: {}\n\n", hint.frame));
+            let rows = Arc::new(hint.rows);
+            for tx in &self.broadcast_txs {
+                let _ = tx.try_send(SseJob::DependencyHint {
+                    user_id: Arc::clone(&user_id),
+                    frame: Arc::clone(&frame),
+                    source: Arc::clone(&source),
+                    rows: Arc::clone(&rows),
+                });
+            }
+        }
+    }
+
+    fn broadcast_replicated(&self, event: &ChangeEvent) {
         // Prepare the projected frame. The worker checks each client's
         // policy before sending it. The `event` in the SseJob stays raw so
         // policies referencing `serverOnly` fields evaluate
@@ -819,6 +909,7 @@ mod tests {
             policy: Arc::new(tenant_policy()),
             auth_user: manifest.auth.user.clone(),
             manifest,
+            sync_dependencies: HashMap::new(),
         };
         let event = tenant_event();
         let wire = ChangeEvent {

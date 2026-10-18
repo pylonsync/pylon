@@ -968,6 +968,151 @@ fn compile_expr(expr: &str) -> Result<Ast, String> {
     Ok(ast)
 }
 
+/// A synced entity whose rows a reader may see or lose when rows of another
+/// entity change: its read policy or sync scope uses
+/// `exists(Source where ... field == auth.userId ...)`. An unshare (a
+/// `DocumentAccess` row deleted) changes who may read a `Document` without
+/// changing the document, so no change event of the document tells the
+/// reader. The server uses these to tell the users named in a changed
+/// source row to re-sync the dependent entity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncDependency {
+    /// The synced entity whose visibility depends on the source.
+    pub dependent: String,
+    /// Fields of the source row compared to `auth.userId`: the readers a
+    /// change to that row can affect. Dotted for nested paths.
+    pub user_fields: Vec<String>,
+    /// Every source field the `exists()` conditions name. An update that
+    /// changes none of them changes no one's access.
+    pub condition_fields: Vec<String>,
+}
+
+impl SyncDependency {
+    /// Whether a change from `prev` to `row` can change someone's access:
+    /// always for an insert or a delete (`prev` or `row` missing), and for
+    /// an update only when a condition field differs.
+    pub fn affected_by(
+        &self,
+        row: Option<&serde_json::Value>,
+        prev: Option<&serde_json::Value>,
+    ) -> bool {
+        let (Some(row), Some(prev)) = (row, prev) else {
+            return true;
+        };
+        let at = |value: &serde_json::Value, field: &str| {
+            field
+                .split('.')
+                .try_fold(value, |v, key| v.get(key))
+                .cloned()
+        };
+        self.condition_fields
+            .iter()
+            .any(|field| at(row, field) != at(prev, field))
+    }
+}
+
+/// For each source entity, the synced entities that depend on it through an
+/// `exists()` in a read policy (`allowRead` or `allow`) or a sync scope.
+/// Only `exists()` clauses tied to the reader (`field == auth.userId`) are
+/// listed: a change to an uncorrelated source row names no reader, so its
+/// effects arrive at the next reconnect or refocus. Expressions that do not
+/// parse are skipped (the engine reports them).
+pub fn sync_dependencies(manifest: &AppManifest) -> HashMap<String, Vec<SyncDependency>> {
+    let mut out: HashMap<String, Vec<SyncDependency>> = HashMap::new();
+    for entity in manifest.entities.iter().filter(|e| e.sync) {
+        let mut exprs: Vec<&str> = Vec::new();
+        for policy in manifest
+            .policies
+            .iter()
+            .filter(|p| p.entity.as_deref() == Some(entity.name.as_str()))
+        {
+            // The engine's own choice of the read expression.
+            let read = PolicyEngine::expr_for(policy, EntityAction::Read);
+            if !read.is_empty() {
+                exprs.push(read);
+            }
+        }
+        if let Some(scope) = entity.sync_scope.as_deref() {
+            exprs.push(scope);
+        }
+        for expr in exprs {
+            let Ok(ast) = compile_expr(expr) else {
+                continue;
+            };
+            let mut found = Vec::new();
+            collect_user_exists(&ast, &mut found);
+            for (source, user_fields, condition_fields) in found {
+                let deps = out.entry(source).or_default();
+                let dep = match deps.iter_mut().position(|d| d.dependent == entity.name) {
+                    Some(i) => &mut deps[i],
+                    None => {
+                        deps.push(SyncDependency {
+                            dependent: entity.name.clone(),
+                            user_fields: Vec::new(),
+                            condition_fields: Vec::new(),
+                        });
+                        deps.last_mut().expect("just pushed")
+                    }
+                };
+                for f in user_fields {
+                    if !dep.user_fields.contains(&f) {
+                        dep.user_fields.push(f);
+                    }
+                }
+                for f in condition_fields {
+                    if !dep.condition_fields.contains(&f) {
+                        dep.condition_fields.push(f);
+                    }
+                }
+            }
+        }
+    }
+    for deps in out.values_mut() {
+        for dep in deps.iter_mut() {
+            dep.user_fields.sort();
+            dep.condition_fields.sort();
+        }
+        deps.sort_by(|a, b| a.dependent.cmp(&b.dependent));
+    }
+    out
+}
+
+/// Every `exists(Source where ...)` in `ast` with a condition
+/// `field == auth.userId`, as (source, those fields, every condition field).
+fn collect_user_exists(ast: &Ast, out: &mut Vec<(String, Vec<String>, Vec<String>)>) {
+    match ast {
+        Ast::Exists { entity, conditions } => {
+            let fields: Vec<String> = conditions
+                .iter()
+                .filter(|(_, value)| {
+                    matches!(value, Ast::Path(path) if path.len() == 2 && path[0] == "auth" && path[1] == "userId")
+                })
+                .map(|(field, _)| field.join("."))
+                .collect();
+            if !fields.is_empty() {
+                let all = conditions
+                    .iter()
+                    .map(|(field, _)| field.join("."))
+                    .collect();
+                out.push((entity.clone(), fields, all));
+            }
+        }
+        Ast::Not(inner) => collect_user_exists(inner, out),
+        Ast::And(l, r)
+        | Ast::Or(l, r)
+        | Ast::Eq(l, r)
+        | Ast::Neq(l, r)
+        | Ast::Lt(l, r)
+        | Ast::Lte(l, r)
+        | Ast::Gt(l, r)
+        | Ast::Gte(l, r) => {
+            collect_user_exists(l, out);
+            collect_user_exists(r, out);
+        }
+        _ => {}
+    }
+}
+
 /// Evaluate an already-parsed `Ast` against the auth/data/input context.
 fn evaluate_ast(
     ast: &Ast,
@@ -4115,5 +4260,145 @@ mod aggregate_read_tests {
                 "{expr}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod sync_dependency_tests {
+    use super::*;
+    use pylon_kernel::{ManifestEntity, ManifestPolicy};
+
+    fn entity(name: &str, sync: bool, scope: Option<&str>) -> ManifestEntity {
+        ManifestEntity {
+            name: name.into(),
+            sync,
+            sync_scope: scope.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    fn read_policy(entity: &str, read: &str) -> ManifestPolicy {
+        ManifestPolicy {
+            name: format!("{entity}_read"),
+            entity: Some(entity.into()),
+            allow_read: Some(read.into()),
+            ..Default::default()
+        }
+    }
+
+    fn dep_of(dependent: &str, user_fields: &[&str], condition_fields: &[&str]) -> SyncDependency {
+        SyncDependency {
+            dependent: dependent.into(),
+            user_fields: user_fields.iter().map(|f| f.to_string()).collect(),
+            condition_fields: condition_fields.iter().map(|f| f.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn lists_exists_clauses_tied_to_the_reader() {
+        let manifest = AppManifest {
+            entities: vec![
+                entity("Document", true, Some("exists(OrgMember where orgId == data.orgId and userId == auth.userId)")),
+                entity("Folder", true, None),
+                entity("Secret", false, None),
+                entity("Org", true, None),
+            ],
+            policies: vec![
+                read_policy(
+                    "Document",
+                    "data.ownerId == auth.userId || exists(DocumentAccess where documentId == data.id and userId == auth.userId) || exists(FolderMember where folderId == data.folderId and userId == auth.userId and role == \"editor\")",
+                ),
+                read_policy("Folder", "!exists(FolderBan where folderId == data.id and memberId == auth.userId)"),
+                // Not synced: no live replica to keep current.
+                read_policy("Secret", "exists(SecretGrant where secretId == data.id and userId == auth.userId)"),
+                // Not tied to the reader: no one to tell.
+                read_policy("Org", "exists(Plan where orgId == data.id and tier == \"pro\")"),
+            ],
+            ..Default::default()
+        };
+        let deps = sync_dependencies(&manifest);
+        let dep = |source: &str| deps.get(source).cloned().unwrap_or_default();
+        assert_eq!(
+            dep("DocumentAccess"),
+            vec![dep_of("Document", &["userId"], &["documentId", "userId"])]
+        );
+        assert_eq!(
+            dep("FolderMember"),
+            vec![dep_of(
+                "Document",
+                &["userId"],
+                &["folderId", "role", "userId"]
+            )]
+        );
+        // From the sync scope.
+        assert_eq!(
+            dep("OrgMember"),
+            vec![dep_of("Document", &["userId"], &["orgId", "userId"])]
+        );
+        // Inside a negation, with its own field name.
+        assert_eq!(
+            dep("FolderBan"),
+            vec![dep_of("Folder", &["memberId"], &["folderId", "memberId"])]
+        );
+        assert!(!deps.contains_key("SecretGrant"));
+        assert!(!deps.contains_key("Plan"));
+    }
+
+    #[test]
+    fn merges_fields_and_skips_expressions_that_do_not_parse() {
+        let manifest = AppManifest {
+            entities: vec![entity("Note", true, None)],
+            policies: vec![
+                read_policy(
+                    "Note",
+                    "exists(Share where noteId == data.id and userId == auth.userId)",
+                ),
+                read_policy(
+                    "Note",
+                    "exists(Share where noteId == data.id and grantedBy == auth.userId)",
+                ),
+                read_policy("Note", "exists(Share where"),
+            ],
+            ..Default::default()
+        };
+        let deps = sync_dependencies(&manifest);
+        assert_eq!(
+            deps["Share"],
+            vec![dep_of(
+                "Note",
+                &["grantedBy", "userId"],
+                &["grantedBy", "noteId", "userId"]
+            )]
+        );
+    }
+
+    /// An empty `allowRead` falls back to `allow`, as the engine reads it.
+    #[test]
+    fn an_empty_allow_read_uses_allow() {
+        let manifest = AppManifest {
+            entities: vec![entity("Note", true, None)],
+            policies: vec![ManifestPolicy {
+                name: "note".into(),
+                entity: Some("Note".into()),
+                allow: "exists(Share where noteId == data.id and userId == auth.userId)".into(),
+                allow_read: Some(String::new()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(sync_dependencies(&manifest).contains_key("Share"));
+    }
+
+    #[test]
+    fn only_a_change_to_a_condition_field_affects_access() {
+        let dep = dep_of("Document", &["userId"], &["documentId", "role", "userId"]);
+        let before = serde_json::json!({ "documentId": "d1", "userId": "u1", "role": "viewer", "seenAt": "1" });
+        let seen = serde_json::json!({ "documentId": "d1", "userId": "u1", "role": "viewer", "seenAt": "2" });
+        let promoted = serde_json::json!({ "documentId": "d1", "userId": "u1", "role": "editor", "seenAt": "1" });
+        assert!(!dep.affected_by(Some(&seen), Some(&before)));
+        assert!(dep.affected_by(Some(&promoted), Some(&before)));
+        // An insert or a delete always can.
+        assert!(dep.affected_by(Some(&before), None));
+        assert!(dep.affected_by(None, Some(&before)));
     }
 }
