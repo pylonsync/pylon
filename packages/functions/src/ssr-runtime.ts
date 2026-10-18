@@ -7,6 +7,7 @@
 // the dispatch arm) so projects without SSR routes pay nothing — no
 // react-dom dependency requirement, no startup cost.
 
+import { withMetaSlot } from "./ssr-page-tree";
 import { moduleKey, serverBundle } from "./server-bundle";
 
 // Bun runtime global. This module runs under Bun but is type-checked by
@@ -2561,15 +2562,14 @@ async function tryRenderBoundary(
     );
     boundaryMeta = applyAutoIcons(rel, boundaryMeta);
     const boundaryMetaFragment = renderMetadata(React, boundaryMeta);
-    let tree = React.createElement(Comp, compProps);
-    if (boundaryMetaFragment) {
-      tree = React.createElement(
-        React.Fragment,
-        null,
-        boundaryMetaFragment,
-        tree,
-      );
-    }
+    // The same metadata slot a page gets: the browser hydrates a boundary
+    // with the page's tree shape (ssr-page-tree.ts).
+    let tree = withMetaSlot(
+      React.createElement,
+      React.Fragment,
+      boundaryMetaFragment,
+      React.createElement(Comp, compProps),
+    );
     tree = await buildLayoutTree(cwd, tree, boundaryLayouts, compProps, React);
     await renderBoundaryToClient(
       React,
@@ -3563,11 +3563,10 @@ export async function handleRenderRoute(
     // root: start with the page component as `tree`, then for each
     // layout (innermost first) wrap it as the new tree. Result is
     // the outermost layout containing all nested layouts down to
-    // the page. The metadata fragment is the FIRST child so React hoists
-    // its <title>/<meta> into the <head> a layout renders.
-    let tree: any = metaFragment
-      ? React.createElement(React.Fragment, null, metaFragment, pageLeaf)
-      : pageLeaf;
+    // the page. The metadata is the FIRST child so React hoists its
+    // <title>/<meta> into the <head> a layout renders; the browser renders
+    // the same slot empty (ssr-page-tree.ts), so useId values match.
+    let tree: any = withMetaSlot(React.createElement, React.Fragment, metaFragment, pageLeaf);
     tree = await buildLayoutTree(cwd, tree, msg.layouts, props, React);
     const element = tree;
     // Tracks whether the HTTP head (response_start) has actually gone out. A

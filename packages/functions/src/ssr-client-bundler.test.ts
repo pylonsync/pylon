@@ -794,6 +794,13 @@ describe("loading.tsx is wired into the client build", () => {
     // (see ssr-hydration.test.ts for why a missing boundary breaks hydration).
     expect(runtime).toContain("buildTree(Page, Layouts, currentPageProps, data.component)");
     expect(runtime).toContain("createElement(Suspense, { fallback: createElement(Loading, props) }, tree)");
+    // The metadata slot the server renders beside every page, empty in the
+    // browser, from the same module the server uses (ssr-page-tree.ts).
+    expect(runtime).toContain('import { withMetaSlot } from "./page-tree";');
+    expect(runtime).toContain("tree = withMetaSlot(createElement, Fragment, null, tree);");
+    expect(fs.readFileSync(path.join(tempDir, ".pylon", "page-tree.ts"), "utf8")).toBe(
+      fs.readFileSync(path.join(import.meta.dir, "ssr-page-tree.ts"), "utf8"),
+    );
   });
 
   test("an app with no loading.tsx still builds and navigates", async () => {

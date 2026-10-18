@@ -21,6 +21,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import React, { Suspense, use } from "react";
 import { renderToReadableStream } from "react-dom/server.browser";
+import { withMetaSlot } from "./ssr-page-tree";
 
 // Mirrors `fulfilledThenable` in ssr-client-bundler.ts's CLIENT_RUNTIME_SOURCE:
 // a React-recognized fulfilled thenable so use() reads `.value` synchronously
@@ -234,6 +235,96 @@ describe("route-level loading.tsx hydration", () => {
   test("the client tree without the boundary mismatches (the bug)", async () => {
     const errors = await hydrateErrors(
       React.createElement(Layout, null, React.createElement(DashPage)),
+    );
+    expect(errors.length).toBeGreaterThan(0);
+  });
+});
+
+// Every page with metadata had different useId values on the server and in
+// the browser: the server put the metadata beside the page, the browser
+// hydrated the page alone. Radix menus, dialogs and form labels then
+// mismatched. Both sides now share withMetaSlot (ssr-page-tree.ts).
+describe("metadata slot keeps useId values stable", () => {
+  function Layout({ children }: { children?: any }) {
+    return React.createElement("main", { id: "layout" }, children);
+  }
+  function Control() {
+    const id = React.useId();
+    return React.createElement("button", { id: `menu-${id}`, "data-probe": "" }, "Menu");
+  }
+  function MenuPage() {
+    return React.createElement("div", { id: "page" }, React.createElement(Control));
+  }
+  const meta = React.createElement("meta", { name: "description", content: "A page" });
+
+  async function render(tree: any): Promise<string> {
+    const stream = await renderToReadableStream(tree);
+    await (stream as any).allReady;
+    const reader = stream.getReader();
+    let html = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      html += dec.decode(value);
+    }
+    return html;
+  }
+
+  async function hydrate(serverTree: any, clientTree: any) {
+    const html = await render(serverTree);
+    const serverId = /id="(menu-[^"]+)"/.exec(html)?.[1];
+    const win = new Window({ url: "http://localhost/" });
+    const root = win.document.createElement("div");
+    root.insertAdjacentHTML("afterbegin", html);
+    win.document.body.appendChild(root);
+    registerDom(win);
+    const errors: string[] = [];
+    const origErr = console.error;
+    console.error = (...a: any[]) => {
+      errors.push(a.map(String).join(" "));
+    };
+    try {
+      const { hydrateRoot } = await import("react-dom/client");
+      hydrateRoot(root as any, clientTree, {
+        onRecoverableError: (e: any) => errors.push(String(e?.message ?? e)),
+      });
+      await new Promise((r) => setTimeout(r, 50));
+    } finally {
+      console.error = origErr;
+    }
+    return {
+      serverId,
+      errors: errors.filter((e) => /hydrat|did not match|mismatch/i.test(e)),
+    };
+  }
+
+  const e = React.createElement;
+
+  test("the server's slot with metadata and the browser's empty slot give the same ids", async () => {
+    // What the browser's ids are, rendered alone with the client shape.
+    const clientHtml = await render(e(Layout, null, withMetaSlot(e, React.Fragment, null, e(MenuPage))));
+    const clientId = /id="(menu-[^"]+)"/.exec(clientHtml)?.[1];
+    const { serverId, errors } = await hydrate(
+      e(Layout, null, withMetaSlot(e, React.Fragment, meta, e(MenuPage))),
+      e(Layout, null, withMetaSlot(e, React.Fragment, null, e(MenuPage))),
+    );
+    expect(serverId).toBeDefined();
+    expect(serverId).toBe(clientId);
+    expect(errors).toEqual([]);
+  });
+
+  test("a page without metadata has the same shape", async () => {
+    const { errors } = await hydrate(
+      e(Layout, null, withMetaSlot(e, React.Fragment, null, e(MenuPage))),
+      e(Layout, null, withMetaSlot(e, React.Fragment, null, e(MenuPage))),
+    );
+    expect(errors).toEqual([]);
+  });
+
+  test("hydrating the page without the slot mismatches (the bug)", async () => {
+    const { errors } = await hydrate(
+      e(Layout, null, e(React.Fragment, null, meta, e(MenuPage))),
+      e(Layout, null, e(MenuPage)),
     );
     expect(errors.length).toBeGreaterThan(0);
   });
