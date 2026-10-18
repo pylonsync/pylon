@@ -130,6 +130,16 @@ export function ProseMirrorSyncPlugin({ doc, containerId }: ProseMirrorSyncPlugi
           applyRemote(view, doc, containerId, event, cursors);
           remember();
         });
+        // A new document has no top node name yet; the server leaves it to
+        // the schema. Write it now, as setup (`sys:init`, which undo skips),
+        // so the person's first edit is an edit they can undo.
+        const root = doc.getContainerById(containerId) as LoroMap;
+        if (root.get("nodeName") == null) {
+          write(() => {
+            root.set("nodeName", view.state.schema.topNodeType.name);
+            doc.commit({ origin: "sys:init" });
+          });
+        }
         loadInitial(view, doc, containerId);
         remember();
       }, 0);

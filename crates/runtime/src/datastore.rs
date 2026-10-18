@@ -1658,7 +1658,7 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
         // envelope only to clients subscribed to the affected room.
         // O(subscribers per room), NOT O(all WS clients).
         if let Some(payload) = payload {
-            translate_and_push_room_event(&self.ws, &payload);
+            translate_and_push_room_event(&self.ws, &payload, true);
             // Presence relays are cross-machine too — a typing indicator
             // on machine A should reach clients on machine B. Skip the relay
             // build on a single-machine bus (local clients already got it via
@@ -1910,7 +1910,7 @@ pub fn install_cluster_bus_subscriber(
                 }
             }
             // Fan to this machine's room subscribers (the scoped path).
-            translate_and_push_room_event(&ws_handler, &envelope.payload);
+            translate_and_push_room_event(&ws_handler, &envelope.payload, false);
             return;
         }
         // CRDT binary: re-encode the wire frame and fan to local
@@ -2033,9 +2033,12 @@ pub(crate) fn unscoped_presence_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// `local` is true for an event from this machine's own RoomManager, false
+/// for one relayed from another machine over the cluster bus.
 pub(crate) fn translate_and_push_room_event(
     ws: &Arc<crate::ws::WsHub>,
     payload: &serde_json::Value,
+    local: bool,
 ) {
     let Some(kind) = payload.get("type").and_then(|v| v.as_str()) else {
         return;
@@ -2103,9 +2106,12 @@ pub(crate) fn translate_and_push_room_event(
     };
     ws.push_room_update(room, action, member, data);
     // A member who left (or was removed) stops receiving the room's events:
-    // their subscriptions go with the membership. One whose access was
-    // revoked is told, so the client can stop showing the room.
-    if kind == "leave" {
+    // their subscriptions on this machine go with the membership. One whose
+    // access was revoked is told, so the client can stop showing the room.
+    // Membership is per machine: a leave relayed from another machine says
+    // nothing about this one's, where the user may still be in the room (the
+    // delivery check catches revoked access here).
+    if kind == "leave" && local {
         if let Some(user_id) = payload.get("user_id").and_then(|v| v.as_str()) {
             let clients = ws.room_subscriptions().unsubscribe_user(room, user_id);
             if payload.get("revoked").and_then(|v| v.as_bool()) == Some(true) {
@@ -2212,6 +2218,35 @@ pub fn sweep_idle_room_members(
         announce_room_event(notifier, event);
     }
     events.len()
+}
+
+#[cfg(test)]
+mod room_leave_tests {
+    use super::*;
+
+    fn hub() -> Arc<crate::ws::WsHub> {
+        let manifest = Arc::new(pylon_kernel::AppManifest::default());
+        crate::ws::WsHub::new(
+            Arc::new(pylon_policy::PolicyEngine::from_manifest(&manifest)),
+            manifest.clone(),
+            manifest.auth.user.clone(),
+        )
+    }
+
+    /// Membership is per machine. A leave relayed from another machine must
+    /// not end this machine's subscriptions for a user who is still in the
+    /// room here; a leave from this machine's own RoomManager does.
+    #[test]
+    fn only_a_local_leave_ends_the_users_subscriptions() {
+        let ws = hub();
+        ws.room_subscriptions()
+            .subscribe(7, "room-1", Some("alice"));
+        let leave = serde_json::json!({ "type": "leave", "room": "room-1", "user_id": "alice" });
+        translate_and_push_room_event(&ws, &leave, false);
+        assert_eq!(ws.room_subscriptions().subscribers("room-1"), vec![7]);
+        translate_and_push_room_event(&ws, &leave, true);
+        assert!(ws.room_subscriptions().subscribers("room-1").is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -7918,6 +7953,14 @@ fn run_crdt_op(
         return Err((
             "CRDT_REPLICATION_DISABLED".into(),
             format!("{} does not replicate CRDT documents", req.entity),
+        ));
+    }
+    // Framework entities have no policies of their own: under the caller's
+    // policies they are not there, as on the entity routes.
+    if enforce && req.entity.starts_with('_') {
+        return Err((
+            "ENTITY_NOT_FOUND".into(),
+            format!("unknown entity {}", req.entity),
         ));
     }
     let auth_ctx = policy_auth_ctx(auth);

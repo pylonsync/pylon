@@ -163,6 +163,15 @@ pub fn apply_crdt_update(
     update: &[u8],
     check_policy: bool,
 ) -> Result<CrdtApplied, CrdtApplyError> {
+    // Framework entities have no policies of their own; only server code
+    // with server trust writes them.
+    if check_policy && entity.starts_with('_') && !auth.is_admin {
+        return Err(CrdtApplyError::new(
+            404,
+            "ROW_NOT_FOUND",
+            "CRDT update targets a row that doesn't exist",
+        ));
+    }
     let existing_row = deps.store.get_by_id(entity, row_id).ok().flatten();
     if check_policy {
         if let pylon_policy::PolicyResult::Denied {

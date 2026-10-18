@@ -5,7 +5,8 @@
 //! - The WebSocket subscription checks the same access.
 //! - A member who loses access (here: the row changes owner) is refused on
 //!   presence, removed on their next heartbeat, and their socket is told
-//!   (`room-revoked`) and stops receiving the room's events.
+//!   (`room-revoked`) and stops receiving the room's events within the
+//!   access re-check window.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -439,10 +440,11 @@ fn rooms_tied_to_a_row_follow_its_read_policy() {
     assert!(refused.is_some(), "a second subscribe is refused");
 }
 
-/// A viewer who loses access stops receiving the room's events at the next
-/// event, without waiting for their heartbeat.
+/// A viewer who loses access stops receiving the room's events within the
+/// access re-check window (`ROOM_ACCESS_TTL`, 5 s), without waiting for their
+/// heartbeat, and is told.
 #[test]
-fn a_viewer_who_loses_access_stops_receiving_events_at_once() {
+fn a_viewer_who_loses_access_stops_receiving_events_within_the_window() {
     let (port, rt) = start_server();
     let base = format!("http://127.0.0.1:{port}");
     let (owner_token, owner) = guest_session(&base);
@@ -478,33 +480,32 @@ fn a_viewer_who_loses_access_stops_receiving_events_at_once() {
     rt.update("Note", &note, &serde_json::json!({ "viewerId": "" }))
         .unwrap();
 
-    // The owner moves their cursor: the viewer gets room-revoked, not the
-    // cursor.
-    let (status, body) = post(
-        &base,
-        "/api/rooms/presence",
-        &format!(r#"{{"room":"{room}","data":{{"cursor":42}}}}"#),
-        &owner_token,
-    );
-    assert_eq!(status, 200, "{body}");
-    let mut saw_cursor = false;
-    let revoked = wait_for_frame(&mut viewer_ws, Duration::from_secs(2), |v| {
-        if v.get("type").and_then(|t| t.as_str()) == Some("room-update") {
-            saw_cursor = true;
-        }
-        v.get("type").and_then(|t| t.as_str()) == Some("room-revoked")
-    });
-    assert!(revoked.is_some(), "the viewer is told");
+    // The owner keeps moving their cursor. Within the re-check window the
+    // viewer is told, and gets nothing from the room after that.
+    let started = Instant::now();
+    let mut revoked = None;
+    let mut cursor = 0;
+    while started.elapsed() < Duration::from_secs(7) && revoked.is_none() {
+        cursor += 1;
+        let (status, _) = post(
+            &base,
+            "/api/rooms/presence",
+            &format!(r#"{{"room":"{room}","data":{{"cursor":{cursor}}}}}"#),
+            &owner_token,
+        );
+        assert_eq!(status, 200);
+        revoked = wait_for_frame(&mut viewer_ws, Duration::from_millis(500), |v| {
+            v.get("type").and_then(|t| t.as_str()) == Some("room-revoked")
+        });
+    }
     assert!(
-        !saw_cursor,
-        "the viewer must not see the owner's cursor after losing access"
+        revoked.is_some(),
+        "the viewer is told within the re-check window"
     );
-
-    // Later events do not reach them either.
     let (status, _) = post(
         &base,
         "/api/rooms/presence",
-        &format!(r#"{{"room":"{room}","data":{{"cursor":43}}}}"#),
+        &format!(r#"{{"room":"{room}","data":{{"cursor":-1}}}}"#),
         &owner_token,
     );
     assert_eq!(status, 200);

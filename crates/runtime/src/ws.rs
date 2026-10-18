@@ -1185,37 +1185,64 @@ impl WsHub {
         // The reader removes room subscriptions when it observes EOF.
     }
 
-    /// The subscribers of a room tied to a row who may still read the row.
-    /// One who may not is unsubscribed and told (`room-revoked`), so access
-    /// lost after joining (an unshare) stops the room's events within
-    /// [`ROOM_ACCESS_TTL`] instead of at the member's next heartbeat.
-    fn room_recipients_with_access(&self, room: &str, subscribers: Vec<u64>) -> Vec<u64> {
+    /// `auth` with the caller's roles as they are now. A socket keeps the
+    /// roles it had when it connected (or last switched org); someone removed
+    /// from an org, or demoted, must not keep a role-gated room on them.
+    fn current_auth(&self, auth: &pylon_auth::AuthContext) -> pylon_auth::AuthContext {
+        let mut fresh = auth.clone();
+        let enrich = match self.auth_enricher.lock() {
+            Ok(g) => g.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        if let Some(enrich) = enrich {
+            enrich(&mut fresh);
+        }
+        fresh
+    }
+
+    /// Whether connected client `id` may use `room`, with its current roles.
+    /// A room tied to a row runs the row's read policy; the answer is cached
+    /// per (client, room) for [`ROOM_ACCESS_TTL`] unless `fresh` is set.
+    pub(crate) fn client_may_use_room(&self, id: u64, room: &str, fresh: bool) -> bool {
+        if !room.starts_with('@') {
+            return true;
+        }
         let now = std::time::Instant::now();
-        let mut allowed = Vec::with_capacity(subscribers.len());
-        let mut denied = Vec::new();
-        for id in subscribers {
+        let key = (id, room.to_string());
+        if !fresh {
             let cached = self
                 .room_access_cache
                 .lock()
                 .unwrap()
-                .get(&(id, room.to_string()))
+                .get(&key)
                 .filter(|(_, at)| now.duration_since(*at) < ROOM_ACCESS_TTL)
                 .map(|(ok, _)| *ok);
-            let ok = match cached {
-                Some(ok) => ok,
-                None => {
-                    let Some(auth) = self.shards[(id as usize) % NUM_SHARDS].auth_of(id) else {
-                        continue;
-                    };
-                    let ok = auth.is_unscoped_admin() || self.room_allowed(&auth, room);
-                    self.room_access_cache
-                        .lock()
-                        .unwrap()
-                        .insert((id, room.to_string()), (ok, now));
-                    ok
-                }
-            };
-            if ok {
+            if let Some(ok) = cached {
+                return ok;
+            }
+        }
+        let Some(auth) = self.shards[(id as usize) % NUM_SHARDS].auth_of(id) else {
+            return false;
+        };
+        let auth = self.current_auth(&auth);
+        let ok = auth.is_unscoped_admin() || self.room_allowed(&auth, room);
+        self.room_access_cache
+            .lock()
+            .unwrap()
+            .insert(key, (ok, now));
+        ok
+    }
+
+    /// The subscribers of a room tied to a row who may still read the row.
+    /// One who may not is unsubscribed and told (`room-revoked`), so access
+    /// lost after joining (an unshare, a removed org member) stops the room's
+    /// events within [`ROOM_ACCESS_TTL`] instead of at the member's next
+    /// heartbeat.
+    fn room_recipients_with_access(&self, room: &str, subscribers: Vec<u64>) -> Vec<u64> {
+        let mut allowed = Vec::with_capacity(subscribers.len());
+        let mut denied = Vec::new();
+        for id in subscribers {
+            if self.client_may_use_room(id, room, false) {
                 allowed.push(id);
             } else {
                 denied.push(id);
@@ -2403,7 +2430,7 @@ fn run_authenticated_session(
                                             .map(|b| b.is_in_room(room, uid))
                                             .unwrap_or(false)
                                     }))
-                                    && hub.room_allowed(&auth_ctx, room)
+                                    && hub.client_may_use_room(client_id, room, false)
                             }
                             None => false,
                         };
@@ -2728,7 +2755,7 @@ fn handle_room_control(
             }
             // A room tied to a row: the row's read policy, checked again
             // here in case access was lost after joining.
-            if !hub.room_allowed(auth_ctx, room) {
+            if !hub.client_may_use_room(client_id, room, true) {
                 let err = serde_json::json!({
                     "type": "error",
                     "code": "ROOM_FORBIDDEN",
@@ -3737,6 +3764,37 @@ mod tests {
             NUM_SHARDS.is_power_of_two(),
             "NUM_SHARDS ({NUM_SHARDS}) must be a power of two for even distribution"
         );
+    }
+
+    /// A socket keeps the roles it connected with. A room check must use the
+    /// roles the user has now (the server's enricher reads the org store),
+    /// or someone removed from an org keeps a role-gated room.
+    #[test]
+    fn room_checks_use_current_roles_not_the_sockets() {
+        let manifest = Arc::new(pylon_kernel::AppManifest::default());
+        let hub = WsHub::new(
+            Arc::new(PolicyEngine::from_manifest(&manifest)),
+            manifest.clone(),
+            manifest.auth.user.clone(),
+        );
+        hub.set_room_access(Arc::new(|auth: &AuthContext, _room: &str| {
+            auth.roles.iter().any(|r| r == "editor")
+        }));
+        let stream: Box<dyn WsStream> = Box::new(std::io::Cursor::new(Vec::<u8>::new()));
+        let mut auth = AuthContext::user("alice".into()).with_tenant("org1".into());
+        auth.roles = vec!["editor".into()];
+        hub.shards[0].add(
+            0,
+            WebSocket::from_raw_socket(stream, Role::Server, None),
+            auth,
+            None,
+        );
+        assert!(hub.client_may_use_room(0, "@Doc/d1", true));
+        // Alice is removed from the org: the enricher finds no role.
+        hub.set_auth_enricher(Arc::new(|c: &mut AuthContext| c.roles.clear()));
+        assert!(!hub.client_may_use_room(0, "@Doc/d1", true));
+        // Free rooms are not checked.
+        assert!(hub.client_may_use_room(0, "chat-1", true));
     }
 
     #[test]

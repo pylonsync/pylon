@@ -442,7 +442,11 @@ pub fn check_room_access(
         return Ok(());
     }
     let (entity, id) = row_room(room).ok_or(RoomDenied::InvalidName)?;
-    if !store.manifest().entities.iter().any(|e| e.name == entity) {
+    // Framework entities (`_Connection`, `_CronLease`, ...) have no policies
+    // of their own (the policy layer lets them through as scaffolding), and
+    // the entity routes refuse them to everyone but admins. They are never a
+    // room: a room someone could use would show their rows exist.
+    if entity.starts_with('_') || !store.manifest().entities.iter().any(|e| e.name == entity) {
         return Err(RoomDenied::Forbidden);
     }
     let row = match store.get_by_id(entity, id) {

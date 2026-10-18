@@ -196,6 +196,21 @@ describe("ProseMirrorSyncPlugin", () => {
 
 // Regressions from the Codex review of 2026-10-17.
 describe("ProseMirrorSyncPlugin review fixes", () => {
+  test("the first edit in a new document can be undone", async () => {
+    const { a, b, sync } = setup();
+    await tick();
+    type(a, "first words");
+    sync();
+    expect(text(b)).toBe("first words");
+    await new Promise((r) => setTimeout(r, 600));
+    type(a, " more");
+    undo(a.state, a.dispatch);
+    undo(a.state, a.dispatch);
+    sync();
+    expect(text(a)).toBe("");
+    expect(text(b)).toBe("");
+  });
+
   test("two editors on one doc see each other's edits", async () => {
     const { a, b, server, sync } = setup({ shared: true });
     await tick();

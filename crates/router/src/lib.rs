@@ -6346,6 +6346,34 @@ mod auth_gate_tests {
         );
     }
 
+    /// Framework entities (`_Connection`, ...) are never rooms, even for an
+    /// admin: a room shows that its row exists, to everyone in it.
+    #[test]
+    fn framework_entities_are_never_rooms() {
+        use pylon_kernel::{AppManifest, ManifestEntity, MANIFEST_VERSION};
+        let manifest = AppManifest {
+            manifest_version: MANIFEST_VERSION,
+            name: "test".into(),
+            version: "0.1.0".into(),
+            entities: vec![ManifestEntity {
+                name: "_Connection".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let store = StubDataStore::empty(manifest.clone());
+        let policy = PolicyEngine::from_manifest(&manifest);
+        for auth in [
+            AuthContext::admin(),
+            AuthContext::authenticated("u-1".into()),
+        ] {
+            assert_eq!(
+                crate::check_room_access(&store, &policy, &auth, "@_Connection/c1"),
+                Err(crate::RoomDenied::Forbidden)
+            );
+        }
+    }
+
     /// `apply_crdt_update` with `check_policy` refuses a caller the update
     /// policy denies, before it learns whether the row exists; with server
     /// trust (`ctx.crdt` without strict function policies) the same call gets

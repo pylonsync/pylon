@@ -3897,6 +3897,11 @@ fn start_server(
         let auth_user_for_fetcher = runtime.manifest().auth.user.clone();
         Arc::new(move |auth_ctx, entity, row_id| {
             use pylon_http::DataStore;
+            // Framework entities have no policies of their own; the entity
+            // routes refuse them to everyone but admins, and so does this.
+            if entity.starts_with('_') && !auth_ctx.is_admin {
+                return None;
+            }
             // Raw snapshots include document history. Entity-level denial
             // also protects documents stored before a field became private.
             if runtime_for_fetcher.has_private_crdt_history(entity)
