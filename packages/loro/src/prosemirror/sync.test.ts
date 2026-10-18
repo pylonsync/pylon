@@ -14,7 +14,7 @@ import { EditorView } from "prosemirror-view";
 import { configureProseMirrorMarks, findProseMirrorContainer } from "./index";
 import { ProseMirrorSyncPlugin, ProseMirrorUndoPlugin } from "./sync";
 
-const schema = new Schema({ nodes: basic.spec.nodes, marks: basic.spec.marks });
+const defaultSchema = new Schema({ nodes: basic.spec.nodes, marks: basic.spec.marks });
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
 const views: EditorView[] = [];
@@ -22,12 +22,14 @@ afterEach(() => {
   for (const v of views.splice(0)) v.destroy();
 });
 
-/** A server doc with the field's container, and two clients synced to it. */
-function setup() {
+/**
+ * A server doc with the field's container, and two editors synced to it:
+ * on two client docs, or with `shared` on one (two editors in one tab).
+ */
+function setup({ schema = defaultSchema, shared = false }: { schema?: Schema; shared?: boolean } = {}) {
   // The empty document the server makes on insert (crates/crdt prosemirror.rs).
   const server = new LoroDoc();
   const body = server.getMap("row").setContainer("body", new LoroMap());
-  body.set("nodeName", "doc");
   body.setContainer("attributes", new LoroMap());
   body.setContainer("children", new LoroList());
   server.commit();
@@ -47,7 +49,7 @@ function setup() {
     views.push(view);
     return view;
   };
-  const [a, b] = [make(docs[0]), make(docs[1])];
+  const [a, b] = [make(docs[0]), make(shared ? docs[0] : docs[1])];
   const sync = () => {
     for (const from of docs) {
       const bytes = from.export({ mode: "update", from: server.oplogVersion() });
@@ -56,7 +58,7 @@ function setup() {
     const all = server.export({ mode: "snapshot" });
     for (const to of docs) to.import(all);
   };
-  return { a, b, docs, sync };
+  return { a, b, docs, server, sync };
 }
 
 const text = (v: EditorView) => v.state.doc.textBetween(0, v.state.doc.content.size, "\n");
@@ -189,5 +191,118 @@ describe("ProseMirrorSyncPlugin", () => {
     sync();
     expect(text(a)).toBe("A:base");
     expect(text(b)).toBe("A:base");
+  });
+});
+
+// Regressions from the Codex review of 2026-10-17.
+describe("ProseMirrorSyncPlugin review fixes", () => {
+  test("two editors on one doc see each other's edits", async () => {
+    const { a, b, server, sync } = setup({ shared: true });
+    await tick();
+    type(a, "base");
+    expect(text(b)).toBe("base");
+    caretAt(b, 5);
+    type(b, "B");
+    expect(text(a)).toBe("baseB");
+    sync();
+    expect(JSON.stringify(server.getMap("row").get("body"))).toBeDefined();
+    expect(text(a)).toBe("baseB");
+  });
+
+  test("the top node's attributes load and are not overwritten", async () => {
+    const langSchema = new Schema({
+      nodes: defaultSchema.spec.nodes.update("doc", { ...defaultSchema.spec.nodes.get("doc")!, attrs: { lang: { default: "en" } } }),
+      marks: defaultSchema.spec.marks,
+    });
+    const { a, b, docs, sync } = setup({ schema: langSchema });
+    await tick();
+    a.dispatch(a.state.tr.setDocAttribute("lang", "fr"));
+    type(a, "bonjour");
+    sync();
+    expect(b.state.doc.attrs.lang).toBe("fr");
+    type(b, "!");
+    sync();
+    expect(a.state.doc.attrs.lang).toBe("fr");
+    const attrs = (docs[0].getMap("row").get("body") as LoroMap).get("attributes") as LoroMap;
+    expect(attrs.get("lang")).toBe("fr");
+  });
+
+  test("clearing the document does not add a paragraph per editor", async () => {
+    const { a, b, docs, server, sync } = setup();
+    await tick();
+    type(a, "text");
+    sync();
+    const children = (server.getMap("row").get("body") as LoroMap).get("children") as LoroList;
+    children.delete(0, children.length);
+    server.commit();
+    for (const d of docs) d.import(server.export({ mode: "snapshot" }));
+    sync();
+    expect(children.length).toBe(0);
+    expect(text(a)).toBe("");
+    expect(text(b)).toBe("");
+  });
+
+  test("a schema whose top node is not doc can edit a new document", async () => {
+    const custom = new Schema({
+      topNode: "document",
+      nodes: defaultSchema.spec.nodes.remove("doc").addToStart("document", { content: "block+" }),
+      marks: defaultSchema.spec.marks,
+    });
+    const { a, b, sync } = setup({ schema: custom });
+    await tick();
+    type(a, "hello");
+    sync();
+    expect(text(b)).toBe("hello");
+    expect(b.state.doc.type.name).toBe("document");
+  });
+
+  test("a caret after an emoji stays after it", async () => {
+    const { a, b, sync } = setup();
+    await tick();
+    type(a, "x😀");
+    sync();
+    caretAt(b, 4); // after the emoji (1 + 1 + 2)
+    caretAt(a, 1);
+    type(a, "AB");
+    sync();
+    expect(text(b)).toBe("ABx😀");
+    expect(b.state.selection.head).toBe(6);
+  });
+
+  test("a caret after an inline node with content stays put", async () => {
+    const nodes = defaultSchema.spec.nodes.addToEnd("chip", {
+      group: "inline",
+      inline: true,
+      content: "text*",
+      toDOM: () => ["span", { class: "chip" }, 0],
+    });
+    const chipSchema = new Schema({ nodes, marks: defaultSchema.spec.marks });
+    const { a, b, sync } = setup({ schema: chipSchema });
+    await tick();
+    type(a, "ab");
+    a.dispatch(a.state.tr.insert(3, chipSchema.node("chip", null, [chipSchema.text("XX")])));
+    caretAt(a, 7); // after the chip
+    type(a, "cd");
+    sync();
+    caretAt(b, 9); // after "cd"
+    caretAt(a, 1);
+    type(a, "Z");
+    sync();
+    expect(b.state.selection.head).toBe(10);
+  });
+
+  test("a selected node stays selected through a remote edit", async () => {
+    const { a, b, sync } = setup();
+    await tick();
+    type(a, "pic ");
+    a.dispatch(a.state.tr.insert(5, defaultSchema.node("image", { src: "x.png" })));
+    sync();
+    const { NodeSelection } = await import("prosemirror-state");
+    b.dispatch(b.state.tr.setSelection(NodeSelection.create(b.state.doc, 5)));
+    caretAt(a, 1);
+    type(a, "A ");
+    sync();
+    expect(b.state.selection).toBeInstanceOf(NodeSelection);
+    expect((b.state.selection as InstanceType<typeof NodeSelection>).node.type.name).toBe("image");
   });
 });

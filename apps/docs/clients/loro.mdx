@@ -194,7 +194,7 @@ const Doc = entity("Doc", {
 });
 ```
 
-The server creates the field's document when the row is inserted: the starting document you pass, or an empty one (a `doc` node with no content). Clients never create its containers, they only edit inside the server's: two editors that each created them would keep only one copy, and the other's edits would be lost. Declare the field `.optional()` unless every insert carries a document: an empty document reads as `null`.
+The server creates the field's document when the row is inserted: the starting document you pass, or an empty one (its `attributes` map and `children` list, with no content). Clients never create its containers, they only edit inside the server's: two editors that each created them would keep only one copy, and the other's edits would be lost. Declare the field `.optional()` unless every insert carries a document: an empty document reads as `null`.
 
 Insert a document with one empty block when several people may open it at once, so every editor starts from the same block:
 

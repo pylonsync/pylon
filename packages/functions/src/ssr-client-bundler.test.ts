@@ -395,6 +395,33 @@ export default function Doc() {
   });
 });
 
+describe("assets a stylesheet references", () => {
+  // The asset plugin answers JavaScript imports with a JavaScript module; a
+  // stylesheet's url(...) must stay with Bun, or the build fails with
+  // "Cannot import a .js file into a CSS file".
+  test("a page importing CSS that uses url() still builds", async () => {
+    tempDir = makeFixture(
+      {
+        "page.tsx": `
+import React from "react";
+import "./look.css";
+export default function Home() {
+  return <div className="hero">home</div>;
+}
+`,
+      },
+      { "layout.tsx": LAYOUT_BODY },
+    );
+    fs.writeFileSync(path.join(tempDir, "app", "look.css"), ".hero { background: url(./bg.png); }\n");
+    fs.writeFileSync(path.join(tempDir, "app", "bg.png"), new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]));
+    originalCwd = process.cwd();
+    process.chdir(tempDir);
+
+    const { manifestPath } = await buildClientBundle();
+    expect(fs.existsSync(manifestPath)).toBe(true);
+  });
+});
+
 describe("nearestBoundaryComponent (client boundary resolution)", () => {
   const routes = new Set([
     "web/app/not-found",

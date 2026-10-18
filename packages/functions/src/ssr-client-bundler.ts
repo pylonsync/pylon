@@ -93,7 +93,7 @@ type BunBuildOutput = {
 type BunPluginBuild = {
   onResolve(
     opts: { filter: RegExp; namespace?: string },
-    callback: (args: { path: string; importer: string }) => void,
+    callback: (args: { path: string; importer: string }) => { path: string; namespace: string } | undefined | void,
   ): void;
   onLoad(
     opts: { filter: RegExp; namespace?: string },
@@ -2081,6 +2081,55 @@ function makeBuildId(): string {
   return `${process.pid.toString(36)}-${Date.now().toString(36)}-${_buildCounter}`;
 }
 
+/** Where the Rust host serves the client build (`/_pylon/build/<path>`): the
+ *  manifest's `public_prefix`, and the prefix of imported assets' URLs. */
+const BUILD_PREFIX = "/_pylon/build/";
+
+/** Files a page can import as a URL (Bun's `file` loader). */
+const ASSET_RE = /\.(wasm|png|jpe?g|gif|webp|avif|ico|svg|woff2?|ttf|otf|mp3|mp4|webm|wav|ogg)$/i;
+
+/**
+ * Assets JavaScript imports (a `.wasm`, an image) as absolute URLs under the
+ * build prefix. Bun's `file` loader exports a RELATIVE path ("assets/x.wasm"),
+ * and code that fetches it resolves it against the page: loro-crdt's browser
+ * build fetched /dashboard/orgs/acme/assets/loro_wasm_bg-….wasm and 404'd.
+ * Bun's `publicPath` would make it absolute, but it also rewrites imports
+ * between split chunks and drops their `chunks/` directory (Bun 1.3.14), so
+ * this plugin writes the file itself, named by its content hash, and exports
+ * the absolute URL. A stylesheet's `url(...)` is left to Bun: CSS cannot
+ * import a JavaScript module.
+ */
+function absoluteAssetPlugin(
+  outdir: string,
+  fs: typeof import("node:fs"),
+  path: typeof import("node:path"),
+  createHash: typeof import("node:crypto").createHash,
+): { name: string; setup(build: BunPluginBuild): void } {
+  const NAMESPACE = "pylon-asset";
+  return {
+    name: "pylon-absolute-assets",
+    setup(build) {
+      build.onResolve({ filter: ASSET_RE }, (args) => {
+        if (!args.importer || /\.css$/i.test(args.importer)) return undefined;
+        const from = path.dirname(args.importer);
+        const resolved = args.path.startsWith(".") || path.isAbsolute(args.path)
+          ? path.resolve(from, args.path)
+          : ((Bun as any).resolveSync(args.path, from) as string);
+        return { path: resolved, namespace: NAMESPACE };
+      });
+      build.onLoad({ filter: /.*/, namespace: NAMESPACE }, (args) => {
+        const bytes = fs.readFileSync(args.path);
+        const hash = createHash("sha256").update(bytes).digest("hex").slice(0, 12);
+        const ext = path.extname(args.path);
+        const rel = `assets/${path.basename(args.path, ext)}-${hash}${ext}`;
+        fs.mkdirSync(path.join(outdir, "assets"), { recursive: true });
+        fs.writeFileSync(path.join(outdir, rel), bytes);
+        return { contents: `export default ${JSON.stringify(BUILD_PREFIX + rel)};`, loader: "js" };
+      });
+    },
+  };
+}
+
 /**
  * Base URL/path prepended to every SSR-emitted asset reference (the entry
  * `<script type="module">`, `<link rel="stylesheet">`, and `modulepreload`s)
@@ -2100,45 +2149,6 @@ function makeBuildId(): string {
  * was pruned, breaking hydration). A trailing slash is enforced so
  * `${prefix}${file}` always joins correctly.
  */
-/** Where the Rust host serves the client build (`/_pylon/build/<path>`). The
- *  manifest's `public_prefix` and the bundler's `publicPath` must agree. */
-const BUILD_PREFIX = "/_pylon/build/";
-
-/** Files a page can import as a URL (Bun's `file` loader). */
-const ASSET_RE = /\.(wasm|png|jpe?g|gif|webp|avif|ico|svg|woff2?|ttf|otf|mp3|mp4|webm|wav|ogg)$/i;
-
-/**
- * Imported assets (a `.wasm`, an image) as absolute URLs under the build
- * prefix. Bun's own `file` loader exports a RELATIVE path ("assets/x.wasm"),
- * and code that fetches it resolves it against the page: loro-crdt's browser
- * build fetched /dashboard/orgs/acme/assets/loro_wasm_bg-….wasm and 404'd.
- * Bun's `publicPath` would make it absolute, but it also rewrites imports
- * between split chunks and drops their `chunks/` directory (Bun 1.3.14), so
- * this plugin writes the file itself, named by its content hash, and exports
- * the absolute URL.
- */
-function absoluteAssetPlugin(
-  outdir: string,
-  fs: typeof import("node:fs"),
-  path: typeof import("node:path"),
-  createHash: typeof import("node:crypto").createHash,
-): { name: string; setup(build: BunPluginBuild): void } {
-  return {
-    name: "pylon-absolute-assets",
-    setup(build) {
-      build.onLoad({ filter: ASSET_RE }, (args) => {
-        const bytes = fs.readFileSync(args.path);
-        const hash = createHash("sha256").update(bytes).digest("hex").slice(0, 12);
-        const ext = path.extname(args.path);
-        const rel = `assets/${path.basename(args.path, ext)}-${hash}${ext}`;
-        fs.mkdirSync(path.join(outdir, "assets"), { recursive: true });
-        fs.writeFileSync(path.join(outdir, rel), bytes);
-        return { contents: `export default ${JSON.stringify(BUILD_PREFIX + rel)};`, loader: "js" };
-      });
-    },
-  };
-}
-
 function resolvePublicPrefix(): string {
   const raw = (process.env.PYLON_PUBLIC_PREFIX ?? "").trim();
   if (!raw) return "/_pylon/build/";

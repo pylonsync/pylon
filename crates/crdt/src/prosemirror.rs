@@ -82,15 +82,14 @@ pub(crate) fn write(
     fill_node(&root, node).map_err(|e| format!("field {key}: {e}"))
 }
 
-/// The top node an empty document gets: ProseMirror's and Tiptap's default
-/// top node type.
-const TOP_NODE: &str = "doc";
-
-/// Create the document under `key` when there is none, as an empty document
-/// (a top node with its `attributes` map and its `children` list). Editors
-/// then only insert into containers the server made. When two editors made
-/// them, as they did when the server left an empty map, one copy won and the
-/// other's edits went with the losing containers.
+/// Create the document under `key` when there is none, with the containers
+/// every node keeps its content in (an `attributes` map and a `children`
+/// list). Editors then only insert into containers the server made, so
+/// concurrent inserts merge. When two editors made them, as they did when the
+/// server left an empty map, one copy won and the other's edits went with the
+/// losing containers. The top node's name is a plain value, not a container:
+/// the first editor writes its schema's (two writing the same name lose
+/// nothing), so a schema whose top node is not `doc` works too.
 pub(crate) fn ensure(parent: &LoroMap, key: &str) -> Result<(), String> {
     let root = match parent.get(key) {
         Some(ValueOrContainer::Container(Container::Map(m))) => m,
@@ -101,22 +100,15 @@ pub(crate) fn ensure(parent: &LoroMap, key: &str) -> Result<(), String> {
     skeleton(&root).map_err(|e| format!("field {key}: create the document: {e}"))
 }
 
-/// The containers every document has. Keeps a top node name an editor wrote.
+/// The containers every document has.
 fn skeleton(root: &LoroMap) -> Result<(), String> {
-    if !matches!(
-        root.get(NODE_NAME),
-        Some(ValueOrContainer::Value(LoroValue::String(_)))
-    ) {
-        root.insert(NODE_NAME, TOP_NODE)
-            .map_err(|e| e.to_string())?;
-    }
     child_map(root, ATTRIBUTES)?;
     child_list(root, CHILDREN)?;
     Ok(())
 }
 
 /// Empty the document under `key`, keeping its containers: the content and
-/// the attributes go, the top node and its children list stay.
+/// the attributes go, the attributes map and the children list stay.
 pub(crate) fn clear(parent: &LoroMap, key: &str) -> Result<(), String> {
     match parent.get(key) {
         Some(ValueOrContainer::Container(Container::Map(m))) => {
@@ -469,7 +461,7 @@ fn project_text(text: &LoroText) -> Vec<Value> {
 mod tests {
     use super::{ATTRIBUTES, CHILDREN, NODE_NAME};
     use crate::{apply_patch, field_kind, project_doc_to_json, root_map, CrdtField, CrdtFieldKind};
-    use loro::{Container, LoroDoc, LoroList, LoroMap, LoroText, LoroValue, ValueOrContainer};
+    use loro::{Container, LoroDoc, LoroList, LoroMap, LoroText, ValueOrContainer};
     use serde_json::json;
 
     fn fields() -> Vec<CrdtField> {
@@ -825,9 +817,8 @@ mod tests {
         let doc = LoroDoc::new();
         apply_patch(&doc, &fields(), &json!({})).unwrap();
         let body = body_map(&doc);
-        assert!(
-            matches!(body.get(NODE_NAME), Some(ValueOrContainer::Value(LoroValue::String(s))) if &*s == "doc")
-        );
+        // The top node's name is the first editor's to write.
+        assert!(body.get(NODE_NAME).is_none());
         assert!(matches!(
             body.get(ATTRIBUTES),
             Some(ValueOrContainer::Container(Container::Map(_)))
@@ -873,6 +864,7 @@ mod tests {
                 Some(ValueOrContainer::Container(Container::List(l))) => l,
                 other => panic!("no children list: {other:?}"),
             };
+            body_map(peer).insert(NODE_NAME, "doc").unwrap();
             let para = children.insert_container(0, LoroMap::new()).unwrap();
             para.insert(NODE_NAME, "paragraph").unwrap();
             let runs = para.insert_container(CHILDREN, LoroList::new()).unwrap();

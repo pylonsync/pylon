@@ -39,7 +39,7 @@ import {
   updateLoroToPmState,
 } from "loro-prosemirror";
 import type { Node } from "prosemirror-model";
-import { Plugin, TextSelection, type EditorState } from "prosemirror-state";
+import { Plugin, TextSelection, type EditorState, type Transaction } from "prosemirror-state";
 import type { EditorView } from "prosemirror-view";
 
 type Mapping = Map<ContainerID, Node | Node[]>;
@@ -65,6 +65,19 @@ export interface ProseMirrorSyncPluginProps {
 }
 
 export function ProseMirrorSyncPlugin({ doc, containerId }: ProseMirrorSyncPluginProps): Plugin {
+  // True while this editor writes to the doc. Loro reports a commit to
+  // subscribers synchronously, in the middle of this editor's own dispatch;
+  // those events are this editor's own edits. Every other change (another
+  // editor on the same doc, app code, an undo, the server) is applied.
+  let writing = false;
+  const write = (fn: () => void) => {
+    writing = true;
+    try {
+      fn();
+    } finally {
+      writing = false;
+    }
+  };
   return new Plugin({
     key: loroSyncPluginKey,
     props: {
@@ -81,22 +94,27 @@ export function ProseMirrorSyncPlugin({ doc, containerId }: ProseMirrorSyncPlugi
         switch (meta?.type) {
           case "doc-changed":
             if (!undoState?.isUndoing?.current) {
-              updateLoroToPmState(doc as never, state.mapping as never, newEditorState, containerId);
+              write(() => updateLoroToPmState(doc as never, state.mapping as never, newEditorState, containerId));
             }
             break;
-          case "update-state":
+          case "update-state": {
             state = { ...state, ...meta.state };
-            state.doc.commit({ origin: "sys:init", timestamp: Date.now() });
+            const committing = state.doc;
+            write(() => committing.commit({ origin: "sys:init", timestamp: Date.now() }));
             break;
+          }
         }
         return state;
       },
     },
-    // After a remote change too, as LoroSyncPlugin does: the write is a no-op
-    // when the editor and the doc agree, and it points the mapping at the
-    // editor's own nodes again.
+    // Only this editor's own changes are written to the doc. A change that
+    // came from the doc is there already, and the empty document an editor
+    // shows for an emptied field must not be written back: every editor
+    // would add its own.
     appendTransaction: (transactions, _old, newState) =>
-      transactions.some((tr) => tr.docChanged)
+      transactions.some(
+        (tr) => tr.docChanged && (tr.getMeta(loroSyncPluginKey) as { type?: string } | undefined)?.type !== "non-local-updates",
+      )
         ? newState.tr.setMeta(loroSyncPluginKey, { type: "doc-changed" })
         : null,
     view: (view) => {
@@ -108,9 +126,7 @@ export function ProseMirrorSyncPlugin({ doc, containerId }: ProseMirrorSyncPlugi
       const timer = setTimeout(() => {
         if (view.isDestroyed) return;
         unsubscribe = doc.getContainerById(containerId)!.subscribe((event) => {
-          // Local edits came from this editor, so it already shows them.
-          // An undo is local to Loro but new to the editor.
-          if (event.by === "local" && event.origin !== "undo") return;
+          if (writing) return;
           applyRemote(view, doc, containerId, event, cursors);
           remember();
         });
@@ -196,9 +212,19 @@ function loadInitial(view: EditorView, doc: LoroDoc, containerId: ContainerID): 
   if (node && node.childCount > 0) {
     tr = tr.replaceWith(0, view.state.doc.content.size, node.content);
   }
+  if (node) tr = withTopAttrs(tr, node);
   tr.setMeta(loroSyncPluginKey, { type: "update-state", state: { mapping, snapshot: null } });
   tr.setMeta("addToHistory", false);
   view.dispatch(tr);
+}
+
+/** Set the top node's attributes to `node`'s where they differ. */
+function withTopAttrs(tr: Transaction, node: Node): Transaction {
+  const current = tr.doc.attrs;
+  for (const [name, value] of Object.entries(node.attrs)) {
+    if (current[name] !== value) tr = tr.setDocAttribute(name, value);
+  }
+  return tr;
 }
 
 /** Drop cached nodes for every container an event touched, and their ancestors. */
@@ -241,6 +267,17 @@ function applyRemote(
       endB += overlap;
     }
     tr = tr.replace(start, endA, next.slice(start, endB));
+  }
+  tr = withTopAttrs(tr, next);
+  // Nothing this editor shows changed (an echo, a change elsewhere in the row).
+  if (!tr.docChanged) return;
+  // A node selection, a cell selection: ProseMirror maps it through the
+  // replace and keeps its kind; a caret rebuilt from cursors would not.
+  if (!(view.state.selection instanceof TextSelection)) {
+    tr.setMeta(loroSyncPluginKey, { type: "non-local-updates" });
+    tr.setMeta("addToHistory", false);
+    view.dispatch(tr);
+    return;
   }
   if (moved) {
     // The person moved the caret after the cursors were taken: map where it
@@ -318,24 +355,52 @@ export function positionToCursor(root: Node, pos: number, doc: LoroDoc, containe
   if (!$pos.parent.inlineContent) {
     return children.getCursor(childIndexFor($pos.parent, $pos.index()) + ($pos.index() >= $pos.parent.childCount ? 1 : 0)) ?? null;
   }
-  // Walk the textblock's children: text runs count their characters, every
-  // other inline node counts one.
-  let offset = $pos.parentOffset;
-  for (let i = 0; i < children.length; i++) {
-    const child = children.get(i);
-    if (child instanceof LoroText) {
-      if (offset <= child.length) {
-        // Bind to the character on the left (side 1: just after it). At the
-        // start of a run there is none, so bind to the first character.
-        return (offset > 0 ? child.getCursor(offset - 1, 1) : child.getCursor(0, 0)) ?? null;
+  // Walk the textblock's children alongside the editor's: a run of text
+  // nodes is one LoroText, every other inline node one child of its size.
+  const parent = $pos.parent;
+  const offset = $pos.parentOffset;
+  let group = -1;
+  let pmOffset = 0;
+  let runStart = -1;
+  for (let i = 0; i < parent.childCount; i++) {
+    const child = parent.child(i);
+    if (child.isText) {
+      if (runStart < 0) {
+        group += 1;
+        runStart = pmOffset;
       }
-      offset -= child.length;
     } else {
-      if (offset === 0) return children.getCursor(i) ?? null;
-      offset -= 1;
+      // The caret at the end of a text run binds to that run, so typing
+      // there continues it.
+      if (runStart >= 0 && offset <= pmOffset) return textCursor(children.get(group), offset - runStart);
+      runStart = -1;
+      group += 1;
+      if (offset === pmOffset) return children.getCursor(group) ?? null;
     }
+    pmOffset += child.nodeSize;
   }
+  if (runStart >= 0 && offset <= pmOffset) return textCursor(children.get(group), offset - runStart);
   return children.getCursor(children.length) ?? null;
+}
+
+/** True for the second half of a UTF-16 surrogate pair (an emoji's, say). */
+function isLowSurrogate(text: string): boolean {
+  const code = text.charCodeAt(0);
+  return code >= 0xdc00 && code <= 0xdfff;
+}
+
+/**
+ * A cursor `offset` UTF-16 units into a text run, bound to the character on
+ * its left (side 1: just after it), the whole character when it is a
+ * surrogate pair. At the start of the run there is none, so it binds to the
+ * first character.
+ */
+function textCursor(text: unknown, offset: number): Cursor | null {
+  if (!(text instanceof LoroText)) return null;
+  if (offset <= 0) return text.getCursor(0, 0) ?? null;
+  let start = Math.min(offset, text.length) - 1;
+  if (start > 0 && isLowSurrogate(text.slice(start, start + 1))) start -= 1;
+  return text.getCursor(start, 1) ?? null;
 }
 
 /** Size in the editor of a container's node, from the binding's mapping. */
@@ -380,8 +445,11 @@ export function cursorToPosition(cursor: Cursor, doc: LoroDoc, containerId: Cont
     // new paragraph as a delete and an insert). ProseMirror's own mapping
     // through the replace places the caret better then.
     if (!text || !pos || pos.update) return null;
-    // The cursor names a character; side 1 means just after it.
-    index = pos.offset + (pos.side === 1 ? 1 : 0);
+    // The cursor names a character; side 1 means just after it, which is
+    // two UTF-16 units for a surrogate pair.
+    const width =
+      pos.side === 1 ? (pos.offset + 1 < text.length && isLowSurrogate(text.slice(pos.offset + 1, pos.offset + 2)) ? 2 : 1) : 0;
+    index = pos.offset + width;
     childId = text.id;
     node = (text.parent() as LoroList | undefined)?.parent() as LoroMap | undefined;
   }
