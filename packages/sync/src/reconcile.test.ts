@@ -684,7 +684,7 @@ describe("sync-reconcile hint", () => {
     dispatchInboundMessage(m: Record<string, unknown>): void;
     running: boolean;
     cursor: { last_seq: number };
-    hintPending: Set<string>;
+    pendingReconcile: Map<string, number>;
   };
   const inner = (engine: SyncEngine) => engine as unknown as Internals;
   const deliver = (engine: SyncEngine, msg: Record<string, unknown>) => inner(engine).dispatchInboundMessage(msg);
@@ -742,13 +742,13 @@ describe("sync-reconcile hint", () => {
     await sleep(250);
     expect(fetches()).toBe(1);
     expect(engine.store.list("Document")).toEqual([]);
-    expect([...inner(engine).hintPending]).toEqual(["Document"]);
+    expect([...inner(engine).pendingReconcile.keys()]).toEqual(["Document"]);
 
     // Retries run at most once a second.
     await sleep(2300);
     expect(fetches()).toBe(3);
     expect(engine.store.list("Document").map((r) => (r as { id: string }).id)).toEqual(["shared"]);
-    expect(inner(engine).hintPending.size).toBe(0);
+    expect(inner(engine).pendingReconcile.size).toBe(0);
     engine.stop();
   });
 
@@ -760,7 +760,7 @@ describe("sync-reconcile hint", () => {
     engine.stop();
     await sleep(250);
     expect(fetches()).toBe(0);
-    expect(inner(engine).hintPending.size).toBe(0);
+    expect(inner(engine).pendingReconcile.size).toBe(0);
   });
 
   test("ignores a hint without entity names", async () => {
@@ -795,7 +795,7 @@ describe("sync-reconcile hint after a failed fetch", () => {
     const engine = makeEngine();
     const inner = engine as unknown as {
       running: boolean;
-      hintPending: Set<string>;
+      pendingReconcile: Map<string, number>;
       dispatchInboundMessage(m: Record<string, unknown>): void;
     };
     inner.running = true;
@@ -804,7 +804,7 @@ describe("sync-reconcile hint after a failed fetch", () => {
     inner.dispatchInboundMessage({ type: "sync-reconcile", entities: ["Document"] });
     await new Promise((r) => setTimeout(r, 250));
     expect(fetches).toBe(1);
-    expect([...inner.hintPending]).toEqual(["Document"]);
+    expect([...inner.pendingReconcile.keys()]).toEqual(["Document"]);
     expect(engine.store.list("Document").length).toBe(1);
 
     await new Promise((r) => setTimeout(r, 1200));
@@ -812,4 +812,208 @@ describe("sync-reconcile hint after a failed fetch", () => {
     expect(engine.store.list("Document")).toEqual([]);
     engine.stop();
   });
+});
+
+// Any reconcile, not only a hinted one: an entity skipped because its fetch
+// raced a newer change is retried, so a row that became readable while the
+// page was away (a new folder, a share) still arrives.
+describe("a skipped reconcile retries", () => {
+  let restore: (() => void) | null = null;
+  afterEach(() => {
+    restore?.();
+    restore = null;
+  });
+
+  test("a startup reconcile that raced a change lands on the retry", async () => {
+    const engine = makeEngine();
+    const inner = engine as unknown as { running: boolean; cursor: { last_seq: number }; pendingReconcile: Set<string> };
+    let fetches = 0;
+    restore = installFetch(async (url) => {
+      if (url.includes("/api/entities/Folder/cursor")) {
+        fetches += 1;
+        if (fetches === 1) inner.cursor.last_seq += 1;
+        return { status: 200, body: { data: [{ id: "f1", name: "Team" }], next_cursor: null, has_more: false } };
+      }
+      return { status: 404, body: {} };
+    });
+    inner.running = true;
+
+    await engine.reconcile(["Folder"]);
+    expect(engine.store.list("Folder")).toEqual([]);
+    expect([...inner.pendingReconcile.keys()]).toEqual(["Folder"]);
+
+    await new Promise((r) => setTimeout(r, 1300));
+    expect(fetches).toBe(2);
+    expect(engine.store.list("Folder").map((r) => (r as { id: string }).id)).toEqual(["f1"]);
+    engine.stop();
+  });
+});
+
+describe("pending reconciles end when they should", () => {
+  let restore: (() => void) | null = null;
+  afterEach(() => {
+    restore?.();
+    restore = null;
+  });
+
+  type Internals = {
+    running: boolean;
+    pendingReconcile: Map<string, number>;
+    opQueue: { enqueue<T>(key: string, fn: () => Promise<T>): Promise<T> };
+    dispatchInboundMessage(m: Record<string, unknown>): void;
+  };
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  function server(status: () => number) {
+    let fetches = 0;
+    restore = installFetch(async (url) => {
+      if (url.includes("/api/entities/Document/cursor")) {
+        fetches += 1;
+        const s = status();
+        if (s !== 200) return { status: s, body: {} };
+        return { status: 200, body: { data: [], next_cursor: null, has_more: false } };
+      }
+      return { status: 404, body: {} };
+    });
+    return () => fetches;
+  }
+
+  test("a later successful reconcile clears the pending retry", async () => {
+    let failing = true;
+    const fetches = server(() => (failing ? 503 : 200));
+    const engine = makeEngine();
+    const inner = engine as unknown as Internals;
+    inner.running = true;
+    await engine.reconcile(["Document"]);
+    expect([...inner.pendingReconcile.keys()]).toEqual(["Document"]);
+    failing = false;
+    await engine.reconcile(["Document"]);
+    expect(inner.pendingReconcile.size).toBe(0);
+    await sleep(1300);
+    expect(fetches()).toBe(2);
+    engine.stop();
+  });
+
+  test("stop cancels a retry already waiting in the queue", async () => {
+    const fetches = server(() => 200);
+    const engine = makeEngine();
+    const inner = engine as unknown as Internals;
+    inner.running = true;
+    // A slow operation holds the queue while the retry's timer fires.
+    void inner.opQueue.enqueue("slow", () => sleep(400));
+    inner.dispatchInboundMessage({ type: "sync-reconcile", entities: ["Document"] });
+    await sleep(200);
+    engine.stop();
+    await sleep(400);
+    expect(fetches()).toBe(0);
+  });
+
+  test("a replica reset drops pending retries", async () => {
+    const fetches = server(() => 503);
+    const engine = makeEngine();
+    const inner = engine as unknown as Internals;
+    inner.running = true;
+    await engine.reconcile(["Document"]);
+    expect(fetches()).toBe(1);
+    await engine.resetReplica();
+    expect(inner.pendingReconcile.size).toBe(0);
+    await sleep(1300);
+    expect(fetches()).toBe(1);
+    engine.stop();
+  });
+});
+
+describe("pending reconciles and newer requests", () => {
+  let restore: (() => void) | null = null;
+  afterEach(() => {
+    restore?.();
+    restore = null;
+  });
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  type Internals = {
+    running: boolean;
+    pendingReconcile: Map<string, number>;
+    dispatchInboundMessage(m: Record<string, unknown>): void;
+  };
+
+  test("a hint that arrives during a fetch survives that fetch", async () => {
+    const engine = makeEngine();
+    const inner = engine as unknown as Internals;
+    let fetches = 0;
+    restore = installFetch(async (url) => {
+      if (url.includes("/api/entities/Document/cursor")) {
+        fetches += 1;
+        // The server already built this response when the share lands.
+        if (fetches === 1) inner.dispatchInboundMessage({ type: "sync-reconcile", entities: ["Document"] });
+        return { status: 200, body: { data: [], next_cursor: null, has_more: false } };
+      }
+      return { status: 404, body: {} };
+    });
+    inner.running = true;
+    await engine.reconcile(["Document"]);
+    expect([...inner.pendingReconcile.keys()]).toEqual(["Document"]);
+    await sleep(1300);
+    expect(fetches).toBe(2);
+    engine.stop();
+  });
+
+  test("a reconcile in flight during a reset does not bring retries back", async () => {
+    const engine = makeEngine();
+    const inner = engine as unknown as Internals;
+    let fetches = 0;
+    let release: () => void = () => {};
+    restore = installFetch(async (url) => {
+      if (url.includes("/api/entities/Document/cursor")) {
+        fetches += 1;
+        if (fetches === 1) await new Promise<void>((r) => (release = r));
+        return { status: 503, body: {} };
+      }
+      return { status: 404, body: {} };
+    });
+    inner.running = true;
+    const pass = engine.reconcile(["Document"]);
+    await sleep(20);
+    const reset = engine.resetReplica();
+    release();
+    await pass;
+    await reset;
+    expect(inner.pendingReconcile.size).toBe(0);
+    await sleep(1300);
+    expect(fetches).toBe(1);
+    engine.stop();
+  });
+});
+
+test("two callers sharing one full reconcile keep a hint that arrived between them", async () => {
+  const engine = makeEngine();
+  const inner = engine as unknown as {
+    running: boolean;
+    pendingReconcile: Map<string, number>;
+    store: { applyChange(ev: ChangeEvent): void };
+    dispatchInboundMessage(m: Record<string, unknown>): void;
+  };
+  seedStore(engine, "Document", [{ id: "d0", title: "seed" }]);
+  let fetches = 0;
+  let release: () => void = () => {};
+  const restore = installFetch(async (url) => {
+    if (url.includes("/api/entities/Document/cursor")) {
+      fetches += 1;
+      if (fetches === 1) await new Promise<void>((r) => (release = r));
+      return { status: 200, body: { data: [{ id: "d0", title: "seed" }], next_cursor: null, has_more: false } };
+    }
+    return { status: 404, body: {} };
+  });
+  try {
+    inner.running = true;
+    const first = engine.reconcile();
+    await new Promise((r) => setTimeout(r, 20));
+    inner.dispatchInboundMessage({ type: "sync-reconcile", entities: ["Document"] });
+    const second = engine.reconcile();
+    release();
+    await Promise.all([first, second]);
+    expect([...inner.pendingReconcile.keys()]).toEqual(["Document"]);
+  } finally {
+    engine.stop();
+    restore();
+  }
 });
