@@ -391,20 +391,6 @@ describe("useRoom WS push path", () => {
     expect(recorded.filter(isKeepalive).length).toBe(before);
   });
 
-  // On a cluster, a leave relayed from another machine can drop someone
-  // still in the room here; a fresh snapshot per heartbeat puts them back.
-  test("each live heartbeat asks for a fresh member list", async () => {
-    __roomRegistryInternals.setTimings({ keepaliveMs: 20 });
-    respond = (url, method) =>
-      method === "POST" && url.endsWith("/api/rooms/heartbeat") ? { alive: true } : undefined;
-    const engine = makeFakeEngine();
-    __roomRegistryInternals.acquire(BASE, ROOM, USER, TOKEN, {}, 1_000, engine as any);
-    await flush(70);
-    const beats = recorded.filter(isKeepalive).length;
-    expect(beats).toBeGreaterThanOrEqual(2);
-    expect(engine._resubscribeCalls.filter((r) => r === ROOM).length).toBeGreaterThanOrEqual(beats - 1);
-  });
-
   test("teardown stops the keepalive", async () => {
     __roomRegistryInternals.setTimings({ keepaliveMs: 20 });
     const engine = makeFakeEngine();

@@ -229,6 +229,8 @@ The room is named `@Document/<id>` (`rowRoom(entity, id)` builds the name), and 
 
 Someone who loses access while in the room (the document is unshared) stops receiving its events at the next one, within 5 seconds of the change, and their next heartbeat removes them from the member list. The hook sets `denied`, clears `peers`, and stops rejoining.
 
+On a deployment with more than one machine, room membership is kept per machine. When someone connected through two machines closes the connection on one, people on the other machines can stop seeing them until their next presence update.
+
 ### Joining and staying in a room
 
 The hook joins over HTTP first and subscribes over the WebSocket after the join lands. While joined it sends `POST /api/rooms/heartbeat` every 45 s; the server drops a member after 120 s without activity and tells the room. When the server reports the member gone (a heartbeat returns `alive: false`, or a resubscribe after a reconnect gets `NOT_IN_ROOM`), the hook rejoins and resubscribes. A closed socket removes the user only from rooms no other socket of that user still holds.

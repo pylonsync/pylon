@@ -474,13 +474,6 @@ function startKeepalive(room: SharedRoom): void {
       json: { room: room.roomId, user_id: room.userId },
     })
       .then((body) => {
-        if (body?.alive === true && room.wsUnsubscribe && room.engine) {
-          // Ask for a fresh member list each heartbeat: on a cluster, a leave
-          // relayed from another machine can drop someone still in the room
-          // here, and a person who only heartbeats sends no presence that
-          // would put them back.
-          room.engine.resubscribeRoom(room.roomId);
-        }
         if (body?.alive === false && body.reason && DENIED_CODES.has(body.reason)) {
           if (rooms.has(roomKeyFor(room))) deny(room, "ROOM_REVOKED");
           return;
