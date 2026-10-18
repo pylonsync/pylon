@@ -294,6 +294,34 @@ The row holds the document as ProseMirror JSON: `{ type, attrs?, content? }`, wi
 
 Each mark type is a Loro text style, which holds one value per character. Two marks of the same type cannot cover the same characters: two comment threads on the same words would leave only one. Keep anchors that can overlap, such as comment threads, as [cursors](#cursors) stored next to the document, and draw them as decorations.
 
+### Comment anchors and other ranges
+
+`@pylonsync/loro/prosemirror/ranges` holds a range as two Loro cursors and draws it as an inline decoration. Ranges may overlap. The start binds to the range's first character and the end to its last: a range stays on its words while anyone edits around it, grows when someone types inside it, and leaves out text typed just before or after it.
+
+```tsx
+import { encodeRange, ProseMirrorRangesPlugin, resolveRanges, setAnchoredRanges } from "@pylonsync/loro/prosemirror/ranges";
+
+// When someone comments on the selection, store both cursors with the thread.
+const { from, to } = view.state.selection;
+const anchor = encodeRange(view.state, doc, containerId, from, to); // { from: string | null, to: string | null }
+
+// In the editor. onReanchor gives new cursors to store (see below).
+plugins: [
+  ProseMirrorSyncPlugin({ doc, containerId }),
+  ProseMirrorRangesPlugin({ doc, containerId, onReanchor: (id, anchor) => saveAnchor(id, anchor) }),
+];
+
+// Whenever the threads change.
+setAnchoredRanges(view, threads.map((t) => ({ id: t.id, from: t.anchorFrom, to: t.anchorTo, className: "thread" })));
+
+// For a margin: where each range is now. `gone` is true when its text was deleted.
+const places = resolveRanges(view.state, doc, containerId, threads.map((t) => ({ id: t.id, from: t.anchorFrom, to: t.anchorTo })));
+```
+
+The binding writes some edits as a delete and an insert: splitting or joining paragraphs moves text into new characters, and a cursor on a moved character no longer names it. The editor that made the edit (or undid one) follows each range through the transaction, keeps drawing it, and calls `onReanchor` with new cursors. Store them in place of the old ones. Other editors draw a range only where its cursors find it: after someone else splits or joins its paragraph, a range is hidden until the app sets the new cursors.
+
+A range whose text was all deleted is not drawn, even when the same words appear elsewhere. When this editor deleted it but the binding kept its characters (deleting the first of two equal words keeps the first word's characters), `onReanchor` gets null cursors: store them, so other editors stop drawing it. A cursor that cannot be read resolves as `gone`, not as an error. Each decoration has the class `pylon-anchored-range` unless you give `className`, and the range's `id` in its spec as `rangeId`.
+
 ## Awareness / presence
 
 For lightweight ephemeral state (who's editing, where their cursor is, what they're typing) that doesn't need to be persisted, use the `useRoom` hook from `@pylonsync/react`. It returns the live peer list plus a `setPresence` you call as the local cursor moves:

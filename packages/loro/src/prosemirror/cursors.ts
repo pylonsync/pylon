@@ -48,6 +48,20 @@ export interface ProseMirrorCursorsPluginProps {
 
 export const proseMirrorCursorsKey = new PluginKey<RemoteCursor[]>("pylonRemoteCursors");
 
+/** A Loro cursor as text (base64), to store or send. */
+export function encodeCursor(cursor: Cursor): string {
+  return toBase64(cursor.encode());
+}
+
+/** A cursor from {@link encodeCursor}, or null when the text is not one. */
+export function decodeCursor(text: string): Cursor | null {
+  try {
+    return Cursor.decode(fromBase64(text));
+  } catch {
+    return null;
+  }
+}
+
 function toBase64(bytes: Uint8Array): string {
   let s = "";
   for (const b of bytes) s += String.fromCharCode(b);

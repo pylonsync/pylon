@@ -346,8 +346,21 @@ function childIndexFor(node: Node, pmIndex: number): number {
  * A cursor for a document position. Walks the position's path from the
  * field's root down, so it does not depend on node identity (a replace
  * rebuilds the nodes along its path).
+ *
+ * Inside text the cursor binds to a character: by default the one on the
+ * left, so text typed at a caret goes before it. `bind: "right"` binds to the
+ * character on the right instead, for the start of a range, so text typed
+ * just before the range stays out of it. Where there is no character on that
+ * side, it binds to the other one.
  */
-export function positionToCursor(root: Node, pos: number, doc: LoroDoc, containerId: ContainerID): Cursor | null {
+export function positionToCursor(
+  root: Node,
+  pos: number,
+  doc: LoroDoc,
+  containerId: ContainerID,
+  options: { bind?: "left" | "right" } = {},
+): Cursor | null {
+  const bind = options.bind ?? "left";
   if (pos < 0 || pos > root.content.size) return null;
   const $pos = root.resolve(pos);
   let map = field(doc, containerId);
@@ -382,14 +395,14 @@ export function positionToCursor(root: Node, pos: number, doc: LoroDoc, containe
     } else {
       // The caret at the end of a text run binds to that run, so typing
       // there continues it.
-      if (runStart >= 0 && offset <= pmOffset) return textCursor(children.get(group), offset - runStart);
+      if (runStart >= 0 && offset <= pmOffset) return textCursor(children.get(group), offset - runStart, bind);
       runStart = -1;
       group += 1;
       if (offset === pmOffset) return children.getCursor(group) ?? null;
     }
     pmOffset += child.nodeSize;
   }
-  if (runStart >= 0 && offset <= pmOffset) return textCursor(children.get(group), offset - runStart);
+  if (runStart >= 0 && offset <= pmOffset) return textCursor(children.get(group), offset - runStart, bind);
   return children.getCursor(children.length) ?? null;
 }
 
@@ -403,11 +416,16 @@ function isLowSurrogate(text: string): boolean {
  * A cursor `offset` UTF-16 units into a text run, bound to the character on
  * its left (side 1: just after it), the whole character when it is a
  * surrogate pair. At the start of the run there is none, so it binds to the
- * first character.
+ * first character. With `bind` "right" it binds to the character on its
+ * right (side -1: just before it) while there is one.
  */
-function textCursor(text: unknown, offset: number): Cursor | null {
+function textCursor(text: unknown, offset: number, bind: "left" | "right"): Cursor | null {
   if (!(text instanceof LoroText)) return null;
   if (offset <= 0) return text.getCursor(0, 0) ?? null;
+  if (bind === "right" && offset < text.length) {
+    const at = isLowSurrogate(text.slice(offset, offset + 1)) ? offset - 1 : offset;
+    return text.getCursor(at, -1) ?? null;
+  }
   let start = Math.min(offset, text.length) - 1;
   if (start > 0 && isLowSurrogate(text.slice(start, start + 1))) start -= 1;
   return text.getCursor(start, 1) ?? null;
