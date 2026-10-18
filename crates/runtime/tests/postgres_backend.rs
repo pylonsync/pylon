@@ -925,7 +925,27 @@ fn query_filtered_default_order_by_id_matches_sqlite() {
 // ---------------------------------------------------------------------------
 
 fn crdt_runtime(url: &str) -> Runtime {
-    let manifest = AppManifest {
+    let manifest = crdt_manifest();
+    let mut adapter = pylon_storage::postgres::live::LivePostgresAdapter::connect(url)
+        .expect("connect to test postgres");
+    let _ = adapter.exec_raw("DROP TABLE IF EXISTS \"Note\" CASCADE");
+    let _ = adapter.exec_raw("DROP TABLE IF EXISTS _pylon_crdt_snapshots CASCADE");
+    let _ = adapter.exec_raw("DROP TABLE IF EXISTS _pylon_crdt_updates CASCADE");
+    let plan = adapter
+        .plan_from_live(&manifest)
+        .expect("plan against fresh schema");
+    adapter.apply_plan(&plan).expect("apply schema");
+    Runtime::open_postgres(url, manifest).expect("open postgres runtime")
+}
+
+/// Another runtime on the database `crdt_runtime` set up, as a second
+/// machine would open it: nothing dropped, nothing cached.
+fn crdt_runtime_existing(url: &str) -> Runtime {
+    Runtime::open_postgres(url, crdt_manifest()).expect("open postgres runtime")
+}
+
+fn crdt_manifest() -> AppManifest {
+    AppManifest {
         entities: vec![ManifestEntity {
             name: "Note".into(),
             fields: vec![
@@ -968,16 +988,7 @@ fn crdt_runtime(url: &str) -> Runtime {
             ..Default::default()
         }],
         ..empty_manifest()
-    };
-    let mut adapter = pylon_storage::postgres::live::LivePostgresAdapter::connect(url)
-        .expect("connect to test postgres");
-    let _ = adapter.exec_raw("DROP TABLE IF EXISTS \"Note\" CASCADE");
-    let _ = adapter.exec_raw("DROP TABLE IF EXISTS _pylon_crdt_snapshots CASCADE");
-    let plan = adapter
-        .plan_from_live(&manifest)
-        .expect("plan against fresh schema");
-    adapter.apply_plan(&plan).expect("apply schema");
-    Runtime::open_postgres(url, manifest).expect("open postgres runtime")
+    }
 }
 
 #[test]
@@ -1014,6 +1025,83 @@ fn crdt_snapshot_roundtrips_on_postgres() {
         .expect("sidecar count");
     let count: i64 = row.get(0);
     assert_eq!(count, 1);
+}
+
+fn title_of(doc: &pylon_crdt::loro::LoroDoc) -> String {
+    match pylon_crdt::root_map(doc).get("title") {
+        Some(pylon_crdt::loro::ValueOrContainer::Value(pylon_crdt::loro::LoroValue::String(s))) => {
+            s.to_string()
+        }
+        other => panic!("title: {other:?}"),
+    }
+}
+
+/// A CRDT edit appends its ops to the row's update log instead of
+/// rewriting the snapshot; another runtime (another machine) reads the
+/// snapshot plus the log; past the log's limit the next edit folds it into
+/// a new snapshot.
+#[test]
+fn crdt_edits_append_to_the_update_log_on_postgres() {
+    let Some(url) = pg_url() else {
+        return;
+    };
+    use pylon_http::DataStore;
+    let rt = crdt_runtime(&url);
+    let id = rt
+        .insert("Note", &serde_json::json!({"title": "v0", "body": "b"}))
+        .unwrap();
+    let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    let stored = |client: &mut postgres::Client| -> (Vec<u8>, i64, i64) {
+        let row = client
+            .query_one(
+                "SELECT s.snapshot, s.log_count, \
+                        (SELECT count(*) FROM _pylon_crdt_updates u \
+                         WHERE u.entity = s.entity AND u.row_id = s.row_id) \
+                 FROM _pylon_crdt_snapshots s WHERE s.entity = 'Note' AND s.row_id = $1",
+                &[&id],
+            )
+            .unwrap();
+        (row.get(0), row.get(1), row.get(2))
+    };
+    let (first, count, rows) = stored(&mut client);
+    assert_eq!((count, rows), (0, 0), "the first write is a snapshot");
+
+    for i in 1..=3 {
+        rt.update("Note", &id, &serde_json::json!({"title": format!("v{i}")}))
+            .unwrap();
+    }
+    let (snapshot, count, rows) = stored(&mut client);
+    assert_eq!((count, rows), (3, 3));
+    assert_eq!(snapshot, first, "appends leave the snapshot as it was");
+
+    // Another runtime on the same database: nothing cached, so it reads
+    // the snapshot and the log.
+    let other = crdt_runtime_existing(&url);
+    let snap = DataStore::crdt_snapshot(&other, "Note", &id)
+        .unwrap()
+        .unwrap();
+    let doc = pylon_crdt::loro::LoroDoc::new();
+    pylon_crdt::apply_update(&doc, &snap).unwrap();
+    assert_eq!(title_of(&doc), "v3");
+    assert_eq!(
+        other.get_by_id("Note", &id).unwrap().unwrap()["title"],
+        "v3"
+    );
+
+    // Past the limit the log folds into a new snapshot.
+    for i in 4..=110 {
+        rt.update("Note", &id, &serde_json::json!({"title": format!("v{i}")}))
+            .unwrap();
+    }
+    let (snapshot, count, rows) = stored(&mut client);
+    assert!(count < 100 && count == rows, "{count} {rows}");
+    assert_ne!(snapshot, first);
+    let snap = DataStore::crdt_snapshot(&crdt_runtime_existing(&url), "Note", &id)
+        .unwrap()
+        .unwrap();
+    let doc = pylon_crdt::loro::LoroDoc::new();
+    pylon_crdt::apply_update(&doc, &snap).unwrap();
+    assert_eq!(title_of(&doc), "v110");
 }
 
 #[test]

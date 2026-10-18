@@ -243,6 +243,10 @@ struct TablePlan {
     /// dropped; such a column is skipped and reported. In any other table an
     /// unknown column is an error.
     entity: bool,
+    /// A set the target may already hold entries of (written when the
+    /// Postgres runtime opened): the copy adds to it instead of requiring it
+    /// empty, and skips entries it already holds.
+    merge: bool,
 }
 
 impl TablePlan {
@@ -254,6 +258,7 @@ impl TablePlan {
             renames: &[],
             dropped: &[],
             entity: false,
+            merge: MERGED_TABLES.contains(&name),
         }
     }
 
@@ -270,8 +275,14 @@ impl TablePlan {
 /// backends.
 const APP_DB_TABLES: &[&str] = &[
     "_pylon_crdt_snapshots",
+    "_pylon_crdt_updates",
+    // Entities whose CRDT history may hold private fields (crdt_privacy):
+    // Postgres must keep refusing to replicate them.
+    "_pylon_crdt_private_entities",
     "_pylon_crdt_synthetic",
     "_pylon_crdt_base",
+    // Pending afterEdit runs (after_edit.rs): they still run on Postgres.
+    "_pylon_after_edit",
     "_pylon_crdt_links",
     "_pylon_fn_calls",
     "_pylon_shard_state",
@@ -279,6 +290,11 @@ const APP_DB_TABLES: &[&str] = &[
     "_pylon_shard_transfers",
     "_pylon_shard_cluster",
 ];
+
+/// Copied tables the target may already hold entries of; see
+/// `TablePlan::merge`. Postgres marks the account entity private when it
+/// opens.
+const MERGED_TABLES: &[&str] = &["_pylon_crdt_private_entities"];
 
 /// Internal tables in the app database that are not copied, and why.
 const APP_DB_NOT_COPIED: &[&str] = &[
@@ -338,6 +354,7 @@ fn change_log_plan() -> TablePlan {
         renames: &[("timestamp", "ts")],
         dropped: &[],
         entity: false,
+        merge: false,
     }
 }
 
@@ -409,7 +426,11 @@ pub fn copy(
         }
     };
 
-    let mut target_tables: Vec<String> = plan.iter().map(|t| t.target.clone()).collect();
+    let mut target_tables: Vec<String> = plan
+        .iter()
+        .filter(|t| !t.merge)
+        .map(|t| t.target.clone())
+        .collect();
     target_tables.extend(JOB_WORKFLOW_TABLES.iter().map(|t| t.to_string()));
     let not_empty = non_empty_tables(pg, &target_tables)?;
     if !not_empty.is_empty() {
@@ -522,7 +543,15 @@ fn write_all<'a>(
             let landed: i64 = tx
                 .query_one(&format!("SELECT count(*) FROM {}", quote(target)), &[])?
                 .get(0);
-            if landed as u64 != read {
+            // A merged table may hold entries of its own (Postgres marks
+            // entities private when it opens); every row read either landed
+            // or was already there.
+            let short = if shape.plan.merge {
+                (landed as u64) < read
+            } else {
+                landed as u64 != read
+            };
+            if short {
                 return Err(CopyError::Failed(format!(
                     "{target}: read {read} row(s) from SQLite but {landed} landed in Postgres"
                 )));
@@ -1259,6 +1288,9 @@ fn insert_rows(
             params.push(value);
         }
         sql.push(')');
+    }
+    if shape.plan.merge {
+        sql.push_str(" ON CONFLICT DO NOTHING");
     }
     tx.execute(&sql, &params)
         .map_err(|e| failed(&format!("insert into {target}"), pg_detail(e)))?;

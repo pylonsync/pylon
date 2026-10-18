@@ -80,6 +80,7 @@ pub fn tx_insert<C: PgConn>(
         pg_search::apply_insert(conn, entity, &id, &row_with_id, &cfg)
             .map_err(search_err_to_data)?;
     }
+    record_after_edit(conn, manifest, entity, &id)?;
     Ok(id)
 }
 
@@ -138,6 +139,7 @@ pub fn tx_update<C: PgConn>(
             pg_search::apply_update(conn, entity, id, &old_row, data, cfg)
                 .map_err(search_err_to_data)?;
         }
+        record_after_edit(conn, manifest, entity, id)?;
     }
     Ok(n > 0)
 }
@@ -157,7 +159,50 @@ pub fn tx_delete<C: PgConn>(
         pg_search::apply_delete(conn, entity, id, &cfg).map_err(search_err_to_data)?;
     }
     let n = conn.execute(&sql, &[&id]).map_err(pg_err_to_data)?;
+    if n > 0 {
+        record_after_edit(conn, manifest, entity, id)?;
+    }
     Ok(n > 0)
+}
+
+/// Note an `afterEdit` run for the row in the write's own transaction, so
+/// a committed write always gets its run (the runtime's dispatcher turns
+/// due rows into jobs). Writes in one window share the row.
+pub fn record_after_edit<C: PgConn>(
+    conn: &mut C,
+    manifest: &AppManifest,
+    entity: &str,
+    id: &str,
+) -> Result<(), DataError> {
+    let Some(hook) = manifest
+        .entities
+        .iter()
+        .find(|e| e.name == entity)
+        .and_then(|e| e.after_edit.as_ref())
+    else {
+        return Ok(());
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let due = hook.due_at(now) as i64;
+    conn.execute(
+        &format!(
+            // DO UPDATE, not DO NOTHING: it locks a row an earlier write
+            // already made, so the dispatcher (FOR UPDATE SKIP LOCKED)
+            // cannot take it until this transaction ends, and the run sees
+            // this write.
+            // `gen` is random per inserted row and kept on conflict; the
+            // job id carries it (see pylon-runtime's after_edit.rs).
+            "INSERT INTO {} (entity, row_id, due_at, gen) VALUES ($1, $2, $3, $4) \
+             ON CONFLICT (entity, row_id, due_at) DO UPDATE SET due_at = EXCLUDED.due_at",
+            pylon_kernel::AFTER_EDIT_TABLE
+        ),
+        &[&entity, &id, &due, &rand::random::<i64>()],
+    )
+    .map(|_| ())
+    .map_err(pg_err_to_data)
 }
 
 /// Read one row by id. Free function so the runtime layer can read

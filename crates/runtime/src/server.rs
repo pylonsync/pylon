@@ -3026,6 +3026,21 @@ fn start_server(
             }
         }
     }
+    // `afterEdit`: due outbox rows become jobs on this queue. Started only
+    // now that the queue's store is attached, so a row is never deleted for
+    // a job that is held only in memory.
+    if job_queue.is_persistent() || jobs_in_memory {
+        crate::after_edit::start_dispatcher(&runtime, &job_queue);
+    } else if runtime
+        .manifest()
+        .entities
+        .iter()
+        .any(|e| e.after_edit.is_some())
+    {
+        // The job store did not open: keep the outbox rows until a start
+        // where it does, rather than turn them into jobs a restart loses.
+        tracing::error!("[afterEdit] the job store is not open; afterEdit runs wait in the outbox");
+    }
 
     // Cron leadership: multi-machine Postgres deploys elect ONE cron
     // firer via an advisory lock; SQLite is single-machine by

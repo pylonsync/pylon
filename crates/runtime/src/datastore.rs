@@ -1431,11 +1431,20 @@ impl DataStore for Runtime {
                     );
                     let params: Vec<&dyn rusqlite::types::ToSql> =
                         values.iter().map(|v| v.as_ref()).collect();
-                    conn.execute(&sql, params.as_slice())
-                        .map_err(|e| crate::RuntimeError {
-                            code: "UPDATE_FAILED".into(),
-                            message: format!("post-merge UPDATE {entity}/{row_id}: {e}"),
-                        })?;
+                    let changed =
+                        conn.execute(&sql, params.as_slice())
+                            .map_err(|e| crate::RuntimeError {
+                                code: "UPDATE_FAILED".into(),
+                                message: format!("post-merge UPDATE {entity}/{row_id}: {e}"),
+                            })?;
+                    if changed > 0 {
+                        // The afterEdit outbox, in this transaction.
+                        crate::after_edit::record_sqlite(&conn, self.manifest(), entity, row_id)
+                            .map_err(|e| crate::RuntimeError {
+                                code: "AFTER_EDIT_FAILED".into(),
+                                message: e,
+                            })?;
+                    }
                 }
 
                 // Return the new snapshot for the router to broadcast.

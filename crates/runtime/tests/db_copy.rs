@@ -166,18 +166,23 @@ fn build_sqlite_app(dir: &std::path::Path) -> (SqliteSource, Vec<Value>, Vec<Val
         }),
     )
     .expect("note 1");
-    rt.insert(
-        "Note",
-        &json!({
-            "title": "second",
-            "body": "",
-            "views": 0,
-            "score": 0.0,
-            "pinned": false,
-            "createdAt": "2026-10-05T12:01:00.000Z"
-        }),
-    )
-    .expect("note 2");
+    let second = rt
+        .insert(
+            "Note",
+            &json!({
+                "title": "second",
+                "body": "",
+                "views": 0,
+                "score": 0.0,
+                "pinned": false,
+                "createdAt": "2026-10-05T12:01:00.000Z"
+            }),
+        )
+        .expect("note 2");
+    // An edit after the insert: its ops are in the row's update log, not
+    // its snapshot.
+    rt.update("Note", &second, &json!({ "views": 7 }))
+        .expect("edit note 2");
 
     // Change log as the SQLite server persists it.
     rt.bootstrap_sqlite_change_seq().unwrap();
@@ -311,6 +316,20 @@ fn sqlite_app_copies_into_postgres() {
     let db = TempDb::create(&admin);
     apply_schema(&db.url, &manifest());
     let pg = Runtime::open(&db.url, manifest()).expect("pg runtime");
+    // A privacy marker the target holds and the source does not (a field
+    // made private before the move): the copy adds to it.
+    pg.pg_data_store_pub()
+        .unwrap()
+        .with_client(|c| -> Result<(), pylon_http::DataError> {
+            c.execute(
+                "INSERT INTO _pylon_crdt_private_entities (entity) VALUES ('TargetOnly') \
+                 ON CONFLICT DO NOTHING",
+                &[],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
 
     // A check writes no rows.
     match db_copy::copy(&pg, &source, CopyMode::Check).expect("check") {
@@ -374,6 +393,33 @@ fn sqlite_app_copies_into_postgres() {
                 .unwrap()
                 .get(0);
             assert_eq!(snaps, 2);
+            // The update log came along, and the edit in it reads back.
+            let logged_ops: i64 = c
+                .query_one(
+                    "SELECT count(*) FROM _pylon_crdt_updates WHERE entity = 'Note'",
+                    &[],
+                )
+                .unwrap()
+                .get(0);
+            assert_eq!(logged_ops, 1);
+            // Note has a vector field, so its CRDT history is private on
+            // Postgres too.
+            let private: i64 = c
+                .query_one(
+                    "SELECT count(*) FROM _pylon_crdt_private_entities WHERE entity = 'Note'",
+                    &[],
+                )
+                .unwrap()
+                .get(0);
+            assert_eq!(private, 1);
+            let kept: i64 = c
+                .query_one(
+                    "SELECT count(*) FROM _pylon_crdt_private_entities WHERE entity = 'TargetOnly'",
+                    &[],
+                )
+                .unwrap()
+                .get(0);
+            assert_eq!(kept, 1, "the target's own markers stay");
             // Change log rows and the sequence.
             let logged: i64 = c
                 .query_one("SELECT count(*) FROM pylon_change_log", &[])

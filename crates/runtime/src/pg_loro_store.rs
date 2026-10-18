@@ -26,8 +26,8 @@ use pylon_storage::pg_exec::PgConn;
 use serde_json::Value;
 
 use crate::loro_store::{
-    doc_from_snapshot, merge_client_update, patch_doc, seed_doc, LoroStoreError, Peers,
-    SideRecords, SideTable, ROW_SIDE_TABLES,
+    doc_from_snapshot, doc_from_stored, merge_client_update, patch_doc, plan_persist, seed_doc,
+    LoroStoreError, Peers, Persist, SideRecords, SideTable, StoredHead, ROW_SIDE_TABLES,
 };
 
 /// SQL to create the PG sidecar table. Idempotent — called every time
@@ -45,6 +45,16 @@ CREATE TABLE IF NOT EXISTS _pylon_crdt_snapshots (\
 /// The server-side records kept per CRDT row beside its snapshot (see
 /// [`SideRecords`]); the same tables as the SQLite sidecar.
 const CREATE_PG_SIDE_TABLES_SQL: &str = "
+ALTER TABLE _pylon_crdt_snapshots ADD COLUMN IF NOT EXISTS log_count bigint NOT NULL DEFAULT 0;
+ALTER TABLE _pylon_crdt_snapshots ADD COLUMN IF NOT EXISTS log_bytes bigint NOT NULL DEFAULT 0;
+ALTER TABLE _pylon_crdt_snapshots ADD COLUMN IF NOT EXISTS vv bytea;
+CREATE TABLE IF NOT EXISTS _pylon_crdt_updates (
+    entity text NOT NULL,
+    row_id text NOT NULL,
+    seq    bigint NOT NULL,
+    delta  bytea NOT NULL,
+    PRIMARY KEY (entity, row_id, seq)
+);
 CREATE TABLE IF NOT EXISTS _pylon_crdt_synthetic (
     entity text NOT NULL,
     row_id text NOT NULL,
@@ -330,22 +340,30 @@ impl PgLoroStore {
         conn: &mut C,
         entity: &str,
         row_id: &str,
-    ) -> Result<(LoroDoc, bool), LoroStoreError> {
+    ) -> Result<(LoroDoc, Option<StoredHead>), LoroStoreError> {
         lock_doc(conn, entity, row_id)?;
         let row = conn
             .query_opt(
-                "SELECT (SELECT snapshot FROM _pylon_crdt_snapshots \
-                         WHERE entity = $1 AND row_id = $2), \
-                        extract(epoch FROM pg_postmaster_start_time())::float8",
+                "SELECT s.snapshot, s.log_count, s.log_bytes, s.vv, \
+                        extract(epoch FROM pg_postmaster_start_time())::float8 \
+                 FROM (SELECT 1) AS one LEFT JOIN _pylon_crdt_snapshots s \
+                   ON s.entity = $1 AND s.row_id = $2",
                 &[&entity, &row_id],
             )
             .map_err(|e| pg_err("read pg snapshot", e))?
             .ok_or_else(|| LoroStoreError::Storage("read pg snapshot: no row".into()))?;
         let snapshot: Option<Vec<u8>> = row.get(0);
-        let started: f64 = row.get(1);
+        let started: f64 = row.get(4);
         self.note_server_start(started);
-        let doc = doc_from_snapshot(snapshot.as_deref(), &self.peers)?;
-        Ok((doc, snapshot.is_some()))
+        let head = snapshot.as_ref().map(|snap| {
+            StoredHead::from_columns(snap.len() as i64, row.get(1), row.get(2), row.get(3))
+        });
+        let log = match head {
+            Some(_) => read_log_pg(conn, entity, row_id)?,
+            None => Vec::new(),
+        };
+        let doc = doc_from_stored(snapshot.as_deref(), &log, &self.peers)?;
+        Ok((doc, head))
     }
 }
 
@@ -363,6 +381,23 @@ fn pg_advisory_key(s: &str) -> i32 {
     // full int4 range. Using `as i32` would panic-truncate; `as u32
     // as i32` round-trips through the bit pattern.
     (h as u32) as i32
+}
+
+/// A row's update log, in order.
+fn read_log_pg<C: PgConn>(
+    conn: &mut C,
+    entity: &str,
+    row_id: &str,
+) -> Result<Vec<Vec<u8>>, LoroStoreError> {
+    Ok(conn
+        .query(
+            "SELECT delta FROM _pylon_crdt_updates WHERE entity = $1 AND row_id = $2 ORDER BY seq",
+            &[&entity, &row_id],
+        )
+        .map_err(|e| pg_err("read the pg update log", e))?
+        .into_iter()
+        .map(|r| r.get::<_, Vec<u8>>(0))
+        .collect())
 }
 
 impl PgLoroStore {
@@ -386,7 +421,10 @@ impl PgLoroStore {
             conn.query_opt(
                 "SELECT s.stamp, CASE WHEN s.stamp IS DISTINCT FROM $3::bigint \
                                       THEN s.snapshot END, \
-                        extract(epoch FROM pg_postmaster_start_time())::float8 \
+                        extract(epoch FROM pg_postmaster_start_time())::float8, \
+                        CASE WHEN s.stamp IS DISTINCT FROM $3::bigint THEN \
+                            (SELECT array_agg(u.delta ORDER BY u.seq) FROM _pylon_crdt_updates u \
+                             WHERE u.entity = $1 AND u.row_id = $2) END \
                  FROM (SELECT 1) AS one LEFT JOIN LATERAL ( \
                      SELECT (extract(epoch FROM updated_at) * 1000000)::bigint AS stamp, \
                             snapshot \
@@ -412,7 +450,9 @@ impl PgLoroStore {
             }
         }
         let snapshot: Option<Vec<u8>> = row.get(1);
-        let doc = doc_from_snapshot(snapshot.as_deref(), &self.peers)?;
+        // Read in the same statement as the snapshot, so the two match.
+        let log: Vec<Vec<u8>> = row.get::<_, Option<Vec<Vec<u8>>>>(3).unwrap_or_default();
+        let doc = doc_from_stored(snapshot.as_deref(), &log, &self.peers)?;
         let handle = Arc::new(Mutex::new(doc));
         Ok((
             self.docs.publish(entity, row_id, handle, stamp, token),
@@ -442,24 +482,60 @@ impl PgLoroStore {
         self.docs.mark_complete(entity, row_id, token);
     }
 
-    /// Persist the current snapshot via UPSERT. Called after every
-    /// apply.
+    /// Store the row's doc after an apply, under the row's lock: the ops
+    /// it added, appended to the update log, or a new snapshot when the log
+    /// is long (see [`plan_persist`]). `head` is what was stored when the
+    /// doc was read under the same lock.
     fn persist_snapshot<C: PgConn>(
         conn: &mut C,
         entity: &str,
         row_id: &str,
         doc: &LoroDoc,
+        head: Option<&StoredHead>,
     ) -> Result<(), LoroStoreError> {
-        let snap = encode_snapshot(doc);
-        conn.execute(
-            "INSERT INTO _pylon_crdt_snapshots (entity, row_id, snapshot, updated_at) \
-             VALUES ($1, $2, $3, clock_timestamp()) \
-             ON CONFLICT (entity, row_id) DO UPDATE \
-             SET snapshot = EXCLUDED.snapshot, updated_at = EXCLUDED.updated_at",
-            &[&entity, &row_id, &snap],
-        )
-        .map(|_| ())
-        .map_err(|e| pg_err("persist pg snapshot", e))
+        let vv = doc.oplog_vv().encode();
+        match plan_persist(head, doc) {
+            Persist::Unchanged => Ok(()),
+            Persist::Snapshot => {
+                let snap = encode_snapshot(doc);
+                conn.execute(
+                    "INSERT INTO _pylon_crdt_snapshots \
+                        (entity, row_id, snapshot, updated_at, log_count, log_bytes, vv) \
+                     VALUES ($1, $2, $3, clock_timestamp(), 0, 0, $4) \
+                     ON CONFLICT (entity, row_id) DO UPDATE \
+                     SET snapshot = EXCLUDED.snapshot, updated_at = EXCLUDED.updated_at, \
+                         log_count = 0, log_bytes = 0, vv = EXCLUDED.vv",
+                    &[&entity, &row_id, &snap, &vv],
+                )
+                .map_err(|e| pg_err("persist pg snapshot", e))?;
+                conn.execute(
+                    "DELETE FROM _pylon_crdt_updates WHERE entity = $1 AND row_id = $2",
+                    &[&entity, &row_id],
+                )
+                .map(|_| ())
+                .map_err(|e| pg_err("clear the pg update log", e))
+            }
+            Persist::Append(delta) => {
+                let head = head.expect("an append has a stored head");
+                let seq = head.log_count + 1;
+                let len = delta.len() as i64;
+                conn.execute(
+                    "INSERT INTO _pylon_crdt_updates (entity, row_id, seq, delta) \
+                     VALUES ($1, $2, $3, $4)",
+                    &[&entity, &row_id, &seq, &delta],
+                )
+                .map_err(|e| pg_err("append to the pg update log", e))?;
+                conn.execute(
+                    "UPDATE _pylon_crdt_snapshots \
+                     SET log_count = log_count + 1, log_bytes = log_bytes + $3, vv = $4, \
+                         updated_at = clock_timestamp() \
+                     WHERE entity = $1 AND row_id = $2",
+                    &[&entity, &row_id, &len, &vv],
+                )
+                .map(|_| ())
+                .map_err(|e| pg_err("record the pg update log", e))
+            }
+        }
     }
 
     /// Apply a JSON patch, persist the new snapshot, return the
@@ -480,9 +556,9 @@ impl PgLoroStore {
         fields: &[CrdtField],
         patch: &Value,
     ) -> Result<Value, LoroStoreError> {
-        let (doc, _) = self.hydrate_for_write(conn, entity, row_id)?;
+        let (doc, head) = self.hydrate_for_write(conn, entity, row_id)?;
         patch_doc(&mut PgSide(conn), &doc, entity, row_id, fields, patch)?;
-        Self::persist_snapshot(conn, entity, row_id, &doc)?;
+        Self::persist_snapshot(conn, entity, row_id, &doc, head.as_ref())?;
         Ok(project_doc_to_json(&doc, fields))
     }
 
@@ -497,9 +573,9 @@ impl PgLoroStore {
         fields: &[CrdtField],
         update: &[u8],
     ) -> Result<Value, LoroStoreError> {
-        let (doc, _) = self.hydrate_for_write(conn, entity, row_id)?;
+        let (doc, head) = self.hydrate_for_write(conn, entity, row_id)?;
         crdt_apply_update(&doc, update).map_err(LoroStoreError::Decode)?;
-        Self::persist_snapshot(conn, entity, row_id, &doc)?;
+        Self::persist_snapshot(conn, entity, row_id, &doc, head.as_ref())?;
         let projected = project_doc_to_json(&doc, fields);
         Ok(projected)
     }
@@ -518,7 +594,7 @@ impl PgLoroStore {
         if values.is_empty() {
             return Ok(Vec::new());
         }
-        let (doc, _) = self.hydrate_for_write(conn, entity, row_id)?;
+        let (doc, head) = self.hydrate_for_write(conn, entity, row_id)?;
         let failed = seed_doc(
             &mut PgSide(conn),
             &doc,
@@ -528,7 +604,7 @@ impl PgLoroStore {
             fields,
             values,
         )?;
-        Self::persist_snapshot(conn, entity, row_id, &doc)?;
+        Self::persist_snapshot(conn, entity, row_id, &doc, head.as_ref())?;
         Ok(failed)
     }
 
@@ -543,7 +619,8 @@ impl PgLoroStore {
         fields: &[CrdtField],
         update: &[u8],
     ) -> Result<(Value, Option<Vec<String>>, bool), LoroStoreError> {
-        let (doc, had_doc) = self.hydrate_for_write(conn, entity, row_id)?;
+        let (doc, head) = self.hydrate_for_write(conn, entity, row_id)?;
+        let had_doc = head.is_some();
         let (before, touched) = merge_client_update(
             &mut PgSide(conn),
             &doc,
@@ -554,7 +631,7 @@ impl PgLoroStore {
             update,
         )?;
         if touched.is_some() {
-            Self::persist_snapshot(conn, entity, row_id, &doc)?;
+            Self::persist_snapshot(conn, entity, row_id, &doc, head.as_ref())?;
         }
         Ok((before, touched, had_doc))
     }
@@ -601,7 +678,8 @@ impl PgLoroStore {
         fields: &[CrdtField],
         row: impl FnOnce(&mut C) -> Result<Option<Value>, LoroStoreError>,
     ) -> Result<bool, LoroStoreError> {
-        let (doc, had_doc) = self.hydrate_for_write(conn, entity, row_id)?;
+        let (doc, head) = self.hydrate_for_write(conn, entity, row_id)?;
+        let had_doc = head.is_some();
         let held = crate::loro_store::held_keys(&doc, fields);
         if had_doc && held.len() == fields.len() {
             return Ok(false);
@@ -612,7 +690,7 @@ impl PgLoroStore {
         let values = crate::missing_values(fields, &held, &row);
         if values.is_empty() {
             if !had_doc {
-                Self::persist_snapshot(conn, entity, row_id, &doc)?;
+                Self::persist_snapshot(conn, entity, row_id, &doc, None)?;
                 self.evict(entity, row_id);
                 return Ok(true);
             }
@@ -724,15 +802,20 @@ impl PgLoroStore {
             .map_err(|e| pg_err("read pg snapshot", e))?
             .map(|r| r.get::<_, Vec<u8>>(0));
         let bytes = snap.unwrap_or_default();
-        // If the row exists, return its bytes verbatim. If it
-        // doesn't, return an encoded empty doc so the broadcast
-        // shape stays consistent with the SQLite path.
+        // If the row doesn't exist, return an encoded empty doc so the
+        // broadcast shape stays consistent with the SQLite path. If it
+        // does, its stored state: the snapshot, with its update log
+        // applied when there is one.
         if bytes.is_empty() {
             let doc = LoroDoc::new();
-            Ok(encode_snapshot(&doc))
-        } else {
-            Ok(bytes)
+            return Ok(encode_snapshot(&doc));
         }
+        let log = read_log_pg(conn, entity, row_id)?;
+        if log.is_empty() {
+            return Ok(bytes);
+        }
+        let doc = doc_from_stored(Some(&bytes), &log, &Peers::new())?;
+        Ok(encode_snapshot(&doc))
     }
 
     /// Drop a row's cached doc. Next access re-hydrates from the PG

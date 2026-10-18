@@ -44,6 +44,7 @@
               "concepts/workflows",
               "concepts/audit-log",
               "concepts/retention",
+              "concepts/after-edit",
               "concepts/agents",
               "concepts/streaming",
               "concepts/realtime",

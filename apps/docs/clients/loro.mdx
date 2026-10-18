@@ -261,6 +261,8 @@ export default action({
 - `ctx.crdt` runs in actions only. Each commit merges and reaches everyone at once, so it cannot roll back with a mutation; a query or mutation gets `CRDT_ACTIONS_ONLY`.
 - Policies follow the `ctx.db` rule. Under strict function policies (`PYLON_STRICT_FN_POLICIES=1`) the caller's read policy gates `openLiveDoc` (a row they may not read is `NOT_FOUND`) and their update policy gates each commit (`POLICY_DENIED`). `openLiveDoc(ctx, entity, id, { unsafe: true })` runs with server trust, like `ctx.db.unsafe`. Without strict policies, check access in the function.
 
+Each commit stores only the ops it added: the server appends them to the row's update log and folds the log into a new snapshot after 100 entries or once it passes the snapshot's size. A one-character edit to a long document writes tens of bytes. To run work after edits land (a search index, a preview), declare an [after-edit hook](/concepts/after-edit) instead of doing it in the function that edits.
+
 `ctx.crdt` itself takes and returns Loro bytes: `snapshot(entity, id)`, `since(entity, id, version)` and `apply(entity, id, update)`, for code that manages its own `LoroDoc`.
 
 ### Read and write a document you hold

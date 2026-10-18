@@ -920,6 +920,38 @@ pub struct ManifestEntity {
     /// [`ManifestRetention`]). A system job enforces it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention: Option<ManifestRetention>,
+    /// An internal function to run after edits to a row land (see
+    /// [`ManifestAfterEdit`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_edit: Option<ManifestAfterEdit>,
+}
+
+/// `afterEdit` on an entity: any committed write to a row schedules
+/// `function` with `{ id }` at the end of the row's current `delay_secs`
+/// window, once for every write in that window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestAfterEdit {
+    pub function: String,
+    #[serde(default = "default_after_edit_delay")]
+    pub delay_secs: u64,
+}
+
+fn default_after_edit_delay() -> u64 {
+    5
+}
+
+/// The outbox of `afterEdit` runs: one row per (entity, row, window end),
+/// written in the transaction of every write to an entity with a hook. A
+/// dispatcher turns due rows into jobs. Same name on SQLite and Postgres.
+pub const AFTER_EDIT_TABLE: &str = "_pylon_after_edit";
+
+impl ManifestAfterEdit {
+    /// The end of the window a write at `now_secs` falls in, as epoch
+    /// seconds: when its run is due. Writes in one window share it.
+    pub fn due_at(&self, now_secs: u64) -> u64 {
+        let window = self.delay_secs.max(1);
+        (now_secs / window + 1) * window
+    }
 }
 
 /// Retention rule for an entity.
@@ -963,6 +995,7 @@ impl Default for ManifestEntity {
             sync_limit: None,
             audit: false,
             retention: None,
+            after_edit: None,
         }
     }
 }

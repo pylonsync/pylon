@@ -213,6 +213,8 @@ pub struct JobQueue {
     /// [`MAX_RETRY_BACKOFF_SECS`]). Default 1. Tests set 0 to keep the
     /// fail→dequeue→fail loop synchronous.
     retry_backoff_base_secs: AtomicU64,
+    /// Held across [`JobQueue::try_enqueue_once`]'s check and insert.
+    enqueue_once: Mutex<()>,
 }
 
 impl JobQueue {
@@ -233,6 +235,7 @@ impl JobQueue {
             pg_store: Mutex::new(None),
             lease_tokens: Mutex::new(HashMap::new()),
             retry_backoff_base_secs: AtomicU64::new(1),
+            enqueue_once: Mutex::new(()),
         }
     }
 
@@ -260,6 +263,12 @@ impl JobQueue {
 
     pub fn is_distributed(&self) -> bool {
         self.pg_store.lock().unwrap().is_some()
+    }
+
+    /// Whether accepted jobs survive a restart: a store is attached (the
+    /// SQLite job database or the Postgres queue).
+    pub fn is_persistent(&self) -> bool {
+        self.is_distributed() || self.store.lock().unwrap().is_some()
     }
 
     /// Best-effort persist. Never panics, never propagates errors — durability
@@ -435,6 +444,40 @@ impl JobQueue {
             queue: queue.to_string(),
             auth,
         }
+    }
+
+    /// Enqueue `job` unless a job with its id exists: pending, running, or
+    /// kept in the store or history. Callers give it a deterministic id
+    /// (see `crate::after_edit`) so repeated requests share one run, on
+    /// one machine or, with the Postgres queue, across machines. Returns
+    /// whether it was enqueued.
+    pub(crate) fn try_enqueue_once(&self, job: Job) -> Result<bool, String> {
+        if let Some(store) = self.pg_store() {
+            let added = store.enqueue_once(&job)?;
+            if added {
+                self.notify.notify_one();
+            }
+            return Ok(added);
+        }
+        let _once = self.enqueue_once.lock().unwrap();
+        let exists = self.pending.lock().unwrap().iter().any(|j| j.id == job.id)
+            || self.running.lock().unwrap().contains_key(&job.id)
+            || self.history.lock().unwrap().iter().any(|j| j.id == job.id)
+            || self
+                .dead_letters
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|j| j.id == job.id);
+        if exists {
+            return Ok(false);
+        }
+        if let Some(store) = self.store.lock().unwrap().as_ref() {
+            if store.load(&job.id)?.is_some() {
+                return Ok(false);
+            }
+        }
+        self.try_enqueue_job(job).map(|_| true)
     }
 
     pub(crate) fn try_enqueue_job(&self, job: Job) -> Result<String, String> {

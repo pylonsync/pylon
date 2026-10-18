@@ -75,52 +75,17 @@ impl PgJobStore {
     }
 
     pub fn enqueue(&self, job: &Job) -> Result<(), String> {
-        let created_at = parse_stamp(&job.created_at);
-        let ready_at = if job.ready_at == 0 {
-            created_at.saturating_add(job.delay_secs)
-        } else {
-            job.ready_at
-        } as i64;
-        let created_at = created_at as i64;
-        let priority = priority_to_i16(job.priority);
-        let status = status_to_str(&job.status);
-        let delay_secs = job.delay_secs.min(i64::MAX as u64) as i64;
-        let max_retries = job.max_retries.min(i32::MAX as u32) as i32;
-        let retry_count = job.retry_count.min(i32::MAX as u32) as i32;
-        let auth = job
-            .auth
-            .as_ref()
-            .map(serde_json::to_value)
-            .transpose()
-            .map_err(|e| format!("job auth serialize failed: {e}"))?;
-        self.pool.with_client(|client| {
-            client.execute(
-                "INSERT INTO _pylon_jobs
-                 (id, name, payload, priority, status, max_retries, retry_count,
-                  queue, delay_secs, ready_at, error, created_at, started_at,
-                  completed_at, auth)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-                 ON CONFLICT (id) DO NOTHING",
-                &[
-                    &job.id,
-                    &job.name,
-                    &job.payload,
-                    &priority,
-                    &status,
-                    &max_retries,
-                    &retry_count,
-                    &job.queue,
-                    &delay_secs,
-                    &ready_at,
-                    &job.error,
-                    &created_at,
-                    &job.started_at.as_deref().map(parse_stamp_i64),
-                    &job.completed_at.as_deref().map(parse_stamp_i64),
-                    &auth,
-                ],
-            )?;
-            Ok(())
-        })
+        self.insert(job).map(|_| ())
+    }
+
+    /// Enqueue `job` unless a job with its id exists (in any state).
+    /// Returns whether it was enqueued.
+    pub fn enqueue_once(&self, job: &Job) -> Result<bool, String> {
+        self.insert(job).map(|rows| rows == 1)
+    }
+
+    fn insert(&self, job: &Job) -> Result<u64, String> {
+        self.pool.with_client(|client| insert_job(client, job))
     }
 
     pub fn claim(
@@ -430,6 +395,58 @@ fn now_secs_i64() -> i64 {
 
 fn count_to_usize(value: i64) -> usize {
     usize::try_from(value.max(0)).unwrap_or(usize::MAX)
+}
+
+/// Insert `job` through `client` (a connection or a transaction) unless a
+/// job with its id exists. Returns how many rows it inserted (0 or 1).
+pub(crate) fn insert_job<C: postgres::GenericClient>(
+    client: &mut C,
+    job: &Job,
+) -> Result<u64, postgres::Error> {
+    let created_at = parse_stamp(&job.created_at);
+    let ready_at = if job.ready_at == 0 {
+        created_at.saturating_add(job.delay_secs)
+    } else {
+        job.ready_at
+    } as i64;
+    let created_at = created_at as i64;
+    let priority = priority_to_i16(job.priority);
+    let status = status_to_str(&job.status);
+    let delay_secs = job.delay_secs.min(i64::MAX as u64) as i64;
+    let max_retries = job.max_retries.min(i32::MAX as u32) as i32;
+    let retry_count = job.retry_count.min(i32::MAX as u32) as i32;
+    let auth = job
+        .auth
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        // A JobAuth is plain data: serializing it cannot fail.
+        .unwrap_or(None);
+    client.execute(
+        "INSERT INTO _pylon_jobs
+             (id, name, payload, priority, status, max_retries, retry_count,
+              queue, delay_secs, ready_at, error, created_at, started_at,
+              completed_at, auth)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+             ON CONFLICT (id) DO NOTHING",
+        &[
+            &job.id,
+            &job.name,
+            &job.payload,
+            &priority,
+            &status,
+            &max_retries,
+            &retry_count,
+            &job.queue,
+            &delay_secs,
+            &ready_at,
+            &job.error,
+            &created_at,
+            &job.started_at.as_deref().map(parse_stamp_i64),
+            &job.completed_at.as_deref().map(parse_stamp_i64),
+            &auth,
+        ],
+    )
 }
 
 #[cfg(test)]

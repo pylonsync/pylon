@@ -20,9 +20,14 @@
 //! );
 //! ```
 //!
-//! Snapshots are full-state Loro snapshots (`ExportMode::Snapshot`).
-//! Loro applies internal compaction so the snapshot size stays bounded;
-//! we don't track an op log separately.
+//! A row's stored state is its snapshot plus an update log
+//! (`_pylon_crdt_updates`): a commit appends only the ops it added (a Loro
+//! update since the stored version vector, kept on the snapshot row), and
+//! once the log passes [`MAX_LOG_UPDATES`] entries or the snapshot's size
+//! (at least [`MIN_LOG_BYTES`]) the next commit writes a new snapshot and
+//! clears the log, in the same transaction. Loading applies the snapshot
+//! and then the log in order. A one-character edit to a long document
+//! writes tens of bytes, not the whole document.
 //!
 //! # In-memory cache
 //!
@@ -85,6 +90,98 @@ CREATE TABLE IF NOT EXISTS _pylon_crdt_snapshots (
     PRIMARY KEY (entity, row_id)
 )
 ";
+
+/// The per-row update log. `seq` counts up from 1 after each snapshot.
+pub const CREATE_UPDATE_LOG_SQL: &str = "
+CREATE TABLE IF NOT EXISTS _pylon_crdt_updates (
+    entity TEXT NOT NULL,
+    row_id TEXT NOT NULL,
+    seq    INTEGER NOT NULL,
+    delta  BLOB NOT NULL,
+    PRIMARY KEY (entity, row_id, seq)
+)
+";
+
+/// Log entries a row keeps before the next commit writes a new snapshot.
+pub(crate) const MAX_LOG_UPDATES: i64 = 100;
+
+/// Log bytes a row keeps before the next commit writes a new snapshot: the
+/// snapshot's own size, and at least this much.
+pub(crate) const MIN_LOG_BYTES: i64 = 64 * 1024;
+
+/// What the sidecar holds for a row beside its snapshot and log bytes.
+#[derive(Debug, Clone)]
+pub(crate) struct StoredHead {
+    pub snapshot_len: i64,
+    pub log_count: i64,
+    pub log_bytes: i64,
+    /// The version of the snapshot plus the log. None for a snapshot
+    /// written before the log existed.
+    pub vv: Option<VersionVector>,
+}
+
+impl StoredHead {
+    pub(crate) fn from_columns(
+        snapshot_len: i64,
+        log_count: i64,
+        log_bytes: i64,
+        vv: Option<Vec<u8>>,
+    ) -> Self {
+        Self {
+            snapshot_len,
+            log_count,
+            log_bytes,
+            vv: vv.and_then(|bytes| VersionVector::decode(&bytes).ok()),
+        }
+    }
+}
+
+/// How a commit stores a row's doc.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Persist {
+    /// The doc has no op the store lacks.
+    Unchanged,
+    /// Write a new snapshot and clear the log.
+    Snapshot,
+    /// Append these ops (a Loro update) to the log.
+    Append(Vec<u8>),
+}
+
+/// How to store `doc` over what is stored (`head`). `doc` holds every op
+/// the store holds: the SQLite store's cached doc, or the Postgres store's
+/// doc read or checked under the row's lock.
+pub(crate) fn plan_persist(head: Option<&StoredHead>, doc: &LoroDoc) -> Persist {
+    let Some(head) = head else {
+        return Persist::Snapshot;
+    };
+    let Some(stored) = head.vv.as_ref() else {
+        // Written before the log: start one from a fresh snapshot.
+        return Persist::Snapshot;
+    };
+    if stored.includes_vv(&doc.oplog_vv()) {
+        return Persist::Unchanged;
+    }
+    let delta = encode_update_since(doc, stored);
+    let bytes = head.log_bytes + delta.len() as i64;
+    if head.log_count + 1 > MAX_LOG_UPDATES || bytes > head.snapshot_len.max(MIN_LOG_BYTES) {
+        Persist::Snapshot
+    } else {
+        Persist::Append(delta)
+    }
+}
+
+/// A doc from a stored snapshot (or none) and its log, in order.
+pub(crate) fn doc_from_stored(
+    snapshot: Option<&[u8]>,
+    log: &[Vec<u8>],
+    peers: &Peers,
+) -> Result<LoroDoc, LoroStoreError> {
+    let doc = doc_from_snapshot(snapshot, peers)?;
+    for delta in log {
+        crdt_apply_update(&doc, delta).map_err(LoroStoreError::Decode)?;
+    }
+    Ok(doc)
+}
 
 /// Which snapshots a prune batch removes for one entity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +258,31 @@ pub fn ensure_sidecar(conn: &Connection) -> Result<(), LoroStoreError> {
     conn.execute(CREATE_SIDECAR_SQL, [])
         .map(|_| ())
         .map_err(|e| LoroStoreError::Storage(format!("create sidecar: {e}")))?;
+    conn.execute(CREATE_UPDATE_LOG_SQL, [])
+        .map(|_| ())
+        .map_err(|e| LoroStoreError::Storage(format!("create the update log: {e}")))?;
+    // The log's bookkeeping on the snapshot row; added to a sidecar from
+    // before the log.
+    let columns: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('_pylon_crdt_snapshots')")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|e| LoroStoreError::Storage(format!("read sidecar columns: {e}")))?;
+    for (column, ddl) in [
+        ("log_count", "log_count INTEGER NOT NULL DEFAULT 0"),
+        ("log_bytes", "log_bytes INTEGER NOT NULL DEFAULT 0"),
+        ("vv", "vv BLOB"),
+    ] {
+        if !columns.iter().any(|c| c == column) {
+            conn.execute(
+                &format!("ALTER TABLE _pylon_crdt_snapshots ADD COLUMN {ddl}"),
+                [],
+            )
+            .map_err(|e| LoroStoreError::Storage(format!("add sidecar column {column}: {e}")))?;
+        }
+    }
     // The peers of each row's synthetic ops (see `as_synthetic`), kept
     // beside the snapshot: server-side state, which a client's update
     // cannot change.
@@ -212,7 +334,8 @@ pub fn ensure_sidecar(conn: &Connection) -> Result<(), LoroStoreError> {
 }
 
 /// The server-side tables kept per CRDT row beside its snapshot.
-pub(crate) const ROW_SIDE_TABLES: [&str; 3] = [
+pub(crate) const ROW_SIDE_TABLES: [&str; 4] = [
+    "_pylon_crdt_updates",
     "_pylon_crdt_synthetic",
     "_pylon_crdt_base",
     "_pylon_crdt_links",
@@ -705,6 +828,134 @@ impl SideRecords for SqliteSide<'_> {
     }
 }
 
+/// A row's stored snapshot and update log, in order.
+pub(crate) fn read_stored_sqlite(
+    conn: &Connection,
+    entity: &str,
+    row_id: &str,
+) -> Result<(Option<Vec<u8>>, Vec<Vec<u8>>), LoroStoreError> {
+    let err = |e: rusqlite::Error| LoroStoreError::Storage(format!("read stored doc: {e}"));
+    let snapshot: Option<Vec<u8>> = conn
+        .prepare_cached(
+            "SELECT snapshot FROM _pylon_crdt_snapshots WHERE entity = ?1 AND row_id = ?2",
+        )
+        .and_then(|mut stmt| stmt.query_row(params![entity, row_id], |r| r.get(0)))
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            e => Err(err(e)),
+        })?;
+    if snapshot.is_none() {
+        return Ok((None, Vec::new()));
+    }
+    let log = conn
+        .prepare_cached(
+            "SELECT delta FROM _pylon_crdt_updates WHERE entity = ?1 AND row_id = ?2 ORDER BY seq",
+        )
+        .and_then(|mut stmt| {
+            stmt.query_map(params![entity, row_id], |r| r.get::<_, Vec<u8>>(0))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(err)?;
+    Ok((snapshot, log))
+}
+
+/// The row's stored state as one snapshot (the snapshot with its log
+/// applied), or None when it has none. For tools and tests that read the
+/// sidecar directly.
+pub fn stored_snapshot_sqlite(
+    conn: &Connection,
+    entity: &str,
+    row_id: &str,
+) -> Result<Option<Vec<u8>>, LoroStoreError> {
+    let (snapshot, log) = read_stored_sqlite(conn, entity, row_id)?;
+    let Some(snapshot) = snapshot else {
+        return Ok(None);
+    };
+    if log.is_empty() {
+        return Ok(Some(snapshot));
+    }
+    let doc = doc_from_stored(Some(&snapshot), &log, &Peers::new())?;
+    Ok(Some(encode_snapshot(&doc)))
+}
+
+fn read_head_sqlite(
+    conn: &Connection,
+    entity: &str,
+    row_id: &str,
+) -> Result<Option<StoredHead>, LoroStoreError> {
+    conn.prepare_cached(
+        "SELECT length(snapshot), log_count, log_bytes, vv FROM _pylon_crdt_snapshots
+         WHERE entity = ?1 AND row_id = ?2",
+    )
+    .and_then(|mut stmt| {
+        stmt.query_row(params![entity, row_id], |r| {
+            Ok(StoredHead::from_columns(
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+            ))
+        })
+    })
+    .map(Some)
+    .or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        e => Err(LoroStoreError::Storage(format!(
+            "read the stored head: {e}"
+        ))),
+    })
+}
+
+/// Store `doc` for the row (see [`plan_persist`]).
+pub(crate) fn persist_sqlite(
+    conn: &Connection,
+    entity: &str,
+    row_id: &str,
+    doc: &LoroDoc,
+) -> Result<(), LoroStoreError> {
+    let head = read_head_sqlite(conn, entity, row_id)?;
+    let err = |what: &str, e: rusqlite::Error| LoroStoreError::Storage(format!("{what}: {e}"));
+    let now = chrono_now_iso();
+    let vv = doc.oplog_vv().encode();
+    match plan_persist(head.as_ref(), doc) {
+        Persist::Unchanged => Ok(()),
+        Persist::Snapshot => {
+            let snap = encode_snapshot(doc);
+            conn.prepare_cached(
+                "INSERT INTO _pylon_crdt_snapshots
+                    (entity, row_id, snapshot, updated_at, log_count, log_bytes, vv)
+                 VALUES (?1, ?2, ?3, ?4, 0, 0, ?5)
+                 ON CONFLICT (entity, row_id) DO UPDATE SET
+                    snapshot = excluded.snapshot, updated_at = excluded.updated_at,
+                    log_count = 0, log_bytes = 0, vv = excluded.vv",
+            )
+            .and_then(|mut stmt| stmt.execute(params![entity, row_id, snap, now, vv]))
+            .map_err(|e| err("persist snapshot", e))?;
+            conn.prepare_cached("DELETE FROM _pylon_crdt_updates WHERE entity = ?1 AND row_id = ?2")
+                .and_then(|mut stmt| stmt.execute(params![entity, row_id]))
+                .map(|_| ())
+                .map_err(|e| err("clear the update log", e))
+        }
+        Persist::Append(delta) => {
+            let head = head.expect("an append has a stored head");
+            conn.prepare_cached(
+                "INSERT INTO _pylon_crdt_updates (entity, row_id, seq, delta) VALUES (?1, ?2, ?3, ?4)",
+            )
+            .and_then(|mut stmt| stmt.execute(params![entity, row_id, head.log_count + 1, delta]))
+            .map_err(|e| err("append to the update log", e))?;
+            conn.prepare_cached(
+                "UPDATE _pylon_crdt_snapshots
+                 SET log_count = log_count + 1, log_bytes = log_bytes + ?3, vv = ?4, updated_at = ?5
+                 WHERE entity = ?1 AND row_id = ?2",
+            )
+            .and_then(|mut stmt| stmt.execute(params![entity, row_id, delta.len() as i64, vv, now]))
+            .map(|_| ())
+            .map_err(|e| err("record the update log", e))
+        }
+    }
+}
+
 thread_local! {
     /// Rows whose cached doc this thread changed since its write
     /// transaction began. The cache holds the change before the commit, so
@@ -777,22 +1028,8 @@ impl LoroStore {
         // doc is dropped after the cache check below. Loro's snapshot
         // decode is deterministic, so both copies are byte-identical;
         // the race only wastes a microsecond, never produces divergence.
-        let snapshot: Option<Vec<u8>> = conn
-            .query_row(
-                "SELECT snapshot FROM _pylon_crdt_snapshots WHERE entity = ?1 AND row_id = ?2",
-                params![entity, row_id],
-                |r| r.get(0),
-            )
-            .map(Some)
-            .or_else(|e| {
-                if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
-                    Ok(None)
-                } else {
-                    Err(LoroStoreError::Storage(format!("read snapshot: {e}")))
-                }
-            })?;
-
-        let doc = doc_from_snapshot(snapshot.as_deref(), &self.peers)?;
+        let (snapshot, log) = read_stored_sqlite(conn, entity, row_id)?;
+        let doc = doc_from_stored(snapshot.as_deref(), &log, &self.peers)?;
         let handle = Arc::new(Mutex::new(doc));
 
         // Publish, but defer to whatever's already there if we lost the
@@ -822,8 +1059,10 @@ impl LoroStore {
         self.docs.mark_complete(entity, row_id, token);
     }
 
-    /// Persist the current snapshot for a row to the sidecar. Called
-    /// after every commit. Synchronous; tests rely on read-after-write.
+    /// Store the row's doc after a commit: the ops it added, appended to
+    /// the update log, or a new snapshot when the log is long (see
+    /// [`plan_persist`]). Synchronous, on the caller's connection and
+    /// transaction; tests rely on read-after-write.
     fn persist_snapshot(
         &self,
         conn: &Connection,
@@ -831,16 +1070,7 @@ impl LoroStore {
         row_id: &str,
         doc: &LoroDoc,
     ) -> Result<(), LoroStoreError> {
-        let snap = encode_snapshot(doc);
-        let now = chrono_now_iso();
-        conn.prepare_cached(
-            "INSERT OR REPLACE INTO _pylon_crdt_snapshots
-                (entity, row_id, snapshot, updated_at)
-             VALUES (?1, ?2, ?3, ?4)",
-        )
-        .and_then(|mut statement| statement.execute(params![entity, row_id, snap, now]))
-        .map(|_| ())
-        .map_err(|e| LoroStoreError::Storage(format!("persist snapshot: {e}")))
+        persist_sqlite(conn, entity, row_id, doc)
     }
 
     /// Apply a JSON `{field: value}` patch to the row's doc, persist the
@@ -1164,6 +1394,278 @@ mod tests {
         ]
     }
 
+    fn log_rows(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM _pylon_crdt_updates", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    fn snapshot_bytes(conn: &Connection) -> Vec<u8> {
+        conn.query_row("SELECT snapshot FROM _pylon_crdt_snapshots", [], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    }
+
+    fn title_in(conn: &Connection) -> serde_json::Value {
+        // A fresh store: nothing cached, so this is what was stored.
+        LoroStore::new()
+            .project(conn, "Doc", "row", &fields())
+            .unwrap()["title"]
+            .clone()
+    }
+
+    #[test]
+    fn a_commit_appends_only_its_ops_and_a_fresh_store_reads_them_back() {
+        let conn = open_test_db();
+        let store = LoroStore::new();
+        store
+            .apply_patch(
+                &conn,
+                "Doc",
+                "row",
+                &fields(),
+                &serde_json::json!({"title": "one"}),
+            )
+            .unwrap();
+        let first = snapshot_bytes(&conn);
+        assert_eq!(log_rows(&conn), 0, "the first write is a snapshot");
+
+        for (i, title) in ["two", "three", "four"].iter().enumerate() {
+            store
+                .apply_patch(
+                    &conn,
+                    "Doc",
+                    "row",
+                    &fields(),
+                    &serde_json::json!({"title": title}),
+                )
+                .unwrap();
+            assert_eq!(log_rows(&conn), i as i64 + 1);
+        }
+        assert_eq!(
+            snapshot_bytes(&conn),
+            first,
+            "appends leave the snapshot as it was"
+        );
+        let delta: Vec<u8> = conn
+            .query_row(
+                "SELECT delta FROM _pylon_crdt_updates WHERE seq = 3",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            delta.len() < first.len(),
+            "{} vs {}",
+            delta.len(),
+            first.len()
+        );
+        assert_eq!(title_in(&conn), "four");
+    }
+
+    #[test]
+    fn the_log_folds_into_a_new_snapshot_at_its_limit() {
+        let conn = open_test_db();
+        let store = LoroStore::new();
+        for i in 0..=MAX_LOG_UPDATES + 1 {
+            store
+                .apply_patch(
+                    &conn,
+                    "Doc",
+                    "row",
+                    &fields(),
+                    &serde_json::json!({"qty": i}),
+                )
+                .unwrap();
+        }
+        // Write 0 is the snapshot, writes 1..=MAX are appended, write MAX+1
+        // folds them into a new snapshot.
+        assert_eq!(log_rows(&conn), 0);
+        let (count, bytes): (i64, i64) = conn
+            .query_row(
+                "SELECT log_count, log_bytes FROM _pylon_crdt_snapshots",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((count, bytes), (0, 0));
+        let qty = LoroStore::new()
+            .project(&conn, "Doc", "row", &fields())
+            .unwrap()["qty"]
+            .clone();
+        assert_eq!(qty.as_f64(), Some((MAX_LOG_UPDATES + 1) as f64));
+    }
+
+    #[test]
+    fn an_unchanged_doc_writes_nothing() {
+        let conn = open_test_db();
+        let store = LoroStore::new();
+        store
+            .apply_patch(
+                &conn,
+                "Doc",
+                "row",
+                &fields(),
+                &serde_json::json!({"title": "one"}),
+            )
+            .unwrap();
+        let handle = store.get_or_hydrate(&conn, "Doc", "row").unwrap();
+        let doc = handle.lock().unwrap();
+        store.persist_snapshot(&conn, "Doc", "row", &doc).unwrap();
+        assert_eq!(log_rows(&conn), 0);
+    }
+
+    #[test]
+    fn a_snapshot_from_before_the_log_starts_one_at_its_next_write() {
+        let conn = open_test_db();
+        let doc = LoroDoc::new();
+        pylon_crdt::root_map(&doc)
+            .insert("title", "legacy")
+            .unwrap();
+        doc.commit();
+        conn.execute(
+            "INSERT INTO _pylon_crdt_snapshots (entity, row_id, snapshot, updated_at)
+             VALUES ('Doc', 'row', ?1, '2026-01-01T00:00:00Z')",
+            params![encode_snapshot(&doc)],
+        )
+        .unwrap();
+        assert_eq!(title_in(&conn), "legacy");
+        let store = LoroStore::new();
+        store
+            .apply_patch(
+                &conn,
+                "Doc",
+                "row",
+                &fields(),
+                &serde_json::json!({"title": "new"}),
+            )
+            .unwrap();
+        let vv: Option<Vec<u8>> = conn
+            .query_row("SELECT vv FROM _pylon_crdt_snapshots", [], |r| r.get(0))
+            .unwrap();
+        assert!(vv.is_some(), "the rewrite records the version");
+        assert_eq!(log_rows(&conn), 0);
+        store
+            .apply_patch(
+                &conn,
+                "Doc",
+                "row",
+                &fields(),
+                &serde_json::json!({"title": "newer"}),
+            )
+            .unwrap();
+        assert_eq!(log_rows(&conn), 1);
+        assert_eq!(title_in(&conn), "newer");
+    }
+
+    #[test]
+    fn a_rolled_back_append_leaves_the_stored_doc_as_it_was() {
+        let conn = open_test_db();
+        let store = LoroStore::new();
+        store
+            .apply_patch(
+                &conn,
+                "Doc",
+                "row",
+                &fields(),
+                &serde_json::json!({"title": "kept"}),
+            )
+            .unwrap();
+        let tx = conn.unchecked_transaction().unwrap();
+        write_tx_began();
+        store
+            .apply_patch(
+                &tx,
+                "Doc",
+                "row",
+                &fields(),
+                &serde_json::json!({"title": "dropped"}),
+            )
+            .unwrap();
+        assert_eq!(log_rows(&tx), 1);
+        tx.rollback().unwrap();
+        store.rolled_back();
+        assert_eq!(log_rows(&conn), 0);
+        assert_eq!(title_in(&conn), "kept");
+        // The next write appends after what was stored, not after the
+        // rolled-back op.
+        store
+            .apply_patch(
+                &conn,
+                "Doc",
+                "row",
+                &fields(),
+                &serde_json::json!({"title": "next"}),
+            )
+            .unwrap();
+        assert_eq!(title_in(&conn), "next");
+    }
+
+    #[test]
+    fn deleting_a_row_clears_its_log() {
+        let conn = open_test_db();
+        let store = LoroStore::new();
+        for t in ["a", "b"] {
+            store
+                .apply_patch(
+                    &conn,
+                    "Doc",
+                    "row",
+                    &fields(),
+                    &serde_json::json!({"title": t}),
+                )
+                .unwrap();
+        }
+        assert_eq!(log_rows(&conn), 1);
+        store.delete_row(&conn, "Doc", "row").unwrap();
+        assert_eq!(log_rows(&conn), 0);
+    }
+
+    #[test]
+    fn plan_persist_picks_snapshot_append_or_nothing() {
+        let doc = LoroDoc::new();
+        pylon_crdt::root_map(&doc).insert("title", "x").unwrap();
+        doc.commit();
+        assert_eq!(plan_persist(None, &doc), Persist::Snapshot);
+        let legacy = StoredHead {
+            snapshot_len: 100,
+            log_count: 0,
+            log_bytes: 0,
+            vv: None,
+        };
+        assert_eq!(plan_persist(Some(&legacy), &doc), Persist::Snapshot);
+        let current = StoredHead {
+            snapshot_len: 100,
+            log_count: 0,
+            log_bytes: 0,
+            vv: Some(doc.oplog_vv()),
+        };
+        assert_eq!(plan_persist(Some(&current), &doc), Persist::Unchanged);
+        let before = doc.oplog_vv();
+        pylon_crdt::root_map(&doc).insert("title", "y").unwrap();
+        doc.commit();
+        let behind = StoredHead {
+            vv: Some(before.clone()),
+            ..current.clone()
+        };
+        assert!(matches!(
+            plan_persist(Some(&behind), &doc),
+            Persist::Append(_)
+        ));
+        let full = StoredHead {
+            log_count: MAX_LOG_UPDATES,
+            vv: Some(before.clone()),
+            ..current.clone()
+        };
+        assert_eq!(plan_persist(Some(&full), &doc), Persist::Snapshot);
+        let heavy = StoredHead {
+            log_bytes: MIN_LOG_BYTES,
+            vv: Some(before),
+            ..current
+        };
+        assert_eq!(plan_persist(Some(&heavy), &doc), Persist::Snapshot);
+    }
+
     #[test]
     fn cached_snapshot_statements_observe_replacement_and_rollback() {
         let conn = open_test_db();
@@ -1173,30 +1675,24 @@ mod tests {
         pylon_crdt::root_map(&doc).insert("title", "first").unwrap();
         store.persist_snapshot(&conn, "Doc", "row", &doc).unwrap();
         assert!(store.has_snapshot(&conn, "Doc", "row").unwrap());
-        let before: Vec<u8> = conn
-            .query_row("SELECT snapshot FROM _pylon_crdt_snapshots", [], |r| {
-                r.get(0)
-            })
+        let before: Vec<u8> = stored_snapshot_sqlite(&conn, "Doc", "row")
+            .map(|s| s.unwrap())
             .unwrap();
         let tx = conn.unchecked_transaction().unwrap();
         pylon_crdt::root_map(&doc)
             .insert("title", "second")
             .unwrap();
         store.persist_snapshot(&tx, "Doc", "row", &doc).unwrap();
-        let during: Vec<u8> = tx
-            .query_row("SELECT snapshot FROM _pylon_crdt_snapshots", [], |r| {
-                r.get(0)
-            })
+        let during: Vec<u8> = stored_snapshot_sqlite(&tx, "Doc", "row")
+            .map(|s| s.unwrap())
             .unwrap();
         assert_ne!(before, during);
         tx.execute("DELETE FROM _pylon_crdt_snapshots", []).unwrap();
         assert!(!store.has_snapshot(&tx, "Doc", "row").unwrap());
         tx.rollback().unwrap();
         assert!(store.has_snapshot(&conn, "Doc", "row").unwrap());
-        let after: Vec<u8> = conn
-            .query_row("SELECT snapshot FROM _pylon_crdt_snapshots", [], |r| {
-                r.get(0)
-            })
+        let after: Vec<u8> = stored_snapshot_sqlite(&conn, "Doc", "row")
+            .map(|s| s.unwrap())
             .unwrap();
         assert_eq!(before, after);
     }

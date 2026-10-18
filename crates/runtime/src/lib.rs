@@ -1,4 +1,5 @@
 pub mod account_backend;
+pub mod after_edit;
 pub mod api_key_backend;
 pub mod app_api_keys;
 pub mod app_audit;
@@ -1265,6 +1266,13 @@ impl Runtime {
                 code: "CRDT_SIDECAR_BOOTSTRAP_FAILED".into(),
                 message: format!("ensure pg crdt sidecar: {e}"),
             })?;
+        // The afterEdit outbox (see after_edit.rs), same as the sidecar.
+        store
+            .with_client(|c| crate::after_edit::ensure_table_pg(c))
+            .map_err(|e| RuntimeError {
+                code: "AFTER_EDIT_BOOTSTRAP_FAILED".into(),
+                message: format!("ensure the pg afterEdit outbox: {e}"),
+            })?;
         // Idempotent function calls (see fn_calls.rs), same as the sidecar.
         store
             .with_client(|c| crate::fn_calls::ensure_pg(c))
@@ -2321,6 +2329,10 @@ impl Runtime {
             code: "FN_CALLS_BOOTSTRAP_FAILED".into(),
             message: format!("create _pylon_fn_calls: {e}"),
         })?;
+        crate::after_edit::ensure_table_sqlite(&conn).map_err(|e| RuntimeError {
+            code: "AFTER_EDIT_BOOTSTRAP_FAILED".into(),
+            message: e,
+        })?;
 
         let crdt_fields = entities
             .iter()
@@ -2980,6 +2992,13 @@ impl Runtime {
         let rows_changed = !totals.is_empty();
         if rows_changed {
             self.write_crdt_corrections(conn, ent, id, &serde_json::Value::Object(totals))?;
+            // The row changed: the afterEdit outbox, in this transaction.
+            crate::after_edit::record_sqlite(conn, &self.manifest, &ent.name, id).map_err(|e| {
+                RuntimeError {
+                    code: "AFTER_EDIT_FAILED".into(),
+                    message: e,
+                }
+            })?;
         }
         Ok((wanted > failed || rows_changed, failed))
     }
@@ -3345,9 +3364,21 @@ impl Runtime {
                 return pg
                     .store
                     .with_transaction_raw(|tx| -> Result<bool, RuntimeError> {
-                        tx.execute(&sql, &[&new, &id, &old])
+                        let changed = tx
+                            .execute(&sql, &[&new, &id, &old])
                             .map(|n| n == 1)
-                            .map_err(|e| query_err(e.to_string()))
+                            .map_err(|e| query_err(e.to_string()))?;
+                        if changed {
+                            // The afterEdit outbox, like every row write.
+                            pylon_storage::pg_tx_store::record_after_edit(
+                                tx,
+                                &self.manifest,
+                                entity,
+                                id,
+                            )
+                            .map_err(data_err_to_runtime)?;
+                        }
+                        Ok(changed)
                     });
             }
             let crdt_fields = self.crdt_fields_for(ent)?;
@@ -3772,6 +3803,13 @@ impl Runtime {
                         })?;
                 }
             }
+            // The afterEdit outbox, in the same tx (see after_edit.rs).
+            crate::after_edit::record_sqlite(&conn, &self.manifest, entity, &id).map_err(|e| {
+                RuntimeError {
+                    code: "AFTER_EDIT_FAILED".into(),
+                    message: e,
+                }
+            })?;
             Ok(())
         });
         if result.is_err() && ent.crdt {
@@ -4262,6 +4300,15 @@ impl Runtime {
                     })?;
                 }
             }
+            if affected > 0 {
+                // The afterEdit outbox, in the same tx (see after_edit.rs).
+                crate::after_edit::record_sqlite(&conn, &self.manifest, entity, id).map_err(
+                    |e| RuntimeError {
+                        code: "AFTER_EDIT_FAILED".into(),
+                        message: e,
+                    },
+                )?;
+            }
             if affected == 0 && ent.crdt {
                 // No such row: roll back so no orphan snapshot is persisted
                 // for an id a later insert could reuse.
@@ -4322,34 +4369,45 @@ impl Runtime {
         let ent = self.require_entity(entity)?;
         let conn = self.lock_write_conn()?;
 
-        // Apply search-maintenance BEFORE the DELETE — we still need
-        // the row's facet values to clear the bitmap bits.
-        let searchable = ent.search.as_ref().map(|c| !c.is_empty()).unwrap_or(false);
-        if searchable {
-            if let (Some(cfg), Ok(Some(row))) = (
-                ent.search.as_ref(),
-                self.get_by_id_with_conn(&conn, entity, id),
-            ) {
-                pylon_storage::search_maintenance::apply_delete(&conn, entity, id, &row, cfg)
-                    .map_err(|e| RuntimeError {
+        // One transaction: the search index, the row, its CRDT snapshot
+        // and the afterEdit outbox change together.
+        with_write_tx(self, &conn, || {
+            // Apply search-maintenance BEFORE the DELETE — we still need
+            // the row's facet values to clear the bitmap bits.
+            let searchable = ent.search.as_ref().map(|c| !c.is_empty()).unwrap_or(false);
+            if searchable {
+                if let (Some(cfg), Ok(Some(row))) = (
+                    ent.search.as_ref(),
+                    self.get_by_id_with_conn(&conn, entity, id),
+                ) {
+                    pylon_storage::search_maintenance::apply_delete(&conn, entity, id, &row, cfg)
+                        .map_err(|e| RuntimeError {
                         code: "SEARCH_MAINTENANCE_FAILED".into(),
                         message: format!("search index update on delete {entity}: {e}"),
                     })?;
+                }
             }
-        }
 
-        let sql = format!("DELETE FROM {} WHERE \"id\" = ?1", quote_ident(entity));
-        let affected = conn
-            .execute(&sql, rusqlite::params![id])
-            .map_err(|e| RuntimeError {
-                code: sqlite_write_code(&e, "DELETE_FAILED").into(),
-                message: format!("Delete {entity}/{id} failed: {e}"),
-            })?;
-        if ent.crdt {
-            self.delete_crdt_snapshot(&conn, entity, id)?;
-        }
-
-        Ok(affected > 0)
+            let sql = format!("DELETE FROM {} WHERE \"id\" = ?1", quote_ident(entity));
+            let affected = conn
+                .execute(&sql, rusqlite::params![id])
+                .map_err(|e| RuntimeError {
+                    code: sqlite_write_code(&e, "DELETE_FAILED").into(),
+                    message: format!("Delete {entity}/{id} failed: {e}"),
+                })?;
+            if ent.crdt {
+                self.delete_crdt_snapshot(&conn, entity, id)?;
+            }
+            if affected > 0 {
+                crate::after_edit::record_sqlite(&conn, &self.manifest, entity, id).map_err(
+                    |e| RuntimeError {
+                        code: "AFTER_EDIT_FAILED".into(),
+                        message: e,
+                    },
+                )?;
+            }
+            Ok(affected > 0)
+        })
     }
 
     /// Remove CRDT snapshots nothing reads: those whose row was deleted
@@ -4851,6 +4909,13 @@ impl Runtime {
                     })?;
             }
         }
+        // The afterEdit outbox, in the caller's transaction.
+        crate::after_edit::record_sqlite(conn, &self.manifest, entity, &id).map_err(|e| {
+            RuntimeError {
+                code: "AFTER_EDIT_FAILED".into(),
+                message: e,
+            }
+        })?;
 
         Ok(id)
     }
@@ -4961,6 +5026,15 @@ impl Runtime {
                     })?;
             }
         }
+        if affected > 0 {
+            // The afterEdit outbox, in the caller's transaction.
+            crate::after_edit::record_sqlite(conn, &self.manifest, entity, id).map_err(|e| {
+                RuntimeError {
+                    code: "AFTER_EDIT_FAILED".into(),
+                    message: e,
+                }
+            })?;
+        }
 
         Ok(affected > 0)
     }
@@ -4999,6 +5073,15 @@ impl Runtime {
             })?;
         if ent.crdt {
             self.delete_crdt_snapshot(conn, entity, id)?;
+        }
+        if affected > 0 {
+            // The afterEdit outbox, in the caller's transaction.
+            crate::after_edit::record_sqlite(conn, &self.manifest, entity, id).map_err(|e| {
+                RuntimeError {
+                    code: "AFTER_EDIT_FAILED".into(),
+                    message: e,
+                }
+            })?;
         }
         Ok(affected > 0)
     }
@@ -7536,13 +7619,9 @@ mod tests {
 
         let snap_after_insert: Vec<u8> = {
             let conn = rt.lock_write_conn().unwrap();
-            conn.query_row(
-                "SELECT snapshot FROM _pylon_crdt_snapshots
-                 WHERE entity = 'User' AND row_id = ?1",
-                rusqlite::params![&id],
-                |r| r.get(0),
-            )
-            .unwrap()
+            crate::loro_store::stored_snapshot_sqlite(&conn, "User", &id)
+                .map(|s| s.unwrap())
+                .unwrap()
         };
 
         rt.update("User", &id, &serde_json::json!({"displayName": "Eric C"}))
@@ -7550,13 +7629,9 @@ mod tests {
 
         let snap_after_update: Vec<u8> = {
             let conn = rt.lock_write_conn().unwrap();
-            conn.query_row(
-                "SELECT snapshot FROM _pylon_crdt_snapshots
-                 WHERE entity = 'User' AND row_id = ?1",
-                rusqlite::params![&id],
-                |r| r.get(0),
-            )
-            .unwrap()
+            crate::loro_store::stored_snapshot_sqlite(&conn, "User", &id)
+                .map(|s| s.unwrap())
+                .unwrap()
         };
 
         assert_ne!(
@@ -7891,13 +7966,8 @@ mod tests {
         tree_row["outline"] = serde_json::json!([{"id": "b", "parent": "a"}, {"id": "a"}]);
         let tree = rt.insert("Doc", &tree_row).unwrap();
         let snapshot = |id: &str| -> Vec<u8> {
-            rt.lock_write_conn()
+            crate::loro_store::stored_snapshot_sqlite(&rt.lock_write_conn().unwrap(), "Doc", id)
                 .unwrap()
-                .query_row(
-                    "SELECT snapshot FROM _pylon_crdt_snapshots WHERE entity = 'Doc' AND row_id = ?1",
-                    [id],
-                    |r| r.get(0),
-                )
                 .unwrap()
         };
         {
@@ -8169,15 +8239,10 @@ mod tests {
         assert_eq!(rt.get_by_id("Note", &id).unwrap().unwrap()["body"], second);
 
         // An editor: load the row's doc, type into the heading, push the update.
-        let snapshot: Vec<u8> = rt
-            .lock_write_conn()
-            .unwrap()
-            .query_row(
-                "SELECT snapshot FROM _pylon_crdt_snapshots WHERE entity = 'Note' AND row_id = ?1",
-                [&id],
-                |r| r.get(0),
-            )
-            .unwrap();
+        let snapshot: Vec<u8> =
+            crate::loro_store::stored_snapshot_sqlite(&rt.lock_write_conn().unwrap(), "Note", &id)
+                .unwrap()
+                .unwrap();
         let editor = pylon_crdt::loro::LoroDoc::new();
         editor.import(&snapshot).unwrap();
         let from = editor.oplog_vv();
@@ -10576,13 +10641,8 @@ mod rotation_crdt_tests {
         exercise(
             |cur, prev| with_keys(cur, prev, || Runtime::open(&path, manifest()).unwrap()),
             &|rt, id| {
-                rt.lock_conn_pub()
+                crate::loro_store::stored_snapshot_sqlite(&rt.lock_conn_pub().unwrap(), "Note", id)
                     .unwrap()
-                    .query_row(
-                        "SELECT snapshot FROM _pylon_crdt_snapshots WHERE entity = 'Note' AND row_id = ?1",
-                        [id],
-                        |r| r.get(0),
-                    )
                     .unwrap()
             },
         );
@@ -10613,12 +10673,9 @@ mod rotation_crdt_tests {
             },
             &move |_rt, id| {
                 let mut c = postgres::Client::connect(&snap_url, postgres::NoTls).unwrap();
-                c.query_one(
-                    "SELECT snapshot FROM _pylon_crdt_snapshots WHERE entity = 'Note' AND row_id = $1",
-                    &[&id],
-                )
-                .unwrap()
-                .get(0)
+                // The stored state: the snapshot with its update log.
+                crate::pg_loro_store::PgLoroStore::read_snapshot_via_conn(&mut c, "Note", id)
+                    .unwrap()
             },
         );
     }

@@ -1,0 +1,51 @@
+---
+title: "After-edit hooks"
+description: "Run an internal function after edits to a row land: a search index, a preview, a review queue."
+---
+
+Declare `afterEdit` on an entity and Pylon runs an internal function after
+edits to a row land. Every committed write to the row counts: an insert, an
+update, a live edit from an editor or from `ctx.crdt`, and a delete.
+
+```ts
+const Document = entity(
+  "Document",
+  { title: field.string(), body: field.richtext().crdt("prosemirror") },
+  { afterEdit: { fn: "indexDocument", delaySeconds: 5 } },
+);
+```
+
+```ts
+// functions/indexDocument.ts
+import { mutation, v } from "@pylonsync/functions";
+
+export default mutation({
+  internal: true,
+  args: { id: v.string() },
+  async handler(ctx, args) {
+    const doc = await ctx.db.get("Document", args.id);
+    if (!doc) return; // deleted since the edit
+    // ...update a search index, a preview, a review queue...
+  },
+});
+```
+
+## When it runs
+
+Time is cut into windows of `delaySeconds` (default 5). A write schedules
+the function for the end of the row's current window, and every other
+write to that row in the window shares the run. A row edited without
+pause gets one run per window, so an AI draft that commits many times a
+second runs the hook once every few seconds, not once per commit.
+
+- The function gets `{ id }` and reads the row itself. The row may have
+  changed again, or been deleted, by the time it runs.
+- It must be `internal: true`. It runs without a user, like a
+  [cron](/concepts/scheduling) target; its `ctx.db` calls are server-side.
+- Runs are jobs on the `functions` queue: they survive a restart, retry
+  when the function throws, and show in `pylon jobs`. On Postgres the job
+  id names the row and the window, so the writes of every machine share
+  one run.
+- Each write notes its run in the same database transaction as the row,
+  so a committed write always gets its run (and a rolled-back one never
+  does), even when the server stops right after the write.

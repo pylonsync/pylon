@@ -477,6 +477,11 @@ export interface EntityDefinition {
    */
   retention?: RetentionRule;
   /**
+   * Run an internal function after edits to a row land. See
+   * {@link AfterEditHook}.
+   */
+  afterEdit?: AfterEditHook;
+  /**
    * Per-row CRDT (Loro) documents. Default `true`: every write merges through
    * a document, and offline edits from several devices converge. Set `false`
    * for rows only the server writes and that nobody edits concurrently:
@@ -539,6 +544,28 @@ export interface RetentionRule {
   hold?: string;
 }
 
+/**
+ * An internal function that runs after edits to a row land: a search index,
+ * a preview, a review queue.
+ *
+ * ```ts
+ * entity("Document", { … }, { afterEdit: { fn: "indexDocument", delaySeconds: 5 } })
+ * ```
+ *
+ * Any committed write to a row (an insert, an update, a live edit, a
+ * delete) schedules `fn` with `{ id }`, to run at the end of the row's
+ * current `delaySeconds` window; every edit in that window shares the run.
+ * A row edited without pause gets one run per window. `fn` must be
+ * `internal: true`; it runs without a user, like a cron target, and reads
+ * the row itself (it may have been deleted). Runs are jobs: they survive a
+ * restart, retry on failure, and show in `pylon jobs`.
+ */
+export interface AfterEditHook {
+  fn: string;
+  /** The window, in seconds. Default 5. */
+  delaySeconds?: number;
+}
+
 export function entity(
   name: string,
   fields: Record<string, FieldBuilder>,
@@ -559,6 +586,9 @@ export function entity(
     /** Delete rows past a retention period. Mirrors
      *  {@link EntityDefinition.retention}. */
     retention?: RetentionRule;
+    /** Run an internal function after edits land. Mirrors
+     *  {@link EntityDefinition.afterEdit}. */
+    afterEdit?: AfterEditHook;
   },
 ): EntityDefinition {
   return {
@@ -571,6 +601,7 @@ export function entity(
     crdt: options?.crdt,
     audit: options?.audit,
     retention: options?.retention,
+    afterEdit: options?.afterEdit,
   };
 }
 
@@ -822,6 +853,8 @@ export interface ManifestEntity {
   audit?: boolean;
   /** Retention rule; omitted when unset. */
   retention?: RetentionRule;
+  /** After-edit hook; omitted when unset. */
+  after_edit?: { function: string; delay_secs: number };
 }
 
 export interface ManifestRoute {
@@ -1375,6 +1408,14 @@ export function entitiesToManifest(
         ...(e.retention.after ? { after: e.retention.after } : {}),
         ...(e.retention.hold ? { hold: e.retention.hold } : {}),
       };
+    }
+    if (e.afterEdit) {
+      const delay = e.afterEdit.delaySeconds ?? 5;
+      if (!e.afterEdit.fn) throw new Error(`${e.name}: afterEdit needs fn`);
+      if (!Number.isInteger(delay) || delay < 1) {
+        throw new Error(`${e.name}: afterEdit.delaySeconds must be a whole number of seconds, at least 1`);
+      }
+      result.after_edit = { function: e.afterEdit.fn, delay_secs: delay };
     }
     return result;
   });
