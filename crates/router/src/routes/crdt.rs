@@ -73,56 +73,130 @@ pub(crate) fn handle(
             ));
         }
     };
-    // Run the policy check FIRST against whatever existing row state
-    // we have (may be None). A deny-by-default policy bounces here
-    // with 403 — no further info leaks. Then we verify the row
-    // actually exists and 404 if not. This ordering means an
-    // unauth/wrong-tenant caller never learns whether the row
-    // exists; only callers who pass the policy gate see the
-    // ROW_NOT_FOUND signal.
-    let existing_row = ctx.store.get_by_id(entity, row_id).ok().flatten();
-    if let pylon_policy::PolicyResult::Denied {
-        policy_name,
-        reason,
-    } = ctx
-        .policy_engine
-        .check_entity_update(entity, ctx.auth_ctx, existing_row.as_ref(), None)
-    {
-        tracing::warn!(
-            "[policy] crdt push {entity}/{row_id} denied by \"{policy_name}\": {reason}"
-        );
-        return Some((
-            403,
-            json_error_with_hint(
-                "POLICY_DENIED",
-                "Access denied by policy",
-                "Check your auth token or the policy rules in your schema",
+    let deps = CrdtApplyDeps {
+        store: ctx.store,
+        policy_engine: ctx.policy_engine,
+        plugin_hooks: ctx.plugin_hooks,
+        notifier: ctx.notifier,
+        change_log: ctx.change_log,
+    };
+    Some(
+        match apply_crdt_update(&deps, ctx.auth_ctx, entity, row_id, &update_bytes, true) {
+            Ok(applied) => {
+                if let Some(seq) = applied.change_seq {
+                    crate::emit_change_seq_header(ctx, seq);
+                }
+                (200, serde_json::json!({"ok": true}).to_string())
+            }
+            Err(e) if e.code == "POLICY_DENIED" => (
+                403,
+                json_error_with_hint(
+                    "POLICY_DENIED",
+                    "Access denied by policy",
+                    "Check your auth token or the policy rules in your schema",
+                ),
             ),
-        ));
+            Err(e) => (e.status, json_error(&e.code, &e.message)),
+        },
+    )
+}
+
+/// What a CRDT merge needs besides the caller: the store, the policy
+/// engine, the plugin chain, and where to broadcast.
+pub struct CrdtApplyDeps<'a> {
+    pub store: &'a dyn pylon_http::DataStore,
+    pub policy_engine: &'a pylon_policy::PolicyEngine,
+    pub plugin_hooks: &'a dyn crate::PluginHookOps,
+    pub notifier: &'a dyn crate::ChangeNotifier,
+    pub change_log: &'a pylon_sync::ChangeLog,
+}
+
+/// A merged update: the post-merge snapshot, and the sequence number of the
+/// JSON change event for the row's projected columns (when the row exists
+/// after the merge).
+#[derive(Debug)]
+pub struct CrdtApplied {
+    pub snapshot: Vec<u8>,
+    pub change_seq: Option<u64>,
+}
+
+/// Why a merge was refused, with the HTTP status the route answers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CrdtApplyError {
+    pub status: u16,
+    pub code: String,
+    pub message: String,
+}
+
+impl CrdtApplyError {
+    fn new(status: u16, code: &str, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+}
+
+/// Merge a Loro update into a row's document, the one path every CRDT write
+/// takes (`POST /api/crdt/...` and `ctx.crdt.apply` in server functions):
+///
+/// 1. With `check_policy`, the entity's update policy runs against the stored
+///    row (a caller who may not write it never learns whether it exists).
+/// 2. The row must exist, and the entity must replicate CRDT history.
+/// 3. The plugin chain's `before_update` runs.
+/// 4. The store merges. With `check_policy`, the update policy and the
+///    readonly fields are checked again against the row after the merge,
+///    before anything commits.
+/// 5. `after_update` runs, the binary frame goes to the row's subscribers
+///    (each re-checked against its read policy), and a JSON change event goes
+///    to everyone else.
+///
+/// `check_policy` is false only for server functions that run with server
+/// trust (`ctx.crdt` without strict function policies, or `ctx.crdt.unsafe`),
+/// the same rule as `ctx.db`.
+pub fn apply_crdt_update(
+    deps: &CrdtApplyDeps,
+    auth: &pylon_auth::AuthContext,
+    entity: &str,
+    row_id: &str,
+    update: &[u8],
+    check_policy: bool,
+) -> Result<CrdtApplied, CrdtApplyError> {
+    let existing_row = deps.store.get_by_id(entity, row_id).ok().flatten();
+    if check_policy {
+        if let pylon_policy::PolicyResult::Denied {
+            policy_name,
+            reason,
+        } = deps
+            .policy_engine
+            .check_entity_update(entity, auth, existing_row.as_ref(), None)
+        {
+            tracing::warn!(
+                "[policy] crdt push {entity}/{row_id} denied by \"{policy_name}\": {reason}"
+            );
+            return Err(CrdtApplyError::new(403, "POLICY_DENIED", reason));
+        }
     }
     // Row MUST exist before we merge — otherwise CRDT sidecar state
     // accumulates for non-existent materialized rows (divergent +
     // invisible-to-policy). Caught in the 2026-05-10 codex pass-3
     // audit (P1 NEW).
     if existing_row.is_none() {
-        return Some((
+        return Err(CrdtApplyError::new(
             404,
-            json_error(
-                "ROW_NOT_FOUND",
-                "CRDT update targets a row that doesn't exist",
-            ),
+            "ROW_NOT_FOUND",
+            "CRDT update targets a row that doesn't exist",
         ));
     }
-    let manifest = ctx.store.manifest();
-    if ctx.store.has_private_crdt_history(entity)
+    let manifest = deps.store.manifest();
+    if deps.store.has_private_crdt_history(entity)
         || !crate::supports_crdt_replication(manifest, &manifest.auth.user, entity)
     {
-        return Some((
+        return Err(CrdtApplyError::new(
             403,
-            json_error(
-                "CRDT_REPLICATION_DISABLED",
-                "Binary CRDT updates are disabled for this entity. Use the JSON update API.",
-            ),
+            "CRDT_REPLICATION_DISABLED",
+            "Binary CRDT updates are disabled for this entity. Use the JSON update API.",
         ));
     }
     // Plugin chain: run `before_update` so TenantScopePlugin and any
@@ -135,13 +209,13 @@ pub(crate) fn handle(
     // Caught in the 2026-05-10 codex pass-3 audit (P1 NEW).
     let mut hook_data = serde_json::json!({
         "_pylon_crdt_update": true,
-        "_pylon_update_size_bytes": update_bytes.len(),
+        "_pylon_update_size_bytes": update.len(),
     });
     if let Err((status, code, msg)) =
-        ctx.plugin_hooks
-            .before_update(entity, row_id, &mut hook_data, ctx.auth_ctx)
+        deps.plugin_hooks
+            .before_update(entity, row_id, &mut hook_data, auth)
     {
-        return Some((status, json_error(&code, &msg)));
+        return Err(CrdtApplyError::new(status, &code, msg));
     }
     // The check above only saw the stored row. The merged doc is known
     // only inside the store's transaction, so the store hands its
@@ -150,110 +224,102 @@ pub(crate) fn handle(
     // `PolicyEngine::check_entity_update`), and a readonly column (owner,
     // tenant) can't change. Either failure rolls the merge back.
     let authorize = |projected: &serde_json::Value| -> Result<(), pylon_http::DataError> {
-        authorize_crdt_merge(ctx, entity, existing_row.as_ref(), projected)
+        if check_policy {
+            authorize_crdt_merge(deps, auth, entity, existing_row.as_ref(), projected)
+        } else {
+            Ok(())
+        }
     };
-    Some(
-        match ctx
-            .store
-            .crdt_apply_update(entity, row_id, &update_bytes, &authorize)
-        {
-            Ok(snapshot) => {
-                ctx.plugin_hooks
-                    .after_update(entity, row_id, &hook_data, ctx.auth_ctx);
-                // Fetch the post-merge row so the broadcast can run per-
-                // subscriber policy re-checks against it. None → entity-
-                // level only (graceful degradation for row-level rules).
-                let row_for_authz = ctx.store.get_by_id(entity, row_id).ok().flatten();
-                // Conservative high-water seq for the revocation
-                // tombstone (CRDT route doesn't have an
-                // event-specific seq in scope yet — the JSON change
-                // event below will get its own seq). The client also
-                // fires a catch-up pull on receipt, so being
-                // slightly behind the JSON event seq is harmless.
-                let revocation_seq = ctx.change_log.current_seq();
-                ctx.notifier.notify_crdt(
-                    entity,
-                    row_id,
-                    &snapshot,
-                    row_for_authz.as_ref(),
-                    revocation_seq,
-                );
-                // ALSO emit a JSON change event so non-CRDT subscribers
-                // (the regular `db.useQuery` path, `/api/sync/pull`
-                // callers) observe the materialized-column projection
-                // that `crdt_apply_update` writes. Without this, normal
-                // JSON sync clients see only the binary CRDT frame
-                // (which they don't decode) and miss the projected
-                // fields the SQL row now reflects.
-                //
-                // Documented exception to the "all writes go through
-                // `apply_mutation`" invariant: the CRDT route already
-                // ran the policy gate + plugin before_update hook
-                // above, and `notify_crdt` did the binary broadcast.
-                // What's left is JSON-only notification of the
-                // materialized row to non-CRDT subscribers — handled
-                // here with the typed `ChangeRecord::Update`.
-                if let Ok(Some(row)) = ctx.store.get_by_id(entity, row_id) {
-                    let event = ctx.change_log.record(
-                        entity,
-                        row_id,
-                        pylon_sync::ChangeRecord::Update {
-                            row: row.clone(),
-                            // Thread the pre-merge row (loaded at
-                            // line 83 for policy authz) through to
-                            // the JSON change event. Visibility-flip
-                            // subscribers on the JSON sync path
-                            // (db.useQuery / /api/sync/pull) get a
-                            // synthesized Delete tombstone instead
-                            // of being silently dropped.
-                            prev: existing_row.clone(),
-                        },
-                    );
-                    crate::emit_change_seq_header(ctx, event.seq);
-                    crate::broadcast_change_event(
-                        ctx.notifier,
-                        event.seq,
-                        entity,
-                        row_id,
-                        event.kind.clone(),
-                        event.data.as_ref(),
-                        event.prev_data.as_ref(),
-                    );
-                }
-                (200, serde_json::json!({"ok": true}).to_string())
-            }
-            Err(e) if e.code == "POLICY_DENIED" => {
+    let snapshot = match deps
+        .store
+        .crdt_apply_update(entity, row_id, update, &authorize)
+    {
+        Ok(snapshot) => snapshot,
+        Err(e) => {
+            if e.code == "POLICY_DENIED" {
                 tracing::warn!("[policy] crdt push {entity}/{row_id} denied: {}", e.message);
-                (
-                    403,
-                    json_error_with_hint(
-                        "POLICY_DENIED",
-                        "Access denied by policy",
-                        "Check your auth token or the policy rules in your schema",
-                    ),
-                )
             }
-            Err(e) if e.code == "READONLY_FIELD" || e.code == "FIELD_TOO_LONG" => {
-                (400, json_error(&e.code, &e.message))
-            }
-            Err(e) => {
-                let status = match e.code.as_str() {
-                    "ENTITY_NOT_FOUND" => 404,
-                    "NOT_SUPPORTED" => 400,
-                    "CRDT_DECODE_FAILED" => 400,
-                    _ => 500,
-                };
-                (status, json_error(&e.code, &e.message))
-            }
-        },
-    )
+            let status = match e.code.as_str() {
+                "POLICY_DENIED" => 403,
+                "READONLY_FIELD" | "FIELD_TOO_LONG" => 400,
+                "ENTITY_NOT_FOUND" => 404,
+                "NOT_SUPPORTED" => 400,
+                "CRDT_DECODE_FAILED" => 400,
+                _ => 500,
+            };
+            return Err(CrdtApplyError::new(status, &e.code, e.message));
+        }
+    };
+    deps.plugin_hooks
+        .after_update(entity, row_id, &hook_data, auth);
+    // Fetch the post-merge row so the broadcast can run per-
+    // subscriber policy re-checks against it. None → entity-
+    // level only (graceful degradation for row-level rules).
+    let row_after = deps.store.get_by_id(entity, row_id).ok().flatten();
+    // Conservative high-water seq for the revocation
+    // tombstone (CRDT route doesn't have an
+    // event-specific seq in scope yet — the JSON change
+    // event below will get its own seq). The client also
+    // fires a catch-up pull on receipt, so being
+    // slightly behind the JSON event seq is harmless.
+    let revocation_seq = deps.change_log.current_seq();
+    deps.notifier.notify_crdt(
+        entity,
+        row_id,
+        &snapshot,
+        row_after.as_ref(),
+        revocation_seq,
+    );
+    // ALSO emit a JSON change event so non-CRDT subscribers
+    // (the regular `db.useQuery` path, `/api/sync/pull`
+    // callers) observe the materialized-column projection
+    // that `crdt_apply_update` writes. Without this, normal
+    // JSON sync clients see only the binary CRDT frame
+    // (which they don't decode) and miss the projected
+    // fields the SQL row now reflects.
+    //
+    // Documented exception to the "all writes go through
+    // `apply_mutation`" invariant: the CRDT path already
+    // ran the policy gate + plugin before_update hook
+    // above, and `notify_crdt` did the binary broadcast.
+    // What's left is JSON-only notification of the
+    // materialized row to non-CRDT subscribers — handled
+    // here with the typed `ChangeRecord::Update`.
+    let change_seq = row_after.map(|row| {
+        let event = deps.change_log.record(
+            entity,
+            row_id,
+            pylon_sync::ChangeRecord::Update {
+                row,
+                // The pre-merge row, so visibility-flip subscribers on the
+                // JSON sync path get a synthesized Delete tombstone instead
+                // of being silently dropped.
+                prev: existing_row.clone(),
+            },
+        );
+        crate::broadcast_change_event(
+            deps.notifier,
+            event.seq,
+            entity,
+            row_id,
+            event.kind.clone(),
+            event.data.as_ref(),
+            event.prev_data.as_ref(),
+        );
+        event.seq
+    });
+    Ok(CrdtApplied {
+        snapshot,
+        change_seq,
+    })
 }
 
 /// Authorize a CRDT merge against its projected columns before the store
 /// commits it. The row after the merge is the stored row with the
 /// projected columns written over it.
 fn authorize_crdt_merge(
-    ctx: &RouterContext,
+    deps: &CrdtApplyDeps,
+    auth: &pylon_auth::AuthContext,
     entity: &str,
     existing: Option<&serde_json::Value>,
     projected: &serde_json::Value,
@@ -276,16 +342,16 @@ fn authorize_crdt_merge(
         .unwrap_or_default();
     let patch = serde_json::Value::Object(changed);
     if let Err((code, message)) =
-        crate::reject_readonly_payload(ctx.store.manifest(), entity, &patch, ctx.auth_ctx)
+        crate::reject_readonly_payload(deps.store.manifest(), entity, &patch, auth)
     {
         return Err(pylon_http::DataError {
             code: code.into(),
             message,
         });
     }
-    match ctx
+    match deps
         .policy_engine
-        .check_entity_update(entity, ctx.auth_ctx, existing, Some(&patch))
+        .check_entity_update(entity, auth, existing, Some(&patch))
     {
         pylon_policy::PolicyResult::Allowed => Ok(()),
         pylon_policy::PolicyResult::Denied { reason, .. } => Err(pylon_http::DataError {

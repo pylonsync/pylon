@@ -14,7 +14,8 @@
     "./registry": "./src/registry.ts",
     "./prosemirror": "./src/prosemirror/index.ts",
     "./prosemirror/react": "./src/prosemirror/react.ts",
-    "./prosemirror/sync": "./src/prosemirror/sync.ts"
+    "./prosemirror/sync": "./src/prosemirror/sync.ts",
+    "./server": "./src/server.ts"
   },
   "scripts": {
     "check": "tsc -p tsconfig.json --noEmit"

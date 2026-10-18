@@ -24,6 +24,7 @@ import type {
   EmailSender,
   Files,
   ActionFiles,
+  Crdt,
   StoredFile,
   Shards,
   ShardInfo,
@@ -672,6 +673,36 @@ function buildActionFiles(callId: string): ActionFiles {
 /** Largest `ctx.files.store` payload. Mirrors the host's
  *  FILES_STORE_MAX_BYTES; `PYLON_MAX_UPLOAD_BYTES` can lower the host's. */
 const FILES_STORE_MAX_BYTES = 25 * 1024 * 1024;
+
+/** `ctx.crdt` — see {@link Crdt}. */
+function buildCrdt(callId: string): Crdt {
+  const ops = (unsafeOp: boolean): Omit<Crdt, "unsafe"> => {
+    const call = (entity: string, id: string, op: Record<string, unknown>) =>
+      rpcDb(callId, { type: "crdt_op", entity, id, unsafe_op: unsafeOp, ...op }) as Promise<
+        Record<string, string> | null
+      >;
+    return {
+      async snapshot(entity, id) {
+        const res = await call(entity, id, { op: "snapshot" });
+        return res ? fromBase64(res.snapshot) : null;
+      },
+      async since(entity, id, version) {
+        const res = await call(entity, id, { op: "since", version_base64: toBase64(version) });
+        return res ? fromBase64(res.update) : null;
+      },
+      async apply(entity, id, update) {
+        await call(entity, id, { op: "apply", update_base64: toBase64(update) });
+      },
+    };
+  };
+  return { ...ops(false), unsafe: ops(true) };
+}
+
+/** Bytes of a base64 string. */
+function fromBase64(data: string): Uint8Array {
+  const buf = Buffer.from(data, "base64");
+  return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+}
 
 /** Base64 of bytes, or of a string's UTF-8 encoding. */
 function toBase64(data: Uint8Array | ArrayBuffer | string): string {
@@ -1445,6 +1476,7 @@ function buildActionCtx(
       return err;
     },
     files: buildActionFiles(callId),
+    crdt: buildCrdt(callId),
     shards: buildShards(callId),
     // Actions have no ctx.db; read membership via the built-in internal query.
     requireMember: makeRequireMember(auth.userId, (entity, filter) =>
@@ -1640,6 +1672,9 @@ async function handleCall(msg: CallMessage): Promise<void> {
         // so a call from a query or mutation gets the host's
         // FILES_WRITE_NOT_ALLOWED instead of a TypeError.
         files: buildActionFiles(msg.call_id),
+        // Not on the query or mutation type; present at runtime so a call
+        // gets the host's CRDT_ACTIONS_ONLY instead of a TypeError.
+        crdt: buildCrdt(msg.call_id),
         shards: buildShards(msg.call_id),
       };
       break;
@@ -1669,6 +1704,9 @@ async function handleCall(msg: CallMessage): Promise<void> {
         // so a call from a query or mutation gets the host's
         // FILES_WRITE_NOT_ALLOWED instead of a TypeError.
         files: buildActionFiles(msg.call_id),
+        // Not on the query or mutation type; present at runtime so a call
+        // gets the host's CRDT_ACTIONS_ONLY instead of a TypeError.
+        crdt: buildCrdt(msg.call_id),
         shards: buildShards(msg.call_id),
       };
       break;

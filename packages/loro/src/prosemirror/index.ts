@@ -27,7 +27,7 @@
 import type { ContainerID, LoroDoc, LoroMap } from "loro-crdt";
 import { createNodeFromLoroObj, updateLoroToPmState } from "loro-prosemirror";
 import type { Node, Schema } from "prosemirror-model";
-import { EditorState } from "prosemirror-state";
+import { EditorState, Transaction } from "prosemirror-state";
 
 /** The root map every Pylon row doc keeps its fields in (crates/crdt). */
 const ROOT_MAP = "row";
@@ -112,4 +112,39 @@ export function writeProseMirror(doc: LoroDoc, field: string, schema: Schema, no
   }
   configureProseMirrorMarks(doc, schema);
   updateLoroToPmState(doc as never, new Map(), EditorState.create({ schema, doc: node }), containerId);
+}
+
+/** What {@link editProseMirror} needs of a live doc (`LiveDoc` from `@pylonsync/loro/server`). */
+export interface LiveProseMirrorDoc {
+  readonly doc: LoroDoc;
+  refresh(): Promise<void>;
+  commit(): Promise<boolean>;
+}
+
+/**
+ * Change `field`'s document from a server function and send the change to
+ * everyone editing. `change` gets an editor state on the document as it is
+ * now (an empty document when there is none) and returns a transaction or
+ * a new document; returning nothing changes nothing. The write is a diff,
+ * so edits people make at the same time still merge. Returns the document
+ * written, or null when nothing changed.
+ *
+ *   await editProseMirror(live, "body", schema, (state) =>
+ *     state.tr.insertText("Summary: ", 1));
+ */
+export async function editProseMirror(
+  live: LiveProseMirrorDoc,
+  field: string,
+  schema: Schema,
+  change: (state: EditorState) => Transaction | Node | null | undefined | void,
+): Promise<Node | null> {
+  await live.refresh();
+  const current = readProseMirror(live.doc, field, schema) ?? schema.topNodeType.createAndFill();
+  if (!current) throw new Error(`The schema's ${schema.topNodeType.name} has no empty form to start from.`);
+  const result = change(EditorState.create({ schema, doc: current }));
+  const next = result instanceof Transaction ? result.doc : result;
+  if (!next || next.eq(current)) return null;
+  writeProseMirror(live.doc, field, schema, next);
+  await live.commit();
+  return next;
 }

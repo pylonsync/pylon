@@ -36,6 +36,9 @@ pub(crate) fn handle(
             Some(r) => r,
             None => return Some((400, json_error("MISSING_ROOM", "room is required"))),
         };
+        if let Err(denied) = room_access(ctx, room) {
+            return Some(denied.response());
+        }
         let body_user = data.get("user_id").and_then(|v| v.as_str());
         let user_id = if ctx.auth_ctx.is_admin {
             body_user.or(ctx.auth_ctx.user_id.as_deref())
@@ -163,6 +166,9 @@ pub(crate) fn handle(
             }
         };
         let presence_data = data.get("data").cloned().unwrap_or(serde_json::json!({}));
+        if let Err(denied) = room_access(ctx, room) {
+            return Some(denied.response());
+        }
 
         if let Some(presence_event) = ctx.rooms.set_presence(room, user_id, presence_data) {
             if let Ok(json) = serde_json::to_string(&presence_event) {
@@ -217,6 +223,23 @@ pub(crate) fn handle(
             }
         };
 
+        // Access lost since joining (unshared, removed from the workspace):
+        // the member leaves, which also ends their subscriptions to the room.
+        if let Err(denied) = room_access(ctx, room) {
+            if let Some(leave_event) = ctx.rooms.leave(room, user_id) {
+                let mut event = leave_event;
+                if let Some(obj) = event.as_object_mut() {
+                    obj.insert("revoked".into(), serde_json::Value::Bool(true));
+                }
+                if let Ok(json) = serde_json::to_string(&event) {
+                    ctx.notifier.notify_presence(&json);
+                }
+            }
+            return Some((
+                200,
+                serde_json::json!({"alive": false, "reason": denied.code()}).to_string(),
+            ));
+        }
         if ctx.rooms.touch(room, user_id) {
             return Some((200, serde_json::json!({"alive": true}).to_string()));
         }
@@ -258,6 +281,9 @@ pub(crate) fn handle(
             ctx.auth_ctx.user_id.as_deref()
         };
         let broadcast_data = data.get("data").cloned().unwrap_or(serde_json::json!({}));
+        if let Err(denied) = room_access(ctx, room) {
+            return Some(denied.response());
+        }
 
         // Auth gate (mirrors set_presence above): require an
         // identifiable sender, and require non-admin senders to be
@@ -303,8 +329,11 @@ pub(crate) fn handle(
             return Some(err);
         }
         let room_names = ctx.rooms.list_rooms();
+        // A room tied to a row names the row: list it only to callers who
+        // may read the row.
         let rooms: Vec<serde_json::Value> = room_names
             .iter()
+            .filter(|name| room_access(ctx, name).is_ok())
             .map(|name| {
                 serde_json::json!({
                     "name": name,
@@ -330,7 +359,11 @@ pub(crate) fn handle(
             if let Some(err) = require_auth(ctx) {
                 return Some(err);
             }
-            let members = ctx.rooms.members(room_name);
+            let room_name = crate::url_decode(room_name);
+            if let Err(denied) = room_access(ctx, &room_name) {
+                return Some(denied.response());
+            }
+            let members = ctx.rooms.members(&room_name);
             return Some((
                 200,
                 serde_json::json!({
@@ -344,4 +377,99 @@ pub(crate) fn handle(
     }
 
     None
+}
+
+/// The row a room is tied to: a room named `@Entity/rowId` (built by
+/// `useRoom({ entity, id })`). Its members are the people who may read the
+/// row. Any other name is a free room.
+pub fn row_room(room: &str) -> Option<(&str, &str)> {
+    let rest = room.strip_prefix('@')?;
+    let (entity, id) = rest.split_once('/')?;
+    if entity.is_empty() || id.is_empty() {
+        return None;
+    }
+    Some((entity, id))
+}
+
+/// Why a caller may not use a room.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoomDenied {
+    /// A name starting with `@` that does not name a row. `@` is reserved
+    /// for rooms tied to a row, so a typo cannot make a free room.
+    InvalidName,
+    /// The row does not exist, or the caller may not read it. One answer for
+    /// both, so a caller cannot probe for rows.
+    Forbidden,
+}
+
+impl RoomDenied {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidName => "INVALID_ROOM",
+            Self::Forbidden => "ROOM_FORBIDDEN",
+        }
+    }
+
+    fn response(&self) -> (u16, String) {
+        match self {
+            Self::InvalidName => (
+                400,
+                json_error(
+                    "INVALID_ROOM",
+                    "A room name starting with @ must be @Entity/rowId",
+                ),
+            ),
+            Self::Forbidden => (
+                403,
+                json_error("ROOM_FORBIDDEN", "You cannot use this room"),
+            ),
+        }
+    }
+}
+
+/// Whether `auth` may use `room`: free rooms are open to any signed-in
+/// caller, as before; a room tied to a row needs the row's read policy.
+/// Every room operation (join, presence, heartbeat, messages, the member
+/// list, the WebSocket subscription) runs this, so access lost after joining
+/// takes effect at the next one.
+pub fn check_room_access(
+    store: &dyn pylon_http::DataStore,
+    policy: &pylon_policy::PolicyEngine,
+    auth: &pylon_auth::AuthContext,
+    room: &str,
+) -> Result<(), RoomDenied> {
+    if !room.starts_with('@') {
+        return Ok(());
+    }
+    let (entity, id) = row_room(room).ok_or(RoomDenied::InvalidName)?;
+    if !store.manifest().entities.iter().any(|e| e.name == entity) {
+        return Err(RoomDenied::Forbidden);
+    }
+    let row = match store.get_by_id(entity, id) {
+        Ok(Some(row)) => row,
+        _ => return Err(RoomDenied::Forbidden),
+    };
+    match policy.check_entity_read(entity, auth, Some(&row)) {
+        pylon_policy::PolicyResult::Allowed => Ok(()),
+        pylon_policy::PolicyResult::Denied { .. } => Err(RoomDenied::Forbidden),
+    }
+}
+
+fn room_access(ctx: &RouterContext, room: &str) -> Result<(), RoomDenied> {
+    check_room_access(ctx.store, ctx.policy_engine, ctx.auth_ctx, room)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::row_room;
+
+    #[test]
+    fn row_rooms_name_an_entity_and_an_id() {
+        assert_eq!(row_room("@Document/abc"), Some(("Document", "abc")));
+        assert_eq!(row_room("@Document/a/b"), Some(("Document", "a/b")));
+        assert_eq!(row_room("doc:abc"), None);
+        assert_eq!(row_room("@Document"), None);
+        assert_eq!(row_room("@/abc"), None);
+        assert_eq!(row_room("@Document/"), None);
+    }
 }

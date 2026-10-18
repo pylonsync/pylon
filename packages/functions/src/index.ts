@@ -117,6 +117,7 @@ export type {
   // File storage from functions.
   Files,
   ActionFiles,
+  Crdt,
   StoreFileOptions,
   StoredFile,
 } from "./types";

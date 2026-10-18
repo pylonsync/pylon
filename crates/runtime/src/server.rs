@@ -2831,6 +2831,13 @@ fn start_server(
         runtime.manifest().auth.user.clone(),
     );
     let privacy_runtime = Arc::downgrade(&runtime);
+    {
+        let rt = Arc::clone(&runtime);
+        let pe = Arc::clone(&policy_engine);
+        ws_hub.set_room_access(Arc::new(move |auth, room| {
+            pylon_router::check_room_access(rt.as_ref(), &pe, auth, room).is_ok()
+        }));
+    }
     ws_hub.set_crdt_private_history(Arc::new(move |entity| {
         privacy_runtime.upgrade().is_none_or(|runtime| {
             pylon_http::DataStore::has_private_crdt_history(runtime.as_ref(), entity)

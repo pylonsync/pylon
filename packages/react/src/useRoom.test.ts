@@ -214,3 +214,53 @@ describe("useRoom shared registry", () => {
     expect(count(isLeave)).toBe(1);
   });
 });
+
+// Rooms tied to a row: the server refuses callers who may not read the row
+// (403 ROOM_FORBIDDEN on join) and removes members who lose access (a
+// heartbeat answers alive:false, reason ROOM_FORBIDDEN). Retrying cannot
+// help, so the room stops instead of rejoining.
+describe("useRoom access denied", () => {
+  function stubFetch(answer: (url: string) => { status: number; body: unknown }): void {
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      recorded.push({ url, method: (init?.method ?? "GET").toUpperCase(), body: null });
+      const { status, body } = answer(url);
+      return new Response(JSON.stringify(body), {
+        status,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+  }
+
+  test("a refused join does not retry", async () => {
+    __roomRegistryInternals.setTimings({ rejoinBaseMs: 5, keepaliveMs: 10 });
+    stubFetch(() => ({
+      status: 403,
+      body: { error: { code: "ROOM_FORBIDDEN", message: "You cannot use this room" } },
+    }));
+    const room = __roomRegistryInternals.acquire(BASE, "@Document/d1", USER, TOKEN, {}, 1000);
+    await new Promise((res) => setTimeout(res, 60));
+    expect(room.denied).toBe(true);
+    expect(room.error).toBe("You cannot use this room.");
+    expect(count(isJoin)).toBe(1);
+  });
+
+  test("a heartbeat that reports lost access stops the room", async () => {
+    __roomRegistryInternals.setTimings({ rejoinBaseMs: 5, keepaliveMs: 10 });
+    stubFetch((url) =>
+      url.endsWith("/api/rooms/heartbeat")
+        ? { status: 200, body: { alive: false, reason: "ROOM_FORBIDDEN" } }
+        : { status: 200, body: { snapshot: { peers: [{ user_id: "u2", data: {} }] } } },
+    );
+    const room = __roomRegistryInternals.acquire(BASE, "@Document/d1", USER, TOKEN, {}, 1000);
+    await new Promise((res) => setTimeout(res, 60));
+    expect(room.denied).toBe(true);
+    expect(room.peers).toEqual([]);
+    expect(room.error).toBe("You no longer have access to this room.");
+    const joins = count(isJoin);
+    const beats = count((r) => r.url.endsWith("/api/rooms/heartbeat"));
+    await new Promise((res) => setTimeout(res, 50));
+    expect(count(isJoin)).toBe(joins);
+    expect(count((r) => r.url.endsWith("/api/rooms/heartbeat"))).toBe(beats);
+  });
+});

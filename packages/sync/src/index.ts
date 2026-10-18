@@ -22,6 +22,7 @@ import { OpQueue } from "./op-queue";
 import {
   RoomSubscriptions,
   type RoomError,
+  type RoomErrorCode,
   type RoomMember,
   type RoomSubscriber,
 } from "./room-subscriptions";
@@ -37,6 +38,7 @@ import {
 import { generateClientId, generateId } from "./ids";
 export {
   RoomSubscriptions,
+  rowRoom,
   type RoomError,
   type RoomErrorCode,
   type RoomMember,
@@ -4152,6 +4154,20 @@ export class SyncEngine {
       }
       return;
     }
+    // The server removed us from a room tied to a row we may no longer
+    // read. It stops sending the room's events; clear the members and tell
+    // the hook, which stops rejoining.
+    if (msg.type === "room-revoked" && typeof msg.room === "string") {
+      const room = msg.room;
+      const error: RoomError = { code: "ROOM_REVOKED" };
+      this.rooms.applySnapshot(room, []);
+      this.rooms.applyError(room, error);
+      if ((this.roomForwarders.get(room)?.size ?? 0) > 0) {
+        this.broadcastToTabs({ type: "room-fanout-snapshot", room, members: [] });
+        this.broadcastToTabs({ type: "room-fanout-error", room, error });
+      }
+      return;
+    }
     if (
       msg.type === "error" &&
       typeof msg.room === "string" &&
@@ -4163,7 +4179,8 @@ export class SyncEngine {
       // path right now, but the dispatch is keyed by `code` so future
       // error codes (rate-limited, room-full, etc.) route here too.
       const room = msg.room;
-      const code = msg.code === "NOT_IN_ROOM" ? "NOT_IN_ROOM" : "UNKNOWN";
+      const code: RoomErrorCode =
+        msg.code === "NOT_IN_ROOM" || msg.code === "ROOM_FORBIDDEN" ? msg.code : "UNKNOWN";
       const error: RoomError = {
         code,
         message: typeof msg.message === "string" ? msg.message : undefined,

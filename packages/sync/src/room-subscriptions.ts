@@ -51,7 +51,21 @@ export interface RoomMember {
 }
 
 /** Reason codes the SDK exposes on a room subscription error. */
-export type RoomErrorCode = "NOT_IN_ROOM" | "UNKNOWN";
+/**
+ * - `NOT_IN_ROOM`: subscribed before joining (rejoin and resubscribe).
+ * - `ROOM_FORBIDDEN`: a room tied to a row the caller may not read.
+ * - `ROOM_REVOKED`: the caller lost access to that row while in the room.
+ */
+export type RoomErrorCode = "NOT_IN_ROOM" | "ROOM_FORBIDDEN" | "ROOM_REVOKED" | "UNKNOWN";
+
+/**
+ * The room tied to a row: its members are the people who may read the row,
+ * and the server checks that on every room operation. `@` starts only these
+ * names.
+ */
+export function rowRoom(entity: string, id: string): string {
+  return `@${entity}/${id}`;
+}
 
 export interface RoomError {
   code: RoomErrorCode;

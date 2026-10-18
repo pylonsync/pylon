@@ -42,6 +42,22 @@ export interface OutboxOptions {
   clearTimer?: (handle: unknown) => void;
 }
 
+/** This peer's op counter in `doc` (exclusive end). */
+export function ownCounter(doc: LoroDoc): number {
+  return doc.oplogVersion().get(doc.peerIdStr) ?? 0;
+}
+
+/**
+ * This peer's ops after counter `confirmed`, and no one else's: start from
+ * everything the doc has, then roll this peer back to `confirmed`.
+ */
+export function exportOwnOps(doc: LoroDoc, confirmed: number): Uint8Array {
+  const from = doc.oplogVersion().toJSON();
+  if (confirmed > 0) from.set(doc.peerIdStr, confirmed);
+  else from.delete(doc.peerIdStr);
+  return doc.export({ mode: "update", from: VersionVector.parseJSON(from) });
+}
+
 /** True for an error the same request could get past by trying again. */
 export function isRetryable(err: unknown): boolean {
   const status = (err as { status?: unknown } | null)?.status;
@@ -146,18 +162,13 @@ export class CrdtOutbox {
   }
 
   private ownCounter(): number {
-    return this.doc.oplogVersion().get(this.doc.peerIdStr) ?? 0;
+    return ownCounter(this.doc);
   }
 
   /** This peer's ops after `confirmed`, or null when there are none. */
   private unsent(): Uint8Array | null {
     if (!this.hasUnsent()) return null;
-    // Start from everything the doc has, then roll this peer back to what
-    // the server confirmed: the export is exactly this peer's new ops.
-    const from = this.doc.oplogVersion().toJSON();
-    if (this.confirmed > 0) from.set(this.doc.peerIdStr, this.confirmed);
-    else from.delete(this.doc.peerIdStr);
-    return this.doc.export({ mode: "update", from: VersionVector.parseJSON(from) });
+    return exportOwnOps(this.doc, this.confirmed);
   }
 
   private confirm(counter: number): void {

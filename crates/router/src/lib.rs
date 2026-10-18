@@ -29,7 +29,9 @@ pub use routes::sync::{
 /// The declarative function auth gate, re-exported for the runtime's SSE
 /// fast path — `/api/fn/:name` with `Accept: text/event-stream` bypasses
 /// the router dispatch, so it must run the exact same gate itself.
+pub use routes::crdt::{apply_crdt_update, CrdtApplied, CrdtApplyDeps, CrdtApplyError};
 pub use routes::functions::{check_fn_auth, fn_auth_denial, fn_auth_error, FnAuthGate};
+pub use routes::rooms::{check_room_access, row_room, RoomDenied};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use org_resync::{resync_federated_orgs, OrgResync, ResyncError};
@@ -1997,7 +1999,7 @@ fn parse_query_params(url: &str) -> std::collections::HashMap<String, String> {
     out
 }
 
-fn url_decode(s: &str) -> String {
+pub(crate) fn url_decode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let bytes = s.as_bytes();
     let mut i = 0;
@@ -6341,6 +6343,51 @@ mod auth_gate_tests {
             Expect::Eq(401),
             Expect::ReachedHandler,
             Expect::ReachedHandler,
+        );
+    }
+
+    /// `apply_crdt_update` with `check_policy` refuses a caller the update
+    /// policy denies, before it learns whether the row exists; with server
+    /// trust (`ctx.crdt` without strict function policies) the same call gets
+    /// past the policy to the store, which has no such row here.
+    #[test]
+    fn crdt_apply_checks_the_update_policy_only_when_asked() {
+        use pylon_kernel::{AppManifest, ManifestPolicy, MANIFEST_VERSION};
+        let manifest = AppManifest {
+            manifest_version: MANIFEST_VERSION,
+            name: "test".into(),
+            version: "0.1.0".into(),
+            policies: vec![ManifestPolicy {
+                name: "denyAll".into(),
+                entity: Some("Doc".into()),
+                allow_update: Some("false".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let store = StubDataStore::empty(manifest.clone());
+        let policy_engine = PolicyEngine::from_manifest(&manifest);
+        let change_log = ChangeLog::new();
+        let notifier = NoopNotifier;
+        let deps = crate::CrdtApplyDeps {
+            store: &store,
+            policy_engine: &policy_engine,
+            plugin_hooks: &NoopPluginHooks,
+            notifier: &notifier,
+            change_log: &change_log,
+        };
+        let user = AuthContext::authenticated("u-1".into());
+        let denied =
+            crate::apply_crdt_update(&deps, &user, "Doc", "row-1", &[0], true).unwrap_err();
+        assert_eq!(
+            (denied.status, denied.code.as_str()),
+            (403, "POLICY_DENIED")
+        );
+        let trusted =
+            crate::apply_crdt_update(&deps, &user, "Doc", "row-1", &[0], false).unwrap_err();
+        assert_eq!(
+            (trusted.status, trusted.code.as_str()),
+            (404, "ROW_NOT_FOUND")
         );
     }
 

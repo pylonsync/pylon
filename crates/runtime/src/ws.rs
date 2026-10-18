@@ -249,6 +249,41 @@ impl RoomSubscriptions {
         }
     }
 
+    /// Drop every subscription `user_id`'s clients hold to `room`, and
+    /// return those clients. Called when the user leaves the room (or is
+    /// removed from it): a subscription without membership would keep
+    /// receiving the room's events.
+    pub fn unsubscribe_user(&self, room: &str, user_id: &str) -> Vec<u64> {
+        let mut guard = self.state.lock().unwrap();
+        let state = &mut *guard;
+        let clients: Vec<u64> = state
+            .by_room
+            .get(room)
+            .map(|set| {
+                set.iter()
+                    .copied()
+                    .filter(|c| state.user_by_client.get(c).map(String::as_str) == Some(user_id))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for client in &clients {
+            if let Some(set) = state.by_room.get_mut(room) {
+                set.remove(client);
+                if set.is_empty() {
+                    state.by_room.remove(room);
+                }
+            }
+            if let Some(set) = state.by_client.get_mut(client) {
+                set.remove(room);
+                if set.is_empty() {
+                    state.by_client.remove(client);
+                    state.user_by_client.remove(client);
+                }
+            }
+        }
+        clients
+    }
+
     /// Drop every room subscription for this client. Called on WS
     /// disconnect. Returns the client's user and the rooms that user no
     /// longer holds through any other client, in one step under the
@@ -651,6 +686,16 @@ impl Shard {
     ///
     /// Used by `broadcast_binary_to_authed` (codex P1 — CRDT
     /// subscriptions leaked frames after permission revocation).
+    /// The auth a connected client runs as, or None when it is gone.
+    fn auth_of(&self, id: u64) -> Option<pylon_auth::AuthContext> {
+        let handle = self.clients.lock().unwrap().get(&id).map(Arc::clone)?;
+        let auth = match handle.auth.read() {
+            Ok(g) => g.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        Some(auth)
+    }
+
     fn filter_binary_recipients(
         &self,
         ids: &[u64],
@@ -1010,6 +1055,13 @@ pub struct WsHub {
     /// fields from the policy check input.
     manifest: Arc<pylon_kernel::AppManifest>,
     crdt_private_entities: std::sync::OnceLock<Arc<dyn Fn(&str) -> bool + Send + Sync>>,
+    /// Whether a caller may use a room (`pylon_router::check_room_access`).
+    /// Set once by the server. Without it, rooms tied to a row are refused.
+    room_access: std::sync::OnceLock<RoomAccessFn>,
+    /// Recent answers of `room_access` per (client, room), so a room tied to
+    /// a row re-checks its recipients at most every [`ROOM_ACCESS_TTL`]
+    /// instead of on every cursor move.
+    room_access_cache: Mutex<HashMap<(u64, String), (bool, std::time::Instant)>>,
     /// Auth-user manifest config, used by `maybe_project_user_row`
     /// inside the wire projection.
     auth_user: pylon_kernel::ManifestAuthUserConfig,
@@ -1090,6 +1142,8 @@ impl WsHub {
             policy,
             manifest,
             crdt_private_entities: std::sync::OnceLock::new(),
+            room_access: std::sync::OnceLock::new(),
+            room_access_cache: Mutex::new(HashMap::new()),
             auth_user,
             auth_enricher: Mutex::new(None),
             auth_resolver: Mutex::new(None),
@@ -1112,9 +1166,12 @@ impl WsHub {
     /// Dead client ids are evicted from the room registry on send
     /// failure so the next fanout doesn't pay the cost again.
     pub fn push_to_room_subscribers(&self, room: &str, text: &str) {
-        let subscribers = self.room_subscriptions.subscribers(room);
+        let mut subscribers = self.room_subscriptions.subscribers(room);
         if subscribers.is_empty() {
             return;
+        }
+        if room.starts_with('@') {
+            subscribers = self.room_recipients_with_access(room, subscribers);
         }
         // Resolve all recipients in each shard under one lock.
         let mut by_shard: Vec<Vec<u64>> = (0..NUM_SHARDS).map(|_| Vec::new()).collect();
@@ -1126,6 +1183,54 @@ impl WsHub {
             self.shards[idx].send_text_to_many(ids, &shared);
         }
         // The reader removes room subscriptions when it observes EOF.
+    }
+
+    /// The subscribers of a room tied to a row who may still read the row.
+    /// One who may not is unsubscribed and told (`room-revoked`), so access
+    /// lost after joining (an unshare) stops the room's events within
+    /// [`ROOM_ACCESS_TTL`] instead of at the member's next heartbeat.
+    fn room_recipients_with_access(&self, room: &str, subscribers: Vec<u64>) -> Vec<u64> {
+        let now = std::time::Instant::now();
+        let mut allowed = Vec::with_capacity(subscribers.len());
+        let mut denied = Vec::new();
+        for id in subscribers {
+            let cached = self
+                .room_access_cache
+                .lock()
+                .unwrap()
+                .get(&(id, room.to_string()))
+                .filter(|(_, at)| now.duration_since(*at) < ROOM_ACCESS_TTL)
+                .map(|(ok, _)| *ok);
+            let ok = match cached {
+                Some(ok) => ok,
+                None => {
+                    let Some(auth) = self.shards[(id as usize) % NUM_SHARDS].auth_of(id) else {
+                        continue;
+                    };
+                    let ok = auth.is_unscoped_admin() || self.room_allowed(&auth, room);
+                    self.room_access_cache
+                        .lock()
+                        .unwrap()
+                        .insert((id, room.to_string()), (ok, now));
+                    ok
+                }
+            };
+            if ok {
+                allowed.push(id);
+            } else {
+                denied.push(id);
+            }
+        }
+        if !denied.is_empty() {
+            let revoked = serde_json::json!({ "type": "room-revoked", "room": room }).to_string();
+            let mut cache = self.room_access_cache.lock().unwrap();
+            for id in denied {
+                self.room_subscriptions.unsubscribe(id, room);
+                cache.remove(&(id, room.to_string()));
+                self.send_text_to(id, &revoked);
+            }
+        }
+        allowed
     }
 
     /// Push a `room-snapshot` envelope to a single client. Used at
@@ -1169,6 +1274,22 @@ impl WsHub {
         }
         if let Ok(text) = serde_json::to_string(&frame) {
             self.push_to_room_subscribers(room, &text);
+        }
+    }
+
+    pub(crate) fn set_room_access(&self, check: RoomAccessFn) {
+        assert!(
+            self.room_access.set(check).is_ok(),
+            "room access is set once before accepting clients"
+        );
+    }
+
+    /// Whether `auth` may use `room`. A room tied to a row (`@Entity/id`)
+    /// is refused when the server installed no check.
+    pub(crate) fn room_allowed(&self, auth: &pylon_auth::AuthContext, room: &str) -> bool {
+        match self.room_access.get() {
+            Some(check) => check(auth, room),
+            None => !room.starts_with('@'),
         }
     }
 
@@ -1687,6 +1808,10 @@ impl WsHub {
     fn remove_client(&self, id: u64) {
         let shard_idx = (id as usize) % NUM_SHARDS;
         self.shards[shard_idx].remove(id);
+        self.room_access_cache
+            .lock()
+            .unwrap()
+            .retain(|(client, _), _| *client != id);
     }
 
     /// Total number of connected clients across all shards.
@@ -1711,6 +1836,14 @@ impl WsHub {
 /// Wrapped in an Arc<dyn Fn> so the runtime can build it once, capturing
 /// the LoroStore + PolicyEngine handles, and hand the same closure to
 /// every accepted connection.
+/// How long a recipient's access to a room tied to a row is trusted before
+/// the next event re-checks it. Bounds how long someone who lost access
+/// keeps receiving the room's events.
+pub const ROOM_ACCESS_TTL: Duration = Duration::from_secs(5);
+
+/// `pylon_router::check_room_access` with the server's store and policies.
+pub type RoomAccessFn = Arc<dyn Fn(&pylon_auth::AuthContext, &str) -> bool + Send + Sync>;
+
 pub type SnapshotFetcher =
     Arc<dyn Fn(&pylon_auth::AuthContext, &str, &str) -> Option<Vec<u8>> + Send + Sync>;
 
@@ -2263,13 +2396,14 @@ fn run_authenticated_session(
                             .filter(|r| !r.is_empty());
                         let is_member = match room {
                             Some(room) => {
-                                auth_ctx.is_admin
+                                (auth_ctx.is_admin
                                     || auth_ctx.user_id.as_deref().is_some_and(|uid| {
                                         rooms
                                             .as_ref()
                                             .map(|b| b.is_in_room(room, uid))
                                             .unwrap_or(false)
-                                    })
+                                    }))
+                                    && hub.room_allowed(&auth_ctx, room)
                             }
                             None => false,
                         };
@@ -2585,6 +2719,19 @@ fn handle_room_control(
                 let err = serde_json::json!({
                     "type": "error",
                     "code": "NOT_IN_ROOM",
+                    "room": room,
+                });
+                if let Ok(text) = serde_json::to_string(&err) {
+                    hub.send_text_to(client_id, &text);
+                }
+                return;
+            }
+            // A room tied to a row: the row's read policy, checked again
+            // here in case access was lost after joining.
+            if !hub.room_allowed(auth_ctx, room) {
+                let err = serde_json::json!({
+                    "type": "error",
+                    "code": "ROOM_FORBIDDEN",
                     "room": room,
                 });
                 if let Ok(text) = serde_json::to_string(&err) {
@@ -3590,6 +3737,21 @@ mod tests {
             NUM_SHARDS.is_power_of_two(),
             "NUM_SHARDS ({NUM_SHARDS}) must be a power of two for even distribution"
         );
+    }
+
+    #[test]
+    fn unsubscribe_user_drops_only_that_users_clients_in_that_room() {
+        let subs = RoomSubscriptions::new();
+        subs.subscribe(1, "r", Some("alice"));
+        subs.subscribe(2, "r", Some("alice"));
+        subs.subscribe(3, "r", Some("bob"));
+        subs.subscribe(1, "other", Some("alice"));
+        let mut gone = subs.unsubscribe_user("r", "alice");
+        gone.sort();
+        assert_eq!(gone, vec![1, 2]);
+        assert_eq!(subs.subscribers("r"), vec![3]);
+        assert_eq!(subs.subscribers("other"), vec![1]);
+        assert!(subs.unsubscribe_user("r", "alice").is_empty());
     }
 
     #[test]

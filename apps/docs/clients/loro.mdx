@@ -235,9 +235,37 @@ With Tiptap, add the plugins through an extension's `addProseMirrorPlugins`, and
 
 `configureProseMirrorMarks` (which `useProseMirrorDoc` calls) tells this copy of the document how each mark behaves at its edges: a mark that is `inclusive` (the ProseMirror default) extends to text typed right after it. Every copy that writes marks needs it; Loro refuses a mark it has no style for. The rule is recorded with each mark, so it holds for everyone who edits after.
 
-### Read and write on the server
+### Edit from a server function
 
-A server function reads and changes the document without an editor:
+An action edits a row's live document with `ctx.crdt`. `openLiveDoc` from `@pylonsync/loro/server` opens it as a `LoroDoc`, and `editProseMirror` changes a ProseMirror field the way an editor does: everyone editing sees the change as it lands, and their edits made at the same moment merge with it.
+
+```typescript
+import { action, v } from "@pylonsync/functions";
+import { openLiveDoc } from "@pylonsync/loro/server";
+import { editProseMirror } from "@pylonsync/loro/prosemirror";
+
+export default action({
+  args: { docId: v.id("Doc") },
+  async handler(ctx, args) {
+    const live = await openLiveDoc(ctx, "Doc", args.docId);
+    await editProseMirror(live, "body", schema, (state) =>
+      state.tr.insertText("Summary: ", 1),
+    );
+  },
+});
+```
+
+- `openLiveDoc` throws `NOT_FOUND` when the row has no document.
+- `live.edit(fn)` pulls in what others wrote since the doc was opened, runs `fn` on the `LoroDoc`, and sends only this function's ops. `refresh()` and `commit()` do the two halves on their own: a long run (an AI draft that streams in) commits as it goes and refreshes before each change.
+- Each `openLiveDoc` is a new Loro peer, so two functions editing one row merge like two people.
+- `ctx.crdt` runs in actions only. Each commit merges and reaches everyone at once, so it cannot roll back with a mutation; a query or mutation gets `CRDT_ACTIONS_ONLY`.
+- Policies follow the `ctx.db` rule. Under strict function policies (`PYLON_STRICT_FN_POLICIES=1`) the caller's read policy gates `openLiveDoc` (a row they may not read is `NOT_FOUND`) and their update policy gates each commit (`POLICY_DENIED`). `openLiveDoc(ctx, entity, id, { unsafe: true })` runs with server trust, like `ctx.db.unsafe`. Without strict policies, check access in the function.
+
+`ctx.crdt` itself takes and returns Loro bytes: `snapshot(entity, id)`, `since(entity, id, version)` and `apply(entity, id, update)`, for code that manages its own `LoroDoc`.
+
+### Read and write a document you hold
+
+`readProseMirror` and `writeProseMirror` work on any `LoroDoc` that holds the field, such as a live doc's `live.doc`:
 
 ```typescript
 import { readProseMirror, writeProseMirror } from "@pylonsync/loro/prosemirror";
@@ -272,7 +300,7 @@ For lightweight ephemeral state (who's editing, where their cursor is, what they
 import { useRoom } from "@pylonsync/react";
 
 function PresenceLayer({ docId, me }: { docId: string; me: User }) {
-  const room = useRoom(`doc:${docId}`, me.id);
+  const room = useRoom({ entity: "Doc", id: docId }, me.id);
 
   return (
     <>
@@ -290,6 +318,8 @@ function PresenceLayer({ docId, me }: { docId: string; me: User }) {
 ```
 
 Each `peer.presence` is the last object that peer pushed via `setPresence`. Presence rides the same WebSocket as CRDT updates but doesn't go into the CRDT itself. It's transient. Peers who disconnect drop out of `room.peers`.
+
+`useRoom({ entity, id })` is the room tied to that row: only people who may read the row join it, see who is there, or receive its messages, and someone who loses access is removed (see [Presence + rooms](/clients/react#presence--rooms)). Use it for a document's cursors; a free room name like `doc:${docId}` lets any signed-in user in.
 
 ## Saving and loading
 

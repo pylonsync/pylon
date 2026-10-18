@@ -6,6 +6,7 @@ import {
   type RoomMember,
   type RoomMessage,
   type SyncEngine,
+  rowRoom,
 } from '@pylonsync/sync';
 import { getBaseUrl, getReactStorage, storageKey } from './index';
 import { getSync } from './db';
@@ -65,6 +66,18 @@ export interface UseRoomReturn {
   leave: () => void;
   /** Error message, if any. */
   error: string | null;
+  /**
+   * True when the server refused this room or revoked access to it: a room
+   * tied to a row (`useRoom({ entity, id })`) the user may not read, or no
+   * longer may. The hook stops rejoining; peers are empty.
+   */
+  denied: boolean;
+}
+
+/** A room tied to a row (see {@link rowRoom}). */
+export interface RowRoomRef {
+  entity: string;
+  id: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -175,6 +188,8 @@ interface SharedRoom {
   rejoinAttempts: number;
   /** The caller left with `leave()`: no keepalive, no rejoin. */
   left: boolean;
+  /** The server refused the room or revoked access: no keepalive, no rejoin. */
+  denied: boolean;
 }
 
 const rooms = new Map<string, SharedRoom>();
@@ -186,6 +201,20 @@ function roomKey(
   token: string | undefined,
 ): string {
   return `${baseUrl}|${roomId}|${userId}|${token ?? ''}`;
+}
+
+/** Error codes that end the room for this user: retrying cannot help. */
+const DENIED_CODES = new Set(["ROOM_FORBIDDEN", "ROOM_REVOKED", "INVALID_ROOM"]);
+
+/** The server refused the room, or revoked access: stop, clear, and say so. */
+function deny(room: SharedRoom, code: string): void {
+  room.denied = true;
+  stopKeepalive(room);
+  room.peers = [];
+  room.isConnected = false;
+  room.error =
+    code === "ROOM_REVOKED" ? "You no longer have access to this room." : "You cannot use this room.";
+  notify(room);
 }
 
 function notify(room: SharedRoom): void {
@@ -256,9 +285,14 @@ function startWsPush(room: SharedRoom): void {
       // (reconnect), the idle sweep dropped us, or the subscribe beat the
       // join. Rejoin over HTTP, then resubscribe. Surface the error only
       // when rejoining keeps failing.
+      if (DENIED_CODES.has(err.code)) {
+        deny(room, err.code);
+        return;
+      }
       if (
         err.code === 'NOT_IN_ROOM' &&
         !room.left &&
+        !room.denied &&
         room.rejoinAttempts < MAX_REJOIN_ATTEMPTS
       ) {
         if (room.isConnected) {
@@ -365,7 +399,7 @@ function joinRoom(room: SharedRoom): void {
   // and notifies all subscribers. Late subscribers either pick up the
   // already-resolved snapshot from `room.peers` or the next push /
   // heartbeat.
-  if (room.joining || room.left) return;
+  if (room.joining || room.left || room.denied) return;
   room.joining = true;
   pylonFetch<{ snapshot?: { peers?: RoomPeer[] } }>(
     transportFor(room),
@@ -400,6 +434,10 @@ function joinRoom(room: SharedRoom): void {
     .catch((e: any) => {
       room.joining = false;
       if (!rooms.has(roomKeyFor(room))) return;
+      if (typeof e?.code === 'string' && DENIED_CODES.has(e.code)) {
+        deny(room, e.code);
+        return;
+      }
       if (room.rejoinAttempts < MAX_REJOIN_ATTEMPTS && !room.left) {
         scheduleRejoin(room);
         return;
@@ -412,7 +450,7 @@ function joinRoom(room: SharedRoom): void {
 /** Rejoin with backoff: at once for the first attempt, then 1 s, 2 s, 4 s,
  *  ... capped at 30 s. One pending rejoin at a time. */
 function scheduleRejoin(room: SharedRoom): void {
-  if (room.rejoinTimer || room.joining || room.left) return;
+  if (room.rejoinTimer || room.joining || room.left || room.denied) return;
   const attempt = room.rejoinAttempts;
   room.rejoinAttempts += 1;
   const delay =
@@ -431,11 +469,15 @@ function startKeepalive(room: SharedRoom): void {
   if (room.keepalive || room.left) return;
   room.keepalive = setInterval(() => {
     if (!rooms.has(roomKeyFor(room)) || room.left) return;
-    pylonFetch<{ alive?: boolean }>(transportFor(room), '/api/rooms/heartbeat', {
+    pylonFetch<{ alive?: boolean; reason?: string }>(transportFor(room), '/api/rooms/heartbeat', {
       method: 'POST',
       json: { room: room.roomId, user_id: room.userId },
     })
       .then((body) => {
+        if (body?.alive === false && body.reason && DENIED_CODES.has(body.reason)) {
+          if (rooms.has(roomKeyFor(room))) deny(room, "ROOM_REVOKED");
+          return;
+        }
         if (body?.alive === false && rooms.has(roomKeyFor(room))) {
           if (room.isConnected) {
             room.isConnected = false;
@@ -520,6 +562,7 @@ function acquireRoom(
     rejoinTimer: null,
     rejoinAttempts: 0,
     left: false,
+    denied: false,
   };
   rooms.set(key, room);
   joinRoom(room);
@@ -706,11 +749,17 @@ function tryGetSync(): SyncEngine | null {
   }
 }
 
+/**
+ * Join a presence room. Pass `{ entity, id }` for the room tied to a row:
+ * only people who may read the row get in, and someone who loses access is
+ * removed (`denied` turns true).
+ */
 export function useRoom(
-  roomId: string,
+  room: string | RowRoomRef,
   userId: string,
   options: UseRoomOptions = {},
 ): UseRoomReturn {
+  const roomId = typeof room === 'string' ? room : rowRoom(room.entity, room.id);
   const {
     // Fall back to the globally configured baseUrl so room requests don't
     // land on the Vite dev origin (localhost:5173) and 404 when the caller
@@ -727,6 +776,7 @@ export function useRoom(
   const [peers, setPeers] = useState<RoomPeer[]>([]);
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [denied, setDenied] = useState(false);
 
   // Remember the most recent shared room this hook is attached to so
   // setPresence / broadcast / leave can route through it without
@@ -751,11 +801,13 @@ export function useRoom(
     setPeers(room.peers);
     setIsConnected(room.isConnected);
     setError(room.error);
+    setDenied(room.denied);
 
     const sub = () => {
       setPeers(room.peers);
       setIsConnected(room.isConnected);
       setError(room.error);
+      setDenied(room.denied);
     };
     room.subs.add(sub);
 
@@ -828,7 +880,7 @@ export function useRoom(
     setPeers([]);
   }, [roomId, userId, baseUrl, token]);
 
-  return { peers, isConnected, setPresence, broadcast, leave, error };
+  return { peers, isConnected, setPresence, broadcast, leave, error, denied };
 }
 
 /**

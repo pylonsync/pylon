@@ -2102,6 +2102,22 @@ pub(crate) fn translate_and_push_room_event(
         _ => return,
     };
     ws.push_room_update(room, action, member, data);
+    // A member who left (or was removed) stops receiving the room's events:
+    // their subscriptions go with the membership. One whose access was
+    // revoked is told, so the client can stop showing the room.
+    if kind == "leave" {
+        if let Some(user_id) = payload.get("user_id").and_then(|v| v.as_str()) {
+            let clients = ws.room_subscriptions().unsubscribe_user(room, user_id);
+            if payload.get("revoked").and_then(|v| v.as_bool()) == Some(true) {
+                let frame = serde_json::json!({ "type": "room-revoked", "room": room });
+                if let Ok(text) = serde_json::to_string(&frame) {
+                    for client in clients {
+                        ws.send_text_to(client, &text);
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -6478,6 +6494,16 @@ pub fn try_spawn_functions(
             let max = FILES_STORE_MAX_BYTES.min(crate::server::upload_max_bytes());
             run_files_op(files_storage.as_ref(), op, auth, max)
         }));
+        // `ctx.crdt` — reads and merges into a row's live document, through
+        // the same path as `POST /api/crdt` (see `run_crdt_op`).
+        let weak_ops = Arc::downgrade(&ops);
+        let crdt_policy = Arc::clone(&policy_engine);
+        runner.set_crdt_op_hook(Box::new(move |req, auth, enforce| {
+            let Some(ops) = weak_ops.upgrade() else {
+                return Err(("SHUTTING_DOWN".into(), "the server is shutting down".into()));
+            };
+            run_crdt_op(&ops, &crdt_policy, req, auth, enforce)
+        }));
         // `ctx.shards.ticket` — same pattern: the runtime owns the secret.
         runner.set_shard_ticket_signer(Box::new(
             |req: &pylon_functions::protocol::SignShardTicketMessage, caller: Option<&str>| {
@@ -7854,6 +7880,112 @@ pub(crate) fn cron_lease_entity() -> pylon_kernel::ManifestEntity {
 /// here. The schedule hook + email hook can be the same closure
 /// shape on every runner (they call into shared adapters); only
 /// the nested-call hook needs the runner-specific capture.
+/// One `ctx.crdt` op from an action. `enforce` is the `ctx.db` rule: the
+/// caller's policies apply under strict function policies, unless the op is
+/// `unsafe`.
+///
+/// - `snapshot` / `since`: the row's document, or the changes since a version
+///   the caller holds. A row that does not exist, or that the caller may not
+///   read when `enforce` is on, answers null (the same answer, so a caller
+///   cannot probe for rows).
+/// - `apply`: merges through `pylon_router::apply_crdt_update`, the path
+///   `POST /api/crdt` takes: plugin hooks, the merge, the binary broadcast to
+///   everyone editing, and the JSON change event.
+///
+/// Entities whose CRDT history is private are refused: raw history carries
+/// every value a field ever held.
+fn run_crdt_op(
+    ops: &FnOpsImpl,
+    policy: &pylon_policy::PolicyEngine,
+    req: &pylon_functions::protocol::CrdtOpMessage,
+    auth: &pylon_functions::protocol::AuthInfo,
+    enforce: bool,
+) -> Result<serde_json::Value, (String, String)> {
+    use base64::Engine as _;
+    use pylon_functions::protocol::CrdtOp;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let store: &dyn DataStore = ops.runtime.as_ref();
+    let manifest = store.manifest();
+    if !manifest.entities.iter().any(|e| e.name == req.entity) {
+        return Err((
+            "ENTITY_NOT_FOUND".into(),
+            format!("unknown entity {}", req.entity),
+        ));
+    }
+    if store.has_private_crdt_history(&req.entity)
+        || !pylon_router::supports_crdt_replication(manifest, &manifest.auth.user, &req.entity)
+    {
+        return Err((
+            "CRDT_REPLICATION_DISABLED".into(),
+            format!("{} does not replicate CRDT documents", req.entity),
+        ));
+    }
+    let auth_ctx = policy_auth_ctx(auth);
+    let data_err = |e: DataError| (e.code, e.message);
+    match &req.op {
+        CrdtOp::Snapshot | CrdtOp::Since { .. } => {
+            let Some(row) = store.get_by_id(&req.entity, &req.id).map_err(data_err)? else {
+                return Ok(serde_json::Value::Null);
+            };
+            if enforce
+                && !matches!(
+                    policy.check_entity_read(&req.entity, &auth_ctx, Some(&row)),
+                    pylon_policy::PolicyResult::Allowed
+                )
+            {
+                return Ok(serde_json::Value::Null);
+            }
+            match &req.op {
+                CrdtOp::Snapshot => Ok(store
+                    .crdt_snapshot(&req.entity, &req.id)
+                    .map_err(data_err)?
+                    .map(|bytes| serde_json::json!({ "snapshot": b64.encode(bytes) }))
+                    .unwrap_or(serde_json::Value::Null)),
+                CrdtOp::Since { version_base64 } => {
+                    let since = b64.decode(version_base64).map_err(|_| {
+                        (
+                            "INVALID_ARGS".to_string(),
+                            "version is not base64".to_string(),
+                        )
+                    })?;
+                    Ok(store
+                        .crdt_update_since(&req.entity, &req.id, &since)
+                        .map_err(data_err)?
+                        .map(|bytes| serde_json::json!({ "update": b64.encode(bytes) }))
+                        .unwrap_or(serde_json::Value::Null))
+                }
+                CrdtOp::Apply { .. } => unreachable!(),
+            }
+        }
+        CrdtOp::Apply { update_base64 } => {
+            let update = b64.decode(update_base64).map_err(|_| {
+                (
+                    "INVALID_ARGS".to_string(),
+                    "update is not base64".to_string(),
+                )
+            })?;
+            let hooks = PluginHooksAdapter(Arc::clone(&ops.plugins));
+            let deps = pylon_router::CrdtApplyDeps {
+                store,
+                policy_engine: policy,
+                plugin_hooks: &hooks,
+                notifier: ops.notifier.as_ref(),
+                change_log: ops.change_log.as_ref(),
+            };
+            pylon_router::apply_crdt_update(
+                &deps,
+                &auth_ctx,
+                &req.entity,
+                &req.id,
+                &update,
+                enforce,
+            )
+            .map(|_| serde_json::json!({ "ok": true }))
+            .map_err(|e| (e.code, e.message))
+        }
+    }
+}
+
 fn install_nested_call_hook(ops: &Arc<FnOpsImpl>, runner: &Arc<FnRunner>) {
     use pylon_functions::protocol::{AuthInfo, FnType};
 

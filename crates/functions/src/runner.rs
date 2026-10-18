@@ -194,6 +194,20 @@ pub type FilesOpHookFn = dyn Fn(&crate::protocol::FilesOp, &AuthInfo) -> Result<
     + Sync;
 pub type FilesOpHook = Box<FilesOpHookFn>;
 
+/// Callback for `ctx.crdt.snapshot/since/apply`. Takes the request, the
+/// calling user's auth, and whether the caller's policies apply (the same
+/// rule as `ctx.db`: strict function policies on, not `unsafe`). Returns the
+/// JSON reply or an error pair. Installed by the runtime, which owns the
+/// store, the policy engine and the broadcast.
+pub type CrdtOpHookFn = dyn Fn(
+        &crate::protocol::CrdtOpMessage,
+        &AuthInfo,
+        bool,
+    ) -> Result<serde_json::Value, (String, String)>
+    + Send
+    + Sync;
+pub type CrdtOpHook = Box<CrdtOpHookFn>;
+
 /// Callback for `ctx.shards.ticket(...)`. Takes the request and the calling
 /// user's id, returns the signed ticket (or an error pair). Installed by the
 /// runtime, which owns the ticket secret.
@@ -486,6 +500,7 @@ pub struct FnRunner {
     nested_call_hook: Mutex<Option<Arc<NestedCallHookFn>>>,
     file_url_signer: Mutex<Option<FileUrlSigner>>,
     files_op_hook: Mutex<Option<Arc<FilesOpHookFn>>>,
+    crdt_op_hook: Mutex<Option<Arc<CrdtOpHookFn>>>,
     shard_ticket_signer: Mutex<Option<ShardTicketSigner>>,
     /// An `Arc` so a call runs after the lock is released: a hook that
     /// panics must not poison it for every later `ctx.shards` call.
@@ -561,6 +576,7 @@ impl FnRunner {
             nested_call_hook: Mutex::new(None),
             file_url_signer: Mutex::new(None),
             files_op_hook: Mutex::new(None),
+            crdt_op_hook: Mutex::new(None),
             shard_ticket_signer: Mutex::new(None),
             shard_op_hook: Mutex::new(None),
             email_hook: Mutex::new(None),
@@ -688,6 +704,11 @@ impl FnRunner {
 
     pub fn set_files_op_hook(&self, hook: FilesOpHook) {
         *self.files_op_hook.lock().unwrap() = Some(Arc::from(hook));
+    }
+
+    /// Install the hook backing `ctx.crdt`.
+    pub fn set_crdt_op_hook(&self, hook: CrdtOpHook) {
+        *self.crdt_op_hook.lock().unwrap() = Some(Arc::from(hook));
     }
 
     pub fn set_file_url_signer(&self, hook: FileUrlSigner) {
@@ -1998,6 +2019,45 @@ impl FnRunner {
                             "SHARD_TICKETS_NOT_CONFIGURED",
                             "this host does not sign shard tickets",
                         ),
+                    };
+                    self.send(&reply)?;
+                }
+
+                TsMessage::CrdtOp(req) if req.call_id == call_id => {
+                    let op_id = req.op_id.clone();
+                    let reply = if fn_type != FnType::Action {
+                        DbResultMessage::err_with_op(
+                            call_id.clone(),
+                            op_id,
+                            "CRDT_ACTIONS_ONLY",
+                            "ctx.crdt runs only in actions: a merge reaches everyone editing as it lands, so it cannot roll back with a query or mutation",
+                        )
+                    } else {
+                        let auth_now = AuthInfo {
+                            is_admin: caller_is_admin,
+                            ..auth_for_hooks.clone()
+                        };
+                        // The `ctx.db` rule: the caller's policies apply under
+                        // strict function policies, unless the op is `unsafe`
+                        // or the caller is an unscoped admin.
+                        let enforce = strict_policies
+                            && !req.unsafe_op
+                            && !(auth_now.is_admin && auth_now.tenant_id.is_none());
+                        // Cloned out of the lock so a slow merge does not
+                        // block other calls installing or reading the hook.
+                        let hook = self.crdt_op_hook.lock().unwrap().clone();
+                        match hook.as_ref().map(|cb| cb(&req, &auth_now, enforce)) {
+                            Some(Ok(v)) => DbResultMessage::ok_with_op(call_id.clone(), op_id, v),
+                            Some(Err((code, msg))) => {
+                                DbResultMessage::err_with_op(call_id.clone(), op_id, &code, &msg)
+                            }
+                            None => DbResultMessage::err_with_op(
+                                call_id.clone(),
+                                op_id,
+                                "CRDT_NOT_CONFIGURED",
+                                "this host does not support ctx.crdt",
+                            ),
+                        }
                     };
                     self.send(&reply)?;
                 }

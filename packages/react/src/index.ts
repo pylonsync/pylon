@@ -129,11 +129,13 @@ export type {
 
 // Room hook
 export { useRoom, useRoomMessages } from "./useRoom";
+export { rowRoom } from "@pylonsync/sync";
 export type {
   RoomPeer,
   RoomSnapshot,
   UseRoomOptions,
   UseRoomReturn,
+  RowRoomRef,
 } from "./useRoom";
 export type { RoomMessage } from "@pylonsync/sync";
 // Thrown by db.insert / update / delete (and useEntity's) when the server

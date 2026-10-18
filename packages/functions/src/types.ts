@@ -1044,6 +1044,30 @@ export type RequireMember = (
  * });
  * ```
  */
+/**
+ * `ctx.crdt` (actions only): read and change a row's live CRDT document, the
+ * one editors bind to with `@pylonsync/loro`. Bytes are Loro's own formats.
+ * `@pylonsync/loro/server` wraps this in a `LoroDoc` (`openLiveDoc`).
+ *
+ * Each `apply` is its own write: it merges, then reaches everyone editing at
+ * once, so it cannot roll back with a mutation (queries and mutations get
+ * CRDT_ACTIONS_ONLY). Policies follow the `ctx.db` rule: they apply under
+ * strict function policies (`PYLON_STRICT_FN_POLICIES=1`), except through
+ * `ctx.crdt.unsafe`. Without strict policies, check access yourself.
+ */
+export interface Crdt {
+  /** The row's whole document, or null when the row does not exist (or, under
+   *  strict policies, the caller may not read it). */
+  snapshot(entity: string, id: string): Promise<Uint8Array | null>;
+  /** The changes since `version` (a Loro version vector, `doc.oplogVersion().encode()`),
+   *  or null as for {@link Crdt.snapshot}. */
+  since(entity: string, id: string, version: Uint8Array): Promise<Uint8Array | null>;
+  /** Merge a Loro update into the row and broadcast it. */
+  apply(entity: string, id: string, update: Uint8Array): Promise<void>;
+  /** The same operations with server trust even under strict policies. */
+  unsafe: Omit<Crdt, "unsafe">;
+}
+
 export interface Files {
   /**
    * Mint a signed download path for a file id. `ttlSecs` defaults to 300
@@ -1542,6 +1566,8 @@ export interface ActionCtx<R extends AuthRequirement = "optional"> {
   env: Record<string, string>;
   /** Signed file-download URLs — see {@link Files}. */
   files: ActionFiles;
+  /** A row's live CRDT document, as Loro bytes — see {@link Crdt}. */
+  crdt: Crdt;
   /** Shard tickets, reads, and start/stop — see {@link Shards}. */
   shards: Shards;
   /** Run a registered query within its own read transaction. */

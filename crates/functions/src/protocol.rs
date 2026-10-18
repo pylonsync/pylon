@@ -480,6 +480,13 @@ pub enum TsMessage {
     #[serde(rename = "files_op")]
     FilesOp(FilesOpMessage),
 
+    /// `ctx.crdt.snapshot/since/apply` from an action: read or merge into a
+    /// row's live CRDT document. Refused in queries and mutations: a merge is
+    /// broadcast to everyone editing as it lands, so it cannot roll back with
+    /// a transaction.
+    #[serde(rename = "crdt_op")]
+    CrdtOp(CrdtOpMessage),
+
     /// `ctx.shards.ticket(shardId, {subscriberId, claims, ttlSecs})` — mint
     /// a signed shard ticket. The host signs with its ticket secret; the
     /// shard transports verify it. See `pylon_realtime::ticket`.
@@ -617,6 +624,7 @@ impl TsMessage {
             TsMessage::RunAgent(m) => Some(&m.call_id),
             TsMessage::SignFileUrl(m) => Some(&m.call_id),
             TsMessage::FilesOp(m) => Some(&m.call_id),
+            TsMessage::CrdtOp(m) => Some(&m.call_id),
             TsMessage::SignShardTicket(m) => Some(&m.call_id),
             TsMessage::ShardOp(m) => Some(&m.call_id),
             TsMessage::SendEmail(m) => Some(&m.call_id),
@@ -947,6 +955,37 @@ pub struct FilesOpMessage {
     pub call_id: String,
     #[serde(flatten)]
     pub op: FilesOp,
+}
+
+/// See [`TsMessage::CrdtOp`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrdtOpMessage {
+    pub call_id: String,
+    /// Echoed on the reply so concurrent ops from one handler stay apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op_id: Option<String>,
+    pub entity: String,
+    pub id: String,
+    /// `ctx.crdt.unsafe.*`: server trust even under strict function
+    /// policies, like `ctx.db.unsafe`.
+    #[serde(default, skip_serializing_if = "is_false_local")]
+    pub unsafe_op: bool,
+    #[serde(flatten)]
+    pub op: CrdtOp,
+}
+
+/// One `ctx.crdt` operation. Bytes travel as base64.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum CrdtOp {
+    /// The row's full document. Reply: `{ snapshot: base64 }`, or null when
+    /// the row does not exist (or the caller may not read it).
+    Snapshot,
+    /// The changes since a version the caller holds (Loro's encoded version
+    /// vector). Reply: `{ update: base64 }`, or null as for `snapshot`.
+    Since { version_base64: String },
+    /// Merge a Loro update and broadcast it. Reply: `{ ok: true }`.
+    Apply { update_base64: String },
 }
 
 /// One `ctx.files` write.
