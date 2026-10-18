@@ -299,3 +299,15 @@ describe("RoomSubscriptions: resubscribe after a rejoin", () => {
     expect(sent).toEqual([{ type: "room-sub-resubscribe", room: "channel:a" }]);
   });
 });
+
+test("presence from someone not in the list adds them back", () => {
+  const { rooms } = makeHarness();
+  rooms.register("doc", () => {});
+  rooms.applySnapshot("doc", [{ user_id: "alice", joined_at: "t", data: {} }]);
+  // A leave relayed from another machine, though Alice is still connected
+  // through this one.
+  rooms.applyUpdate("doc", "leave", { user_id: "alice", joined_at: "", data: {} }, undefined);
+  expect(rooms.members("doc")).toEqual([]);
+  rooms.applyUpdate("doc", "presence", { user_id: "alice", joined_at: "", data: {} }, { cursor: 4 });
+  expect(rooms.members("doc")).toEqual([{ user_id: "alice", joined_at: "", data: { cursor: 4 } }]);
+});

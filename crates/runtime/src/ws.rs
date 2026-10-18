@@ -249,15 +249,6 @@ impl RoomSubscriptions {
         }
     }
 
-    /// Whether any client subscribed to `room` as `user_id` on this machine.
-    pub fn user_subscribed(&self, room: &str, user_id: &str) -> bool {
-        let state = self.state.lock().unwrap();
-        state.by_room.get(room).is_some_and(|set| {
-            set.iter()
-                .any(|c| state.user_by_client.get(c).map(String::as_str) == Some(user_id))
-        })
-    }
-
     /// Drop every subscription `user_id`'s clients hold to `room`, and
     /// return those clients. Called when the user leaves the room (or is
     /// removed from it): a subscription without membership would keep
@@ -477,6 +468,10 @@ pub struct WsClient {
     /// already dropped the client; the reader thread ends the session at
     /// its next iteration and processes no further control messages.
     revoked: std::sync::atomic::AtomicBool,
+    /// The roles the connection's credential itself carries (JWT claims),
+    /// before the active org's role was added. A role refresh starts from
+    /// these, so it replaces the org role and keeps the credential's.
+    base_roles: RwLock<Vec<String>>,
 }
 
 impl WsClient {
@@ -517,9 +512,24 @@ impl Shard {
             auth: RwLock::new(auth),
             token,
             revoked: std::sync::atomic::AtomicBool::new(false),
+            base_roles: RwLock::new(Vec::new()),
         });
         self.clients.lock().unwrap().insert(id, Arc::clone(&handle));
         handle
+    }
+
+    /// A connected client's auth and its credential's own roles.
+    fn auth_and_base_roles(&self, id: u64) -> Option<(pylon_auth::AuthContext, Vec<String>)> {
+        let handle = self.clients.lock().unwrap().get(&id).map(Arc::clone)?;
+        let auth = match handle.auth.read() {
+            Ok(g) => g.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        let base = match handle.base_roles.read() {
+            Ok(g) => g.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        Some((auth, base))
     }
 
     fn remove(&self, id: u64) {
@@ -695,16 +705,6 @@ impl Shard {
     ///
     /// Used by `broadcast_binary_to_authed` (codex P1 — CRDT
     /// subscriptions leaked frames after permission revocation).
-    /// The auth a connected client runs as, or None when it is gone.
-    fn auth_of(&self, id: u64) -> Option<pylon_auth::AuthContext> {
-        let handle = self.clients.lock().unwrap().get(&id).map(Arc::clone)?;
-        let auth = match handle.auth.read() {
-            Ok(g) => g.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        };
-        Some(auth)
-    }
-
     fn filter_binary_recipients(
         &self,
         ids: &[u64],
@@ -981,11 +981,15 @@ impl Shard {
             auth.tenant_id = new_tenant.map(|t| t.to_string());
             // Roles are per-ACTIVE-ORG, so the old org's role must not
             // survive the switch — `enrich_active_org_role` no-ops when
-            // `roles` is already populated, so clear before re-running.
+            // `roles` is already populated, so reset to the credential's
+            // own roles (JWT claims; usually none) before re-running.
             // Skipped when no enricher is installed: clearing without a
             // way to repopulate would only lose information.
             if let Some(enrich) = enrich {
-                auth.roles.clear();
+                auth.roles = match handle.base_roles.read() {
+                    Ok(g) => g.clone(),
+                    Err(poisoned) => poisoned.into_inner().clone(),
+                };
                 enrich(&mut auth);
             }
             updated += 1;
@@ -1196,13 +1200,15 @@ impl WsHub {
 
     /// `auth` with the caller's roles as they are now. A socket keeps the
     /// roles it had when it connected (or last switched org); someone removed
-    /// from an org, or demoted, must not keep a role-gated room on them.
-    ///
-    /// Roles on a socket are the active org's (a tenant switch replaces them
-    /// the same way, see `update_tenant_for_user`), and the enricher only
-    /// fills empty roles, so they are cleared before it runs. Admin and
-    /// API-key identities keep theirs.
-    fn current_auth(&self, auth: &pylon_auth::AuthContext) -> pylon_auth::AuthContext {
+    /// from an org, or demoted, must not keep a role-gated room on them. The
+    /// refresh starts from the credential's own roles (`base_roles`, JWT
+    /// claims) and re-adds the active org's role, as a tenant switch does.
+    /// Admin and API-key identities keep theirs.
+    fn current_auth(
+        &self,
+        auth: &pylon_auth::AuthContext,
+        base_roles: Vec<String>,
+    ) -> pylon_auth::AuthContext {
         let mut fresh = auth.clone();
         let enrich = match self.auth_enricher.lock() {
             Ok(g) => g.clone(),
@@ -1210,7 +1216,7 @@ impl WsHub {
         };
         if let Some(enrich) = enrich {
             if !fresh.is_admin && !fresh.is_api_key_auth() {
-                fresh.roles.clear();
+                fresh.roles = base_roles;
             }
             enrich(&mut fresh);
         }
@@ -1238,10 +1244,12 @@ impl WsHub {
                 return ok;
             }
         }
-        let Some(auth) = self.shards[(id as usize) % NUM_SHARDS].auth_of(id) else {
+        let Some((auth, base_roles)) =
+            self.shards[(id as usize) % NUM_SHARDS].auth_and_base_roles(id)
+        else {
             return false;
         };
-        let auth = self.current_auth(&auth);
+        let auth = self.current_auth(&auth, base_roles);
         let ok = auth.is_unscoped_admin() || self.room_allowed(&auth, room);
         self.room_access_cache
             .lock()
@@ -2239,6 +2247,9 @@ fn run_authenticated_session(
             return;
         }
     };
+    // The credential's own roles (JWT claims), before the org role joins
+    // them: a later role refresh starts from these.
+    let base_roles = auth_ctx.roles.clone();
     // Admin lift + active-org role, as every transport does. Without the
     // role, every `auth.hasAnyRole(...)` read policy denies the broadcast.
     auth.enrich(&mut auth_ctx);
@@ -2254,6 +2265,10 @@ fn run_authenticated_session(
     // front, contradicting the rest of the stack and making the live
     // sync demo silently fall back to no-broadcasts.
     let (client_id, socket_handle) = hub.add_client(ws, auth_ctx.clone(), token);
+    *socket_handle
+        .base_roles
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = base_roles;
 
     // Dual-thread path: spawn the writer thread on the cloned TcpStream.
     // It owns `outbound_rx` and `WebSocket::from_raw_socket`-wraps the
@@ -3826,6 +3841,21 @@ mod tests {
         assert!(!hub.client_may_use_room(0, "@Doc/d1", true));
         // Free rooms are not checked.
         assert!(hub.client_may_use_room(0, "chat-1", true));
+
+        // A JWT's claim roles are the credential's own: a refresh keeps them
+        // (the enricher only fills empty roles) instead of trading them for
+        // an org role.
+        let stream: Box<dyn WsStream> = Box::new(std::io::Cursor::new(Vec::<u8>::new()));
+        let mut jwt = AuthContext::user("bob".into()).with_tenant("org1".into());
+        jwt.roles = vec!["editor".into()];
+        let handle = hub.shards[1].add(
+            1,
+            WebSocket::from_raw_socket(stream, Role::Server, None),
+            jwt,
+            None,
+        );
+        *handle.base_roles.write().unwrap() = vec!["editor".into()];
+        assert!(hub.client_may_use_room(1, "@Doc/d1", true));
     }
 
     #[test]

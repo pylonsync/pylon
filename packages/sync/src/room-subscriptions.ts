@@ -286,11 +286,22 @@ export class RoomSubscriptions {
           _data && typeof _data === "object"
             ? (_data as Record<string, unknown>)
             : undefined;
-        entry.members = entry.members.map((m) =>
-          m.user_id === member.user_id
-            ? { ...m, ...member, ...(presence ? { data: presence } : {}) }
-            : m,
-        );
+        if (entry.members.some((m) => m.user_id === member.user_id)) {
+          entry.members = entry.members.map((m) =>
+            m.user_id === member.user_id
+              ? { ...m, ...member, ...(presence ? { data: presence } : {}) }
+              : m,
+          );
+        } else {
+          // Presence from someone not in the list is in the room: on a
+          // cluster, a leave relayed from one machine can drop a person
+          // still connected through another. Their next presence puts them
+          // back.
+          entry.members = [
+            ...entry.members,
+            { joined_at: "", ...member, ...(presence ? { data: presence } : {}) },
+          ];
+        }
         break;
       }
       case "broadcast": {

@@ -2104,17 +2104,10 @@ pub(crate) fn translate_and_push_room_event(
         // from the local hub at subscribe time.
         _ => return,
     };
-    // Membership is per machine. A leave relayed from another machine, for a
-    // user still connected to the room here, would drop them from the peer
-    // lists of everyone on this machine (later presence cannot add them
-    // back), so it is not passed on.
-    if kind == "leave" && !local {
-        if let Some(user_id) = payload.get("user_id").and_then(|v| v.as_str()) {
-            if ws.room_subscriptions().user_subscribed(room, user_id) {
-                return;
-            }
-        }
-    }
+    // A leave relayed from another machine is passed on even when the user
+    // is still in the room through this machine (membership is per machine
+    // and not shared). Clients put a dropped person back at their next
+    // presence update (sync RoomSubscriptions.applyUpdate).
     ws.push_room_update(room, action, member, data);
     // A member who left (or was removed) stops receiving the room's events:
     // their subscriptions on this machine go with the membership. One whose
@@ -2255,17 +2248,11 @@ mod room_leave_tests {
         let leave = serde_json::json!({ "type": "leave", "room": "room-1", "user_id": "alice" });
         translate_and_push_room_event(&ws, &leave, false);
         assert_eq!(ws.room_subscriptions().subscribers("room-1"), vec![7]);
-        // Nor is the relayed leave passed on while alice is connected here.
         let watcher = 8;
         ws.room_subscriptions()
             .subscribe(watcher, "room-1", Some("bob"));
-        let before = ws.room_subscriptions().subscribers("room-1").len();
-        translate_and_push_room_event(&ws, &leave, false);
-        assert_eq!(ws.room_subscriptions().subscribers("room-1").len(), before);
-        assert!(ws.room_subscriptions().user_subscribed("room-1", "alice"));
         translate_and_push_room_event(&ws, &leave, true);
         assert_eq!(ws.room_subscriptions().subscribers("room-1"), vec![watcher]);
-        assert!(!ws.room_subscriptions().user_subscribed("room-1", "alice"));
     }
 }
 
