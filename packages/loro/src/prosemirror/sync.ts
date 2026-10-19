@@ -38,7 +38,7 @@ import {
   loroUndoPluginKey,
   updateLoroToPmState,
 } from "loro-prosemirror";
-import type { Node } from "prosemirror-model";
+import type { Fragment, Node } from "prosemirror-model";
 import { Plugin, TextSelection, type EditorState, type Transaction } from "prosemirror-state";
 import type { EditorView } from "prosemirror-view";
 
@@ -265,20 +265,7 @@ function applyRemote(
   const next = isEmpty(root)
     ? view.state.schema.topNodeType.createAndFill()!
     : (createNodeFromLoroObj(view.state.schema, root as never, state.mapping as never) as Node);
-  const current = view.state.doc;
-  const start = current.content.findDiffStart(next.content);
-  let tr = view.state.tr;
-  if (start != null) {
-    let { a: endA, b: endB } = current.content.findDiffEnd(next.content)!;
-    // A run of equal content at both ends can make the two ends cross.
-    const overlap = start - Math.min(endA, endB);
-    if (overlap > 0) {
-      endA += overlap;
-      endB += overlap;
-    }
-    tr = tr.replace(start, endA, next.slice(start, endB));
-  }
-  tr = withTopAttrs(tr, next);
+  let tr = withTopAttrs(replaceToMatch(view.state, next), next);
   // Nothing this editor shows changed (an echo, a change elsewhere in the row).
   if (!tr.docChanged) return;
   // A node selection, a cell selection: ProseMirror maps it through the
@@ -310,6 +297,81 @@ function applyRemote(
   tr.setMeta(loroSyncPluginKey, { type: "non-local-updates" });
   tr.setMeta("addToHistory", false);
   view.dispatch(tr);
+}
+
+/**
+ * A transaction that turns the editor's document into `next`'s content,
+ * changing as little as it can so the selection maps through.
+ */
+function replaceToMatch(state: EditorState, next: Node): Transaction {
+  const current = state.doc;
+  const start = current.content.findDiffStart(next.content);
+  if (start == null) return state.tr;
+  let { a: endA, b: endB } = current.content.findDiffEnd(next.content)!;
+  // A run of equal content at both ends can make the two ends cross.
+  const overlap = start - Math.min(endA, endB);
+  if (overlap > 0) {
+    endA += overlap;
+    endB += overlap;
+  }
+  const fine = state.tr.replace(start, endA, next.slice(start, endB));
+  if (fine.doc.content.eq(next.content)) return fine;
+  // ProseMirror fits a slice into the place it goes, and it does not join
+  // across isolating nodes (a table's cells): the fitted result can differ
+  // from `next`. Replace whole nodes instead, as deep as the change allows,
+  // so positions in the nodes around it still map.
+  const exact = replaceChangedNodes(state, next);
+  if (exact.doc.content.eq(next.content)) return exact;
+  return state.tr.replaceWith(0, current.content.size, next.content);
+}
+
+/**
+ * Replace the nodes that differ between the editor's document and `next`,
+ * looking inside each one that keeps its type and attributes, so nodes
+ * that did not change keep their positions (and a selection on them).
+ */
+function replaceChangedNodes(state: EditorState, next: Node): Transaction {
+  const tr = state.tr;
+  replaceChangedChildren(tr, state.doc.content, next.content, 0);
+  return tr;
+}
+
+/**
+ * Turn fragment `a`, which starts at `offset` in `tr.doc`, into `b`. Works
+ * from the end, so positions before each change still hold.
+ */
+function replaceChangedChildren(tr: Transaction, a: Fragment, b: Fragment, offset: number): void {
+  let first = 0;
+  while (first < a.childCount && first < b.childCount && a.child(first).eq(b.child(first))) first++;
+  let endA = a.childCount;
+  let endB = b.childCount;
+  while (endA > first && endB > first && a.child(endA - 1).eq(b.child(endB - 1))) {
+    endA--;
+    endB--;
+  }
+  let from = offset;
+  for (let i = 0; i < first; i++) from += a.child(i).nodeSize;
+  let to = from;
+  for (let i = first; i < endA; i++) to += a.child(i).nodeSize;
+  // Children that pair up one to one: each changed one on its own. (The
+  // caller checks the result; a step ProseMirror has to fit falls back.)
+  if (endA - first === endB - first) {
+    let end = to;
+    for (let i = endA - 1; i >= first; i--) {
+      const x = a.child(i);
+      const y = b.child(i);
+      const start = end - x.nodeSize;
+      if (!x.eq(y)) {
+        if (!x.isLeaf && x.sameMarkup(y)) replaceChangedChildren(tr, x.content, y.content, start + 1);
+        else tr.replaceWith(start, end, y);
+      }
+      end = start;
+    }
+    return;
+  }
+  const nodes: Node[] = [];
+  for (let i = first; i < endB; i++) nodes.push(b.child(i));
+  tr.replaceWith(from, to, nodes);
 }
 
 /**

@@ -7,11 +7,11 @@ if (!globalThis.document) GlobalRegistrator.register();
 import { afterEach, describe, expect, test } from "bun:test";
 import { LoroDoc, LoroList, LoroMap, type ContainerID } from "loro-crdt";
 import { undo } from "loro-prosemirror";
-import { Schema } from "prosemirror-model";
+import { type Node, Schema } from "prosemirror-model";
 import { schema as basic } from "prosemirror-schema-basic";
-import { EditorState, TextSelection } from "prosemirror-state";
+import { EditorState, NodeSelection, TextSelection } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
-import { configureProseMirrorMarks, findProseMirrorContainer } from "./index";
+import { configureProseMirrorMarks, findProseMirrorContainer, writeProseMirror } from "./index";
 import { ProseMirrorSyncPlugin, ProseMirrorUndoPlugin } from "./sync";
 
 const defaultSchema = new Schema({ nodes: basic.spec.nodes, marks: basic.spec.marks });
@@ -312,12 +312,118 @@ describe("ProseMirrorSyncPlugin review fixes", () => {
     type(a, "pic ");
     a.dispatch(a.state.tr.insert(5, defaultSchema.node("image", { src: "x.png" })));
     sync();
-    const { NodeSelection } = await import("prosemirror-state");
     b.dispatch(b.state.tr.setSelection(NodeSelection.create(b.state.doc, 5)));
     caretAt(a, 1);
     type(a, "A ");
     sync();
     expect(b.state.selection).toBeInstanceOf(NodeSelection);
     expect((b.state.selection as InstanceType<typeof NodeSelection>).node.type.name).toBe("image");
+  });
+});
+
+describe("ProseMirrorSyncPlugin with nested nodes", () => {
+  // A table's rows and cells, with prosemirror-tables' content rules.
+  const tableSchema = new Schema({
+    nodes: {
+      doc: { content: "block+" },
+      paragraph: { group: "block", content: "inline*", toDOM: () => ["p", 0] },
+      table: { group: "block", content: "row+", toDOM: () => ["table", ["tbody", 0]] },
+      row: { content: "cell*", toDOM: () => ["tr", 0] },
+      cell: { content: "block+", isolating: true, toDOM: () => ["td", 0] },
+      text: { group: "inline" },
+    },
+  });
+  const p = (t: string) => tableSchema.node("paragraph", null, t ? [tableSchema.text(t)] : []);
+  const table = (rows: string[][]) =>
+    tableSchema.node(
+      "table",
+      null,
+      rows.map((r) => tableSchema.node("row", null, r.map((c) => tableSchema.node("cell", null, [p(c)])))),
+    );
+  const doc = (rows: string[][]) => tableSchema.node("doc", null, [p("Owners"), table(rows)]);
+
+  // A model streaming a table: each write is the whole document again. Here
+  // the next write fills the first cell and the second. The smallest
+  // replace runs from inside one cell into the next, and ProseMirror does
+  // not join across isolating cells: the row got a fourth cell.
+  test("a document rewritten through a table reaches the editor exactly", async () => {
+    const { a, docs } = setup({ schema: tableSchema });
+    await tick();
+    const steps = [
+      doc([["Area", "Owner", "Due"], ["Rele", "", ""]]),
+      doc([["Area", "Owner", "Due"], ["Release notes", "Ben", ""]]),
+      doc([["Area", "Owner", "Due"], ["Release notes", "Ben", "Oct 25"], ["Sup", "", ""]]),
+      doc([["Area", "Owner", "Due"], ["Release notes", "Ben", "Oct 25"], ["Support inbox", "TBD", "Oct 26"]]),
+    ];
+    for (const next of steps) {
+      writeProseMirror(docs[1]!, "body", tableSchema, next);
+      docs[1]!.commit();
+      docs[0]!.import(docs[1]!.export({ mode: "update", from: docs[0]!.oplogVersion() }));
+      await tick();
+      expect(a.state.doc.toJSON()).toEqual(next.toJSON());
+    }
+  });
+
+  test("a selected cell the change does not touch stays selected", async () => {
+    const { a, docs } = setup({ schema: tableSchema });
+    await tick();
+    const write = async (next: Node) => {
+      writeProseMirror(docs[1]!, "body", tableSchema, next);
+      docs[1]!.commit();
+      docs[0]!.import(docs[1]!.export({ mode: "update", from: docs[0]!.oplogVersion() }));
+      await tick();
+    };
+    await write(doc([["Area", "Owner", "Due"], ["Rele", "", ""]]));
+    let areaCell = -1;
+    a.state.doc.descendants((node, pos) => {
+      if (areaCell < 0 && node.type.name === "cell") areaCell = pos;
+    });
+    a.dispatch(a.state.tr.setSelection(NodeSelection.create(a.state.doc, areaCell)));
+    await write(doc([["Area", "Owner", "Due"], ["Release notes", "Ben", ""]]));
+    expect(a.state.selection).toBeInstanceOf(NodeSelection);
+    expect(a.state.selection.from).toBe(areaCell);
+    expect((a.state.selection as InstanceType<typeof NodeSelection>).node.textContent).toBe("Area");
+  });
+
+  test("a selected paragraph keeps its selection when the cells around it change", async () => {
+    const { a, docs } = setup({ schema: tableSchema });
+    await tick();
+    const cells = (first: string, second: string) =>
+      tableSchema.node("doc", null, [
+        tableSchema.node("table", null, [
+          tableSchema.node("row", null, [
+            tableSchema.node("cell", null, [p("Keep"), p(first)]),
+            tableSchema.node("cell", null, [p(second)]),
+          ]),
+        ]),
+      ]);
+    const write = async (next: Node) => {
+      writeProseMirror(docs[1]!, "body", tableSchema, next);
+      docs[1]!.commit();
+      docs[0]!.import(docs[1]!.export({ mode: "update", from: docs[0]!.oplogVersion() }));
+      await tick();
+    };
+    await write(cells("Rele", ""));
+    // doc > table > row > cell > the "Keep" paragraph.
+    a.dispatch(a.state.tr.setSelection(NodeSelection.create(a.state.doc, 3)));
+    await write(cells("Release notes", "Ben"));
+    expect(a.state.doc.toJSON()).toEqual(cells("Release notes", "Ben").toJSON());
+    expect(a.state.selection).toBeInstanceOf(NodeSelection);
+    expect((a.state.selection as InstanceType<typeof NodeSelection>).node.textContent).toBe("Keep");
+  });
+
+  test("typing in a paragraph still maps the selection, not the whole block", async () => {
+    const { a, b, sync } = setup({ schema: tableSchema });
+    await tick();
+    b.dispatch(b.state.tr.replaceWith(0, b.state.doc.content.size, doc([["x", "y", "z"]]).content));
+    sync();
+    await tick();
+    // Ada's caret after "Own".
+    a.dispatch(a.state.tr.setSelection(TextSelection.create(a.state.doc, 4)));
+    b.dispatch(b.state.tr.insertText("The ", 1));
+    sync();
+    await tick();
+    expect(a.state.doc.child(0).textContent).toBe("The Owners");
+    expect(a.state.selection.from).toBe(8);
   });
 });
