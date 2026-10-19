@@ -5253,9 +5253,23 @@ pub struct FnOpsImpl {
     pub plugins: Arc<pylon_plugin::PluginRegistry>,
     /// The shards `ctx.shards.send` from a mutation reaches after COMMIT.
     pub shards: Option<Arc<crate::shard_wasm::WasmShardHost>>,
+    /// This value, for registering job handlers when the definitions
+    /// change. Set once, right after construction.
+    this: std::sync::OnceLock<std::sync::Weak<FnOpsImpl>>,
 }
 
 impl FnOpsImpl {
+    /// Replace the function definitions with a freshly loaded set, and give
+    /// every function a job handler, so `ctx.scheduler.runAfter` reaches a
+    /// function added since boot (a `pylon dev` reload, a respawn).
+    /// Replace, not merge: deleted functions must stop being callable.
+    fn replace_definitions(&self, defs: Vec<FnDef>) {
+        self.registry.replace_all(defs);
+        if let Some(ops) = self.this.get().and_then(std::sync::Weak::upgrade) {
+            register_function_job_handlers(&ops, &self.job_queue);
+        }
+    }
+
     /// Write the audit events a committed mutation buffered.
     fn flush_audits(&self, events: Vec<pylon_auth::audit::AuditEvent>) {
         if events.is_empty() {
@@ -5807,7 +5821,7 @@ impl pylon_router::FnOps for FnOpsImpl {
         }
         let defs = latest.unwrap_or_default();
         let count = defs.len();
-        self.registry.replace_all(defs);
+        self.replace_definitions(defs);
         Ok(count)
     }
 
@@ -6620,7 +6634,9 @@ pub fn try_spawn_functions(
         audit: std::sync::OnceLock::new(),
         plugins,
         shards: shards.clone(),
+        this: std::sync::OnceLock::new(),
     });
+    let _ = ops.this.set(Arc::downgrade(&ops));
 
     // A shard kind's `onStop` function runs as a job when one of its
     // shards ends on this machine.
@@ -8650,7 +8666,7 @@ fn respawn_runner(
             // Replace, not merge — deleted functions must stop being callable.
             // register_all() alone leaves stale entries from the previous
             // process generation.
-            ops.registry.replace_all(defs);
+            ops.replace_definitions(defs);
             tracing::warn!("[functions] Respawned Bun runtime [{idx}/{pool_size}] ({count} fn(s))");
             *backoff = Duration::from_secs(1);
         }
