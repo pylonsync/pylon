@@ -9,7 +9,15 @@ import {
 	useRef,
 	useState,
 } from "react";
-import { uploadFile, type FileVisibility, type UploadedFile } from "@pylonsync/react";
+import {
+	queueUpload,
+	uploadFile,
+	useOutbox,
+	type FileVisibility,
+	type QueuedUploadHandle,
+	type UploadAttachTarget,
+	type UploadedFile,
+} from "@pylonsync/react";
 import { cn } from "../lib/cn";
 
 export interface FileUploadProps {
@@ -28,6 +36,21 @@ export interface FileUploadProps {
 	 * only. "public": anyone, for content every visitor sees.
 	 */
 	visibility?: FileVisibility;
+	/**
+	 * Keep each file on the device and upload it when there is a network
+	 * (`queueUpload`), instead of uploading now. Needs `attach`.
+	 */
+	offline?: boolean;
+	/**
+	 * With `offline`: the record each file belongs to and the field that
+	 * gets its id (and `urlField`, its URL). A function is called once per
+	 * file, for example to insert a row per photo and return its target.
+	 */
+	attach?:
+		| UploadAttachTarget
+		| ((file: File) => UploadAttachTarget | Promise<UploadAttachTarget>);
+	/** With `offline`: called once for each file kept on the device. */
+	onQueued?: (queued: QueuedUploadHandle, source: File) => void;
 	/** Override the headline. */
 	label?: ReactNode;
 	/** Override the helper text. */
@@ -40,12 +63,18 @@ export interface FileUploadResult {
 	status: "ok" | "error";
 	uploaded?: UploadedFile;
 	error?: string;
+	/** With `offline`: the queued upload. */
+	queued?: QueuedUploadHandle;
 }
 
 /**
  * Drop-in drag-and-drop file picker. Uploads each file with `uploadFile`
  * (init, PUT, confirm), shows per-file progress and errors, and emits
  * `onUploaded` as each file lands.
+ *
+ * With `offline` and `attach`, each file is kept on the device with
+ * `queueUpload` and shown from there at once; it uploads when there is a
+ * network and is then set on its record.
  *
  * Pure UI shell — no provider configuration of its own. Pylon's file
  * router handles where bytes actually go (local disk for self-host,
@@ -58,6 +87,9 @@ export function FileUpload({
 	multiple,
 	maxSizeBytes,
 	visibility,
+	offline,
+	attach,
+	onQueued,
 	label = "Drop files to upload",
 	helperText = "or click to browse",
 	className,
@@ -86,6 +118,30 @@ export function FileUpload({
 				initial.map(async (entry) => {
 					if (entry.status === "error") return entry;
 					try {
+						if (offline) {
+							if (!attach) throw new Error("FileUpload offline needs attach");
+							const target =
+								typeof attach === "function" ? await attach(entry.file) : attach;
+							const queued = await queueUpload(entry.file, {
+								attach: target,
+								visibility,
+							});
+							onQueued?.(queued, entry.file);
+							const result: FileUploadResult = { ...entry, queued };
+							queued.done.then(
+								(uploaded) => {
+									// Also seen by the batch update below when the
+									// upload beats it.
+									result.uploaded = uploaded;
+									onUploaded?.(uploaded, entry.file);
+									setItems((prev) =>
+										prev.map((r) => (r.file === entry.file ? { ...r, uploaded } : r)),
+									);
+								},
+								() => {},
+							);
+							return result;
+						}
 						const uploaded = await uploadFile(entry.file, { visibility });
 						onUploaded?.(uploaded, entry.file);
 						return { ...entry, uploaded } satisfies FileUploadResult;
@@ -110,7 +166,7 @@ export function FileUpload({
 			});
 			onComplete?.(settled);
 		},
-		[maxSizeBytes, onComplete, onUploaded, visibility],
+		[attach, maxSizeBytes, offline, onComplete, onQueued, onUploaded, visibility],
 	);
 
 	function onDrop(e: DragEvent<HTMLDivElement>) {
@@ -170,7 +226,14 @@ export function FileUpload({
 							key={`${item.file.name}-${i}`}
 							className="flex items-center justify-between gap-3 px-3 py-2 text-sm"
 						>
-							<span className="min-w-0">
+							{item.queued?.localUrl && item.file.type.startsWith("image/") ? (
+								<img
+									src={item.queued.localUrl}
+									alt=""
+									className="h-10 w-10 flex-none rounded object-cover"
+								/>
+							) : null}
+							<span className="min-w-0 flex-1">
 								<span className="block truncate font-medium text-[var(--pylon-ink,#0a0a0a)]">
 									{item.file.name}
 								</span>
@@ -188,7 +251,30 @@ export function FileUpload({
 	);
 }
 
+function QueuedStatus({ result }: { result: FileUploadResult }) {
+	const { failed } = useOutbox();
+	const failure = failed.find((f) => f.id === result.queued?.localId);
+	if (failure) {
+		return (
+			<span
+				title={failure.error}
+				className="rounded-md bg-[var(--pylon-error-bg,#fef2f2)] px-2 py-0.5 text-[11px] font-medium text-[var(--pylon-error-ink,#b91c1c)]"
+			>
+				Failed
+			</span>
+		);
+	}
+	return (
+		<span className="text-[11px] text-[var(--pylon-ink-3,#71717a)]">
+			Waiting to upload
+		</span>
+	);
+}
+
 function UploadStatus({ result }: { result: FileUploadResult }) {
+	if (result.queued && !result.uploaded && result.status !== "error") {
+		return <QueuedStatus result={result} />;
+	}
 	if (result.uploaded) {
 		return (
 			<span className="rounded-md bg-[var(--pylon-paper-2,#f4f4f5)] px-2 py-0.5 text-[11px] font-medium text-[var(--pylon-ink-2,#52525b)]">

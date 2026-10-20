@@ -97,6 +97,8 @@ export interface MultiTabOrchestratorHooks {
   onMutationsQueued(opIds: string[]): void;
   /** Another tab retried or dismissed these failed writes. */
   onMutationsRemoved(opIds: string[]): void;
+  /** Another tab changed the upload queue in storage. */
+  onUploadsChanged(): void;
   /** Leader → follower: a binary frame from the WS. Engine routes
    *  to its local binary handlers. */
   onBinaryReceived(bytes: Uint8Array): void;
@@ -404,6 +406,10 @@ export class MultiTabOrchestrator {
       case "mutations-queued": {
         const opIds = msg.opIds as string[] | undefined;
         if (Array.isArray(opIds)) this.hooks.onMutationsQueued(opIds);
+        break;
+      }
+      case "uploads-changed": {
+        this.hooks.onUploadsChanged();
         break;
       }
       case "mutations-removed": {

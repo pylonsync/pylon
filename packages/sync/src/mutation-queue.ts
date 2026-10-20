@@ -80,8 +80,11 @@ export interface OutboxItem {
   id: string;
   entity: string;
   rowId: string;
-  kind: "insert" | "update" | "delete";
-  /** The fields the write sets. Empty for a delete. */
+  /** `"upload"` is a file from `queueUpload`; `entity`/`rowId` is the
+   *  record it attaches to. */
+  kind: "insert" | "update" | "delete" | "upload";
+  /** The fields the write sets. Empty for a delete. For an upload:
+   *  `field`, `urlField`, `filename`, `contentType`, `size`. */
   data: Row;
   /** When the write was made, in ms since the epoch (0 when unknown). */
   createdAt: number;

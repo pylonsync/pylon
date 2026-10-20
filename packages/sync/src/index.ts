@@ -22,9 +22,19 @@ import {
   MutationRejectedError,
   toOutboxItem,
   type Outbox,
+  type OutboxItem,
   type PendingMutation,
 } from "./mutation-queue";
 import { MultiTabOrchestrator } from "./multi-tab-orchestrator";
+import {
+  IndexedDBUploadStore,
+  UploadManager,
+  uploadOutboxItem,
+  type QueuedUpload,
+  type QueuedUploadHandle,
+  type UploadAttachTarget,
+} from "./upload-queue";
+import type { FileVisibility } from "./upload";
 import { OpQueue } from "./op-queue";
 import {
   RoomSubscriptions,
@@ -80,6 +90,25 @@ export {
  *  OUTBOX_CHANNEL)` hears outbox changes and no entity changes. */
 export const OUTBOX_CHANNEL = "$outbox";
 export { generateId } from "./ids";
+export {
+  uploadBytes,
+  type FileVisibility,
+  type UploadBytesOptions,
+  type UploadedFile,
+} from "./upload";
+export {
+  DEFAULT_MAX_QUEUED_UPLOAD_BYTES,
+  IndexedDBUploadStore,
+  LOCAL_FILE_PREFIX,
+  localUploadId,
+  MemoryUploadStore,
+  UploadQueueFullError,
+  UploadRejectedError,
+  type QueuedUpload,
+  type QueuedUploadHandle,
+  type UploadAttachTarget,
+  type UploadStore,
+} from "./upload-queue";
 export type {
   ChangeEvent,
   ClientChange,
@@ -217,6 +246,9 @@ export interface SyncEngineConfig {
    * its own leader (the pre-multi-tab semantics).
    */
   multiTab?: boolean;
+  /** Cap on the bytes `queueUpload` keeps on the device. Default 200 MB.
+   *  Past it `queueUpload` throws `UploadQueueFullError`. */
+  maxQueuedUploadBytes?: number;
 }
 
 /**
@@ -396,6 +428,8 @@ export class SyncEngine {
 
   readonly store: LocalStore;
   readonly mutations: MutationQueue;
+  /** Files queued with `queueUpload`, sent when there is a network. */
+  readonly uploads: UploadManager;
 
   /**
    * Stable per-client identifier. Minted on first construction, not
@@ -617,7 +651,8 @@ export class SyncEngine {
     return this.mutations.pending().length;
   }
 
-  private outboxCache: { version: number; value: Outbox } | null = null;
+  private outboxCache: { version: number; uploadVersion: number; value: Outbox } | null =
+    null;
 
   /**
    * Writes made here that the server has not applied yet (`pending`:
@@ -629,14 +664,27 @@ export class SyncEngine {
    */
   outbox(): Outbox {
     const version = this.mutations.version();
-    if (this.outboxCache && this.outboxCache.version === version) {
+    const uploadVersion = this.uploads.version();
+    if (
+      this.outboxCache &&
+      this.outboxCache.version === version &&
+      this.outboxCache.uploadVersion === uploadVersion
+    ) {
       return this.outboxCache.value;
     }
+    const uploads = this.uploads.list();
+    const byTime = (a: OutboxItem, b: OutboxItem) => a.createdAt - b.createdAt;
     const value: Outbox = {
-      pending: byCreatedAt(this.mutations.pending().slice()).map(toOutboxItem),
-      failed: this.mutations.failed().map(toOutboxItem),
+      pending: [
+        ...byCreatedAt(this.mutations.pending().slice()).map(toOutboxItem),
+        ...uploads.filter((u) => u.status === "pending").map(uploadOutboxItem),
+      ].sort(byTime),
+      failed: [
+        ...this.mutations.failed().map(toOutboxItem),
+        ...uploads.filter((u) => u.status === "failed").map(uploadOutboxItem),
+      ].sort(byTime),
     };
-    this.outboxCache = { version, value };
+    this.outboxCache = { version, uploadVersion, value };
     return value;
   }
 
@@ -655,6 +703,11 @@ export class SyncEngine {
    * signed in (or the write predates owner tracking). Dismiss those.
    */
   async retryWrite(id: string, data?: Row): Promise<string> {
+    if (this.uploads.get(id)) {
+      // An upload is sent as it was queued; `data` does not apply.
+      await this.uploads.retry(id);
+      return id;
+    }
     const m = this.mutations.get(id);
     if (!m || m.status !== "failed") {
       throw new Error(`retryWrite: no failed write with id ${id}`);
@@ -701,9 +754,43 @@ export class SyncEngine {
    *  was already rolled back. Returns false when there is no failed write
    *  with that id; a pending write cannot be dismissed. */
   dismissWrite(id: string): boolean {
+    if (this.uploads.get(id)) return this.uploads.dismiss(id);
     if (!this.mutations.dismiss(id)) return false;
     this.broadcastToTabs({ type: "mutations-removed", opIds: [id] });
     return true;
+  }
+
+  /**
+   * Keep a file on the device and upload it when there is a network, then
+   * set it on the record it belongs to. Returns at once.
+   *
+   * At once, `attach.entity`/`attach.id` gets `attach.field` (and
+   * `attach.urlField`, when given) = `local:<localId>` as a queued write,
+   * so the record shows the file from the device (`uploadLocalUrl`). When
+   * the upload finishes, a second queued write sets the file's id (and
+   * URL). Both are ordinary writes: policies and owner rules apply.
+   *
+   * The file is sent only as the user who queued it. Throws
+   * `UploadQueueFullError` past `maxQueuedUploadBytes`. Pending and failed
+   * uploads show in `outbox()` with kind `"upload"`; retry and dismiss them
+   * with `retryWrite` / `dismissWrite`.
+   */
+  queueUpload(
+    file: Blob,
+    opts: {
+      attach: UploadAttachTarget;
+      filename?: string;
+      contentType?: string;
+      visibility?: FileVisibility;
+    },
+  ): Promise<QueuedUploadHandle> {
+    return this.uploads.enqueue(file, opts);
+  }
+
+  /** An object URL for a queued file (`local:<localId>` without the
+   *  prefix), or null when no queued upload has that id. */
+  uploadLocalUrl(localId: string): string | null {
+    return this.uploads.localUrl(localId);
   }
 
   /** Apply the queued writes to the replica again after a reload. An
@@ -735,6 +822,8 @@ export class SyncEngine {
     if (this._connectionStatus === next) return;
     this._connectionStatus = next;
     this.store.notify();
+    // Back online: send the files queued while offline.
+    if (next === "connected") void this.uploads.process();
   }
 
   /** Sync key-value adapter for hot-path state (token, client_id). */
@@ -745,6 +834,29 @@ export class SyncEngine {
     this.store = new LocalStore();
     this.mutations = new MutationQueue();
     this.mutations.setChangeListener(() => this.store.notify(OUTBOX_CHANNEL));
+    this.uploads = new UploadManager(
+      {
+        transport: () => ({
+          baseUrl: this.config.baseUrl,
+          getToken: () => this.currentToken() ?? undefined,
+        }),
+        currentOwner: () =>
+          this.identityPending || !this.session.hasObserved()
+            ? undefined
+            : this.session.resolved().userId,
+        ownerForNewUpload: () => this.currentOwner(),
+        isLeader: () => this.isMultiTabLeader,
+        isRunning: () => this.running,
+        update: (entity, id, patch) => {
+          // An ordinary queued write: its outcome shows in the outbox.
+          this.update(entity, id, patch).catch(() => {});
+        },
+        changed: () => this.store.notify(OUTBOX_CHANNEL),
+        broadcast: () => this.broadcastToTabs({ type: "uploads-changed" }),
+        later: (ms, fn) => this.later(ms, fn),
+      },
+      config.maxQueuedUploadBytes,
+    );
     this.storage = config.storage ?? defaultStorage();
     this.clientId = generateClientId(this.storage);
     // ServerSubscriptions defers sending until the WS is open (the
@@ -946,6 +1058,8 @@ export class SyncEngine {
             this.mutations.attachPersistence(mqPersistence);
             await this.mutations.hydrate();
             this.reapplyPendingWrites();
+            // Queued files live in their own database (see upload-queue.ts).
+            await this.uploads.attachStore(new IndexedDBUploadStore(this.config.appName));
           }
           // The hydrated offline writes are drained in the leader path
           // below (after `initMultiTab` settles), NOT here. We're still
@@ -1077,6 +1191,9 @@ export class SyncEngine {
     // initial-sync signal on completion (leader path), so useQuery's loading
     // drops here on the normal fast path and the start() fallback is cancelled.
     await this.pull();
+
+    // Files queued in an earlier run (or by a tab that closed).
+    void this.uploads.process();
 
     // Save cursor after pull. Fire-and-forget on bootstrap — the
     // enqueueApply path already persists per-batch as pull lands rows,
@@ -1224,6 +1341,11 @@ export class SyncEngine {
         // The leader's push failed transiently; the writes stay queued
         // and the leader retries them. Release this tab's callers.
         for (const id of opIds) this.mutations.settleQueued(id);
+      },
+      onUploadsChanged: () => {
+        void this.uploads.reload().then(() => {
+          if (this.isMultiTabLeader) return this.uploads.process();
+        });
       },
       onMutationsRemoved: (opIds: string[]) => {
         // Another tab retried (under a new op id) or dismissed these
@@ -3105,6 +3227,15 @@ export class SyncEngine {
         this.identityRetryAttempts = 0;
         if ((wasPending || userFlipped) && this.mutations.pending().length > 0) {
           void this.push();
+        }
+        // Uploads follow the same owner rule: stamp the ones made before
+        // the session was known, then send (or, for another user's,
+        // discard) what is queued.
+        if (wasPending || userFlipped) {
+          const stamp = firstResolution
+            ? this.uploads.stampPendingOwner(next.userId)
+            : Promise.resolve();
+          void stamp.then(() => this.uploads.process());
         }
       }
       if (verdict.identityChanged || firstResolution) {

@@ -221,6 +221,9 @@ export class TestServer {
    *  answers. Lets a test queue a write while a push is in flight. */
   pushGate: Promise<void> | null = null;
 
+  /** The file endpoints (`/api/files/init`, PUT, `/api/files/confirm`). */
+  readonly files = new TestFileServer(this);
+
   /** Entities whose pushed writes are rejected per op, like a write
    *  policy denial on the real server (HTTP 200 with a per-op error). */
   private deniedWrites = new Map<string, { code: string; message: string }>();
@@ -588,5 +591,72 @@ export class TestServer {
         sub(projected as unknown as Record<string, unknown>);
       }
     }
+  }
+}
+
+/**
+ * In-memory stand-in for the runtime's file routes. Records every request
+ * so a test can count uploads, and lets a test refuse a file (`rejectInit`)
+ * or drop the connection during the next PUT (`dropNextPut`).
+ */
+export class TestFileServer {
+  private nextId = 1;
+  private slots = new Map<string, { owner: string | null; filename: string; size: number; bytes?: number }>();
+  readonly stored = new Map<string, { filename: string; size: number; owner: string | null }>();
+  initCount = 0;
+  putCount = 0;
+  private rejection: { status: number; code: string; message: string } | null = null;
+  private dropPut = false;
+
+  constructor(private readonly server: TestServer) {}
+
+  /** Refuse every init with this status, like a type or size check. */
+  rejectInit(status: number, code: string, message: string): void {
+    this.rejection = { status, code, message };
+  }
+  clearRejection(): void {
+    this.rejection = null;
+  }
+  /** When set, every PUT waits for it before it answers. */
+  putGate: Promise<void> | null = null;
+  /** The next PUT fails like a dropped connection (no status). */
+  dropNextPut(): void {
+    this.dropPut = true;
+  }
+
+  init(token: string | undefined, body: { filename?: string; size?: number }) {
+    this.initCount += 1;
+    if (this.rejection) {
+      const r = this.rejection;
+      return { status: r.status, body: { error: { code: r.code, message: r.message } } };
+    }
+    const id = `f_${this.nextId++}`;
+    const owner = this.server.authContextFor(token).userId;
+    this.slots.set(id, { owner, filename: body.filename ?? "upload", size: body.size ?? 0 });
+    return { status: 200, body: { uploadUrl: `/api/files/local-put/${id}`, assetId: id } };
+  }
+
+  put(id: string, bytes: unknown) {
+    this.putCount += 1;
+    if (this.dropPut) {
+      this.dropPut = false;
+      throw new TypeError("simulated dropped connection during upload");
+    }
+    const slot = this.slots.get(id);
+    if (!slot) return { status: 404, body: { error: { code: "NOT_FOUND" } } };
+    slot.bytes = bytes instanceof ArrayBuffer ? bytes.byteLength : slot.size;
+    return { status: 200, body: null };
+  }
+
+  confirm(token: string | undefined, id: string) {
+    const slot = this.slots.get(id);
+    if (!slot || slot.bytes === undefined) {
+      return { status: 400, body: { error: { code: "NOT_UPLOADED" } } };
+    }
+    if (slot.owner !== this.server.authContextFor(token).userId) {
+      return { status: 403, body: { error: { code: "FORBIDDEN" } } };
+    }
+    this.stored.set(id, { filename: slot.filename, size: slot.bytes, owner: slot.owner });
+    return { status: 200, body: { id, url: `/api/files/${id}`, size: slot.bytes } };
   }
 }

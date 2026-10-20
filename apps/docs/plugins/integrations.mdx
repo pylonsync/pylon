@@ -89,6 +89,8 @@ const photo = await uploadFile(file, { visibility: "public" });
 await db.insert("Post", { imageUrl: photo.url, caption });
 ```
 
+`uploadFile` needs the network for all three steps. For a file taken where there may be none, use `queueUpload`: it keeps the file on the device and uploads it later. See [Offline apps](/ssr/offline#photos-taken-offline).
+
 ### Visibility
 
 `visibility` on `/api/files/init` decides who can read the file through `GET /api/files/<id>` on backends that track ownership (local disk, a private S3 bucket):

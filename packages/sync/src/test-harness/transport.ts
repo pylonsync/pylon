@@ -374,6 +374,23 @@ async function handle(
     };
   }
 
+  // File uploads: /api/files/init, the PUT to the returned URL, and
+  // /api/files/confirm (see TestServer.files).
+  if (url.endsWith("/api/files/init") && method === "POST") {
+    const body = typeof _init?.body === "string" ? JSON.parse(_init.body) : {};
+    return server.files.init(token, body);
+  }
+  const put = url.match(/\/api\/files\/local-put\/([^/?]+)$/);
+  if (put && method === "PUT") {
+    const bytes = _init?.body instanceof Blob ? await _init.body.arrayBuffer() : _init?.body;
+    if (server.files.putGate) await server.files.putGate;
+    return server.files.put(put[1]!, bytes);
+  }
+  if (url.endsWith("/api/files/confirm") && method === "POST") {
+    const body = typeof _init?.body === "string" ? JSON.parse(_init.body) : {};
+    return server.files.confirm(token, body.assetId);
+  }
+
   // Anything else: 404 with a clear error so test failures point
   // at the exact missing route rather than a generic JSON parse.
   return {

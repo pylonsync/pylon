@@ -166,6 +166,10 @@ function SyncStatus() {
 - `retry(id, data?)`: applies the write again and sends it, with `data` merged over its fields. It rejects with a `MutationRejectedError` when the server rejects it again, or when another user is signed in.
 - `dismiss(id)`: drops a failed write.
 
+### `queueUpload` and `useFileUrl` — photos taken offline
+
+`queueUpload(file, { attach })` keeps a file on the device and uploads it when there is a network, then sets it on its record. `useFileUrl(value)` shows a `local:` value from the copy on the device. See [Offline apps](/ssr/offline#photos-taken-offline).
+
 ### `db.useSearch` — live faceted search
 
 ```tsx

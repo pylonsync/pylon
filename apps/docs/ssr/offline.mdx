@@ -115,6 +115,55 @@ Rows written offline stay on screen after the app restarts. The sync engine appl
 
 When two people edit the same field of one row offline, the server keeps the edit that arrives last. Both writes succeed, so neither person is told. Edits to different fields of the row are both kept.
 
+## Photos taken offline
+
+`uploadFile` needs the network. `queueUpload` keeps the file on the device and returns at once. The leader tab uploads queued files one at a time when there is a network, then sets the file on its record.
+
+```tsx
+import { db, queueUpload, useFileUrl } from "@pylonsync/react";
+
+async function addPhoto(leadId: string, file: File) {
+  const photoId = await db.insert("Photo", { leadId, fileId: null, url: null });
+  await queueUpload(file, {
+    attach: { entity: "Photo", id: photoId, field: "fileId", urlField: "url" },
+  });
+}
+
+function PhotoThumb({ photo }: { photo: { url: string | null } }) {
+  const src = useFileUrl(photo.url);
+  return src ? <img src={src} alt="" /> : <div className="placeholder" />;
+}
+```
+
+1. `queueUpload` stores the file in IndexedDB.
+2. It sets `field` and `urlField` on the record to `local:<localId>` with a queued write. `useFileUrl` shows a `local:` value from the copy on the device.
+3. When the upload finishes, a second queued write sets `field` to the file id and `urlField` to the file URL.
+
+Both changes to the record are ordinary writes, so the entity's policies apply. Insert one row per photo to keep several photos on one record.
+
+The rules:
+
+- A file is uploaded only as the user who queued it. When another user signs in, the queued file is discarded.
+- A file the server refuses (type, size, policy) stays in the outbox as a failed write with `kind: "upload"`. It is not sent again until you retry it. Retry and dismiss it like any failed write.
+- A dropped connection leaves the file queued. It is sent again on the next reconnect.
+- The queue holds at most 200 MB (`maxQueuedUploadBytes` on the sync engine). Past that, `queueUpload` throws `UploadQueueFullError`.
+- Another device sees `local:<localId>` until the upload finishes. `useFileUrl` returns `null` for it.
+
+`<FileUpload offline attach={...} />` in `@pylonsync/client` does the same for a file picker. Give `attach` as a function to insert a row per file:
+
+```tsx
+<FileUpload
+  offline
+  accept="image/*"
+  attach={async () => ({
+    entity: "Photo",
+    id: await db.insert("Photo", { leadId, fileId: null, url: null }),
+    field: "fileId",
+    urlField: "url",
+  })}
+/>
+```
+
 ## New deploys
 
 Each build gets a new worker with its own caches. The new worker installs in the background and waits. It takes over on the next launch, when every tab of the app is closed. Then it deletes the caches of the old build. A deploy never changes the code of a page that is open.

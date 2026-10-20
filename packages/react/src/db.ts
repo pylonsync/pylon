@@ -3,6 +3,11 @@
 import { SyncEngine, createSyncEngine, type Row, type SyncEngineConfig } from "@pylonsync/sync";
 import { setActiveEngine } from "./engine-registry";
 import {
+  queueUpload,
+  type QueuedUploadHandle,
+  type QueueUploadOptions,
+} from "./offlineUploads";
+import {
   useQuery as useQueryHook,
   useQueryOne as useQueryOneHook,
   useReactiveQuery as useReactiveQueryHook,
@@ -338,6 +343,12 @@ export const db = {
     options?: UploadFileOptions
   ): Promise<UploadedFile> {
     return uploadFile(input, options);
+  },
+
+  /** Keep a file on the device and upload it when there is a network,
+   *  then set it on its record. See `queueUpload`. */
+  queueUpload(file: Blob, options: QueueUploadOptions): Promise<QueuedUploadHandle> {
+    return queueUpload(file, options);
   },
 
   /** @deprecated Use `uploadFile`; extra fields were never stored. */
