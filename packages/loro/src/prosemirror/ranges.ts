@@ -17,6 +17,10 @@
  *   // For a margin: where each range is now, or `gone`.
  *   resolveRanges(view.state, doc, containerId, ranges)
  *
+ *   // In a server function, with no editor: positions in the document
+ *   // readProseMirror (or editProseMirror's state) gives for the doc now.
+ *   resolveRangesInDoc(doc, "body", schema, ranges)
+ *
  * The binding writes some edits as a delete and an insert: splitting or
  * joining paragraphs moves text into new characters, and a cursor on a moved
  * character no longer names it. The editor that makes such an edit still
@@ -26,13 +30,17 @@
  * again. Until then, other editors draw a range only where its cursors find
  * it, so never on characters that replaced its own.
  */
-import type { ContainerID, LoroDoc } from "loro-crdt";
-import { loroSyncPluginKey } from "loro-prosemirror";
-import type { Node } from "prosemirror-model";
+import type { ContainerID, LoroDoc, LoroMap } from "loro-crdt";
+import { createNodeFromLoroObj, loroSyncPluginKey } from "loro-prosemirror";
+import type { Node, Schema } from "prosemirror-model";
 import { type EditorState, Plugin, PluginKey, type Transaction } from "prosemirror-state";
 import { Decoration, DecorationSet, type EditorView } from "prosemirror-view";
 import { decodeCursor, encodeCursor } from "./cursors";
+import { findProseMirrorContainer } from "./index";
 import { cursorToPosition, positionToCursor } from "./sync";
+
+/** Loro containers to the ProseMirror nodes made from them (loro-prosemirror's mapping). */
+type Mapping = Map<ContainerID, Node | Node[]>;
 
 /** A range as encoded cursors (see {@link encodeRange}). */
 export interface EncodedRange {
@@ -116,6 +124,12 @@ export function encodeRange(
   return { from: start ? encodeCursor(start) : null, to: end ? encodeCursor(end) : null };
 }
 
+/** The mapping of an editor bound with ProseMirrorSyncPlugin, or null without one. */
+function syncMapping(state: EditorState): Mapping | null {
+  const sync = loroSyncPluginKey.getState(state) as { mapping?: Mapping } | undefined;
+  return sync?.mapping ?? null;
+}
+
 /** Where a stored cursor is now, and whether its character was deleted. */
 function locate(
   encoded: string | null | undefined,
@@ -123,15 +137,25 @@ function locate(
   doc: LoroDoc,
   containerId: ContainerID,
 ): { pos: number; moved: boolean } | null {
+  const mapping = syncMapping(state);
+  return mapping ? locateIn(encoded, state.doc, mapping, doc, containerId) : null;
+}
+
+function locateIn(
+  encoded: string | null | undefined,
+  root: Node,
+  mapping: Mapping,
+  doc: LoroDoc,
+  containerId: ContainerID,
+): { pos: number; moved: boolean } | null {
   if (!encoded) return null;
-  const sync = loroSyncPluginKey.getState(state) as { mapping?: Map<ContainerID, Node | Node[]> } | undefined;
   const cursor = decodeCursor(encoded);
-  if (!sync?.mapping || !cursor) return null;
-  const inDoc = (pos: number | null) => pos != null && pos >= 0 && pos <= state.doc.content.size;
+  if (!cursor) return null;
+  const inDoc = (pos: number | null) => pos != null && pos >= 0 && pos <= root.content.size;
   try {
-    const exact = cursorToPosition(cursor, doc, containerId, sync.mapping);
+    const exact = cursorToPosition(cursor, doc, containerId, mapping);
     if (inDoc(exact)) return { pos: exact!, moved: false };
-    const near = cursorToPosition(cursor, doc, containerId, sync.mapping, { acceptMoved: true });
+    const near = cursorToPosition(cursor, doc, containerId, mapping, { acceptMoved: true });
     return inDoc(near) ? { pos: near!, moved: true } : null;
   } catch {
     return null;
@@ -160,9 +184,42 @@ export function resolveRanges(
   containerId: ContainerID,
   ranges: Array<Pick<AnchoredRange, "id" | "from" | "to">>,
 ): ResolvedRange[] {
+  const mapping = syncMapping(state);
+  return resolveWith(state.doc, mapping, doc, containerId, ranges);
+}
+
+/**
+ * {@link resolveRanges} for code with no editor, such as a server function:
+ * the positions are in `field`'s document as the doc holds it now, the
+ * document `readProseMirror` returns and `editProseMirror` hands its
+ * `change`. Every range is `gone` when the doc has no document in `field`.
+ */
+export function resolveRangesInDoc(
+  doc: LoroDoc,
+  field: string,
+  schema: Schema,
+  ranges: Array<Pick<AnchoredRange, "id" | "from" | "to">>,
+): ResolvedRange[] {
+  const containerId = findProseMirrorContainer(doc, field);
+  const map = containerId ? (doc.getContainerById(containerId) as LoroMap | undefined) : undefined;
+  if (!containerId || !map || map.get("nodeName") == null) {
+    return ranges.map((r) => ({ id: r.id, from: 0, to: 0, gone: true }));
+  }
+  const mapping: Mapping = new Map();
+  const root = createNodeFromLoroObj(schema, map as never, mapping as never) as Node;
+  return resolveWith(root, mapping, doc, containerId, ranges);
+}
+
+function resolveWith(
+  root: Node,
+  mapping: Mapping | null,
+  doc: LoroDoc,
+  containerId: ContainerID,
+  ranges: Array<Pick<AnchoredRange, "id" | "from" | "to">>,
+): ResolvedRange[] {
   return ranges.map((r) => {
-    const from = locate(r.from, state, doc, containerId);
-    const to = locate(r.to, state, doc, containerId);
+    const from = mapping ? locateIn(r.from, root, mapping, doc, containerId) : null;
+    const to = mapping ? locateIn(r.to, root, mapping, doc, containerId) : null;
     const at = from?.pos ?? to?.pos ?? 0;
     if (!from || !to || (from.moved && to.moved) || to.pos <= from.pos) return { id: r.id, from: at, to: at, gone: true };
     return { id: r.id, from: from.pos, to: to.pos, gone: false };
