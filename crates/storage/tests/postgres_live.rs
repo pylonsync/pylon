@@ -96,6 +96,7 @@ fn test_manifest() -> AppManifest {
         required_env: Vec::new(),
         build: Default::default(),
         shards: Vec::new(),
+        offline: None,
         manifest_version: 1,
         name: "pg_live_test".into(),
         version: "0.1.0".into(),

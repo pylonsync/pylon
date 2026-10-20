@@ -818,6 +818,82 @@ pub fn validate_field_limits(manifest: &AppManifest) -> Vec<Diagnostic> {
     diagnostics
 }
 
+/// Validate `buildManifest({ offline })`. The SDK checks the same rules; this
+/// catches a manifest written by hand or by an older SDK.
+pub fn validate_offline(manifest: &AppManifest) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    let Some(offline) = manifest.offline.as_ref() else {
+        return diagnostics;
+    };
+    let mut fail = |code: &str, message: String, hint: &str| {
+        diagnostics.push(Diagnostic {
+            severity: Severity::Error,
+            code: code.into(),
+            message,
+            span: None,
+            hint: Some(hint.into()),
+        });
+    };
+    if offline.name.trim().is_empty() {
+        fail(
+            "OFFLINE_NAME_EMPTY",
+            "offline.name is empty".into(),
+            "Set the app name shown on the install prompt",
+        );
+    }
+    if !is_same_origin_path(&offline.start_url) {
+        fail(
+            "OFFLINE_START_URL",
+            format!("offline.startUrl \"{}\" is not a path", offline.start_url),
+            "Use a path that starts with \"/\", such as \"/\" or \"/leads\"",
+        );
+    }
+    if !matches!(
+        offline.display.as_str(),
+        "standalone" | "fullscreen" | "minimal-ui" | "browser"
+    ) {
+        fail(
+            "OFFLINE_DISPLAY",
+            format!(
+                "offline.display \"{}\" is not a display mode",
+                offline.display
+            ),
+            "Use \"standalone\", \"fullscreen\", \"minimal-ui\", or \"browser\"",
+        );
+    }
+    for route in &offline.routes {
+        if !is_same_origin_path(route) || route.contains('?') || route.contains('#') {
+            fail(
+                "OFFLINE_ROUTE",
+                format!("offline.routes has \"{route}\", which is not a route pattern"),
+                "Use a route path such as \"/leads\" or \"/leads/[id]\", with no query or hash",
+            );
+        }
+    }
+    for icon in &offline.icons {
+        if !is_same_origin_path(&icon.src) {
+            fail(
+                "OFFLINE_ICON_SRC",
+                format!("offline icon src \"{}\" is not a path", icon.src),
+                "Serve the icon from this app (a file in public/) and give its path, such as \"/icons/192.png\"",
+            );
+        }
+        if icon.sizes.trim().is_empty() {
+            fail(
+                "OFFLINE_ICON_SIZES",
+                format!("offline icon \"{}\" has no sizes", icon.src),
+                "Set sizes, such as \"192x192\"",
+            );
+        }
+    }
+    diagnostics
+}
+
+/// A path on this origin: one leading `/`, no backslash.
+fn is_same_origin_path(s: &str) -> bool {
+    s.starts_with('/') && !s.starts_with("//") && !s.contains('\\')
+}
+
 /// Extract the target entity name from an `id(EntityName)` type string.
 /// Returns `None` for non-id types or malformed patterns.
 fn extract_id_target(field_type: &str) -> Option<&str> {
@@ -912,6 +988,55 @@ mod tests {
                 "FIELD_MAX_LENGTH_DEFAULT"
             ]
         );
+    }
+
+    #[test]
+    fn offline_config_paths_and_display_are_checked() {
+        let offline = |start: &str, display: &str, routes: &[&str], icon: &str| {
+            pylon_kernel::ManifestOffline {
+                name: "Sales".into(),
+                short_name: None,
+                description: None,
+                icons: vec![pylon_kernel::ManifestOfflineIcon {
+                    src: icon.into(),
+                    sizes: "192x192".into(),
+                    mime_type: None,
+                    purpose: None,
+                }],
+                theme_color: None,
+                background_color: None,
+                start_url: start.into(),
+                display: display.into(),
+                routes: routes.iter().map(|r| r.to_string()).collect(),
+            }
+        };
+        let codes = |o: pylon_kernel::ManifestOffline| -> Vec<String> {
+            let manifest = AppManifest {
+                offline: Some(o),
+                ..Default::default()
+            };
+            validate_offline(&manifest)
+                .into_iter()
+                .map(|d| d.code)
+                .collect()
+        };
+        assert!(codes(offline("/", "standalone", &["/", "/leads/[id]"], "/i.png")).is_empty());
+        assert_eq!(
+            codes(offline(
+                "https://x.example/",
+                "window",
+                &["leads", "/a?b"],
+                "//cdn/i.png"
+            )),
+            [
+                "OFFLINE_START_URL",
+                "OFFLINE_DISPLAY",
+                "OFFLINE_ROUTE",
+                "OFFLINE_ROUTE",
+                "OFFLINE_ICON_SRC"
+            ]
+        );
+        assert!(validate_offline(&AppManifest::default()).is_empty());
     }
 
     #[test]
@@ -1985,6 +2110,7 @@ mod tests {
             required_env: Vec::new(),
             build: Default::default(),
             shards: Vec::new(),
+            offline: None,
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),

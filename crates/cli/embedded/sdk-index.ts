@@ -989,6 +989,168 @@ export interface AppManifest {
   build?: BuildConfig;
   /** Realtime shard kinds whose simulation is a WebAssembly module. */
   shards?: ManifestShard[];
+  /** Installable app that opens without a network. See `OfflineConfig`. */
+  offline?: ManifestOffline;
+}
+
+/**
+ * Make the app installable on a phone's home screen and able to open with
+ * no network. Pylon generates `/manifest.webmanifest`, serves a service
+ * worker at `/pylon-sw.js`, and registers it in production.
+ *
+ * ```ts
+ * buildManifest({
+ *   // ...
+ *   offline: {
+ *     name: "Veritas Field Sales",
+ *     shortName: "Field Sales",
+ *     icons: [
+ *       { src: "/icons/192.png", sizes: "192x192", type: "image/png" },
+ *       { src: "/icons/512.png", sizes: "512x512", type: "image/png" },
+ *     ],
+ *     themeColor: "#0b2545",
+ *     backgroundColor: "#ffffff",
+ *     startUrl: "/leads",
+ *     routes: ["/leads", "/leads/[id]", "/map"],
+ *   },
+ * });
+ * ```
+ *
+ * A route listed in `routes` must render its data with `db.useQuery` (the
+ * local replica), not `serverData`: offline there is no server to read
+ * from. It must also not read `props.auth`, `props.headers` or
+ * `props.cookies` while it renders; read `props.session.exists` for a
+ * signed-in check, and `useSession()` for the user. The service worker only
+ * keeps a page whose HTML is the same for every signed-in user, and
+ * `pylon lint` warns about an offline route that reads `serverData`.
+ */
+export interface OfflineConfig {
+  /** The app name on the install prompt and the splash screen. */
+  name: string;
+  /** The name under the home-screen icon. Default: `name`. */
+  shortName?: string;
+  description?: string;
+  /** Icons for the home screen, served by this app (files in `public/`).
+   *  Give at least a 192x192 and a 512x512 PNG. */
+  icons?: ManifestOfflineIcon[];
+  /** Color of the browser UI around the app. */
+  themeColor?: string;
+  /** Color of the splash screen while the app loads. */
+  backgroundColor?: string;
+  /** The page the installed app opens on. Default `"/"`. */
+  startUrl?: string;
+  /** Default `"standalone"` (no browser UI). */
+  display?: "standalone" | "fullscreen" | "minimal-ui" | "browser";
+  /** Route patterns that open with no network, such as `"/leads"` and
+   *  `"/leads/[id]"`. Default: the start URL only. The start URL is always
+   *  included. */
+  routes?: string[];
+}
+
+/** One home-screen icon. */
+export interface ManifestOfflineIcon {
+  /** A path on this app, such as `"/icons/192.png"`. */
+  src: string;
+  /** `"192x192"`, or several sizes separated by spaces. */
+  sizes: string;
+  /** MIME type, such as `"image/png"`. */
+  type?: string;
+  /** `"any"`, `"maskable"`, `"monochrome"`, or several separated by spaces. */
+  purpose?: string;
+}
+
+/** `OfflineConfig` with its defaults filled, as written to the manifest. */
+export interface ManifestOffline {
+  name: string;
+  shortName?: string;
+  description?: string;
+  icons?: ManifestOfflineIcon[];
+  themeColor?: string;
+  backgroundColor?: string;
+  startUrl: string;
+  display: "standalone" | "fullscreen" | "minimal-ui" | "browser";
+  routes: string[];
+}
+
+const OFFLINE_DISPLAYS = ["standalone", "fullscreen", "minimal-ui", "browser"];
+const ICON_PURPOSES = ["any", "maskable", "monochrome"];
+
+/** A path on this origin: one leading "/", no backslash. */
+function isSameOriginPath(s: unknown): s is string {
+  return (
+    typeof s === "string" &&
+    s.startsWith("/") &&
+    !s.startsWith("//") &&
+    !s.includes("\\")
+  );
+}
+
+/** Validate `offline` and fill its defaults. Throws on a value the runtime
+ *  cannot use. */
+export function normalizeOfflineConfig(config: OfflineConfig): ManifestOffline {
+  const fail = (msg: string): never => {
+    throw new Error(`buildManifest: offline.${msg}`);
+  };
+  if (typeof config?.name !== "string" || config.name.trim() === "") {
+    fail("name must be a non-empty string");
+  }
+  for (const key of ["shortName", "description", "themeColor", "backgroundColor"] as const) {
+    const v = config[key];
+    if (v !== undefined && (typeof v !== "string" || v.trim() === "")) {
+      fail(`${key} must be a non-empty string`);
+    }
+  }
+  const startUrl = config.startUrl ?? "/";
+  if (!isSameOriginPath(startUrl)) {
+    fail(`startUrl must be a path on this app, such as "/" or "/leads"`);
+  }
+  const display = config.display ?? "standalone";
+  if (!OFFLINE_DISPLAYS.includes(display)) {
+    fail(`display must be one of ${OFFLINE_DISPLAYS.map((d) => `"${d}"`).join(", ")}`);
+  }
+  if (config.routes !== undefined && !Array.isArray(config.routes)) {
+    fail("routes must be a list of route paths");
+  }
+  for (const route of config.routes ?? []) {
+    if (!isSameOriginPath(route) || route.includes("?") || route.includes("#")) {
+      fail(`routes has ${JSON.stringify(route)}; use a route path such as "/leads" or "/leads/[id]"`);
+    }
+  }
+  if (config.icons !== undefined && !Array.isArray(config.icons)) {
+    fail("icons must be a list");
+  }
+  for (const icon of config.icons ?? []) {
+    if (!isSameOriginPath(icon?.src)) {
+      fail(`icons: src ${JSON.stringify(icon?.src)} must be a path on this app, such as "/icons/192.png"`);
+    }
+    if (typeof icon.sizes !== "string" || !/^(any|\d+x\d+)( (any|\d+x\d+))*$/.test(icon.sizes)) {
+      fail(`icons: sizes ${JSON.stringify(icon.sizes)} must be like "192x192"`);
+    }
+    if (icon.type !== undefined && typeof icon.type !== "string") {
+      fail("icons: type must be a string");
+    }
+    if (
+      icon.purpose !== undefined &&
+      (typeof icon.purpose !== "string" ||
+        !icon.purpose.split(" ").every((p) => ICON_PURPOSES.includes(p)))
+    ) {
+      fail(`icons: purpose must be "any", "maskable" or "monochrome"`);
+    }
+  }
+  // The start URL always opens offline: it is what the installed app opens.
+  const startPath = startUrl.split(/[?#]/)[0];
+  const routes = [startPath, ...(config.routes ?? []).filter((r) => r !== startPath)];
+  return {
+    name: config.name,
+    ...(config.shortName ? { shortName: config.shortName } : {}),
+    ...(config.description ? { description: config.description } : {}),
+    ...(config.icons && config.icons.length > 0 ? { icons: config.icons } : {}),
+    ...(config.themeColor ? { themeColor: config.themeColor } : {}),
+    ...(config.backgroundColor ? { backgroundColor: config.backgroundColor } : {}),
+    startUrl,
+    display,
+    routes,
+  };
 }
 
 /**
@@ -2555,6 +2717,8 @@ export function buildManifest(options: {
   build?: BuildConfig;
   /** Realtime shard kinds. See `shard`. */
   shards?: ManifestShard[];
+  /** Installable app that opens without a network. See `OfflineConfig`. */
+  offline?: OfflineConfig;
   /** Set by `discoverFunctions()` (spread its result into this call).
    *  When true, the framework's AgentRun/AgentMessage entities and
    *  their owner-scoping policies are appended to the manifest —
@@ -2576,6 +2740,7 @@ export function buildManifest(options: {
   // derive from the entity + a counter so two attached policies
   // don't collide.
   if (options.build) validateBuildConfig(options.build);
+  const offline = options.offline ? normalizeOfflineConfig(options.offline) : undefined;
   const shardNames = new Set<string>();
   for (const def of options.shards ?? []) {
     validateShard(def);
@@ -2653,6 +2818,7 @@ export function buildManifest(options: {
     ...(options.shards && options.shards.length > 0
       ? { shards: options.shards }
       : {}),
+    ...(offline ? { offline } : {}),
   };
 }
 

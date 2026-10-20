@@ -187,6 +187,11 @@ export type { UseSessionReturn, ResolvedSession } from "./useSession";
 export { useSyncStatus } from "./useSyncStatus";
 export type { SyncConnectionStatus } from "./useSyncStatus";
 
+// Offline service worker registration. The SSR client runtime calls it on
+// every page load; apps opt in with `buildManifest({ offline })`.
+export { registerOfflineWorker } from "./offlineWorker";
+export type { OfflineWorkerOptions } from "./offlineWorker";
+
 // One-liner API
 export { db, init, getSync, setSessionToken } from "./db";
 

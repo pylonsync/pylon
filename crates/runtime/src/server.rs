@@ -2533,6 +2533,7 @@ mod change_log_wiring_tests {
             required_env: Vec::new(),
             build: Default::default(),
             shards: Vec::new(),
+            offline: None,
             manifest_version: 1,
             name: "t".into(),
             version: "0.1.0".into(),
@@ -4259,7 +4260,8 @@ fn start_server(
                 .with_session(Arc::clone(&session_store), Arc::clone(&cookie_config))
                 .with_orgs(Arc::clone(&orgs))
                 .with_runtime(Arc::clone(&runtime))
-                .with_accounts(Arc::clone(&account_store)),
+                .with_accounts(Arc::clone(&account_store))
+                .with_offline(shared_manifest.offline.clone().map(Arc::new)),
         )
     };
     if frontend_config.is_active() {

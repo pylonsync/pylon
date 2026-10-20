@@ -9,6 +9,7 @@ pub fn validate_all(manifest: &AppManifest) -> Vec<Diagnostic> {
     diagnostics.extend(pylon_schema::validate(&schema));
     diagnostics.extend(pylon_schema::validate_field_types(manifest));
     diagnostics.extend(pylon_schema::validate_field_limits(manifest));
+    diagnostics.extend(pylon_schema::validate_offline(manifest));
     diagnostics
 }
 

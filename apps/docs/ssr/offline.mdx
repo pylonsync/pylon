@@ -1,0 +1,96 @@
+---
+title: Offline apps
+description: "Make an SSR app installable on a phone's home screen and able to open with no network. Pages read from the local replica; writes wait in a queue until the network returns."
+---
+
+Pylon keeps synced rows in IndexedDB and queues writes made with no network.
+With `offline` set in the manifest, the app also opens with no network: Pylon
+serves a web app manifest, a service worker, and the pages to keep on the
+device.
+
+## Turn it on
+
+Add `offline` to `buildManifest`:
+
+```ts
+// app.ts
+export default buildManifest({
+  name: "field-sales",
+  version: "1.0.0",
+  entities: [Lead],
+  routes: await discoverAppRoutes(),
+  offline: {
+    name: "Veritas Field Sales",
+    shortName: "Field Sales",
+    icons: [
+      { src: "/icons/192.png", sizes: "192x192", type: "image/png" },
+      { src: "/icons/512.png", sizes: "512x512", type: "image/png" },
+    ],
+    themeColor: "#0b2545",
+    backgroundColor: "#ffffff",
+    startUrl: "/leads",
+    routes: ["/leads", "/leads/[id]", "/map"],
+  },
+});
+```
+
+| Field | Default | What it does |
+| --- | --- | --- |
+| `name` | (required) | The app name on the install prompt and the splash screen. |
+| `shortName` | `name` | The name under the home-screen icon. |
+| `icons` | none | Home-screen icons. Put the files in `public/`. Give a 192x192 and a 512x512 PNG. |
+| `themeColor` | none | The color of the browser UI around the app. |
+| `backgroundColor` | none | The splash screen color. |
+| `startUrl` | `"/"` | The page the installed app opens on. |
+| `display` | `"standalone"` | `"standalone"`, `"fullscreen"`, `"minimal-ui"`, or `"browser"`. |
+| `routes` | the start URL | The route patterns that open with no network. The start URL is always one of them. |
+
+Pylon then does these things:
+
+- It serves `/manifest.webmanifest` from this config. A `public/manifest.webmanifest` or `app/manifest.webmanifest` file replaces it.
+- It adds the manifest link, the theme color, and the home-screen icon tags to every page.
+- It writes a service worker for each build and serves it at `/pylon-sw.js`.
+- It registers the worker in production. `pylon dev` does not register it, and removes one that an earlier build left.
+
+## What the worker keeps
+
+When the worker installs, it downloads these files:
+
+- The build files that the pages of `routes` load: scripts, chunks, stylesheets, and fonts.
+- The web app manifest and the icons.
+- The HTML of each route in `routes` that has no dynamic segment.
+
+Build files are content-hashed, so the worker serves them from its cache first. It never caches `/api/*`, `/auth/*`, the sync connection, or the dev endpoints. Data comes from the sync engine, not from the HTTP cache.
+
+When a page load fails because there is no network, the worker answers with the kept HTML for that route. A route with a dynamic segment, such as `/leads/[id]`, uses the start URL's HTML. The client then renders the real URL from the local replica. A load of a route that is not in `routes` opens the start URL.
+
+On an offline route, a slow network gets 3 seconds. Then the worker shows the kept page.
+
+## Render rule for offline routes
+
+An offline route renders with no server. Follow these rules on the page and its layouts:
+
+1. Read data with `db.useQuery` or `db.useQueryOne`. These read the local replica.
+2. Do not read `serverData`. There is no server to answer it.
+3. Do not read `props.auth`, `props.headers`, or `props.cookies` during the render. Use `props.session.exists` for a signed-in check, and `useSession()` for the user.
+
+The worker keeps a page only when its HTML is the same for every signed-in user. When it asks for a route's HTML, the runtime checks the render. A page that breaks rule 2 or 3 is refused, and the browser console shows the reason:
+
+```
+[pylon offline] /leads is not kept for offline use: refused; the page read props.auth
+```
+
+`pylon lint` warns about an offline route that reads `serverData` (PYL008), and about an offline route that names no page (PYL009).
+
+The kept HTML carries one bit of the session: signed in or not. When that bit changes, the page tells the worker, and the worker gets the HTML again.
+
+## New deploys
+
+Each build gets a new worker with its own caches. The new worker installs in the background and waits. It takes over on the next launch, when every tab of the app is closed. Then it deletes the caches of the old build. A deploy never changes the code of a page that is open.
+
+## Install the app
+
+- iOS Safari: tap Share, then Add to Home Screen.
+- Android Chrome: tap the menu, then Install app.
+
+The installed app opens on `startUrl`, with no browser UI when `display` is `"standalone"`.

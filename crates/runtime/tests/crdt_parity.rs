@@ -57,6 +57,7 @@ fn manifest() -> AppManifest {
         required_env: Vec::new(),
         build: Default::default(),
         shards: Vec::new(),
+        offline: None,
         manifest_version: 1,
         name: "crdt_parity".into(),
         version: "1".into(),

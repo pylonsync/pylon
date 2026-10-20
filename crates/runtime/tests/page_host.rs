@@ -116,6 +116,7 @@ fn manifest() -> AppManifest {
         required_env: Vec::new(),
         build: Default::default(),
         shards: Vec::new(),
+        offline: None,
         manifest_version: 1,
         name: "page-host".into(),
         version: "0.1.0".into(),

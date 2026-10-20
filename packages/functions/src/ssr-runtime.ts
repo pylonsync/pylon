@@ -9,6 +9,11 @@
 
 import { withMetaSlot } from "./ssr-page-tree";
 import { moduleKey, serverBundle } from "./server-bundle";
+import {
+  routeAssetFiles,
+  routeScriptFiles,
+  type RouteAssetFiles,
+} from "./ssr-route-assets";
 
 // Bun runtime global. This module runs under Bun but is type-checked by
 // consuming apps under node/DOM (no `Bun` global) — declare the surface used.
@@ -2126,6 +2131,7 @@ async function collectBoundaryHeadBlob(): Promise<string> {
     // Fonts first: the @font-face faces + preloads must be discoverable before
     // the app stylesheet that references the font family.
     let blob = await buildFontHeadBlob();
+    blob += await buildOfflineHeadBlob();
     for (const route of Object.values(manifest.routes || {}) as any[]) {
       for (const css of (route.css || []) as string[]) {
         if (seen.has(css)) continue;
@@ -2167,6 +2173,20 @@ async function buildFontHeadBlob(): Promise<string> {
   }
 }
 
+/** The install tags (web app manifest link, theme color, home-screen icon)
+ *  for an app that opted into `buildManifest({ offline })`; "" otherwise. */
+async function buildOfflineHeadBlob(): Promise<string> {
+  try {
+    const { getManifest } = await import("./ssr-client-bundler");
+    const manifest = await getManifest();
+    if (!manifest.offline) return "";
+    const { offlineHeadTags } = await import("./ssr-offline");
+    return offlineHeadTags(manifest.offline);
+  } catch {
+    return "";
+  }
+}
+
 /**
  * Build the hydration tail appended after React's stream EOFs: the
  * `__PYLON_DATA__` JSON blob (props + ssrData) + the per-route entry
@@ -2201,6 +2221,9 @@ export function buildHydrationTail(args: {
   // user's identity to another (the #277 leak class, at the body level). The
   // raw `auth` is replaced AFTER the live-handle strip below.
   bucketAuth?: { signedIn: boolean };
+  /** The app opted into `buildManifest({ offline })`: the client registers
+   *  the service worker (production only). */
+  offline?: boolean;
   /** Client-side NAVIGATION payload: emit the `__PYLON_DATA__` blob and
    *  nothing else. The client already has the runtime and resolves the route
    *  entry from the build manifest, so the entry `<script>`, the preload tags
@@ -2265,6 +2288,8 @@ export function buildHydrationTail(args: {
   const appName =
     typeof process !== "undefined" ? process.env.PYLON_APP_NAME : undefined;
   if (appName) hydrationPayload.app = appName;
+  // App-global, identity-free: safe in a shared or offline tail.
+  if (args.offline) hydrationPayload.offline = { dev: isDevMode() };
   if (args.kind) hydrationPayload.kind = args.kind;
   const json = escapeScriptJson(JSON.stringify(hydrationPayload));
   let tail = `<script id="__PYLON_DATA__" type="application/json">${json}</script>`;
@@ -2277,10 +2302,9 @@ export function buildHydrationTail(args: {
     const co = /^https?:\/\//i.test(args.publicPrefix) ? " crossorigin" : "";
     // Module scripts run in document order, so the polyfills are in place
     // before the entry (and the shared chunk it imports) runs.
-    if (args.polyfills) {
-      tail += `<script type="module"${co} src="${args.publicPrefix}${args.polyfills}"></script>`;
+    for (const script of routeScriptFiles(args.manifestRoute, args.polyfills)) {
+      tail += `<script type="module"${co} src="${args.publicPrefix}${script}"></script>`;
     }
-    tail += `<script type="module"${co} src="${args.publicPrefix}${args.manifestRoute.file}"></script>`;
   } else {
     // Executable script → the serialized message MUST be script-escaped
     // (`manifestErr` is server-derived today, but this is the one script sink
@@ -2655,12 +2679,16 @@ export function makeServerData(
   // when the call carried a real identity (the fn may read ctx.auth, making
   // its output identity-specific without the page ever touching props.auth).
   onFnCall?: () => void,
+  // Fired on every serverData read (fn calls included), so an offline-shell
+  // render can refuse a page that needs the server to render.
+  onRead?: () => void,
 ): any {
   const promiseCache = new Map<string, Promise<any>>();
   const wrap = (r: any, prefix: string): any => {
     const out: any = {};
     for (const m of SERVER_DATA_METHODS) {
       out[m] = (...args: any[]) => {
+        onRead?.();
         const key = prefix + m + ":" + stableStringify(args);
         let p = promiseCache.get(key);
         if (!p) {
@@ -2679,6 +2707,7 @@ export function makeServerData(
   if (reader.unsafe) sd.unsafe = wrap(reader.unsafe, "u:");
   if (callFn) {
     sd.fn = (name: string, args?: Record<string, unknown>) => {
+      onRead?.();
       // Key MUST match the client shim's `fn` key so hydration replays
       // the value from ssrData without a mismatch.
       const key = "fn:" + name + ":" + stableStringify(args ?? {});
@@ -2811,6 +2840,47 @@ export function computeBucketVerdict(args: {
     !args.wantsStream &&
     args.status === 200
   );
+}
+
+/** Whether the host forwarded the service worker's offline-shell request
+ *  header (`X-Pylon-Offline-Shell: 1`). */
+export function isOfflineShellRequest(
+  headers: Record<string, unknown> | undefined,
+): boolean {
+  const v = headers?.["x-pylon-offline-shell"];
+  return typeof v === "string" && v.trim() === "1";
+}
+
+/**
+ * May the offline service worker keep this render as the route's shell? The
+ * shell is stored on the device and shown, with no network, to whoever is
+ * signed in at the time, so its HTML must not depend on who rendered it:
+ *
+ *  - `authTouched`: reading `props.auth` (or a `serverData.fn` call with an
+ *    identity) makes the HTML one user's. Read `props.session.exists` for a
+ *    signed-in check; the shell keeps that bit and nothing else.
+ *  - `dynamicTouched`: request headers and cookies are one request's.
+ *  - `serverDataTouched`: offline there is no server; an offline route
+ *    renders its data from the replica with `db.useQuery`.
+ *  - a Set-Cookie, or any status but 200 (a redirect to sign-in, an error).
+ *
+ * Pure and exported for the leak-class tests.
+ */
+export function computeOfflineShellVerdict(args: {
+  authTouched: boolean;
+  dynamicTouched: boolean;
+  serverDataTouched: boolean;
+  cookieCount: number;
+  status: number;
+}): { ok: true } | { ok: false; reason: string } {
+  if (args.status !== 200) return { ok: false, reason: `status ${args.status}` };
+  if (args.authTouched) return { ok: false, reason: "the page read props.auth" };
+  if (args.serverDataTouched) return { ok: false, reason: "the page read serverData" };
+  if (args.dynamicTouched) {
+    return { ok: false, reason: "the page read request headers or cookies" };
+  }
+  if (args.cookieCount > 0) return { ok: false, reason: "the render set a cookie" };
+  return { ok: true };
 }
 
 /**
@@ -3365,6 +3435,9 @@ export async function handleRenderRoute(
     // caching, because the output could differ by identity. Declared before
     // serverData so `serverData.fn` can flip it too (below).
     let authTouched = false;
+    // Whether the render read `serverData` at all. An offline shell may not:
+    // offline there is no server, so the page must render from the replica.
+    let serverDataTouched = false;
     // `ssrRead: true` — serverData results are serialized into the
     // client-visible `__PYLON_DATA__` blob, so the host applies the same
     // per-row policy filter + `server_only`/`passwordHash` projection the
@@ -3384,6 +3457,9 @@ export async function handleRenderRoute(
         if (a && (a.user_id || a.is_admin || a.tenant_id)) {
           authTouched = true;
         }
+      },
+      () => {
+        serverDataTouched = true;
       },
     );
 
@@ -3468,7 +3544,11 @@ export async function handleRenderRoute(
     // a shallow allowlist would copy that mutation by reference into the shared
     // tail. Captured only for opted-in pages (zero cost otherwise).
     const bucketOptIn = (mod as any).cache === "auth-bucketed";
-    const bucketTailBase = bucketOptIn
+    // The offline service worker asked for this route's HTML to keep (see
+    // `computeOfflineShellVerdict`). Read off the raw headers: the framework
+    // reading it is not the page reading a request input.
+    const offlineShell = isOfflineShellRequest(msg.headers as Record<string, unknown>);
+    const bucketTailBase = bucketOptIn || offlineShell
       ? {
           pathname: msg.url,
           url: msg.url,
@@ -3556,7 +3636,10 @@ export async function handleRenderRoute(
     // with `export const streaming = true` (inner-boundary streaming, Stage 2).
     // Every un-annotated page keeps the byte-identical BUFFERED path (allReady)
     // that 100% of today's prod traffic rides — this is opt-in, never default.
-    const wantsStream = computeWantsStream(!!Loading, mod);
+    // An offline shell is always buffered: its verdict reads `authTouched`
+    // and friends, which a streaming render has not finished setting when its
+    // head goes out.
+    const wantsStream = !offlineShell && computeWantsStream(!!Loading, mod);
 
     // Resolve the layout chain. Each layout module exports a default
     // function that accepts the same props + `children`. Walk leaf →
@@ -3705,6 +3788,16 @@ export async function handleRenderRoute(
       wantsStream,
       status: responseState.status,
     });
+    const shellVerdict = offlineShell
+      ? computeOfflineShellVerdict({
+          authTouched,
+          dynamicTouched,
+          serverDataTouched,
+          cookieCount: responseState.cookies.length,
+          status: responseState.status,
+        })
+      : null;
+    const shellOk = shellVerdict?.ok === true;
     // Dev diagnostics (the agent + HUD signal): the cache verdict + the single
     // actionable reason, computed ONCE here and reused for the dev HUD blob, the
     // `x-pylon-dev` header (→ the host's diagnostics ring + `pylon diagnostics`),
@@ -3743,7 +3836,7 @@ export async function handleRenderRoute(
           headers: msg.headers,
           cookies: msg.cookies,
           session: { exists: msg.session_present === true },
-          ...(bucketable && bucketTailBase ? bucketTailBase : {}),
+          ...((bucketable || shellOk) && bucketTailBase ? bucketTailBase : {}),
         }
       : props;
     // #278: on a STREAMING render the head commits NOW, before suspended
@@ -3781,6 +3874,15 @@ export async function handleRenderRoute(
         // 406, and the `<path>.md` URL 404s. Trusted channel, stripped by the
         // host, so a page can't forge the inverse and force a conversion.
         ...((mod as any).markdown === false ? { "x-pylon-md": "0" } : {}),
+        // Offline shell verdict. The host re-emits it as `Pylon-Offline-Shell`
+        // for the service worker, which keeps the HTML only on "1".
+        ...(shellVerdict
+          ? {
+              "x-pylon-offline-shell": shellVerdict.ok
+                ? "1"
+                : `refused; ${shellVerdict.reason}`,
+            }
+          : {}),
         // Dev-only: the host parses this into its diagnostics ring (served at
         // /_pylon/dev/diagnostics + `pylon diagnostics`). Single-line JSON, no
         // newlines. Stripped before the client like every x-pylon-* header.
@@ -3814,12 +3916,18 @@ export async function handleRenderRoute(
     let preloadManifestErr: string | null = null;
     let preloadPublicPrefix = "/_pylon/build/";
     let preloadPolyfills: string | undefined;
+    // The same file list the offline service worker precaches for this route.
+    let preloadAssets: RouteAssetFiles | null = null;
+    // Whether the app opted into `buildManifest({ offline })`.
+    let offlineApp = false;
     try {
       const { getManifest } = await import("./ssr-client-bundler");
       const manifest = await getManifest();
       preloadPublicPrefix = manifest.public_prefix || preloadPublicPrefix;
       preloadManifestRoute = manifest.routes[msg.component] ?? null;
       preloadPolyfills = manifest.polyfills;
+      preloadAssets = routeAssetFiles(manifest, msg.component);
+      offlineApp = !!manifest.offline;
       if (!preloadManifestRoute) {
         preloadManifestErr = `manifest has no entry for "${msg.component}"`;
       }
@@ -3839,13 +3947,14 @@ export async function handleRenderRoute(
       );
     } else if (preloadManifestRoute) {
       headBlob += await buildFontHeadBlob();
+      headBlob += await buildOfflineHeadBlob();
       const co = /^https?:\/\//i.test(preloadPublicPrefix) ? " crossorigin" : "";
       const inlineOverride =
         typeof mod?.inlineCss === "boolean" ? mod.inlineCss : undefined;
-      for (const css of preloadManifestRoute.css) {
+      for (const css of preloadAssets?.styles ?? []) {
         headBlob += await cssHeadTag(css, preloadPublicPrefix, inlineOverride);
       }
-      for (const chunk of preloadManifestRoute.imports) {
+      for (const chunk of preloadAssets?.preloads ?? []) {
         headBlob += `<link rel="modulepreload"${co} href="${preloadPublicPrefix}${chunk}">`;
       }
     } else {
@@ -3991,9 +4100,12 @@ export async function handleRenderRoute(
           : undefined,
         // A bucketed render is stored shared → its tail must carry ONLY the
         // binary signed-in bit, never this request's real identity.
-        bucketAuth: bucketable
+        // An offline shell is kept on the device and replayed to whoever is
+        // signed in later, so it gets the same identity-free tail.
+        bucketAuth: bucketable || shellOk
           ? { signedIn: msg.session_present === true }
           : undefined,
+        offline: offlineApp,
         dataOnly: navRender,
       });
       sendChunk(tail);

@@ -64,7 +64,8 @@
               "ssr/image",
               "ssr/styling",
               "ssr/agents",
-              "ssr/customer-domains"
+              "ssr/customer-domains",
+              "ssr/offline"
             ]
           },
           {

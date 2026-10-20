@@ -37,6 +37,14 @@
 //!           load, with no error. Move the private fields to their own
 //!           entity.
 //!
+//!   PYL008  A route listed in `buildManifest({ offline: { routes } })`
+//!           whose page or layouts read `serverData`. Offline there is no
+//!           server, so the page must render its data from the local
+//!           replica with `db.useQuery`. The runtime also refuses to keep
+//!           such a page for offline use; this says so before deploy.
+//!
+//!   PYL009  An offline route that names no page in the app.
+//!
 //! Runs standalone (`pylon lint`) and also at `pylon dev` startup
 //! (via a small invocation in `commands/dev.rs`) so issues land in
 //! front of the developer the moment they save app.ts.
@@ -372,7 +380,8 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
             return ExitCode::Usage;
         }
     };
-    let findings = lint_manifest(&manifest);
+    let mut findings = lint_manifest(&manifest);
+    findings.extend(lint_offline_routes(&manifest, &read_project_module));
     let warnings = findings
         .iter()
         .filter(|f| f.severity == Severity::Warning)
@@ -422,6 +431,89 @@ fn print_pretty(findings: &[Finding], warnings: usize, infos: usize) {
         println!("   fix: {}", f.fix);
         println!();
     }
+}
+
+/// PYL008 + PYL009: offline routes. Reads page and layout sources through
+/// `read_source` (a project-relative module path without extension →
+/// source text) so tests need no files.
+pub fn lint_offline_routes(
+    manifest: &AppManifest,
+    read_source: &dyn Fn(&str) -> Option<String>,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let Some(offline) = manifest.offline.as_ref() else {
+        return findings;
+    };
+    for pattern in &offline.routes {
+        let page = manifest.routes.iter().find(|r| {
+            r.path == *pattern
+                && r.component.is_some()
+                && matches!(r.kind.as_deref(), None | Some("page"))
+        });
+        let Some(page) = page else {
+            findings.push(Finding {
+                rule: "PYL009",
+                severity: Severity::Warning,
+                entity: None,
+                policy: None,
+                message: format!(
+                    "offline.routes has \"{pattern}\", but no page serves that path. It will not open offline."
+                ),
+                fix: "Use the page's route pattern, such as \"/leads/[id]\" for app/leads/[id]/page.tsx.",
+            });
+            continue;
+        };
+        let modules = page
+            .layouts
+            .iter()
+            .chain(page.component.iter())
+            .map(String::as_str);
+        let readers: Vec<&str> = modules
+            .filter(|m| read_source(m).is_some_and(|src| reads_server_data(&src)))
+            .collect();
+        if !readers.is_empty() {
+            findings.push(Finding {
+                rule: "PYL008",
+                severity: Severity::Warning,
+                entity: None,
+                policy: None,
+                message: format!(
+                    "Offline route \"{pattern}\" reads serverData in {}. Offline there is no server, so the page cannot render, and Pylon will not keep it for offline use.",
+                    readers.join(", ")
+                ),
+                fix: "Read the data with db.useQuery (the local replica) on offline routes.",
+            });
+        }
+    }
+    findings
+}
+
+/// Whether module source uses `serverData` as an identifier (not as part of
+/// a longer name).
+fn reads_server_data(src: &str) -> bool {
+    let bytes = src.as_bytes();
+    let needle = b"serverData";
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
+    let mut from = 0;
+    while let Some(pos) = src[from..].find("serverData") {
+        let start = from + pos;
+        let end = start + needle.len();
+        let before_ok = start == 0 || !is_ident(bytes[start - 1]);
+        let after_ok = end >= bytes.len() || !is_ident(bytes[end]);
+        if before_ok && after_ok {
+            return true;
+        }
+        from = end;
+    }
+    false
+}
+
+/// Read a project module (`app/leads/page`) by trying the source
+/// extensions the SSR discoverer accepts.
+pub fn read_project_module(module: &str) -> Option<String> {
+    ["tsx", "ts", "jsx", "js"]
+        .iter()
+        .find_map(|ext| std::fs::read_to_string(format!("{module}.{ext}")).ok())
 }
 
 /// Read the serialized manifest from disk. Looks at the same
@@ -506,6 +598,7 @@ mod tests {
             required_env: vec![],
             build: Default::default(),
             shards: Vec::new(),
+            offline: None,
         }
     }
 
@@ -756,6 +849,81 @@ mod tests {
         );
         m.auth.user.entity = "User".into();
         assert!(lint_manifest(&m).iter().any(|f| f.rule == "PYL007"));
+    }
+
+    fn offline_app(routes: &[&str]) -> AppManifest {
+        let mut m = manifest(vec![], vec![]);
+        let page = |path: &str, component: &str| pylon_kernel::ManifestRoute {
+            path: path.into(),
+            mode: "ssr".into(),
+            component: Some(component.into()),
+            layouts: vec!["app/layout".into()],
+            ..Default::default()
+        };
+        m.routes = vec![
+            page("/leads", "app/leads/page"),
+            page("/leads/[id]", "app/leads/[id]/page"),
+            page("/reports", "app/reports/page"),
+        ];
+        m.offline = Some(pylon_kernel::ManifestOffline {
+            name: "Field Sales".into(),
+            short_name: None,
+            description: None,
+            icons: vec![],
+            theme_color: None,
+            background_color: None,
+            start_url: "/leads".into(),
+            display: "standalone".into(),
+            routes: routes.iter().map(|r| r.to_string()).collect(),
+        });
+        m
+    }
+
+    fn sources(module: &str) -> Option<String> {
+        Some(
+            match module {
+                "app/layout" => "export default function L({ children }) { return children; }",
+                "app/leads/page" => "const rows = db.useQuery(\"Lead\"); // not myserverDataCache",
+                "app/leads/[id]/page" => "const lead = use(props.serverData.get(\"Lead\", id));",
+                "app/reports/page" => "const { serverData } = props;",
+                _ => return None,
+            }
+            .to_string(),
+        )
+    }
+
+    #[test]
+    fn pyl008_flags_offline_routes_that_read_server_data() {
+        let findings = lint_offline_routes(
+            &offline_app(&["/leads", "/leads/[id]", "/reports"]),
+            &sources,
+        );
+        let flagged: Vec<&str> = findings
+            .iter()
+            .filter(|f| f.rule == "PYL008")
+            .map(|f| f.message.as_str())
+            .collect();
+        assert_eq!(flagged.len(), 2, "{findings:?}");
+        assert!(
+            flagged[0].contains("\"/leads/[id]\"") && flagged[0].contains("app/leads/[id]/page")
+        );
+        assert!(flagged[1].contains("\"/reports\""));
+    }
+
+    #[test]
+    fn pyl008_ignores_routes_not_listed_and_apps_without_offline() {
+        assert!(lint_offline_routes(&offline_app(&["/leads"]), &sources).is_empty());
+        let mut plain = offline_app(&["/reports"]);
+        plain.offline = None;
+        assert!(lint_offline_routes(&plain, &sources).is_empty());
+    }
+
+    #[test]
+    fn pyl009_flags_an_offline_route_with_no_page() {
+        let findings = lint_offline_routes(&offline_app(&["/leads", "/lead/[id]"]), &sources);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, "PYL009");
+        assert!(findings[0].message.contains("/lead/[id]"));
     }
 
     #[test]

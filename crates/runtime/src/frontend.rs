@@ -31,6 +31,7 @@ use std::sync::{Arc, RwLock};
 use tiny_http::{Header, Method, Request, Response};
 
 mod dev_git;
+mod offline;
 
 /// Build progress / outcome surfaced to the SPA handler so non-API
 /// GETs can render a useful holding page while `bun install + bun
@@ -133,6 +134,9 @@ pub struct FrontendConfig {
     /// operator's session and render the page signed out (see
     /// `crate::server::drop_operator_identity`).
     pub accounts: Option<std::sync::Arc<pylon_auth::AccountStore>>,
+    /// `buildManifest({ offline })`. When set, the runtime serves the web app
+    /// manifest and the service worker (see `frontend/offline.rs`).
+    pub offline: Option<std::sync::Arc<pylon_kernel::ManifestOffline>>,
 }
 
 impl std::fmt::Debug for FrontendConfig {
@@ -143,6 +147,7 @@ impl std::fmt::Debug for FrontendConfig {
             .field("ssr_routes_count", &self.ssr_routes.len())
             .field("has_fn_ops", &self.fn_ops.is_some())
             .field("has_session_store", &self.session_store.is_some())
+            .field("offline", &self.offline.is_some())
             .finish()
     }
 }
@@ -189,6 +194,7 @@ impl FrontendConfig {
             orgs: None,
             runtime: None,
             accounts: None,
+            offline: None,
         }
     }
 
@@ -239,6 +245,16 @@ impl FrontendConfig {
     /// signed out, as the API routes treat it.
     pub fn with_accounts(mut self, accounts: std::sync::Arc<pylon_auth::AccountStore>) -> Self {
         self.accounts = Some(accounts);
+        self
+    }
+
+    /// Attach the app's `offline` config so the runtime serves
+    /// `/manifest.webmanifest` and `/pylon-sw.js`.
+    pub fn with_offline(
+        mut self,
+        offline: Option<std::sync::Arc<pylon_kernel::ManifestOffline>>,
+    ) -> Self {
+        self.offline = offline;
         self
     }
 
@@ -349,6 +365,7 @@ pub(crate) fn content_type_for(path: &Path) -> &'static str {
         // file served as `application/octet-stream`, which agents download
         // instead of read.
         Some("md") | Some("markdown") => "text/markdown; charset=utf-8",
+        Some("webmanifest") => "application/manifest+json",
         Some("xml") => "application/xml",
         Some("pdf") => "application/pdf",
         Some("mp4") => "video/mp4",
@@ -1325,6 +1342,39 @@ pub fn try_handle(
         return serve_pylon_client_bundle(cfg, request, path_only, cors_origin);
     }
 
+    // Installable app (`buildManifest({ offline })`): the web app manifest
+    // and the service worker. See `frontend/offline.rs`.
+    if path_only == "/manifest.webmanifest" {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let app_dir = cwd.join(derive_app_dir(&cfg.ssr_routes));
+        let cache = if is_dev_mode() {
+            "no-cache, must-revalidate"
+        } else {
+            "public, max-age=3600"
+        };
+        return offline::serve_web_manifest(
+            request,
+            cfg.offline.as_deref(),
+            &public_dir(),
+            &app_dir,
+            cache,
+            cors_origin,
+        );
+    }
+    if path_only == "/pylon-sw.js" && cfg.offline.is_some() {
+        let outdir = match cfg.fn_ops.as_ref() {
+            Some(fn_ops) => {
+                if let Err(e) = warm_client_bundle(fn_ops, &derive_app_dir(&cfg.ssr_routes)) {
+                    tracing::warn!("service worker unavailable (client build failed): {e}");
+                }
+                cached_bundle_outdir().lock().unwrap().clone()
+            }
+            None => None,
+        };
+        offline::serve_service_worker(request, outdir.as_deref(), cors_origin);
+        return Ok(());
+    }
+
     // Optimized image endpoint. `<Image>` renders an `<img>` whose
     // src points here; the handler resizes + re-encodes the source
     // on demand and caches the result under `<cwd>/.pylon/.cache/
@@ -1519,8 +1569,14 @@ pub fn try_handle(
             // (`ssr_cache_bucket_vary`) and is identity-free, so serving it to a
             // session-carrying request is safe; an anon entry stays restricted to
             // cookie-anonymous requests (defense-in-depth).
+            // An offline-shell request (the service worker storing this
+            // route's HTML) renders live and is never stored or served from the
+            // ISR cache: its hydration data is anonymized differently, and the
+            // service worker needs the runtime's shell verdict, which only a
+            // live render carries.
             let bucket_eligible = !is_dev_mode()
                 && design_request.is_none()
+                && !offline::is_offline_shell_request(&request)
                 && matches!(request.method(), Method::Get)
                 && match_url
                     .split_once('?')
@@ -3926,6 +3982,10 @@ fn build_ssr_response_headers(
     // PPR Phase 0: the bucket proof — `Some(secs)` means the render proved itself
     // identity-free (only the binary session bit). Captured + STRIPPED below.
     let mut bucket_secs: Option<u64> = None;
+    // The offline-shell verdict (`1` or `refused; <reason>`), set only on a
+    // render the service worker asked for. Captured + re-emitted under a
+    // public name below.
+    let mut offline_shell: Option<String> = None;
 
     // A header VALUE carrying CR/LF/NUL could smuggle extra headers (HTTP
     // response splitting). Drop it rather than trust the header library.
@@ -3972,10 +4032,17 @@ fn build_ssr_response_headers(
                 cacheable_secs = value.trim().parse::<u64>().ok();
             } else if lname == "x-pylon-bucket" {
                 bucket_secs = value.trim().parse::<u64>().ok();
+            } else if lname == "x-pylon-offline-shell" && header_value_is_safe(value) {
+                offline_shell = Some(value.trim().to_string());
             }
             continue;
         }
         if !header_value_is_safe(value) || !header_name_is_safe(name) {
+            continue;
+        }
+        if lname == "pylon-offline-shell" {
+            // Only the runtime's verdict above may tell the service worker to
+            // keep a page.
             continue;
         }
         if lname == "cache-control" {
@@ -4091,7 +4158,20 @@ fn build_ssr_response_headers(
         if !may_share && !is_non_shared_cc(&cc) {
             cc = "private, no-store".to_string();
         }
+        // An offline shell is stored by the service worker, never by the HTTP
+        // cache: a shell from the HTTP cache would answer a later ordinary
+        // navigation with anonymized hydration data.
+        if offline_shell.is_some() {
+            cc = "no-store".to_string();
+        }
         out.push(Header::from_bytes("Cache-Control", cc.as_bytes()).unwrap());
+    }
+    if let Some(verdict) = offline_shell.as_deref() {
+        if let Ok(h) =
+            Header::from_bytes(offline::OFFLINE_SHELL_RESPONSE_HEADER, verdict.as_bytes())
+        {
+            out.push(h);
+        }
     }
     // Baseline security headers on the user-facing SSR HTML. Previously only
     // Studio carried these, so app pages were clickjackable (no X-Frame-Options)
@@ -6567,6 +6647,38 @@ mod tests {
             pairs.iter().filter(|(k, _)| k == "content-type").collect();
         assert_eq!(cts.len(), 1, "exactly one content-type (no default added)");
         assert_eq!(cts[0].1, "application/rss+xml");
+    }
+
+    #[test]
+    fn ssr_headers_carry_the_offline_shell_verdict_and_refuse_a_forged_one() {
+        let mut page = std::collections::HashMap::new();
+        page.insert("x-pylon-offline-shell".to_string(), "1".to_string());
+        let pairs = header_pairs(&build_ssr_response_headers(
+            &page,
+            "*",
+            true,
+            false,
+            VariantHeaders::default(),
+        ));
+        assert!(pairs
+            .iter()
+            .any(|(k, v)| k == "pylon-offline-shell" && v == "1"));
+        assert!(pairs
+            .iter()
+            .any(|(k, v)| k == "cache-control" && v == "no-store"));
+        assert!(!pairs.iter().any(|(k, _)| k.starts_with("x-pylon-")));
+
+        // A page cannot mark itself as a shell.
+        let mut forged = std::collections::HashMap::new();
+        forged.insert("Pylon-Offline-Shell".to_string(), "1".to_string());
+        let pairs = header_pairs(&build_ssr_response_headers(
+            &forged,
+            "*",
+            true,
+            false,
+            VariantHeaders::default(),
+        ));
+        assert!(!pairs.iter().any(|(k, _)| k == "pylon-offline-shell"));
     }
 
     #[test]

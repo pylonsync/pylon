@@ -909,3 +909,66 @@ describe("client router popstate", () => {
     expect(src.match(/renderedPath = location\.pathname \+ location\.search;/g)?.length).toBeGreaterThanOrEqual(3);
   });
 });
+
+describe("offline service worker (buildManifest({ offline }))", () => {
+  test("an offline app's build writes pylon-sw.js with each offline route's files", async () => {
+    tempDir = makeFixture(
+      {
+        "page.tsx": PAGE_BODY("Home"),
+        "leads/page.tsx": PAGE_BODY("Leads"),
+        "leads/[id]/page.tsx": PAGE_BODY("Lead"),
+        "settings/page.tsx": PAGE_BODY("Settings"),
+      },
+      { "layout.tsx": LAYOUT_BODY },
+    );
+    fs.writeFileSync(
+      path.join(tempDir, "pylon.manifest.json"),
+      JSON.stringify({
+        offline: {
+          name: "Field Sales",
+          icons: [{ src: "/icons/192.png", sizes: "192x192" }],
+          startUrl: "/leads",
+          display: "standalone",
+          routes: ["/leads", "/leads/[id]"],
+        },
+      }),
+    );
+    originalCwd = process.cwd();
+    process.chdir(tempDir);
+
+    const { manifestPath, outdir } = await buildClientBundle();
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as PylonBundleManifest;
+    expect(manifest.offline?.routes).toEqual(["/leads", "/leads/[id]"]);
+    expect(manifest.offline?.version).toMatch(/^[0-9a-f]{16}$/);
+
+    const sw = fs.readFileSync(path.join(outdir, "pylon-sw.js"), "utf8");
+    // Valid script (compiled, not run).
+    const { Script } = await import("node:vm");
+    expect(() => new Script(sw)).not.toThrow();
+    const config = JSON.parse(sw.slice(sw.indexOf(")(self, ") + 8, sw.lastIndexOf(", function")));
+    expect(config.version).toBe(manifest.offline!.version);
+    expect(config.shells).toEqual(["/leads"]);
+    const prefix = manifest.public_prefix;
+    for (const component of ["app/leads/page", "app/leads/[id]/page"]) {
+      expect(config.precache).toContain(prefix + manifest.routes[component].file);
+    }
+    // Not an offline route: its entry is not precached.
+    expect(config.precache).not.toContain(prefix + manifest.routes["app/settings/page"].file);
+    expect(config.precache).toContain("/icons/192.png");
+
+    // The same build gives the same version: no reinstall per boot.
+    const again = await buildClientBundle();
+    const second = JSON.parse(fs.readFileSync(again.manifestPath, "utf8")) as PylonBundleManifest;
+    expect(second.offline?.version).toBe(manifest.offline!.version);
+  });
+
+  test("an app without offline gets no worker", async () => {
+    tempDir = makeFixture({ "page.tsx": PAGE_BODY("Home") }, { "layout.tsx": LAYOUT_BODY });
+    originalCwd = process.cwd();
+    process.chdir(tempDir);
+    const { manifestPath, outdir } = await buildClientBundle();
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as PylonBundleManifest;
+    expect(manifest.offline).toBeUndefined();
+    expect(fs.existsSync(path.join(outdir, "pylon-sw.js"))).toBe(false);
+  });
+});

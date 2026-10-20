@@ -206,6 +206,23 @@ fn canonical_prefix(path: &Path) -> std::path::PathBuf {
     }
 }
 
+/// Write `pylon.manifest.json` next to the entry file, as `pylon dev` does.
+/// The client build reads manifest-derived features from it (fonts, the
+/// offline service worker); without it `pylon start app.ts` on a fresh
+/// checkout built a client bundle without them and said so only in a log
+/// line. Best-effort: a read-only app directory keeps the file it shipped.
+fn write_source_manifest(entry_file: &str, manifest_json: &str) {
+    let dir = Path::new(entry_file).parent().unwrap_or(Path::new("."));
+    let path = dir.join(MANIFEST_FILE);
+    let contents = format!("{manifest_json}\n");
+    if std::fs::read_to_string(&path).ok().as_deref() == Some(contents.as_str()) {
+        return;
+    }
+    if let Err(e) = std::fs::write(&path, contents) {
+        tracing::debug!("could not write {}: {e}", path.display());
+    }
+}
+
 pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     // Prebuilt-artifact boot (Pylon Cloud build pipeline). When the control
     // plane ships a prebuilt bundle instead of inlining source, fetch + verify
@@ -328,7 +345,10 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         }
     } else {
         match crate::bun::run_bun_codegen(&entry_file, true) {
-            Ok(json) => json,
+            Ok(json) => {
+                write_source_manifest(&entry_file, &json);
+                json
+            }
             Err(diag) => {
                 print_diagnostics(&[diag], json_mode);
                 return ExitCode::Error;

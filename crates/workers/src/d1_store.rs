@@ -525,6 +525,7 @@ mod tests {
             required_env: Vec::new(),
             build: Default::default(),
             shards: Vec::new(),
+            offline: None,
             manifest_version: pylon_kernel::MANIFEST_VERSION,
             name: "t".into(),
             version: "0".into(),

@@ -538,6 +538,7 @@ fn empty_manifest() -> pylon_kernel::AppManifest {
         required_env: vec![],
         build: Default::default(),
         shards: Vec::new(),
+        offline: None,
     }
 }
 

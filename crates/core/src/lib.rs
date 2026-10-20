@@ -170,6 +170,109 @@ pub struct AppManifest {
     /// boot; `ctx.shards.create(kind, id)` starts a shard of that kind.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shards: Vec<ManifestShard>,
+    /// Installable app that opens without a network, from
+    /// `buildManifest({ offline: {...} })`. When set, the runtime serves
+    /// `/manifest.webmanifest` and `/pylon-sw.js`, and the client registers
+    /// the service worker in production.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offline: Option<ManifestOffline>,
+}
+
+/// Offline and install settings. Emitted by the SDK's
+/// `buildManifest({ offline })`, which fills the defaults.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestOffline {
+    /// The app name on the install prompt and the splash screen.
+    pub name: String,
+    /// The name under the home-screen icon. Default: `name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub icons: Vec<ManifestOfflineIcon>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_color: Option<String>,
+    /// The page the installed app opens on.
+    #[serde(default = "default_offline_start_url")]
+    pub start_url: String,
+    /// `standalone`, `fullscreen`, `minimal-ui`, or `browser`.
+    #[serde(default = "default_offline_display")]
+    pub display: String,
+    /// Route patterns (`/leads`, `/leads/[id]`) that open without a network.
+    /// The SDK always includes the start URL.
+    #[serde(default)]
+    pub routes: Vec<String>,
+}
+
+fn default_offline_start_url() -> String {
+    "/".to_string()
+}
+
+fn default_offline_display() -> String {
+    "standalone".to_string()
+}
+
+/// One icon in the web app manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestOfflineIcon {
+    /// A same-origin path (`/icons/192.png`, usually a file in `public/`).
+    pub src: String,
+    /// `"192x192"`, or several sizes separated by spaces.
+    pub sizes: String,
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    /// `"any"`, `"maskable"`, `"monochrome"`, or several separated by spaces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+}
+
+impl ManifestOffline {
+    /// The web app manifest served at `/manifest.webmanifest`.
+    pub fn web_manifest(&self) -> serde_json::Value {
+        let mut m = serde_json::Map::new();
+        m.insert("name".into(), self.name.clone().into());
+        m.insert(
+            "short_name".into(),
+            self.short_name
+                .clone()
+                .unwrap_or_else(|| self.name.clone())
+                .into(),
+        );
+        if let Some(d) = &self.description {
+            m.insert("description".into(), d.clone().into());
+        }
+        m.insert("start_url".into(), self.start_url.clone().into());
+        m.insert("scope".into(), "/".into());
+        m.insert("display".into(), self.display.clone().into());
+        if let Some(c) = &self.theme_color {
+            m.insert("theme_color".into(), c.clone().into());
+        }
+        if let Some(c) = &self.background_color {
+            m.insert("background_color".into(), c.clone().into());
+        }
+        let icons: Vec<serde_json::Value> = self
+            .icons
+            .iter()
+            .map(|i| {
+                let mut o = serde_json::Map::new();
+                o.insert("src".into(), i.src.clone().into());
+                o.insert("sizes".into(), i.sizes.clone().into());
+                if let Some(t) = &i.mime_type {
+                    o.insert("type".into(), t.clone().into());
+                }
+                if let Some(p) = &i.purpose {
+                    o.insert("purpose".into(), p.clone().into());
+                }
+                serde_json::Value::Object(o)
+            })
+            .collect();
+        m.insert("icons".into(), icons.into());
+        serde_json::Value::Object(m)
+    }
 }
 
 /// One shard kind. Emitted by the SDK's `shard({...})` helper.
