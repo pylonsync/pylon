@@ -8,8 +8,9 @@ import { Schema } from "prosemirror-model";
 import { schema as basic } from "prosemirror-schema-basic";
 import { EditorState, TextSelection } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
-import { configureProseMirrorMarks, findProseMirrorContainer } from "./index";
+import { configureProseMirrorMarks, findProseMirrorContainer, readProseMirror, writeProseMirror } from "./index";
 import {
+  resolveRangesInDoc,
   diffMatches,
   encodeRange,
   mapSpans,
@@ -883,4 +884,34 @@ test("an in-place undo after an outside retype does not keep the retyped range",
   expect(covered(b)).toBeNull();
   expect(reanchored).toEqual([]);
   void a;
+});
+
+// A server function has no editor: it reads the document from the doc.
+test("resolveRangesInDoc finds a range in the doc as it is now, or says it is gone", () => {
+  const doc = new LoroDoc();
+  const body = doc.getMap("row").setContainer("body", new LoroMap());
+  body.setContainer("attributes", new LoroMap());
+  body.setContainer("children", new LoroList());
+  doc.commit();
+  configureProseMirrorMarks(doc, schema);
+  const p = (t: string) => schema.node("paragraph", null, [schema.text(t)]);
+  writeProseMirror(doc, "body", schema, schema.node("doc", null, [p("Hello world"), p("Second")]));
+  doc.commit();
+  const containerId = findProseMirrorContainer(doc, "body")!;
+  const state = EditorState.create({ schema, doc: readProseMirror(doc, "body", schema)! });
+  // "world": after "Hello " in the first paragraph (position 1 is its start).
+  const anchor = encodeRange(state, doc, containerId, 7, 12);
+  const text = (r: { from: number; to: number }) => readProseMirror(doc, "body", schema)!.textBetween(r.from, r.to);
+
+  writeProseMirror(doc, "body", schema, schema.node("doc", null, [p("Oh, hello world"), p("Second")]));
+  doc.commit();
+  const [moved] = resolveRangesInDoc(doc, "body", schema, [{ id: "a", ...anchor }]);
+  expect(moved!.gone).toBe(false);
+  expect(text(moved!)).toBe("world");
+
+  writeProseMirror(doc, "body", schema, schema.node("doc", null, [p("Oh, hello"), p("Second")]));
+  doc.commit();
+  expect(resolveRangesInDoc(doc, "body", schema, [{ id: "a", ...anchor }])[0]!.gone).toBe(true);
+  // A doc with no document in the field.
+  expect(resolveRangesInDoc(new LoroDoc(), "body", schema, [{ id: "a", ...anchor }])[0]!.gone).toBe(true);
 });

@@ -322,6 +322,19 @@ The binding writes some edits as a delete and an insert: splitting or joining pa
 
 A range whose text was all deleted is not drawn, even when the same words appear elsewhere. When this editor deleted it but the binding kept its characters (deleting the first of two equal words keeps the first word's characters), `onReanchor` gets null cursors: store them, so other editors stop drawing it. A cursor that cannot be read resolves as `gone`, not as an error. Each decoration has the class `pylon-anchored-range` unless you give `className`, and the range's `id` in its spec as `rangeId`.
 
+A server function has no editor. `resolveRangesInDoc(doc, field, schema, ranges)` reads the field's document from the doc and resolves each range in it. The positions match the document `readProseMirror` returns and the state `editProseMirror` gives its `change`, so a function can keep an edit inside a range:
+
+```ts
+import { editProseMirror } from "@pylonsync/loro/prosemirror";
+import { resolveRangesInDoc } from "@pylonsync/loro/prosemirror/ranges";
+
+await editProseMirror(live, "body", schema, (state) => {
+  const [range] = resolveRangesInDoc(live.doc, "body", schema, [{ id: thread.id, from: thread.anchorFrom, to: thread.anchorTo }]);
+  if (!range || range.gone) return null; // its text was deleted
+  return state.tr.insertText("(checked) ", range.from);
+});
+```
+
 ## Awareness / presence
 
 For lightweight ephemeral state (who's editing, where their cursor is, what they're typing) that doesn't need to be persisted, use the `useRoom` hook from `@pylonsync/react`. It returns the live peer list plus a `setPresence` you call as the local cursor moves:
