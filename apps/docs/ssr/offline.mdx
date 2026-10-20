@@ -84,6 +84,37 @@ The worker keeps a page only when its HTML is the same for every signed-in user.
 
 The kept HTML carries one bit of the session: signed in or not. When that bit changes, the page tells the worker, and the worker gets the HTML again.
 
+## Unsynced and failed writes
+
+Writes made with no network wait in a queue on the device and are sent when the network returns. Show the user what is waiting and what the server refused with `useOutbox()`:
+
+```tsx
+import { useOutbox } from "@pylonsync/react";
+
+export function OutboxBar() {
+  const { pending, failed, retry, dismiss } = useOutbox();
+  if (pending.length === 0 && failed.length === 0) return null;
+  return (
+    <div>
+      {pending.length > 0 && <p>{pending.length} not synced</p>}
+      {failed.map((w) => (
+        <div key={w.id}>
+          <p>Not saved: {w.error}</p>
+          <button onClick={() => retry(w.id)}>Retry</button>
+          <button onClick={() => dismiss(w.id)}>Dismiss</button>
+        </div>
+      ))}
+    </div>
+  );
+}
+```
+
+To fix a value the server rejected, pass the corrected fields: `retry(w.id, { door: "14B" })`. A failed write is sent again only as the user who made it.
+
+Rows written offline stay on screen after the app restarts. The sync engine applies the queued writes to the local replica again when it starts.
+
+When two people edit the same field of one row offline, the server keeps the edit that arrives last. Both writes succeed, so neither person is told. Edits to different fields of the row are both kept.
+
 ## New deploys
 
 Each build gets a new worker with its own caches. The new worker installs in the background and waits. It takes over on the next launch, when every tab of the app is closed. Then it deletes the caches of the old build. A deploy never changes the code of a page that is open.

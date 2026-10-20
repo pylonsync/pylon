@@ -137,6 +137,35 @@ try {
 }
 ```
 
+### `useOutbox` — unsynced and failed writes
+
+`useOutbox()` lists the writes on this device that are not on the server. It re-renders when a write is queued, applied, rejected, retried, or dismissed.
+
+```tsx
+import { useOutbox } from "@pylonsync/react";
+
+function SyncStatus() {
+  const { pending, failed, retry, dismiss } = useOutbox();
+  return (
+    <div>
+      {pending.length > 0 && <p>{pending.length} not synced</p>}
+      {failed.map((w) => (
+        <div key={w.id}>
+          <p>{w.entity} not saved: {w.error}</p>
+          <button onClick={() => retry(w.id)}>Retry</button>
+          <button onClick={() => dismiss(w.id)}>Dismiss</button>
+        </div>
+      ))}
+    </div>
+  );
+}
+```
+
+- `pending`: writes made offline, or waiting for a sign-in. Oldest first.
+- `failed`: writes the server rejected, with `error` and `errorCode`.
+- `retry(id, data?)`: applies the write again and sends it, with `data` merged over its fields. It rejects with a `MutationRejectedError` when the server rejects it again, or when another user is signed in.
+- `dismiss(id)`: drops a failed write.
+
 ### `db.useSearch` — live faceted search
 
 ```tsx

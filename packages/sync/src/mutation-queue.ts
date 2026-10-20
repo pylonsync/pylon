@@ -55,6 +55,9 @@ export interface PendingMutation {
   error?: string;
   /** Server error code for a failed mutation, when the server sent one. */
   errorCode?: string;
+  /** When the write was made, in ms since the epoch. Missing on writes
+   *  queued by an older client; those sort first. */
+  createdAt?: number;
   /** User id the write was made as (`null` = anonymous). Persisted with
    *  the queue so a write is only ever pushed as the user who made it.
    *  `undefined` = unknown (queued by an older client). */
@@ -69,6 +72,46 @@ export interface PendingMutation {
    *  the value the server actually holds. `null` = the row didn't exist
    *  before the mutation; `undefined` = not captured (inserts). */
   prevRow?: Row | null;
+}
+
+/** One write as the outbox shows it. */
+export interface OutboxItem {
+  /** Op id. Pass it to `retryWrite` / `dismissWrite`. */
+  id: string;
+  entity: string;
+  rowId: string;
+  kind: "insert" | "update" | "delete";
+  /** The fields the write sets. Empty for a delete. */
+  data: Row;
+  /** When the write was made, in ms since the epoch (0 when unknown). */
+  createdAt: number;
+  /** The server's message, for a failed write. */
+  error?: string;
+  /** The server's error code (`POLICY_DENIED`, `VALIDATION_FAILED`, ...),
+   *  for a failed write. */
+  errorCode?: string;
+}
+
+/** Writes not yet on the server, and writes the server rejected. */
+export interface Outbox {
+  pending: OutboxItem[];
+  failed: OutboxItem[];
+}
+
+export function toOutboxItem(m: PendingMutation): OutboxItem {
+  const item: OutboxItem = {
+    id: m.id,
+    entity: m.change.entity,
+    rowId: m.change.row_id,
+    kind: m.change.kind,
+    data: { ...(m.change.data ?? {}) },
+    createdAt: m.createdAt ?? 0,
+  };
+  if (m.status === "failed") {
+    if (m.error !== undefined) item.error = m.error;
+    if (m.errorCode !== undefined) item.errorCode = m.errorCode;
+  }
+  return item;
 }
 
 /**
@@ -94,9 +137,30 @@ export class MutationQueue {
   /** Callers waiting for a mutation's outcome, by op id. Memory-only:
    *  a promise cannot outlive the page that created it. */
   private waiters = new Map<string, OutcomeWaiter[]>();
+  /** Called after every change to what the queue holds or to a write's
+   *  status. The engine turns it into a store notification so the outbox
+   *  re-renders. */
+  private changeListener: (() => void) | null = null;
+  /** Bumped on every change; lets readers cache a snapshot. */
+  private _version = 0;
 
   constructor(persistence?: MutationQueuePersistence) {
     this.persistence = persistence;
+  }
+
+  /** Set the one listener called after each queue change. */
+  setChangeListener(listener: (() => void) | null): void {
+    this.changeListener = listener;
+  }
+
+  /** Changes so far. Equal versions mean the same contents. */
+  version(): number {
+    return this._version;
+  }
+
+  private changed(): void {
+    this._version += 1;
+    this.changeListener?.();
   }
 
   /**
@@ -125,7 +189,10 @@ export class MutationQueue {
           mergedAny = true;
         }
       }
-      if (mergedAny) this.flush();
+      if (mergedAny) {
+        this.flush();
+        this.changed();
+      }
     } catch (err) {
       // Broken storage shouldn't prevent the app from running — warn
       // and degrade to memory-only mode.
@@ -146,18 +213,26 @@ export class MutationQueue {
     prevRow?: Row | null,
     owner?: string | null,
     ownerPending?: boolean,
+    createdAt?: number,
   ): string {
     const id =
       typeof change.op_id === "string" && change.op_id.length > 0
         ? change.op_id
-        : `mut_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        : newOpId();
     if (this.queue.has(id)) return id;
     const changeWithOp: ClientChange = { ...change, op_id: id };
-    const entry: PendingMutation = { id, change: changeWithOp, status: "pending", prevRow };
+    const entry: PendingMutation = {
+      id,
+      change: changeWithOp,
+      status: "pending",
+      prevRow,
+      createdAt: createdAt ?? Date.now(),
+    };
     if (owner !== undefined) entry.owner = owner;
     if (ownerPending) entry.ownerPending = true;
     this.queue.set(id, entry);
     this.flush([entry]);
+    this.changed();
     return id;
   }
 
@@ -167,6 +242,61 @@ export class MutationQueue {
       if (mutation.status === "pending") pending.push(mutation);
     }
     return pending;
+  }
+
+  /** Writes the server rejected, oldest first. They stay until the user
+   *  retries or dismisses them. */
+  failed(): PendingMutation[] {
+    return byCreatedAt(Array.from(this.queue.values()).filter((m) => m.status === "failed"));
+  }
+
+  /**
+   * Queue a failed write again under a new op id, with `data` (when
+   * given) merged over the original change's fields. The failed entry is
+   * removed in the same persistence write, so a reload never sees both.
+   * The new write keeps the original's owner and `createdAt`. `prevRow`
+   * is the row before the caller re-applied the write locally, for the
+   * rollback if the server rejects it again. Returns the new op id.
+   *
+   * The server forgets a rejected op id (it never applied it), so the new
+   * id cannot be applied alongside the old one.
+   */
+  retry(id: string, data: Row | undefined, prevRow: Row | null | undefined): string {
+    const m = this.queue.get(id);
+    if (!m || m.status !== "failed") {
+      throw new Error(`no failed write with id ${id}`);
+    }
+    const newId = newOpId();
+    const change: ClientChange = { ...m.change, op_id: newId };
+    if (data !== undefined && m.change.kind !== "delete") {
+      change.data = { ...(m.change.data ?? {}), ...data };
+      if (m.change.kind === "insert") change.data.id = m.change.row_id;
+    }
+    const entry: PendingMutation = {
+      id: newId,
+      change,
+      status: "pending",
+      prevRow,
+      createdAt: m.createdAt,
+    };
+    if (m.owner !== undefined) entry.owner = m.owner;
+    this.queue.delete(id);
+    this.queue.set(newId, entry);
+    this.flush([entry], [id]);
+    this.changed();
+    return newId;
+  }
+
+  /** Drop a failed write after the user has seen it. Returns false when
+   *  there is no failed write with that id (pending writes cannot be
+   *  dismissed: they may already be on the server). */
+  dismiss(id: string): boolean {
+    const m = this.queue.get(id);
+    if (!m || m.status !== "failed") return false;
+    this.queue.delete(id);
+    this.flush([], [id]);
+    this.changed();
+    return true;
   }
 
   /** Look up a queued mutation by op id (any status). Used by the
@@ -237,7 +367,10 @@ export class MutationQueue {
         changed.push(m);
       }
     }
-    if (changed.length > 0) this.flush(changed);
+    if (changed.length > 0) {
+      this.flush(changed);
+      this.changed();
+    }
     for (const id of ids) this.resolveWaiters(id);
   }
 
@@ -248,7 +381,10 @@ export class MutationQueue {
       m.error = error;
       if (errorCode) m.errorCode = errorCode;
     }
-    if (m) this.flush([m]);
+    if (m) {
+      this.flush([m]);
+      this.changed();
+    }
     const waiters = this.waiters.get(id);
     if (!waiters) return;
     this.waiters.delete(id);
@@ -283,7 +419,10 @@ export class MutationQueue {
         removedIds.push(id);
       }
     }
-    if (removedIds.length > 0) this.flush([], removedIds);
+    if (removedIds.length > 0) {
+      this.flush([], removedIds);
+      this.changed();
+    }
   }
 
   /** Stamp every write whose owner was pending with the user the first
@@ -307,6 +446,7 @@ export class MutationQueue {
     const m = this.get(id);
     this.queue.delete(id);
     this.flush([], [id]);
+    if (m) this.changed();
     const waiters = this.waiters.get(id);
     if (!waiters) return;
     this.waiters.delete(id);
@@ -326,8 +466,9 @@ export class MutationQueue {
   /** Remove a specific mutation by id. Used by the UI after user
    *  ack of failures. */
   remove(id: string): void {
-    this.queue.delete(id);
+    if (!this.queue.delete(id)) return;
     this.flush([], [id]);
+    this.changed();
   }
 
   /**
@@ -345,6 +486,7 @@ export class MutationQueue {
     const dropped = this.queue;
     this.queue = new Map();
     this.flush();
+    if (dropped.size > 0) this.changed();
     // Nobody will push these writes any more. Reject their waiters so a
     // caller awaiting the outcome does not hang.
     for (const m of dropped.values()) {
@@ -376,6 +518,16 @@ export class MutationQueue {
       console.warn("[sync] mutation-queue persist failed:", err);
     });
   }
+}
+
+/** A new op id. The server deduplicates pushes by it. */
+function newOpId(): string {
+  return `mut_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+}
+
+/** Oldest first; writes without `createdAt` (older clients) first of all. */
+export function byCreatedAt(list: PendingMutation[]): PendingMutation[] {
+  return list.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
 }
 
 function rejectionFor(m: PendingMutation): MutationRejectedError {

@@ -228,6 +228,22 @@ export class TestServer {
     this.deniedWrites.set(entity, { code, message });
   }
 
+  /** Reject a pushed insert/update of `entity` whose fields match
+   *  `predicate`, like a write policy that checks a field value. */
+  private conditionalDenials: Array<{
+    entity: string;
+    predicate: (data: Row) => boolean;
+    error: { code: string; message: string };
+  }> = [];
+  rejectWritesWhere(
+    entity: string,
+    predicate: (data: Row) => boolean,
+    code = "POLICY_DENIED",
+    message = "write denied by policy",
+  ): void {
+    this.conditionalDenials.push({ entity, predicate, error: { code, message } });
+  }
+
   private nextPushOutcome:
     | { kind: "network" }
     | { kind: "status"; status: number }
@@ -389,6 +405,11 @@ export class TestServer {
     const denied = this.deniedWrites.get(entity);
     if (denied) {
       return { op_id, status: "error", error: denied };
+    }
+    if (kind !== "delete") {
+      const merged = { ...(this.rows.get(entity)?.get(row_id) ?? {}), ...(change.data ?? {}) } as Row;
+      const rule = this.conditionalDenials.find((d) => d.entity === entity && d.predicate(merged));
+      if (rule) return { op_id, status: "error", error: rule.error };
     }
     const exists = this.rows.get(entity)?.has(row_id) ?? false;
     if (kind === "insert") {

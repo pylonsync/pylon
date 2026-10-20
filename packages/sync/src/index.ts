@@ -16,7 +16,14 @@ import {
   type TransportConfig,
 } from "./transport";
 import { LocalStore } from "./local-store";
-import { MutationQueue, type PendingMutation } from "./mutation-queue";
+import {
+  byCreatedAt,
+  MutationQueue,
+  MutationRejectedError,
+  toOutboxItem,
+  type Outbox,
+  type PendingMutation,
+} from "./mutation-queue";
 import { MultiTabOrchestrator } from "./multi-tab-orchestrator";
 import { OpQueue } from "./op-queue";
 import {
@@ -64,8 +71,14 @@ export {
   MutationQueue,
   MutationRejectedError,
   type MutationQueuePersistence,
+  type Outbox,
+  type OutboxItem,
   type PendingMutation,
 } from "./mutation-queue";
+
+/** The store channel the outbox notifies on. `store.subscribe(cb,
+ *  OUTBOX_CHANNEL)` hears outbox changes and no entity changes. */
+export const OUTBOX_CHANNEL = "$outbox";
 export { generateId } from "./ids";
 export type {
   ChangeEvent,
@@ -604,6 +617,115 @@ export class SyncEngine {
     return this.mutations.pending().length;
   }
 
+  private outboxCache: { version: number; value: Outbox } | null = null;
+
+  /**
+   * Writes made here that the server has not applied yet (`pending`:
+   * offline, or waiting for a sign-in), and writes the server rejected
+   * (`failed`, with its error). Oldest first. The same object is
+   * returned until the queue changes, so it can back
+   * `useSyncExternalStore`. Changes notify store subscribers on
+   * `OUTBOX_CHANNEL`.
+   */
+  outbox(): Outbox {
+    const version = this.mutations.version();
+    if (this.outboxCache && this.outboxCache.version === version) {
+      return this.outboxCache.value;
+    }
+    const value: Outbox = {
+      pending: byCreatedAt(this.mutations.pending().slice()).map(toOutboxItem),
+      failed: this.mutations.failed().map(toOutboxItem),
+    };
+    this.outboxCache = { version, value };
+    return value;
+  }
+
+  /**
+   * Send a failed write again, with `data` (when given) merged over the
+   * fields it set. The write is applied locally again at once (the
+   * rejection rolled it back) and queued under a new op id. Settles like
+   * `insert`: resolves with the new op id once the server applies it or
+   * it is queued offline, and rejects with a `MutationRejectedError` when
+   * the server rejects it again (it is then failed again, with the new
+   * error).
+   *
+   * A write is only ever sent as the user who made it. Throws
+   * `MutationRejectedError` with code `OWNER_MISMATCH` when someone else
+   * is signed in, and `OWNER_UNKNOWN` when it is not yet known who is
+   * signed in (or the write predates owner tracking). Dismiss those.
+   */
+  async retryWrite(id: string, data?: Row): Promise<string> {
+    const m = this.mutations.get(id);
+    if (!m || m.status !== "failed") {
+      throw new Error(`retryWrite: no failed write with id ${id}`);
+    }
+    const reject = (code: string, message: string) =>
+      new MutationRejectedError(message, {
+        code,
+        opId: id,
+        entity: m.change.entity,
+        rowId: m.change.row_id,
+        kind: m.change.kind,
+      });
+    const current = this.currentOwner();
+    if (current === undefined || m.owner === undefined || m.ownerPending) {
+      throw reject(
+        "OWNER_UNKNOWN",
+        "This write cannot be sent again: it is not known who made it or who is signed in.",
+      );
+    }
+    if (m.owner !== current) {
+      throw reject(
+        "OWNER_MISMATCH",
+        "This write was made by another user and cannot be sent as the signed-in user.",
+      );
+    }
+    const { entity, row_id: rowId, kind } = m.change;
+    const before = this.store.get(entity, rowId);
+    const prev = before ? { ...before } : null;
+    const newId = this.mutations.retry(id, data, kind === "insert" ? undefined : prev);
+    const change = this.mutations.get(newId)!.change;
+    if (kind === "insert") {
+      this.store.optimisticInsertWithId(entity, rowId, change.data ?? { id: rowId });
+    } else if (kind === "update") {
+      this.store.optimisticUpdate(entity, rowId, change.data ?? {});
+    } else {
+      this.store.optimisticDelete(entity, rowId);
+    }
+    this.broadcastToTabs({ type: "mutations-removed", opIds: [id] });
+    await this.sendAndAwait(newId);
+    return newId;
+  }
+
+  /** Drop a failed write after the user has seen it. Its local change
+   *  was already rolled back. Returns false when there is no failed write
+   *  with that id; a pending write cannot be dismissed. */
+  dismissWrite(id: string): boolean {
+    if (!this.mutations.dismiss(id)) return false;
+    this.broadcastToTabs({ type: "mutations-removed", opIds: [id] });
+    return true;
+  }
+
+  /** Apply the queued writes to the replica again after a reload. An
+   *  optimistic change lives only in memory, so without this a row
+   *  written offline vanished from the screen on reload (it was still
+   *  queued and still reached the server later). Oldest first, so an
+   *  update of a row inserted offline finds the row. */
+  private reapplyPendingWrites(): void {
+    for (const m of byCreatedAt(this.mutations.pending().slice())) {
+      const { entity, row_id: rowId, kind, data } = m.change;
+      if (kind === "insert") {
+        if (!this.store.get(entity, rowId)) {
+          this.store.optimisticInsertWithId(entity, rowId, data ?? { id: rowId });
+        }
+      } else if (kind === "update") {
+        this.store.optimisticUpdate(entity, rowId, data ?? {});
+      } else {
+        this.store.optimisticDelete(entity, rowId);
+      }
+    }
+  }
+
   /**
    * Mutate connection status + notify subscribers. Idempotent — same-
    * status calls are a no-op so the WS onopen → connected transition
@@ -622,6 +744,7 @@ export class SyncEngine {
     this.config = config;
     this.store = new LocalStore();
     this.mutations = new MutationQueue();
+    this.mutations.setChangeListener(() => this.store.notify(OUTBOX_CHANNEL));
     this.storage = config.storage ?? defaultStorage();
     this.clientId = generateClientId(this.storage);
     // ServerSubscriptions defers sending until the WS is open (the
@@ -822,6 +945,7 @@ export class SyncEngine {
             const mqPersistence = new IndexedDBMutationPersistence(persistence);
             this.mutations.attachPersistence(mqPersistence);
             await this.mutations.hydrate();
+            this.reapplyPendingWrites();
           }
           // The hydrated offline writes are drained in the leader path
           // below (after `initMultiTab` settles), NOT here. We're still
@@ -1088,7 +1212,7 @@ export class SyncEngine {
           // DELETE the leader's still-valid row. The follower's prevRow
           // (its pre-edit value) equals the leader's canonical row, so
           // restoring it is correct on both tabs.
-          this.mutations.add(op.change, op.prevRow, op.owner, op.ownerPending);
+          this.mutations.add(op.change, op.prevRow, op.owner, op.ownerPending, op.createdAt);
         }
         void this.pushNew(ops.map((op) => op.id));
       },
@@ -1100,6 +1224,14 @@ export class SyncEngine {
         // The leader's push failed transiently; the writes stay queued
         // and the leader retries them. Release this tab's callers.
         for (const id of opIds) this.mutations.settleQueued(id);
+      },
+      onMutationsRemoved: (opIds: string[]) => {
+        // Another tab retried (under a new op id) or dismissed these
+        // failed writes. Drop this tab's copy so neither tab shows or
+        // resends the old one.
+        for (const id of opIds) {
+          if (this.mutations.get(id)?.status === "failed") this.mutations.remove(id);
+        }
       },
       onMutationsFailed: (
         ops: { opId: string; error: string; code?: string }[],

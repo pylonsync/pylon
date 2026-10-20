@@ -187,6 +187,10 @@ export type { UseSessionReturn, ResolvedSession } from "./useSession";
 export { useSyncStatus } from "./useSyncStatus";
 export type { SyncConnectionStatus } from "./useSyncStatus";
 
+// Writes not yet on the server, and writes the server rejected.
+export { useOutbox } from "./useOutbox";
+export type { UseOutboxReturn, Outbox, OutboxItem } from "./useOutbox";
+
 // Offline service worker registration. The SSR client runtime calls it on
 // every page load; apps opt in with `buildManifest({ offline })`.
 export { registerOfflineWorker } from "./offlineWorker";

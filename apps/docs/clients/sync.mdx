@@ -78,15 +78,34 @@ await engine.update("Todo", id, { done: true });
 await engine.delete("Todo", id);
 ```
 
-If the server rejects a mutation, the engine marks it `failed` in the queue (`engine.mutations`, a `MutationQueue`) and keeps it there. It isn't silently dropped. Look one up by op id with `engine.mutations.get(id)` (its `.status` is `"pending" | "applied" | "failed"`, with `.error` set on failure), and drop it once resolved:
+If the server rejects a mutation, the engine rolls it back and keeps it in the queue as `failed`. `engine.outbox()` lists the writes that are not on the server:
 
 ```typescript
-const m = engine.mutations.get(opId);
-if (m?.status === "failed") {
-  toast.error(`write failed: ${m.error}`);
-  engine.mutations.remove(opId); // clear it after showing a retry affordance
+const { pending, failed } = engine.outbox();
+// pending: writes made offline (or waiting for a sign-in), oldest first
+// failed:  writes the server rejected, each with `error` and `errorCode`
+for (const w of failed) {
+  console.log(w.entity, w.rowId, w.kind, w.data, w.error, w.errorCode);
 }
 ```
+
+Each item has the op id (`id`), `entity`, `rowId`, `kind`, the fields it sets (`data`), and `createdAt`. The same object is returned until the queue changes. A queue change notifies store subscribers on `OUTBOX_CHANNEL`.
+
+Retry a failed write, with corrected fields when the server rejected a value. The write is applied locally again and sent under a new op id. The promise settles like `insert`:
+
+```typescript
+await engine.retryWrite(w.id, { door: "14B" });
+```
+
+Dismiss a failed write after the user has seen it:
+
+```typescript
+engine.dismissWrite(w.id); // false when no failed write has that id
+```
+
+A write is sent only as the user who made it. `retryWrite` rejects with code `OWNER_MISMATCH` when another user is signed in, and with `OWNER_UNKNOWN` when the engine does not know who made the write or who is signed in. Dismiss those writes.
+
+Rows written offline stay on screen after a reload: on start, the engine applies the pending writes from the saved queue to the local replica again.
 
 For a simpler per-call API, prefer the React [`db.useMutation`](/clients/react) hook. It exposes `loading` / `data` / `error` for the specific call, without reaching into the queue.
 
