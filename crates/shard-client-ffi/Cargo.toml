@@ -19,7 +19,8 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 [dependencies]
 wtransport = { workspace = true }
 rustls = { workspace = true }
-webpki-roots = "0.26"
+# 1.0.10 drops the distrusted emSign ECC Root CA - G3 (RUSTSEC-2026-0381).
+webpki-roots = "1.0.10"
 tokio = { workspace = true }
 
 [dev-dependencies]

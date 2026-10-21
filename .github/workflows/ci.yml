@@ -467,7 +467,14 @@ jobs:
       # path, the attack is unreachable here. Justification reviewed
       # 2026-06-11; revisit if a decrypting RSA code path is ever added or
       # the `rsa` crate ships a fix (then drop this ignore).
-      - run: cargo audit --ignore RUSTSEC-2023-0071
+      # RUSTSEC-2026-0381 (webpki-roots < 1.0.10 trusts the distrusted
+      # emSign ECC Root CA - G3) matches webpki-roots 0.26.11, which ureq 2
+      # and tungstenite 0.24 still require. 0.26.11 holds no roots of its
+      # own: its lib.rs is `pub use parent::TLS_SERVER_ROOTS` from
+      # webpki-roots 1.x, and crates/shard-client-ffi requires 1.0.10, so
+      # the lockfile's roots are the fixed set. Drop this ignore when ureq
+      # and tungstenite move to webpki-roots 1.x. Reviewed 2026-10-21.
+      - run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0381
 
   # -----------------------------------------------------------------
   # Terminal gate. Always runs (even when every real job is skipped),
