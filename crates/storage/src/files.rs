@@ -78,6 +78,18 @@ pub trait FileStorage: Send + Sync {
     /// back to `get()` for backends without a CDN URL.
     fn get(&self, id: &str) -> Result<Vec<u8>, FileStorageError>;
 
+    /// [`Self::get`], reading at most `max` bytes: a larger file is refused
+    /// with `FILE_TOO_LARGE` without holding it all in memory. The
+    /// built-in backends stop reading at the limit; the default reads the
+    /// whole file first, so a backend with large files should override it.
+    fn get_limited(&self, id: &str, max: usize) -> Result<Vec<u8>, FileStorageError> {
+        let bytes = self.get(id)?;
+        if bytes.len() > max {
+            return Err(file_too_large(max));
+        }
+        Ok(bytes)
+    }
+
     /// Delete a file by ID. Returns `Ok(true)` when the file existed
     /// and was removed, `Ok(false)` when it was already absent.
     fn delete(&self, id: &str) -> Result<bool, FileStorageError>;
@@ -133,6 +145,25 @@ pub trait FileStorage: Send + Sync {
     fn requires_owner_check(&self) -> bool {
         false
     }
+}
+
+/// The error a bounded read returns for a file over its limit.
+pub fn file_too_large(max: usize) -> FileStorageError {
+    FileStorageError {
+        code: "FILE_TOO_LARGE".into(),
+        message: format!("the file is larger than {max} bytes"),
+    }
+}
+
+/// Read a response body, refusing it past `max` bytes without buffering more.
+pub(crate) fn read_limited(
+    reader: impl std::io::Read,
+    max: usize,
+) -> std::io::Result<Option<Vec<u8>>> {
+    use std::io::Read as _;
+    let mut buf = Vec::new();
+    reader.take(max as u64 + 1).read_to_end(&mut buf)?;
+    Ok(if buf.len() > max { None } else { Some(buf) })
 }
 
 /// Result of `FileStorage::init_upload`.
@@ -511,6 +542,19 @@ impl FileStorage for LocalFileStorage {
         })
     }
 
+    fn get_limited(&self, id: &str, max: usize) -> Result<Vec<u8>, FileStorageError> {
+        validate_local_id(id)?;
+        let path = self.dir.join(id);
+        let not_found = || FileStorageError {
+            code: "NOT_FOUND".into(),
+            message: "File not found".into(),
+        };
+        let file = std::fs::File::open(&path).map_err(|_| not_found())?;
+        read_limited(file, max)
+            .map_err(|_| not_found())?
+            .ok_or_else(|| file_too_large(max))
+    }
+
     fn delete(&self, id: &str) -> Result<bool, FileStorageError> {
         validate_local_id(id)?;
         let path = self.dir.join(id);
@@ -884,6 +928,32 @@ impl FileStorage for Stack0FileStorage {
         Ok(buf)
     }
 
+    fn get_limited(&self, id: &str, max: usize) -> Result<Vec<u8>, FileStorageError> {
+        let meta: serde_json::Value = self
+            .agent
+            .get(&self.asset_url(id)?)
+            .set("Authorization", &format!("Bearer {}", self.api_key))
+            .call()
+            .map_err(|e| match &e {
+                ureq::Error::Status(404, _) => stack0_err("NOT_FOUND", "Asset not found"),
+                _ => stack0_err("STACK0_GET_FAILED", e),
+            })?
+            .into_json()
+            .map_err(|e| stack0_err("STACK0_GET_PARSE", e))?;
+        let cdn_url = meta["cdnUrl"]
+            .as_str()
+            .ok_or_else(|| stack0_err("STACK0_GET_BAD_RESPONSE", "missing cdnUrl"))?;
+        let reader = self
+            .agent
+            .get(cdn_url)
+            .call()
+            .map_err(|e| stack0_err("STACK0_FETCH_FAILED", e))?
+            .into_reader();
+        read_limited(reader, max)
+            .map_err(|e| stack0_err("STACK0_FETCH_READ", e))?
+            .ok_or_else(|| file_too_large(max))
+    }
+
     fn delete(&self, id: &str) -> Result<bool, FileStorageError> {
         let agent = &self.agent;
         match agent
@@ -1006,6 +1076,24 @@ mod tests {
         assert!(storage
             .asset_url("0b8e5f2a-1c3d-4e5f-9a8b-7c6d5e4f3a2b")
             .is_ok());
+    }
+
+    #[test]
+    fn local_get_limited_stops_at_the_limit() {
+        let dir = std::env::temp_dir().join(format!("pylon_get_limited_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let storage = LocalFileStorage::new(dir.to_str().unwrap(), "/api/files");
+        let stored = storage.store("a.txt", b"0123456789", "text/plain").unwrap();
+        assert_eq!(storage.get_limited(&stored.id, 10).unwrap(), b"0123456789");
+        assert_eq!(
+            storage.get_limited(&stored.id, 9).unwrap_err().code,
+            "FILE_TOO_LARGE"
+        );
+        assert_eq!(
+            storage.get_limited("missing", 9).unwrap_err().code,
+            "NOT_FOUND"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

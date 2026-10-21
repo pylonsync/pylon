@@ -89,7 +89,9 @@ pub enum LlmContent {
 
 /// Content block — mirror of Anthropic's content block enum. Streams
 /// arrive as a sequence of these. Tools loop emits `ToolUse`, the
-/// caller responds with `ToolResult` referencing the same `id`.
+/// caller responds with `ToolResult` referencing the same `id`. A
+/// person's message can carry `Image` and `Document` blocks (a PDF or
+/// plain text the model reads), each with its bytes in `source`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
@@ -107,6 +109,103 @@ pub enum ContentBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
     },
+    Image {
+        source: MediaSource,
+    },
+    Document {
+        source: MediaSource,
+        /// Shown to the model as the document's name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
+}
+
+/// The bytes of an image or document block: `{ type: "base64",
+/// media_type, data }`, as Anthropic takes them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaSource {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub media_type: String,
+    pub data: String,
+}
+
+/// Image types the providers read.
+const IMAGE_TYPES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
+/// Document types the providers read.
+const DOCUMENT_TYPES: &[&str] = &["application/pdf", "text/plain"];
+
+/// Refuse image and document blocks the provider would refuse, before the
+/// request is sent: base64 sources of the types above. OpenAI's chat API
+/// takes images but no documents.
+fn check_media(req: &LlmCompleteRequest, provider: &LlmProvider) -> Result<(), LlmError> {
+    let invalid = |message: String| LlmError {
+        code: "LLM_INVALID_CONTENT".into(),
+        message,
+    };
+    for m in &req.messages {
+        let LlmContent::Blocks(blocks) = &m.content else {
+            continue;
+        };
+        let has_media = blocks.iter().any(|b| {
+            matches!(
+                b,
+                ContentBlock::Image { .. } | ContentBlock::Document { .. }
+            )
+        });
+        if has_media
+            && blocks
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
+        {
+            return Err(invalid(
+                "a message cannot carry both tool_use and image or document blocks".into(),
+            ));
+        }
+        for b in blocks {
+            // A person sends images and documents; an assistant message
+            // carries tool_use, which OpenAI cannot mix with image parts.
+            if matches!(
+                b,
+                ContentBlock::Image { .. } | ContentBlock::Document { .. }
+            ) && m.role != "user"
+            {
+                return Err(invalid(format!(
+                    "image and document blocks go in user messages, not {}",
+                    m.role
+                )));
+            }
+            let (source, allowed, what) = match b {
+                ContentBlock::Image { source } => (source, IMAGE_TYPES, "image"),
+                ContentBlock::Document { source, .. } => {
+                    if matches!(provider, LlmProvider::Openai) {
+                        return Err(LlmError {
+                            code: "LLM_UNSUPPORTED_CONTENT".into(),
+                            message: "the OpenAI provider takes no document blocks; send the text, or images".into(),
+                        });
+                    }
+                    (source, DOCUMENT_TYPES, "document")
+                }
+                _ => continue,
+            };
+            if source.kind != "base64" {
+                return Err(invalid(format!("an {what} block's source must be base64")));
+            }
+            if !allowed.contains(&source.media_type.as_str()) {
+                return Err(invalid(format!(
+                    "an {what} block must be one of {}, not {}",
+                    allowed.join(", "),
+                    source.media_type
+                )));
+            }
+            if source.media_type == "text/plain" && plain_text(&source.data).is_none() {
+                return Err(invalid(
+                    "a text/plain document must be base64 of UTF-8 text".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Tool declaration. The schema is a JSON Schema object describing
@@ -405,6 +504,7 @@ impl LlmClient {
     /// shot. Use this when the caller doesn't need progressive output
     /// (agent tool-use loops, batch generation, internal jobs).
     pub fn complete(&self, mut req: LlmCompleteRequest) -> Result<LlmCompleteResponse, LlmError> {
+        check_media(&req, &self.inner.provider)?;
         req.model = Some(self.resolve_model(&req)?);
         // Clamp max_tokens against the configured cap. Codex P1-5:
         // a caller can request `max_tokens: 200000` against a premium
@@ -448,6 +548,7 @@ impl LlmClient {
         if cancel.load(Ordering::SeqCst) {
             return Err(cancelled_error());
         }
+        check_media(&req, &self.inner.provider)?;
         req.model = Some(self.resolve_model(&req)?);
         let requested_max = req.max_tokens.unwrap_or(4096);
         req.max_tokens = Some(match self.inner.max_tokens_cap {
@@ -889,11 +990,42 @@ fn serialize_messages_anthropic(messages: &[LlmMessage]) -> Vec<serde_json::Valu
         .map(|m| {
             let content = match &m.content {
                 LlmContent::Text(s) => serde_json::Value::String(s.clone()),
-                LlmContent::Blocks(blocks) => serde_json::json!(blocks),
+                LlmContent::Blocks(blocks) => {
+                    serde_json::Value::Array(blocks.iter().map(anthropic_block).collect())
+                }
             };
             serde_json::json!({"role": m.role, "content": content})
         })
         .collect()
+}
+
+/// A block as Anthropic takes it. A plain-text document goes as its text
+/// (`source.type: "text"`), which Anthropic requires; check_media made
+/// sure it decodes.
+fn anthropic_block(block: &ContentBlock) -> serde_json::Value {
+    if let ContentBlock::Document { source, title } = block {
+        if source.media_type == "text/plain" {
+            let text = plain_text(&source.data).unwrap_or_default();
+            let mut doc = serde_json::json!({
+                "type": "document",
+                "source": { "type": "text", "media_type": "text/plain", "data": text },
+            });
+            if let Some(title) = title {
+                doc["title"] = serde_json::Value::String(title.clone());
+            }
+            return doc;
+        }
+    }
+    serde_json::json!(block)
+}
+
+/// A base64 plain-text document's text, or None when it is not UTF-8.
+fn plain_text(data: &str) -> Option<String> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .ok()?;
+    String::from_utf8(bytes).ok()
 }
 
 /// Builds the `/v1/chat/completions` body.
@@ -1026,6 +1158,12 @@ fn serialize_messages_openai(m: &LlmMessage) -> Vec<serde_json::Value> {
             let mut out: Vec<serde_json::Value> = Vec::new();
             let mut text_chunks: Vec<String> = Vec::new();
             let mut tool_calls: Vec<serde_json::Value> = Vec::new();
+            // With images, the message is ordered parts: text and image_url,
+            // as the blocks came. check_media refused documents.
+            let has_images = blocks
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Image { .. }));
+            let mut parts: Vec<serde_json::Value> = Vec::new();
             // Emit tool_result blocks as standalone role:"tool"
             // messages — these don't combine with text/tool_use.
             for b in blocks {
@@ -1044,7 +1182,10 @@ fn serialize_messages_openai(m: &LlmMessage) -> Vec<serde_json::Value> {
             }
             for b in blocks {
                 match b {
-                    ContentBlock::Text { text } => text_chunks.push(text.clone()),
+                    ContentBlock::Text { text } => {
+                        text_chunks.push(text.clone());
+                        parts.push(serde_json::json!({"type": "text", "text": text}));
+                    }
                     ContentBlock::ToolUse { id, name, input } => {
                         tool_calls.push(serde_json::json!({
                             "id": id,
@@ -1056,12 +1197,19 @@ fn serialize_messages_openai(m: &LlmMessage) -> Vec<serde_json::Value> {
                         }));
                     }
                     ContentBlock::ToolResult { .. } => {} // handled above
+                    ContentBlock::Image { source } => parts.push(serde_json::json!({
+                        "type": "image_url",
+                        "image_url": { "url": format!("data:{};base64,{}", source.media_type, source.data) },
+                    })),
+                    ContentBlock::Document { .. } => {}
                 }
             }
             // Build the text+tool_calls message if we have either —
             // role-normalized to assistant when tool_calls present,
             // since OpenAI rejects tool_calls on non-assistant roles.
-            if !text_chunks.is_empty() || !tool_calls.is_empty() {
+            if has_images {
+                out.push(serde_json::json!({"role": m.role, "content": parts}));
+            } else if !text_chunks.is_empty() || !tool_calls.is_empty() {
                 let role = if !tool_calls.is_empty() && m.role != "assistant" {
                     tracing::warn!(
                         "[llm] OpenAI: forcing role to \"assistant\" on message with tool_calls (caller passed role=\"{}\")",
@@ -1620,6 +1768,213 @@ mod tests {
         assert_eq!(body["system"], "You are helpful.");
         assert_eq!(body["tools"][0]["name"], "get_weather");
         assert_eq!(body["stream"], true);
+    }
+
+    fn media(media_type: &str) -> MediaSource {
+        MediaSource {
+            kind: "base64".into(),
+            media_type: media_type.into(),
+            data: "aGk=".into(),
+        }
+    }
+
+    fn with_blocks(blocks: Vec<ContentBlock>) -> LlmCompleteRequest {
+        LlmCompleteRequest {
+            model: Some("m".into()),
+            messages: vec![LlmMessage {
+                role: "user".into(),
+                content: LlmContent::Blocks(blocks),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn anthropic_body_carries_image_and_document_blocks() {
+        let req = with_blocks(vec![
+            ContentBlock::Text {
+                text: "Read these.".into(),
+            },
+            ContentBlock::Image {
+                source: media("image/png"),
+            },
+            ContentBlock::Document {
+                source: media("application/pdf"),
+                title: Some("spec.pdf".into()),
+            },
+        ]);
+        assert!(check_media(&req, &LlmProvider::Anthropic).is_ok());
+        let body = anthropic_request_body(&req, false);
+        let content = &body["messages"][0]["content"];
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[2]["type"], "document");
+        assert_eq!(content[2]["title"], "spec.pdf");
+        assert_eq!(content[2]["source"]["data"], "aGk=");
+    }
+
+    #[test]
+    fn blocks_arrive_from_a_function_in_anthropic_shape() {
+        let req: LlmCompleteRequest = serde_json::from_value(serde_json::json!({
+            "messages": [{ "role": "user", "content": [
+                { "type": "image", "source": { "type": "base64", "media_type": "image/jpeg", "data": "eA==" } },
+                { "type": "document", "source": { "type": "base64", "media_type": "text/plain", "data": "eA==" } }
+            ]}]
+        }))
+        .unwrap();
+        assert!(check_media(&req, &LlmProvider::Anthropic).is_ok());
+    }
+
+    #[test]
+    fn media_the_provider_would_refuse_is_refused_first() {
+        let bad_type = with_blocks(vec![ContentBlock::Image {
+            source: media("image/tiff"),
+        }]);
+        assert_eq!(
+            check_media(&bad_type, &LlmProvider::Anthropic)
+                .unwrap_err()
+                .code,
+            "LLM_INVALID_CONTENT"
+        );
+        let mut url = media("image/png");
+        url.kind = "url".into();
+        let bad_source = with_blocks(vec![ContentBlock::Image { source: url }]);
+        assert_eq!(
+            check_media(&bad_source, &LlmProvider::Anthropic)
+                .unwrap_err()
+                .code,
+            "LLM_INVALID_CONTENT"
+        );
+        let doc = with_blocks(vec![ContentBlock::Document {
+            source: media("application/pdf"),
+            title: None,
+        }]);
+        assert_eq!(
+            check_media(&doc, &LlmProvider::Openai).unwrap_err().code,
+            "LLM_UNSUPPORTED_CONTENT"
+        );
+    }
+
+    #[test]
+    fn anthropic_body_sends_a_plain_text_document_as_text() {
+        use base64::Engine as _;
+        let mut source = media("text/plain");
+        source.data = base64::engine::general_purpose::STANDARD.encode("Notes: ship Friday.");
+        let req = with_blocks(vec![ContentBlock::Document {
+            source,
+            title: Some("notes.txt".into()),
+        }]);
+        assert!(check_media(&req, &LlmProvider::Anthropic).is_ok());
+        let doc = &anthropic_request_body(&req, false)["messages"][0]["content"][0];
+        assert_eq!(
+            doc["source"],
+            serde_json::json!({"type": "text", "media_type": "text/plain", "data": "Notes: ship Friday."})
+        );
+        assert_eq!(doc["title"], "notes.txt");
+        let mut bad = media("text/plain");
+        bad.data = base64::engine::general_purpose::STANDARD.encode([0xff, 0xfe]);
+        let req = with_blocks(vec![ContentBlock::Document {
+            source: bad,
+            title: None,
+        }]);
+        assert_eq!(
+            check_media(&req, &LlmProvider::Anthropic).unwrap_err().code,
+            "LLM_INVALID_CONTENT"
+        );
+    }
+
+    #[test]
+    fn media_goes_only_in_user_messages() {
+        let mut req = with_blocks(vec![
+            ContentBlock::Image {
+                source: media("image/png"),
+            },
+            ContentBlock::ToolUse {
+                id: "t1".into(),
+                name: "look".into(),
+                input: serde_json::json!({}),
+            },
+        ]);
+        // In a user message too: OpenAI could not send both.
+        for provider in [LlmProvider::Anthropic, LlmProvider::Openai] {
+            assert_eq!(
+                check_media(&req, &provider).unwrap_err().code,
+                "LLM_INVALID_CONTENT"
+            );
+        }
+        req.messages[0].role = "assistant".into();
+        for provider in [LlmProvider::Anthropic, LlmProvider::Openai] {
+            assert_eq!(
+                check_media(&req, &provider).unwrap_err().code,
+                "LLM_INVALID_CONTENT"
+            );
+        }
+        let image_only = LlmCompleteRequest {
+            messages: vec![LlmMessage {
+                role: "assistant".into(),
+                content: LlmContent::Blocks(vec![ContentBlock::Image {
+                    source: media("image/png"),
+                }]),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            check_media(&image_only, &LlmProvider::Anthropic)
+                .unwrap_err()
+                .code,
+            "LLM_INVALID_CONTENT"
+        );
+    }
+
+    #[test]
+    fn openai_body_keeps_text_and_images_in_order() {
+        let req = with_blocks(vec![
+            ContentBlock::Text {
+                text: "Before:".into(),
+            },
+            ContentBlock::Image {
+                source: media("image/png"),
+            },
+            ContentBlock::Text {
+                text: "After:".into(),
+            },
+            ContentBlock::Image {
+                source: media("image/jpeg"),
+            },
+        ]);
+        let parts = &serialize_messages_openai(&req.messages[0])[0]["content"];
+        let kinds: Vec<&str> = parts
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["type"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["text", "image_url", "text", "image_url"]);
+        assert_eq!(parts[2]["text"], "After:");
+        assert_eq!(parts[3]["image_url"]["url"], "data:image/jpeg;base64,aGk=");
+    }
+
+    #[test]
+    fn openai_body_sends_images_as_image_url_parts() {
+        let req = with_blocks(vec![
+            ContentBlock::Text {
+                text: "What is this?".into(),
+            },
+            ContentBlock::Image {
+                source: media("image/webp"),
+            },
+        ]);
+        assert!(check_media(&req, &LlmProvider::Openai).is_ok());
+        let wire = serialize_messages_openai(&req.messages[0]);
+        assert_eq!(wire.len(), 1);
+        let parts = &wire[0]["content"];
+        assert_eq!(
+            parts[0],
+            serde_json::json!({"type": "text", "text": "What is this?"})
+        );
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/webp;base64,aGk=");
     }
 
     #[test]

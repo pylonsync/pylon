@@ -75,6 +75,7 @@ ctx.rooms.broadcast(room, topic, data) // push → every subscriber of a presenc
 
 // All three flavors:
 ctx.files.signedUrl(fileId, { ttlSecs: 300 })  // mint a short-lived signed download URL
+ctx.files.info(fileId)                         // content type, owner, public, or null
 ctx.shards.ticket(shardId, { subscriberId, claims, ttlSecs })  // mint a signed realtime shard ticket
 ctx.shards.get(shardId) / ctx.shards.list()                    // running shards
 
@@ -83,6 +84,7 @@ ctx.shards.create(kind, shardId, params)  // start a WebAssembly shard (see Real
 ctx.shards.stop(shardId)                  // stop it and close its connections
 ctx.files.store(data, { name, contentType, public })  // write a file to the app's storage
 ctx.files.delete(fileId)                  // delete a stored file
+ctx.files.read(fileId)                    // a stored file's bytes, with server trust
 ctx.crdt.snapshot/since/apply(entity, id, ...)  // edit a row's live CRDT document (see Loro CRDTs)
 ctx.agents.run(name, { input, as, context })  // run an agent() as a named user (see Agents)
 ```
@@ -125,6 +127,23 @@ export default action({
 - `data` is a `Uint8Array`, an `ArrayBuffer`, or a string (stored as UTF-8). The limit is 25 MiB, or `PYLON_MAX_UPLOAD_BYTES` when that is lower.
 - The file is owned by the calling user and tenant, as if that user had uploaded it. Called with no user (a scheduled job, a public webhook), the file is system-owned: readable through `ctx.files.signedUrl`, by an unscoped admin, or by anyone when `public: true`.
 - Both run only in actions. A query or mutation that calls them gets `FILES_WRITE_NOT_ALLOWED`, because a file write cannot roll back with the transaction.
+
+### Reading stored files
+
+`ctx.files.info(fileId)` works in every function. It returns `{ id, contentType, ownerId, public, ownerTracked }`. On a backend that records owners (local disk, a private S3 bucket), `ownerTracked` is true, `ownerId` is who uploaded or stored the file, and a file that does not exist returns null. The Stack0 CDN records no owner (`ownerTracked: false`, `ownerId: null`): there a file id works like an unguessable link, so check who may use a file id yourself, for example by recording uploads in your own rows.
+
+`ctx.files.read(fileId)` returns `{ id, contentType, size, data }`, with `data` a `Uint8Array`. It reads with server trust, so the function decides who may read. It runs only in actions and returns at most the upload limit.
+
+```ts
+// Send an uploaded PDF to the model.
+const file = await ctx.files.read(attachment.fileId);
+await ctx.llm.complete({
+  messages: [{ role: "user", content: [
+    { type: "text", text: "Summarize this." },
+    { type: "document", title: attachment.name, source: { type: "base64", media_type: "application/pdf", data: Buffer.from(file.data).toString("base64") } },
+  ] }],
+});
+```
 
 ### Shard tickets
 
@@ -590,6 +609,8 @@ export default action({
   },
 });
 ```
+
+A person's message can also carry images and documents: `{ type: "image", source }` (png, jpeg, gif or webp) and `{ type: "document", source, title? }` (a PDF or plain text), each with `source: { type: "base64", media_type, data }`. Other types are refused with `LLM_INVALID_CONTENT` before the request is sent. The OpenAI provider takes images and refuses documents with `LLM_UNSUPPORTED_CONTENT`.
 
 The loop bound matters: a model can keep requesting tools indefinitely. Without a cap, the only thing that stops it is the call deadline ending the worker during a turn.
 

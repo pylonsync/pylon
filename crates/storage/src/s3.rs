@@ -349,6 +349,17 @@ impl FileStorage for S3FileStorage {
         Ok(buf)
     }
 
+    fn get_limited(&self, id: &str, max: usize) -> Result<Vec<u8>, FileStorageError> {
+        let url = self.presign("GET", id, OP_URL_EXPIRES);
+        let resp = self.agent().get(&url).call().map_err(|e| match &e {
+            ureq::Error::Status(404, _) => s3_err("NOT_FOUND", "File not found"),
+            _ => s3_err("S3_GET_FAILED", e),
+        })?;
+        crate::files::read_limited(resp.into_reader(), max)
+            .map_err(|e| s3_err("S3_GET_READ", e))?
+            .ok_or_else(|| crate::files::file_too_large(max))
+    }
+
     fn delete(&self, id: &str) -> Result<bool, FileStorageError> {
         // S3 DeleteObject is idempotent (204 whether or not the key existed),
         // so we can't distinguish absent from removed. The router owner-checks

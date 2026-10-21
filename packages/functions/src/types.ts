@@ -832,7 +832,21 @@ export type LlmContentBlock =
       tool_use_id: string;
       content: string;
       is_error?: boolean;
-    };
+    }
+  /** An image the model reads: png, jpeg, gif or webp, as base64. */
+  | { type: "image"; source: LlmMediaSource }
+  /**
+   * A document the model reads: a PDF or plain text, as base64. Anthropic
+   * only: the OpenAI provider refuses it (LLM_UNSUPPORTED_CONTENT).
+   */
+  | { type: "document"; source: LlmMediaSource; title?: string };
+
+/** The bytes of an image or document block. */
+export interface LlmMediaSource {
+  type: "base64";
+  media_type: string;
+  data: string;
+}
 
 export interface LlmTool {
   name: string;
@@ -1075,6 +1089,35 @@ export interface Files {
    * so keep lifetimes short.
    */
   signedUrl(fileId: string, opts?: { ttlSecs?: number }): Promise<string>;
+  /**
+   * What the host knows of a stored file, in any function. On a backend
+   * that tracks owners (local disk, a private S3 bucket) `ownerId` is who
+   * uploaded or stored it, and a file that does not exist is null. A
+   * backend that does not (`ownerTracked: false`, the Stack0 CDN) knows no
+   * owner: there a file id is a capability, so check who may use it
+   * yourself, for example by recording uploads in your own rows.
+   */
+  info(fileId: string): Promise<FileInfo | null>;
+}
+
+/** {@link Files.info}. */
+export interface FileInfo {
+  id: string;
+  /** Recorded at upload, when the backend keeps it. */
+  contentType: string | null;
+  /** The uploader, or null when the backend does not track it or the system stored it. */
+  ownerId: string | null;
+  public: boolean;
+  /** The backend records owners, so `ownerId` and a null answer can be trusted. */
+  ownerTracked: boolean;
+}
+
+/** {@link ActionFiles.read}. */
+export interface ReadFile {
+  id: string;
+  contentType: string | null;
+  size: number;
+  data: Uint8Array;
 }
 
 /** Options for {@link ActionFiles.store}. */
@@ -1117,6 +1160,12 @@ export interface ActionFiles extends Files {
   ): Promise<StoredFile>;
   /** Delete a stored file. `deleted` is false when it did not exist. */
   delete(fileId: string): Promise<{ deleted: boolean }>;
+  /**
+   * A stored file's bytes, with server trust: the function decides who may
+   * read it. At most the host's upload limit (25 MiB, or
+   * `PYLON_MAX_UPLOAD_BYTES`).
+   */
+  read(fileId: string): Promise<ReadFile>;
 }
 
 /**

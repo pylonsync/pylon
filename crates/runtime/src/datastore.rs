@@ -2908,6 +2908,49 @@ pub(crate) fn run_files_op(
                 .map_err(|e| bad(&e.code, e.message))?;
             Ok(serde_json::json!({ "deleted": deleted }))
         }
+        FilesOp::Info { file_id } => {
+            if !file_id_is_valid(file_id, false) {
+                return Err(bad("INVALID_FILE_ID", "not a file id".into()));
+            }
+            let tracked = storage.requires_owner_check();
+            let owner = storage
+                .owner_of(file_id)
+                .map_err(|e| bad(&e.code, e.message))?;
+            // A backend that tracks owners keeps one for every stored file:
+            // none means no such file.
+            if tracked && owner.is_none() {
+                return Ok(serde_json::Value::Null);
+            }
+            Ok(serde_json::json!({
+                "id": file_id,
+                "contentType": storage.content_type(file_id),
+                "ownerId": owner.as_ref().map(|o| o.user_id.clone()).filter(|u| !u.is_empty()),
+                "public": owner.as_ref().map(|o| o.public).unwrap_or(false),
+                "ownerTracked": tracked,
+            }))
+        }
+        FilesOp::Read { file_id } => {
+            if !file_id_is_valid(file_id, false) {
+                return Err(bad("INVALID_FILE_ID", "not a file id".into()));
+            }
+            // Bounded in the backend: a larger file is refused before it is all in memory.
+            let bytes = storage.get_limited(file_id, max_bytes).map_err(|e| {
+                if e.code == "FILE_TOO_LARGE" {
+                    bad(
+                        "FILE_TOO_LARGE",
+                        format!("ctx.files.read returns at most {max_bytes} bytes"),
+                    )
+                } else {
+                    bad(&e.code, e.message)
+                }
+            })?;
+            Ok(serde_json::json!({
+                "id": file_id,
+                "contentType": storage.content_type(file_id),
+                "size": bytes.len(),
+                "data_base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+            }))
+        }
     }
 }
 
@@ -3236,6 +3279,73 @@ mod file_ownership_tests {
             false
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn info_and_read_report_a_stored_file() {
+        use base64::Engine as _;
+        let (storage, dir) = temp_storage("fn_info_read");
+        let id = run_files_op(
+            storage.as_ref(),
+            &store_op("race.jpg", b"jpegbytes", false),
+            &auth(Some("u1")),
+            1024,
+        )
+        .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let info = pylon_functions::protocol::FilesOp::Info {
+            file_id: id.clone(),
+        };
+        let out = run_files_op(storage.as_ref(), &info, &auth(None), 1024).unwrap();
+        assert_eq!(out["ownerId"], "u1");
+        assert_eq!(out["ownerTracked"], true);
+        assert_eq!(out["public"], false);
+        assert_eq!(out["contentType"], "image/jpeg");
+
+        let read = pylon_functions::protocol::FilesOp::Read {
+            file_id: id.clone(),
+        };
+        let out = run_files_op(storage.as_ref(), &read, &auth(None), 1024).unwrap();
+        assert_eq!(out["size"], 9);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(out["data_base64"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(bytes, b"jpegbytes");
+        // Larger than the limit: refused.
+        assert_eq!(
+            run_files_op(storage.as_ref(), &read, &auth(None), 4)
+                .unwrap_err()
+                .0,
+            "FILE_TOO_LARGE"
+        );
+
+        // A file that does not exist: no info on a backend that tracks owners.
+        let missing = pylon_functions::protocol::FilesOp::Info {
+            file_id: format!("{}x", &id[..id.len() - 1]),
+        };
+        assert!(run_files_op(storage.as_ref(), &missing, &auth(None), 1024)
+            .unwrap()
+            .is_null());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn info_is_the_only_file_op_outside_actions() {
+        use pylon_functions::protocol::FilesOp;
+        assert!(!FilesOp::Info {
+            file_id: "f".into()
+        }
+        .action_only());
+        assert!(FilesOp::Read {
+            file_id: "f".into()
+        }
+        .action_only());
+        assert!(FilesOp::Delete {
+            file_id: "f".into()
+        }
+        .action_only());
     }
 
     #[test]

@@ -1968,11 +1968,11 @@ impl FnRunner {
                 }
 
                 TsMessage::FilesOp(req) if req.call_id == call_id => {
-                    let reply = if fn_type != FnType::Action {
+                    let reply = if fn_type != FnType::Action && req.op.action_only() {
                         DbResultMessage::err(
                             call_id.clone(),
                             "FILES_WRITE_NOT_ALLOWED",
-                            "ctx.files.store and ctx.files.delete run only in actions: a file write cannot roll back with a query or mutation",
+                            "ctx.files.store, ctx.files.delete and ctx.files.read run only in actions: file bytes cannot roll back with a query or mutation",
                         )
                     } else {
                         let auth_now = AuthInfo {

@@ -23,6 +23,7 @@ import type {
   EmailOptions,
   EmailSender,
   Files,
+  FileInfo,
   ActionFiles,
   Crdt,
   StoredFile,
@@ -622,8 +623,8 @@ function buildShards(callId: string): Shards {
   };
 }
 
-/** `ctx.files` — signed download URLs, minted host-side. */
-function buildFiles(callId: string): Files {
+/** `ctx.files` — signed download URLs, minted host-side, and what the host knows of a file. */
+export function buildFiles(callId: string): Files {
   return {
     async signedUrl(fileId, opts) {
       return rpc(callId, {
@@ -632,11 +633,14 @@ function buildFiles(callId: string): Files {
         ttl_secs: opts?.ttlSecs,
       }) as Promise<string>;
     },
+    async info(fileId) {
+      return rpc(callId, { type: "files_op", op: "info", file_id: fileId }) as Promise<FileInfo | null>;
+    },
   };
 }
 
-/** `ctx.files` in an action: {@link buildFiles} plus store and delete. */
-function buildActionFiles(callId: string): ActionFiles {
+/** `ctx.files` in an action: {@link buildFiles} plus store, read and delete. */
+export function buildActionFiles(callId: string): ActionFiles {
   return {
     ...buildFiles(callId),
     async store(data, opts) {
@@ -666,6 +670,15 @@ function buildActionFiles(callId: string): ActionFiles {
         op: "delete",
         file_id: fileId,
       }) as Promise<{ deleted: boolean }>;
+    },
+    async read(fileId) {
+      const out = (await rpc(callId, { type: "files_op", op: "read", file_id: fileId })) as {
+        id: string;
+        contentType: string | null;
+        size: number;
+        data_base64: string;
+      };
+      return { id: out.id, contentType: out.contentType ?? null, size: out.size, data: fromBase64(out.data_base64) };
     },
   };
 }

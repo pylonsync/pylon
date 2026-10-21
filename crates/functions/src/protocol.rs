@@ -988,7 +988,8 @@ pub enum CrdtOp {
     Apply { update_base64: String },
 }
 
-/// One `ctx.files` write.
+/// One `ctx.files` operation: a write (store, delete; actions only), or a
+/// read of a stored file (info anywhere, read in actions).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum FilesOp {
@@ -1004,6 +1005,22 @@ pub enum FilesOp {
     },
     /// Delete a stored file.
     Delete { file_id: String },
+    /// What the host knows of a stored file: its content type and, on a
+    /// backend that tracks it, its owner. Reply: `{ id, contentType,
+    /// ownerId, public, ownerTracked }`, or null when a tracking backend
+    /// has no such file.
+    Info { file_id: String },
+    /// A stored file's bytes (base64). Reply: `{ id, contentType, size,
+    /// data_base64 }`.
+    Read { file_id: String },
+}
+
+impl FilesOp {
+    /// Store, delete and read move bytes outside the transaction, so they
+    /// run only in actions. Info only reads metadata.
+    pub fn action_only(&self) -> bool {
+        !matches!(self, FilesOp::Info { .. })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

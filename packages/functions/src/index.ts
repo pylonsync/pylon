@@ -99,6 +99,7 @@ export type {
   Llm,
   LlmMessage,
   LlmContentBlock,
+  LlmMediaSource,
   LlmTool,
   LlmCompleteRequest,
   LlmCompleteResponse,
@@ -120,4 +121,6 @@ export type {
   Crdt,
   StoreFileOptions,
   StoredFile,
+  FileInfo,
+  ReadFile,
 } from "./types";
