@@ -12,11 +12,21 @@ Both protocols ship in the binary:
 
 ## Trust model
 
-Org owners choose their own IdP. The framework does not question that choice. It checks that the IdP's discovery endpoints use HTTPS, but it does not restrict which providers are acceptable.
+Org owners choose their own IdP, and any user can create an org. So the IdP's `email` claim is trusted only for addresses on a domain the org has proven it owns. A sign-in with any other address is refused, with no user looked up or created. Without this rule, an org owner could have their IdP assert another user's address and sign in as that user.
 
-Within one Pylon deployment, the first org to claim a domain owns it. The framework blocks any org from claiming a well-known freemail domain (`gmail.com`, `outlook.com`, `icloud.com`, and others). This stops an org owner from intercepting domain-detection sign-ins for every Gmail user.
+An org proves it owns a domain with a DNS TXT record:
 
-Operators on multi-tenant Pylon deployments should set `PYLON_SSO_ALLOWED_DOMAINS` as an allowlist. Pylon rejects any domain not on the list on `PUT /orgs/:id/sso` or `/saml`.
+| Type | Name | Value |
+| --- | --- | --- |
+| TXT | `_pylon-sso.<domain>` | `pylon-sso-verification=<token>` |
+
+The token is derived from the org id and the domain, so a record published for one org proves nothing for another. `PUT /orgs/:id/sso` or `/saml` returns `400 SSO_DOMAIN_NOT_VERIFIED` with the exact record in `error.record` when it is missing. Pylon checks the record when the config is saved and again at sign-in (a successful check counts for 10 minutes), so removing the record stops SSO sign-ins for that domain.
+
+Pylon reads TXT records over DNS-over-HTTPS (Cloudflare, then Google). Set `PYLON_SSO_DOH_URL` to use another JSON DoH endpoint.
+
+Pylon also blocks any org from claiming a well-known freemail domain (`gmail.com`, `outlook.com`, `icloud.com`, and others).
+
+On a single-tenant deployment, where the operator runs every org, the operator can vouch for domains instead: domains in `PYLON_SSO_ALLOWED_DOMAINS` count as verified for any org, and other domains are refused.
 
 ## Endpoints
 
@@ -55,7 +65,7 @@ curl -X PUT https://your-app/api/auth/orgs/org_acme/sso \
 
 Required fields: `issuer_url`, `client_id`, and `client_secret`.
 
-Optional fields: `default_role` and `email_domains`. `default_role` is `member` or `admin`, and defaults to `member`. Pylon refuses `owner` as a default role, so an IdP misconfiguration cannot hand over org control. `email_domains` lists the domains claimed for the `/sso/discover` flow. Pylon lowercases each domain before it stores them.
+Optional fields: `default_role` and `email_domains`. `default_role` is `member` or `admin`, and defaults to `member`. Pylon refuses `owner` as a default role, so an IdP misconfiguration cannot hand over org control. `email_domains` lists the domains whose addresses this IdP may sign in, and routes the `/sso/discover` flow. Each one needs its TXT record (see [Trust model](#trust-model)); with no domains, every SSO sign-in is refused. Pylon lowercases each domain before it stores them.
 
 Pylon encrypts the `client_secret` at rest when `PYLON_SECRET` is set. Without it, Pylon falls back to a `plain:` envelope in dev mode and prints a warning at boot in production. See [Sessions](/auth/sessions) for details on at-rest encryption.
 
@@ -73,6 +83,8 @@ Errors:
 | 400 | `BAD_DEFAULT_ROLE` | `default_role: "owner"` is refused |
 | 400 | `DOMAIN_BLOCKLISTED` | Claimed a freemail domain |
 | 400 | `DOMAIN_NOT_ALLOWED` | Not in `PYLON_SSO_ALLOWED_DOMAINS` (when set) |
+| 400 | `SSO_DOMAIN_NOT_VERIFIED` | A domain has no `_pylon-sso` TXT record for this org; `error.record` has the record to add |
+| 400 | `SSO_DOMAIN_LOOKUP_FAILED` | The DNS lookup failed |
 | 400 | `DISCOVERY_FAILED` | `<issuer>/.well-known/openid-configuration` unreachable or invalid |
 | 409 | `DOMAIN_ALREADY_CLAIMED` | Another org already claimed one of the email domains |
 | 500 | `SSO_SECRET_SEAL_FAILED` | `PYLON_SECRET` is set but the ChaCha20-Poly1305 seal failed |
@@ -180,7 +192,8 @@ Pylon checks OIDC first. If both protocols claim the same domain, OIDC wins.
 - **SAML signature verification.** Pylon uses `xmlsec1` to check the signature. It rejects any assertion without a valid signature from the configured certificate.
 - **HTTPS enforced.** Pylon requires `idp_sso_url` to use `https://`.
 - **Freemail domain blocklist.** Pylon blocks common consumer-mail domains from being claimed by any org: gmail, yahoo, outlook, icloud, hotmail, live, msn, aol, mail.com, protonmail and proton.me, gmx, yandex, qq, 163, 126, fastmail, mac.com, and me.com. The full list lives in `BLOCKLIST_FREEMAIL_DOMAINS` in `crates/auth/src/org_sso.rs`.
-- **Operator domain allowlist.** Set it with `PYLON_SSO_ALLOWED_DOMAINS=acme.com,acme.io,...`.
+- **Verified domains only.** The IdP's email claim signs in only addresses on domains the org proved it owns with a `_pylon-sso` TXT record (or the operator listed in `PYLON_SSO_ALLOWED_DOMAINS`). Any other address returns `SSO_EMAIL_DOMAIN_NOT_CLAIMED` or `SSO_DOMAIN_NOT_VERIFIED` to the error callback.
+- **Private addresses refused.** Discovery, token, userinfo, JWKS and DNS-over-HTTPS requests refuse loopback, private and link-local addresses, on every redirect.
 - **Default role can never be `owner`.** This stops an IdP misconfiguration from silently handing over org control through IdP-driven role promotion.
 - **`client_secret` encrypted at rest** when `PYLON_SECRET` is set.
 - **Auto-join is idempotent.** Signing in again through SSO does not change an existing member's role. To re-apply the IdP's default role, remove the membership first and let the next sign-in re-add it.
@@ -191,7 +204,8 @@ Pylon checks OIDC first. If both protocols claim the same domain, OIDC wins.
 PYLON_PUBLIC_URL=https://your-app.com           # required for SSO callbacks
 PYLON_SECRET=<openssl rand -hex 32>             # encrypts client_secret at rest
 PYLON_TRUSTED_ORIGINS=https://your-app.com,...  # OAuth callback allowlist (or declare in manifest.auth.trustedOrigins)
-PYLON_SSO_ALLOWED_DOMAINS=acme.com,acme.io      # optional: positive domain allowlist
+PYLON_SSO_ALLOWED_DOMAINS=acme.com,acme.io      # optional, single-tenant: domains the operator vouches for
+PYLON_SSO_DOH_URL=https://dns.example/resolve    # optional: JSON DNS-over-HTTPS endpoint for TXT checks
 ```
 
 ## Where to go next

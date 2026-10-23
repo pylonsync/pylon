@@ -378,9 +378,7 @@ pub fn discover_endpoints(issuer_url: &str) -> Result<DiscoveredEndpoints, Strin
     // service is reachable from the auth server. The guarded resolver runs
     // on the discovery fetch AND any redirect hop, and after a DNS rebind
     // (ureq connects to exactly the addresses it returns).
-    let agent = ureq::AgentBuilder::new()
-        .resolver(|netloc: &str| pylon_kernel::net_guard::resolve_guarded(netloc))
-        .build();
+    let agent = guarded_agent();
     // 5-second timeout — discovery is a blocking call on the config-
     // write path, and IdPs that take longer than that are misconfigured.
     let body = agent
@@ -405,6 +403,17 @@ pub fn discover_endpoints(issuer_url: &str) -> Result<DiscoveredEndpoints, Strin
         userinfo_endpoint: pull("userinfo_endpoint")?,
         jwks_uri: pull("jwks_uri")?,
     })
+}
+
+/// An HTTP agent that refuses private, loopback and link-local addresses,
+/// on the first hop, every redirect, and after a DNS rebind (ureq connects
+/// to exactly the addresses the resolver returns). Every URL an SSO flow
+/// fetches comes from the org owner's config or the IdP's discovery
+/// document, so every fetch goes through this.
+pub(crate) fn guarded_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .resolver(|netloc: &str| pylon_kernel::net_guard::resolve_guarded(netloc))
+        .build()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -448,7 +457,8 @@ pub fn complete_oidc_login(
         secret = url_form(&secret),
         pkce = url_form(pkce_verifier),
     );
-    let token_body = ureq::post(&config.token_endpoint)
+    let token_body = guarded_agent()
+        .post(&config.token_endpoint)
         .set("Accept", "application/json")
         .set("Content-Type", "application/x-www-form-urlencoded")
         .timeout(std::time::Duration::from_secs(10))
@@ -505,7 +515,8 @@ pub fn complete_oidc_login(
         .filter(|s| !s.is_empty())
         .map(String::from);
     let name = name_from_id_token.or_else(|| {
-        ureq::get(&config.userinfo_endpoint)
+        guarded_agent()
+            .get(&config.userinfo_endpoint)
             .set("Authorization", &format!("Bearer {access_token}"))
             .timeout(std::time::Duration::from_secs(10))
             .call()
@@ -649,7 +660,8 @@ fn verify_with_jwks(
     signing_input: &[u8],
     signature: &[u8],
 ) -> Result<(), OrgSsoLoginError> {
-    let body = ureq::get(jwks_uri)
+    let body = guarded_agent()
+        .get(jwks_uri)
         .timeout(std::time::Duration::from_secs(5))
         .call()
         .map_err(|e| OrgSsoLoginError::JwksFetchFailed(format!("{e}")))?

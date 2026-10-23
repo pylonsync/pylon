@@ -52,6 +52,7 @@ pub mod provider;
 pub mod saml;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod siwe;
+pub mod sso_domains;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod steam;
 #[cfg(not(target_arch = "wasm32"))]

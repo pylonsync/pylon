@@ -4533,6 +4533,91 @@ mod auth_gate_tests {
         f(&ctx);
     }
 
+    /// A DNS zone held in memory, for SSO domain proofs.
+    struct TestZone(Vec<(String, String)>);
+
+    impl pylon_auth::sso_domains::TxtLookup for TestZone {
+        fn txt(&self, name: &str) -> Result<Vec<String>, String> {
+            Ok(self
+                .0
+                .iter()
+                .filter(|(n, _)| n == name)
+                .map(|(_, v)| v.clone())
+                .collect())
+        }
+    }
+
+    /// The account takeover through org SSO: an attacker creates an org,
+    /// configures an IdP they run, and has it assert an existing user's
+    /// address. The sign-in must be refused, not bound to that user.
+    #[test]
+    fn org_sso_cannot_sign_in_as_a_user_outside_the_orgs_verified_domains() {
+        let manifest = empty_manifest();
+        let victim = serde_json::json!({
+            "id": "user_victim",
+            "email": "victim@victim.com",
+            "displayName": "Victim",
+            "emailVerified": "2026-01-01T00:00:00Z",
+        });
+        let store = StubDataStore::with_user(manifest.clone(), victim);
+        let (name, value) =
+            pylon_auth::sso_domains::domain_verification_record("org_attacker", "attacker.dev");
+        let zone = TestZone(vec![(name, value)]);
+        with_ctx_store(
+            false,
+            &AuthContext::anonymous(),
+            &NoopPluginHooks,
+            None,
+            None,
+            None,
+            None,
+            manifest,
+            store,
+            "127.0.0.1",
+            |ctx| {
+                // The attacker's IdP asserts the victim's address.
+                let refused = routes::auth::sso_sign_in_user(
+                    ctx,
+                    "org_attacker",
+                    &["attacker.dev".to_string()],
+                    &zone,
+                    "victim@victim.com",
+                    "Victim",
+                    "member",
+                );
+                assert_eq!(
+                    refused.map_err(|(code, _)| code),
+                    Err("SSO_EMAIL_DOMAIN_NOT_CLAIMED".to_string())
+                );
+                // Listing victim.com without the DNS proof is refused too.
+                let unproven = routes::auth::sso_sign_in_user(
+                    ctx,
+                    "org_attacker",
+                    &["victim.com".to_string()],
+                    &zone,
+                    "victim@victim.com",
+                    "Victim",
+                    "member",
+                );
+                assert_eq!(
+                    unproven.map_err(|(code, _)| code),
+                    Err("SSO_DOMAIN_NOT_VERIFIED".to_string())
+                );
+                // An address on the org's own verified domain signs in.
+                let own = routes::auth::sso_sign_in_user(
+                    ctx,
+                    "org_attacker",
+                    &["attacker.dev".to_string()],
+                    &zone,
+                    "staff@attacker.dev",
+                    "Staff",
+                    "member",
+                );
+                assert!(own.is_ok(), "{own:?}");
+            },
+        );
+    }
+
     /// Route as a client at `peer_ip` (the runtime's resolved client
     /// address). For per-IP limiter tests: each test picks its own
     /// addresses so the process-wide limiter state never crosses tests.

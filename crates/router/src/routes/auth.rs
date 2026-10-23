@@ -478,67 +478,20 @@ fn handle_org_sso_callback(ctx: &RouterContext, org_id: &str, raw: &str) -> (u16
     // "jane@x.com" via password create two rows.
     let email = pylon_auth::normalize_email(&email);
     let display_name = name.unwrap_or_else(|| email.clone());
-    // Look up or create the User row by email — same pattern as the
-    // magic-code verify path.
-    let now = pylon_kernel::util::now_iso();
-    let user_entity = ctx.store.manifest().auth.user.entity.clone();
-    let user_id = match ctx.store.lookup(&user_entity, "email", &email) {
-        Ok(Some(row)) => {
-            let id = row["id"].as_str().unwrap_or("").to_string();
-            // The IdP just vouched for the email; stamp emailVerified
-            // if it wasn't already. Surface failures so a misconfigured
-            // schema (missing emailVerified column) doesn't silently
-            // leave the user forever-unverified — the prior `let _ =`
-            // swallow was exactly that bug.
-            if row.get("emailVerified").map_or(true, |v| v.is_null()) {
-                if let Err(e) = ctx.store.update(
-                    &user_entity,
-                    &id,
-                    &stamp_user_fields(ctx, serde_json::json!({ "emailVerified": now })),
-                ) {
-                    tracing::warn!(
-                        "[auth] oauth: failed to persist emailVerified for user {}: {}",
-                        id,
-                        e
-                    );
-                }
-            }
-            id
+    let user_id = match sso_sign_in_user(
+        ctx,
+        org_id,
+        &config.email_domains,
+        &pylon_auth::sso_domains::DohTxtLookup,
+        &email,
+        &display_name,
+        &config.default_role,
+    ) {
+        Ok(id) => id,
+        Err((code, message)) => {
+            return sso_error_redirect(ctx, &state_record.error_callback_url, &code, &message)
         }
-        _ => match ctx.store.insert(
-            &user_entity,
-            &stamp_user_fields(
-                ctx,
-                serde_json::json!({
-                    "email": &email,
-                    "displayName": display_name,
-                    "emailVerified": now,
-                    "createdAt": now,
-                }),
-            ),
-        ) {
-            Ok(id) => id,
-            Err(e) => {
-                return sso_error_redirect(
-                    ctx,
-                    &state_record.error_callback_url,
-                    "USER_CREATE_FAILED",
-                    &format!("{}: {}", e.code, e.message),
-                )
-            }
-        },
     };
-    // Auto-join: idempotent. If the user is already a member of the
-    // org, leave the existing role alone (don't downgrade an admin to
-    // member just because they signed in via SSO again). Only add when
-    // there's no existing membership.
-    if ctx.orgs.role_of(org_id, &user_id).is_none() {
-        let role = pylon_auth::org::OrgRole::from_str(&config.default_role)
-            .unwrap_or(pylon_auth::org::OrgRole::Member);
-        ctx.orgs.add_member(org_id, &user_id, role);
-    }
-    // Mint session + audit + 302 to the caller's success URL.
-    accept_invites_for_verified_email(ctx, &user_id, &email);
     let session = create_session_with_device(ctx, user_id.clone());
     complete_sign_in(
         ctx,
@@ -550,6 +503,109 @@ fn handle_org_sso_callback(ctx: &RouterContext, org_id: &str, raw: &str) -> (u16
     ctx.set_browser_session_cookie(&session.token);
     ctx.add_response_header("Location", state_record.callback_url);
     (302, String::new())
+}
+
+/// The user an org's SSO assertion (OIDC or SAML) signs in as, created when
+/// none has the email yet. The org joins them with its default role and
+/// their pending invites are accepted.
+///
+/// The org owner chooses the IdP, so its `email` claim is only trusted for
+/// a domain the org has proven it owns (pylon_auth::sso_domains). Without
+/// that check, anyone could create an org, point it at an IdP they run, and
+/// sign in as any user of the app by asserting that user's address.
+pub(crate) fn sso_sign_in_user(
+    ctx: &RouterContext,
+    org_id: &str,
+    org_domains: &[String],
+    dns: &dyn pylon_auth::sso_domains::TxtLookup,
+    email: &str,
+    display_name: &str,
+    default_role: &str,
+) -> Result<String, (String, String)> {
+    if let Err(e) = pylon_auth::sso_domains::check_sso_email(dns, org_id, org_domains, email) {
+        tracing::warn!(
+            "[auth] org sso: refused {} for org {}: {}",
+            email,
+            org_id,
+            e.code()
+        );
+        return Err((e.code().to_string(), e.message()));
+    }
+    let now = pylon_kernel::util::now_iso();
+    let user_entity = ctx.store.manifest().auth.user.entity.clone();
+    let user_id = match ctx.store.lookup(&user_entity, "email", email) {
+        Ok(Some(row)) => {
+            let id = row["id"].as_str().unwrap_or("").to_string();
+            // The IdP vouched for the email; stamp emailVerified if it
+            // wasn't already. Surface failures so a schema without the
+            // column doesn't silently leave the user unverified.
+            if row.get("emailVerified").map_or(true, |v| v.is_null()) {
+                if let Err(e) = ctx.store.update(
+                    &user_entity,
+                    &id,
+                    &stamp_user_fields(ctx, serde_json::json!({ "emailVerified": now })),
+                ) {
+                    tracing::warn!(
+                        "[auth] org sso: failed to persist emailVerified for user {}: {}",
+                        id,
+                        e
+                    );
+                }
+            }
+            id
+        }
+        _ => ctx
+            .store
+            .insert(
+                &user_entity,
+                &stamp_user_fields(
+                    ctx,
+                    serde_json::json!({
+                        "email": email,
+                        "displayName": display_name,
+                        "emailVerified": now,
+                        "createdAt": now,
+                    }),
+                ),
+            )
+            .map_err(|e| {
+                (
+                    "USER_CREATE_FAILED".to_string(),
+                    format!("{}: {}", e.code, e.message),
+                )
+            })?,
+    };
+    // Idempotent: an existing member keeps their role (an admin is not
+    // downgraded to member by signing in through SSO again).
+    if ctx.orgs.role_of(org_id, &user_id).is_none() {
+        let role = pylon_auth::org::OrgRole::from_str(default_role)
+            .unwrap_or(pylon_auth::org::OrgRole::Member);
+        ctx.orgs.add_member(org_id, &user_id, role);
+    }
+    accept_invites_for_verified_email(ctx, &user_id, email);
+    Ok(user_id)
+}
+
+/// The 400 body for an SSO domain that failed verification. Carries the TXT
+/// record to publish, so a dashboard can show it.
+fn sso_domain_error_body(e: &pylon_auth::sso_domains::SsoDomainError) -> String {
+    let mut body = serde_json::json!({
+        "error": { "code": e.code(), "message": e.message() }
+    });
+    if let pylon_auth::sso_domains::SsoDomainError::DomainNotVerified {
+        domain,
+        record_name,
+        record_value,
+    } = e
+    {
+        body["error"]["domain"] = serde_json::json!(domain);
+        body["error"]["record"] = serde_json::json!({
+            "type": "TXT",
+            "name": record_name,
+            "value": record_value,
+        });
+    }
+    body.to_string()
 }
 
 /// Build the SSO callback URL the IdP redirects to. Sources:
@@ -894,59 +950,28 @@ fn handle_saml_acs(ctx: &RouterContext, org_id: &str, body: &str) -> (u16, Strin
             );
         }
     };
-    let now = pylon_kernel::util::now_iso();
     // Canonicalize the SAML-supplied email so lookups intersect with
     // the user's password-signup / OAuth row. See
     // pylon_auth::normalize_email for the rationale.
     let canonical_email = pylon_auth::normalize_email(&assertion.email);
-    let user_entity = ctx.store.manifest().auth.user.entity.clone();
-    let user_id = match ctx.store.lookup(&user_entity, "email", &canonical_email) {
-        Ok(Some(row)) => {
-            let id = row["id"].as_str().unwrap_or("").to_string();
-            // SAML assertion vouched for the email; stamp emailVerified
-            // if not already set. Surface failures so a missing-column
-            // schema doesn't silently keep users unverified.
-            if row.get("emailVerified").map_or(true, |v| v.is_null()) {
-                if let Err(e) = ctx.store.update(
-                    &user_entity,
-                    &id,
-                    &stamp_user_fields(ctx, serde_json::json!({ "emailVerified": now })),
-                ) {
-                    tracing::warn!(
-                        "[auth] saml: failed to persist emailVerified for user {}: {}",
-                        id,
-                        e
-                    );
-                }
-            }
-            id
+    let display_name = assertion
+        .name
+        .clone()
+        .unwrap_or_else(|| canonical_email.clone());
+    let user_id = match sso_sign_in_user(
+        ctx,
+        org_id,
+        &config.email_domains,
+        &pylon_auth::sso_domains::DohTxtLookup,
+        &canonical_email,
+        &display_name,
+        &config.default_role,
+    ) {
+        Ok(id) => id,
+        Err((code, message)) => {
+            return saml_error_redirect(ctx, &state_record.error_callback_url, &code, &message)
         }
-        _ => match ctx.store.insert(
-            &user_entity,
-            &stamp_user_fields(ctx, serde_json::json!({
-                "email": &canonical_email,
-                "displayName": assertion.name.clone().unwrap_or_else(|| canonical_email.clone()),
-                "emailVerified": now,
-                "createdAt": now,
-            })),
-        ) {
-            Ok(id) => id,
-            Err(e) => {
-                return saml_error_redirect(
-                    ctx,
-                    &state_record.error_callback_url,
-                    "USER_CREATE_FAILED",
-                    &format!("{}: {}", e.code, e.message),
-                );
-            }
-        },
     };
-    if ctx.orgs.role_of(org_id, &user_id).is_none() {
-        let role = pylon_auth::org::OrgRole::from_str(&config.default_role)
-            .unwrap_or(pylon_auth::org::OrgRole::Member);
-        ctx.orgs.add_member(org_id, &user_id, role);
-    }
-    accept_invites_for_verified_email(ctx, &user_id, &canonical_email);
     let session = create_session_with_device(ctx, user_id.clone());
     complete_sign_in(
         ctx,
@@ -5042,6 +5067,19 @@ pub(crate) fn handle(
                         return Some((400, json_error(e.code(), &e.message())));
                     }
                 }
+                // The org's IdP may only vouch for addresses on domains the
+                // org owns, so a domain is saved only with its DNS proof.
+                // This also stops an org from claiming a domain it does not
+                // own to block the real owner's claim.
+                for d in &email_domains {
+                    if let Err(e) = pylon_auth::sso_domains::verify_domain_ownership(
+                        &pylon_auth::sso_domains::DohTxtLookup,
+                        org_id,
+                        d,
+                    ) {
+                        return Some((400, sso_domain_error_body(&e)));
+                    }
+                }
                 let endpoints = match pylon_auth::org_sso::discover_endpoints(&issuer) {
                     Ok(e) => e,
                     Err(e) => {
@@ -5224,6 +5262,19 @@ pub(crate) fn handle(
                 for d in &email_domains {
                     if let Err(e) = pylon_auth::org_sso::validate_claimable_domain(d) {
                         return Some((400, json_error(e.code(), &e.message())));
+                    }
+                }
+                // The org's IdP may only vouch for addresses on domains the
+                // org owns, so a domain is saved only with its DNS proof.
+                // This also stops an org from claiming a domain it does not
+                // own to block the real owner's claim.
+                for d in &email_domains {
+                    if let Err(e) = pylon_auth::sso_domains::verify_domain_ownership(
+                        &pylon_auth::sso_domains::DohTxtLookup,
+                        org_id,
+                        d,
+                    ) {
+                        return Some((400, sso_domain_error_body(&e)));
                     }
                 }
                 let now = std::time::SystemTime::now()
