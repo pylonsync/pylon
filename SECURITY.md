@@ -18,6 +18,40 @@ mitigation within 14 days for high/critical issues, 30 days for lower-severity.
 We support the most recent minor release. Older versions may receive security
 patches at the maintainers' discretion.
 
+## Dependency and image vulnerabilities
+
+Advisories in Pylon's dependencies (crates, npm packages, Bun, the Debian base
+image) are patched on these deadlines, counted from the advisory's publication:
+
+| Severity | Fixed version available | Released | Running on Stack0 Cloud |
+| --- | --- | --- | --- |
+| Critical (CVSS 9.0+) | yes | 24 hours | 24 hours |
+| High (CVSS 7.0 to 8.9) | yes | 72 hours | 72 hours |
+| Medium and low | yes | next release | next fleet move |
+| Any | no | ignored with a reason and a review date | |
+
+What finds them:
+
+- **CI** (`.github/workflows/ci.yml`, job `dependency advisories`): cargo audit,
+  cargo deny and osv-scanner on every Rust or TypeScript change. Job
+  `image scan`: Trivy on the runtime and builder images when a Dockerfile
+  changes. Both fail on a high or critical vulnerability with a fixed version.
+- **Dependabot** opens a security update when an alert opens, and weekly
+  grouped minor and patch updates for cargo, bun, Docker base images and
+  GitHub Actions.
+- **The nightly scan** checks the published images and every Pylon version
+  running on Stack0 Cloud against fresh advisory data.
+
+An advisory with no fix, or one that does not apply, is ignored in the file
+for its tool, with a reason and a review date:
+
+- `.cargo/audit.toml` and `deny.toml` (the reason ends in "Review by
+  YYYY-MM-DD"; `tools/check-security-ignores.sh` fails CI after that date),
+- `osv-scanner.toml` (`ignoreUntil`),
+- `.trivyignore.yaml` (`expired_at`).
+
+The release and fleet steps are in `docs/ops/SECURITY_PATCHING.md`.
+
 ## Known hardening gaps (pre-1.0)
 
 These are tracked and intended to be fixed before any 1.0 release. They are
