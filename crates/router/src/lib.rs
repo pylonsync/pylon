@@ -4533,6 +4533,24 @@ mod auth_gate_tests {
         f(&ctx);
     }
 
+    /// `{"email":""}` reached the mail provider and came back as a 500
+    /// EMAIL_SEND_FAILED. Junk input is a 400 before any send.
+    #[test]
+    fn magic_send_refuses_a_malformed_email_before_sending() {
+        for body in [
+            r#"{"email":""}"#,
+            r#"{"email":"jane"}"#,
+            r#"{"email":"a@b"}"#,
+        ] {
+            with_ctx_peer("203.0.113.77", &AuthContext::anonymous(), |ctx| {
+                let (status, out, _) =
+                    route(ctx, HttpMethod::Post, "/api/auth/magic/send", body, None);
+                assert_eq!(status, 400, "{body}: {out}");
+                assert!(out.contains("INVALID_EMAIL"), "{body}: {out}");
+            });
+        }
+    }
+
     /// A DNS zone held in memory, for SSO domain proofs.
     struct TestZone(Vec<(String, String)>);
 

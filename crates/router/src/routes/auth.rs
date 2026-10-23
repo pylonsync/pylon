@@ -1618,6 +1618,12 @@ pub(crate) fn handle(
             Some(e) => pylon_auth::normalize_email(e),
             None => return Some((400, json_error("MISSING_EMAIL", "email is required"))),
         };
+        if !pylon_auth::is_plausible_email(&email) {
+            return Some((
+                400,
+                json_error("INVALID_EMAIL", "email must be well-formed"),
+            ));
+        }
         // Rate limit FIRST so an attacker who lacks a valid CAPTCHA
         // token can't bypass the per-IP cap by intentionally tripping
         // the CAPTCHA-fail path repeatedly.
@@ -2061,7 +2067,7 @@ pub(crate) fn handle(
             Some(e) => e.trim().to_lowercase(),
             None => return Some((400, json_error("MISSING_EMAIL", "email is required"))),
         };
-        if !email.contains('@') {
+        if !pylon_auth::is_plausible_email(&email) {
             return Some((
                 400,
                 json_error("INVALID_EMAIL", "email must be well-formed"),
@@ -3543,7 +3549,7 @@ pub(crate) fn handle(
                 return Some((400, json_error("MISSING_EMAIL", "email is required")));
             }
         };
-        if !email.contains('@') {
+        if !pylon_auth::is_plausible_email(&email) {
             audit_failed("invalid_email", None, &intent);
             return Some((
                 400,

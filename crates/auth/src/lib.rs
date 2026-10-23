@@ -294,6 +294,31 @@ pub fn normalize_email(email: &str) -> String {
     email.trim().to_lowercase()
 }
 
+/// Whether a (normalized) address is worth sending mail to: one `@`, a
+/// local part, a domain with a dot and no empty labels, no spaces or
+/// control characters, at most 254 bytes. Not full RFC 5322; it keeps
+/// empty and junk input away from the mail provider, which answered
+/// `{"email":""}` with a 500.
+pub fn is_plausible_email(email: &str) -> bool {
+    if email.is_empty() || email.len() > 254 {
+        return false;
+    }
+    if email
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '<' | '>' | ',' | ';'))
+    {
+        return false;
+    }
+    let Some((local, domain)) = email.split_once('@') else {
+        return false;
+    };
+    !local.is_empty()
+        && local.len() <= 64
+        && !domain.contains('@')
+        && domain.contains('.')
+        && domain.split('.').all(|label| !label.is_empty())
+}
+
 /// Constant-time byte comparison to prevent timing attacks.
 ///
 /// The length check leaks whether the two slices are the same length, but the
@@ -3658,6 +3683,27 @@ mod tests {
         assert!(store.revoke(&session.token));
         assert!(store.get(&session.token).is_none());
         assert!(!store.revoke(&session.token)); // already revoked
+    }
+
+    #[test]
+    fn plausible_emails() {
+        for ok in ["a@b.co", "jane.doe+tag@mail.acme.com"] {
+            assert!(is_plausible_email(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "jane",
+            "@acme.com",
+            "jane@",
+            "jane@acme",
+            "jane@acme..com",
+            "a@b@c.com",
+            "jane doe@acme.com",
+            "jane@acme.com\r\nbcc:x@y.z",
+            "a@b.com,c@d.com",
+        ] {
+            assert!(!is_plausible_email(bad), "{bad:?}");
+        }
     }
 
     #[test]
