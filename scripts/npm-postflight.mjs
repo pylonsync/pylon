@@ -40,7 +40,10 @@ export async function waitForPackages(packages, {
         log(`${name}@${version} is publicly downloadable`);
         return null;
       } catch (error) {
-        reason = error.message;
+        // A request cut short by the overall deadline (an abort, or "deadline
+        // reached") says nothing about the package; keep the reason an
+        // earlier attempt gave.
+        if (Date.now() < deadline || reason === 'not checked') reason = error.message;
       }
       const remaining = deadline - Date.now();
       if (remaining <= intervalMs) break;
