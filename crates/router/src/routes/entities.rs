@@ -101,12 +101,12 @@ pub(crate) fn handle(
                         .to_string(),
                     ));
                 }
-                // Replication fetches page at 1000 (matching the sync pull
-                // batch limits) — a reconcile sweep pays one round trip per
-                // page, so the cap directly divides sweep latency. Total scan
-                // work is the same either way; only the slicing changes. App
-                // reads keep the 100 cap.
-                let limit_cap: usize = if replication_fetch { 1000 } else { 100 };
+                // Replication fetches page at up to 5000 — a reconcile sweep
+                // pays one round trip per page, so the cap directly divides
+                // sweep latency. The client starts at 1000 and doubles. Total
+                // scan work is the same either way; only the slicing changes.
+                // App reads keep the 100 cap.
+                let limit_cap: usize = if replication_fetch { 5000 } else { 100 };
                 let limit: usize = url
                     .split("limit=")
                     .nth(1)

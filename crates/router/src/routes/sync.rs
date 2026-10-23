@@ -61,6 +61,87 @@ fn url_encode(s: &str) -> String {
     out
 }
 
+/// Rows per pull page when the client does not ask (`limit=`). Older
+/// clients send no limit and keep the page size they were written for.
+const DEFAULT_PAGE_ROWS: usize = 1000;
+
+/// The most rows one pull page may carry, whatever the client asks.
+pub const MAX_PAGE_ROWS: usize = 10_000;
+
+/// Test override for [`page_byte_budget`]. 0 = default.
+static PAGE_BYTE_BUDGET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Override the per-page byte budget. 0 restores the default.
+pub fn set_page_byte_budget(bytes: usize) {
+    PAGE_BYTE_BUDGET.store(bytes, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Approximate JSON bytes one pull page may carry. Pages end at the row
+/// limit or at this size, whichever comes first, so a client that asks for
+/// large pages of wide rows does not get a response of tens of megabytes.
+/// `PYLON_SYNC_PAGE_BYTES` overrides the default of 4 MiB.
+fn page_byte_budget() -> usize {
+    let overridden = PAGE_BYTE_BUDGET.load(std::sync::atomic::Ordering::Relaxed);
+    if overridden > 0 {
+        return overridden;
+    }
+    std::env::var("PYLON_SYNC_PAGE_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(4 * 1024 * 1024)
+}
+
+/// The rows the client asked for per page (`limit=`), clamped to
+/// `1..=MAX_PAGE_ROWS`; `DEFAULT_PAGE_ROWS` when absent.
+fn requested_page_rows(url: &str) -> usize {
+    url.split('?')
+        .nth(1)
+        .and_then(|qs| {
+            qs.split('&')
+                .find_map(|kv| kv.strip_prefix("limit="))
+                .and_then(|v| v.parse::<usize>().ok())
+        })
+        .map(|n| n.clamp(1, MAX_PAGE_ROWS))
+        .unwrap_or(DEFAULT_PAGE_ROWS)
+}
+
+/// Ends a pull page at a row limit or a byte budget.
+struct PageBudget {
+    rows: usize,
+    bytes: usize,
+    used: usize,
+}
+
+impl PageBudget {
+    fn new(rows: usize) -> Self {
+        Self::with_bytes(rows, page_byte_budget())
+    }
+
+    fn with_bytes(rows: usize, bytes: usize) -> Self {
+        Self {
+            rows,
+            bytes,
+            used: 0,
+        }
+    }
+
+    /// Count one event's approximate wire size.
+    fn add(&mut self, ev: &ChangeEvent) {
+        let data = ev
+            .data
+            .as_ref()
+            .and_then(|d| serde_json::to_vec(d).ok())
+            .map_or(0, |v| v.len());
+        // seq, kind, timestamp and the JSON punctuation.
+        self.used += data + ev.entity.len() + ev.row_id.len() + ev.timestamp.len() + 64;
+    }
+
+    fn full(&self, rows: usize) -> bool {
+        rows >= self.rows || self.used >= self.bytes
+    }
+}
+
 /// Rows a single snapshot request may TOUCH before paginating.
 ///
 /// Overridable without the environment. Tests need a small budget to force
@@ -219,7 +300,7 @@ fn handle_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
     if since == 0 {
         handle_snapshot_pull(ctx, url)
     } else {
-        handle_delta_pull(ctx, since)
+        handle_delta_pull(ctx, url, since)
     }
 }
 
@@ -238,8 +319,8 @@ fn handle_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
 /// as-of seq, so successive pages share one consistent snapshot
 /// frame even if writes land mid-pagination.
 fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
-    const SNAPSHOT_BATCH_LIMIT: usize = 1000;
     const RAW_FETCH_CHUNK: usize = 200;
+    let mut page = PageBudget::new(requested_page_rows(url));
 
     let snapshot_after_raw: Option<String> = url
         .split("snapshot_after=")
@@ -282,7 +363,7 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
         .and_then(|v| v.get("s").and_then(|s| s.as_u64()))
         .unwrap_or_else(|| ctx.change_log.current_seq());
 
-    // Per-request scanned-row budget. SNAPSHOT_BATCH_LIMIT bounds rows
+    // Per-request scanned-row budget. The page row limit bounds rows
     // EMITTED, but a data-dependent sparse policy (e.g. `auth.userId ==
     // data.ownerId` on a large shared table) passes `check_entity_scan` and is
     // walked row-by-row, with most rows dropped at the per-row `check_entity_read`
@@ -310,7 +391,7 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
     let resume_after_id = snapshot_after.as_ref().and_then(|c| c.1.clone());
     // Rows already emitted for the entity we're resuming INTO. `sync_limit` is
     // a per-client-per-entity ceiling, and a snapshot spans however many
-    // requests SNAPSHOT_BATCH_LIMIT forces — so a counter that reset each
+    // requests the page row limit forces — so a counter that reset each
     // request would let a big table emit `limit` rows per page and bound
     // nothing at all.
     let resume_emitted: usize = snapshot_after_parsed
@@ -469,7 +550,7 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
                 // Pre-fix, the overflow token was rebuilt from the original
                 // resume marker with `n: 0`, i.e. byte-identical to the token
                 // the client had just sent — so any capped entity whose
-                // visible tail exceeded SNAPSHOT_BATCH_LIMIT re-served page 1
+                // visible tail exceeded the page row limit re-served page 1
                 // forever. The client re-requested the same snapshot_after in
                 // a tight loop, bootstrap never converged, and every pull()
                 // awaiting the snapshot hung (found live on reelbear.app once
@@ -495,8 +576,9 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
                         prev_data: None,
                         timestamp: String::new(),
                     });
+                    page.add(changes.last().expect("just pushed"));
                     emitted_for_entity += 1;
-                    if changes.len() >= SNAPSHOT_BATCH_LIMIT {
+                    if page.full(changes.len()) {
                         next_after = Some((entity.name.clone(), None, emitted_for_entity));
                         break 'outer;
                     }
@@ -617,8 +699,9 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
                         prev_data: None,
                         timestamp: String::new(),
                     });
+                    page.add(changes.last().expect("just pushed"));
                     emitted_for_entity += 1;
-                    if changes.len() >= SNAPSHOT_BATCH_LIMIT {
+                    if page.full(changes.len()) {
                         next_after = Some((
                             entity.name.clone(),
                             entity_after.clone(),
@@ -659,20 +742,39 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
         let payload = serde_json::json!({"e": e, "a": a, "s": snapshot_seq, "n": n}).to_string();
         url_encode(&payload)
     });
-    let resp = serde_json::json!({
+    let mut resp = serde_json::json!({
         "changes": changes,
         "cursor": { "last_seq": cursor_seq },
         "has_more": has_more,
         "snapshot_after": next_after_str,
+        // Every page of a snapshot says so: a catching-up client can be
+        // answered with one (see `handle_delta_pull`) and must know.
+        "snapshot": true,
     });
+    if !has_more {
+        // The entities this snapshot holds the complete visible set of. A
+        // client that kept rows from before deletes the ones not sent (the
+        // snapshot has no tombstones).
+        let entities: Vec<&str> = manifest
+            .entities
+            .iter()
+            .filter(|e| crate::is_replicated_entity(manifest, &e.name))
+            .map(|e| e.name.as_str())
+            .collect();
+        resp["snapshot_entities"] = serde_json::json!(entities);
+    }
     (200, resp.to_string())
 }
 
-/// Events per delta-pull response. Matches SNAPSHOT_BATCH_LIMIT — a
-/// catching-up client pays one round trip per page, so the page size
-/// directly divides catch-up latency (100/page made a 15k-event
-/// catch-up ~150 sequential round trips ≈ 10s of pure RTT).
-const DELTA_BATCH_LIMIT: usize = 1000;
+/// Whether the client handles a snapshot in answer to a delta pull
+/// (`snapshot_ok=1`). Older clients get the 410 instead, which makes them
+/// wipe the replica and pull from 0.
+fn accepts_snapshot_catch_up(url: &str) -> bool {
+    url.split('?').nth(1).is_some_and(|qs| {
+        qs.split('&')
+            .any(|kv| kv == "snapshot_ok=1" || kv == "snapshot_ok=true")
+    })
+}
 
 /// Test override for [`delta_scan_budget`] — same atomic-not-env
 /// pattern (and rationale) as [`SNAPSHOT_SCAN_BUDGET`]. 0 = default.
@@ -792,7 +894,7 @@ fn resync_required_body(since: u64, oldest_seq: u64) -> String {
 
 /// Catching-up client (since>0): replay the change-log tail since the
 /// caller's cursor, with the read-policy fence applied to each event.
-fn handle_delta_pull(ctx: &RouterContext, since: u64) -> (u16, String) {
+fn handle_delta_pull(ctx: &RouterContext, url: &str, since: u64) -> (u16, String) {
     // Far-behind cutover. Replaying a delta costs one event per CHANGE
     // since the cursor; a snapshot costs one event per CURRENT visible
     // row, with every intermediate update coalesced and deleted rows
@@ -806,12 +908,23 @@ fn handle_delta_pull(ctx: &RouterContext, since: u64) -> (u16, String) {
     // when the delta is worse than even a whole-table snapshot. Gap ≥
     // threshold gates the row count, so routine catch-ups never pay
     // the COUNT.
+    //
+    // A client that accepts a snapshot catch-up (`snapshot_ok=1`) gets the
+    // snapshot in this response instead of a 410: it keeps its replica on
+    // screen, applies the current rows, deletes the ones the snapshot no
+    // longer holds, and resumes the log from the snapshot's seq. That costs
+    // nothing extra on the client, so the cutover fires as soon as the
+    // delta is longer than a whole-table snapshot (not twice as long).
+    let snapshot_ok = accepts_snapshot_catch_up(url);
     let threshold = delta_resync_threshold();
     if threshold > 0 {
         let current = ctx.change_log.current_seq();
         let gap = current.saturating_sub(since);
         if gap >= threshold {
             if let Some(total) = total_synced_rows(ctx) {
+                if snapshot_ok && gap > total {
+                    return handle_snapshot_pull(ctx, url);
+                }
                 if gap > total.saturating_mul(2) {
                     return (410, resync_required_body(since, current.saturating_add(1)));
                 }
@@ -834,7 +947,9 @@ fn handle_delta_pull(ctx: &RouterContext, since: u64) -> (u16, String) {
     // exhausted, or the scan budget is hit. The response cursor always
     // advances to the last RAW event scanned, so filtered-out spans are
     // never re-scanned on the next request.
-    let scan_budget = delta_scan_budget();
+    let mut page_budget = PageBudget::new(requested_page_rows(url));
+    // A larger page may scan proportionally more of the log.
+    let scan_budget = delta_scan_budget().max(page_budget.rows * 10);
     let mut changes: Vec<ChangeEvent> = Vec::new();
     let mut cursor_seq = since;
     let mut has_more;
@@ -844,11 +959,15 @@ fn handle_delta_pull(ctx: &RouterContext, since: u64) -> (u16, String) {
             &SyncCursor {
                 last_seq: cursor_seq,
             },
-            DELTA_BATCH_LIMIT,
+            page_budget.rows,
         ) {
             Ok(page) => page,
             Err(pylon_sync::PullError::ResyncRequired { oldest_seq, .. }) => {
                 if changes.is_empty() && cursor_seq == since {
+                    // The log no longer holds the cursor's events.
+                    if snapshot_ok {
+                        return handle_snapshot_pull(ctx, url);
+                    }
                     return (410, resync_required_body(since, oldest_seq));
                 }
                 // Mid-refill resync signal with a valid partial page
@@ -866,13 +985,16 @@ fn handle_delta_pull(ctx: &RouterContext, since: u64) -> (u16, String) {
         // future path that returns an empty page with has_more): break
         // rather than spin the refill loop against the same cursor.
         has_more = page.has_more && advanced;
-        changes.extend(
-            page.changes
-                .into_iter()
-                .filter(|ev| crate::is_replicated_entity(manifest, &ev.entity))
-                .filter_map(|ev| project_change_for_caller(ctx, ev)),
-        );
-        if !has_more || changes.len() >= DELTA_BATCH_LIMIT || scanned >= scan_budget {
+        for ev in page
+            .changes
+            .into_iter()
+            .filter(|ev| crate::is_replicated_entity(manifest, &ev.entity))
+            .filter_map(|ev| project_change_for_caller(ctx, ev))
+        {
+            page_budget.add(&ev);
+            changes.push(ev);
+        }
+        if !has_more || page_budget.full(changes.len()) || scanned >= scan_budget {
             break;
         }
     }
@@ -1317,5 +1439,62 @@ fn run_push_op(
                 row_id: &change.row_id,
             },
         ),
+    }
+}
+
+#[cfg(test)]
+mod page_tests {
+    use super::*;
+
+    #[test]
+    fn requested_page_rows_is_clamped() {
+        assert_eq!(
+            requested_page_rows("/api/sync/pull?since=4"),
+            DEFAULT_PAGE_ROWS
+        );
+        assert_eq!(
+            requested_page_rows("/api/sync/pull?since=4&limit=4000"),
+            4000
+        );
+        assert_eq!(
+            requested_page_rows("/api/sync/pull?limit=999999&since=4"),
+            MAX_PAGE_ROWS
+        );
+        assert_eq!(requested_page_rows("/api/sync/pull?since=4&limit=0"), 1);
+        assert_eq!(
+            requested_page_rows("/api/sync/pull?since=4&limit=x"),
+            DEFAULT_PAGE_ROWS
+        );
+    }
+
+    fn event(data: serde_json::Value) -> ChangeEvent {
+        ChangeEvent {
+            seq: 1,
+            entity: "Property".into(),
+            row_id: "p1".into(),
+            kind: ChangeKind::Insert,
+            data: Some(data),
+            prev_data: None,
+            timestamp: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_page_ends_at_its_rows_or_its_bytes() {
+        let mut by_rows = PageBudget::with_bytes(3, usize::MAX);
+        for n in 1..=3 {
+            by_rows.add(&event(serde_json::json!({ "id": "p1" })));
+            assert_eq!(by_rows.full(n), n == 3);
+        }
+
+        // Wide rows: 1 KB of data each, against a 4 KB budget.
+        let wide = serde_json::json!({ "notes": "x".repeat(1000) });
+        let mut by_bytes = PageBudget::with_bytes(10_000, 4096);
+        let mut rows = 0;
+        while !by_bytes.full(rows) {
+            by_bytes.add(&event(wide.clone()));
+            rows += 1;
+        }
+        assert_eq!(rows, 4);
     }
 }

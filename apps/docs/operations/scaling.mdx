@@ -91,7 +91,9 @@ the requested range, the pull reads the shared Postgres change log.
 
 The client-side `reconcile()` pass remains a safety check. On reconnect
 or a visibility change, it compares the local replica with the
-authoritative entity rows and removes stale rows.
+authoritative entity rows and removes stale rows. It skips the pass after
+a pull that received a complete snapshot, because the snapshot already
+removed them.
 
 ## Shared jobs and workflows
 

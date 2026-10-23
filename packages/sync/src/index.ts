@@ -2273,6 +2273,7 @@ export class SyncEngine {
     // bootstrap reconcile (the snapshot path already returned every
     // policy-visible row, per-entity refetch right after is waste).
     const startedFromZero = this.cursor.last_seq === 0;
+    this.lastPullCompletedSnapshot = false;
     // Open the live-event hold for the pull's whole (possibly multi-page)
     // duration so a racing WS frame can't leapfrog the cursor — past the
     // snapshot's rows on a from-zero pull, or past the not-yet-pulled gap
@@ -2314,6 +2315,14 @@ export class SyncEngine {
       let hasMore = false;
       let firstPass = true;
       let nextSince = this.cursor.last_seq;
+      // Adaptive page size: a small first page paints quickly, then each
+      // full page doubles the next one up to the server's maximum, so a
+      // large catch-up costs a few round trips instead of hundreds.
+      let pageRows = SyncEngine.FIRST_PULL_PAGE_ROWS;
+      // Ids per entity seen in a snapshot (a pull from 0, or the server's
+      // answer to a far-behind cursor). When the snapshot completes, local
+      // rows it did not send are deleted: a snapshot has no tombstones.
+      let snapshotSeen: Map<string, Set<string>> | null = null;
       while (firstPass || snapshotAfter || hasMore) {
         firstPass = false;
         // `snapshot_after` is an OPAQUE cursor the server already URL-encoded
@@ -2324,17 +2333,37 @@ export class SyncEngine {
         // restart the snapshot from row 0 — an infinite re-snapshot loop for any
         // table larger than one page (SNAPSHOT_BATCH_LIMIT rows). `since` is a
         // plain integer, so it's safe to inline.
-        let query = `since=${nextSince}`;
+        // `snapshot_ok=1`: a far-behind cursor gets a snapshot of current
+        // rows (applied in place, then the log resumes from its seq)
+        // instead of a 410 that wipes the replica.
+        let query = `since=${nextSince}&limit=${pageRows}&snapshot_ok=1`;
         if (snapshotAfter) {
           query += `&snapshot_after=${snapshotAfter}`;
         }
-        const resp = await this.request<
-          PullResponse & { snapshot_after?: string | null }
-        >("GET", `/api/sync/pull?${query}`);
+        const resp = await this.request<PullResponse>("GET", `/api/sync/pull?${query}`);
         if (pendingApply) await pendingApply;
         pendingApply = this.enqueueApply(resp.changes, resp.cursor, {
           isPull: true,
         });
+        if (resp.snapshot) {
+          snapshotSeen ??= new Map();
+          for (const ev of resp.changes) {
+            let ids = snapshotSeen.get(ev.entity);
+            if (!ids) snapshotSeen.set(ev.entity, (ids = new Set()));
+            ids.add(ev.row_id);
+          }
+          if (resp.snapshot_entities) {
+            const entities = resp.snapshot_entities;
+            const seen = snapshotSeen;
+            const tombstoneSeq = resp.cursor.last_seq;
+            snapshotSeen = null;
+            const applied = pendingApply;
+            pendingApply = applied.then(() => this.sweepAfterSnapshot(entities, seen, tombstoneSeq));
+          }
+        }
+        if (resp.changes.length >= pageRows) {
+          pageRows = Math.min(pageRows * 2, SyncEngine.MAX_PULL_PAGE_ROWS);
+        }
         // Guard against a server that reports more pages without
         // advancing the cursor (a transient no-progress page): break
         // rather than refetch the same page forever. The next poll /
@@ -2457,6 +2486,44 @@ export class SyncEngine {
     }
   }
 
+  /** Rows a reconcile fetches per entity, at most. */
+  private static readonly RECONCILE_ROW_CAP = 20_000;
+  /** The server's page maximum for replication reads (`?sync=1`). */
+  private static readonly MAX_RECONCILE_PAGE_ROWS = 5_000;
+
+  /** Rows the first page of a pull asks for. Later pages double. */
+  private static readonly FIRST_PULL_PAGE_ROWS = 1000;
+  /** The server's page maximum (MAX_PAGE_ROWS in routes/sync.rs). */
+  private static readonly MAX_PULL_PAGE_ROWS = 10_000;
+
+  /**
+   * After a complete snapshot: delete local rows of `entities` that the
+   * snapshot did not send. Rows with writes not yet on the server are kept.
+   * The deletes are tombstoned at the snapshot's seq, so an older event
+   * cannot bring a row back.
+   */
+  private async sweepAfterSnapshot(
+    entities: string[],
+    seen: Map<string, Set<string>>,
+    tombstoneSeq: number,
+  ): Promise<void> {
+    const pendingKeys = this.mutations.pendingRowKeys();
+    for (const entity of entities) {
+      const ids = seen.get(entity);
+      const removalIds: string[] = [];
+      for (const row of this.store.list(entity)) {
+        const id = (row as { id?: unknown }).id;
+        if (typeof id !== "string") continue;
+        if (ids?.has(id) || pendingKeys.has(`${entity}/${id}`)) continue;
+        removalIds.push(id);
+      }
+      if (removalIds.length > 0) {
+        await this.enqueueReconcile(entity, [], removalIds, tombstoneSeq);
+      }
+    }
+    this.lastPullCompletedSnapshot = true;
+  }
+
   /** Consecutive 410 RESYNC_REQUIRED responses since the last successful
    *  pull. Used by the circuit breaker in pull() to bound the retry
    *  storm against a misconfigured server. Resets to 0 on any pull
@@ -2479,6 +2546,10 @@ export class SyncEngine {
    *  cleared on read so a subsequent reconnect-after-disconnect still
    *  runs reconcile normally. */
   private lastPullStartedFromZero = false;
+  /** The last pull received a complete snapshot and deleted the local
+   *  rows it did not hold, so the replica matches the server: the
+   *  reconcile that follows a connect would fetch the same rows again. */
+  private lastPullCompletedSnapshot = false;
 
   /** Timestamp of the last `reconcile()` invocation. Used to debounce —
    *  reconcile runs on connect, WS reconnect, AND visibility-change, so
@@ -2892,20 +2963,22 @@ export class SyncEngine {
   ): Promise<{ rows: Row[]; truncated: boolean }> {
     const out: Row[] = [];
     let cursor: string | null = null;
-    // 20 pages × 1000 per page = 20k rows. A `sync:true` entity larger than
-    // this should switch to `sync: false` + search/by-id — see useInfiniteQuery.
-    // 1000/page matches the sync-pull batch limits; the server only honors it
-    // on replication fetches (`sync=1`), and each page costs a full round
-    // trip, so the page size directly divides sweep latency (a 20k-row
-    // entity was 200 sequential requests; now 20).
-    for (let page = 0; page < 20; page++) {
+    // At most RECONCILE_ROW_CAP rows in 20 pages. A `sync:true` entity larger than this
+    // should switch to `sync: false` + search/by-id (see useInfiniteQuery).
+    // Pages start at 1000 rows and double up to the server's replication
+    // maximum: each page costs a round trip, so a 7k-row entity takes 3
+    // requests instead of 8.
+    // The page cap bounds requests when pages come back short (a sparse
+    // policy can leave few visible rows per page).
+    let limit = 1000;
+    for (let page = 0; page < 20 && out.length < SyncEngine.RECONCILE_ROW_CAP; page++) {
       // `sync=1` marks this as a REPLICATION fetch, which is what makes an
       // entity's `sync` scope apply. Without it the server treats the request
       // as an ordinary app read and returns unscoped rows — correct for a
       // direct read, wrong here, since these rows land in the replica.
       const qs: string = cursor
-        ? `?limit=1000&sync=1&after=${encodeURIComponent(cursor)}`
-        : `?limit=1000&sync=1`;
+        ? `?limit=${limit}&sync=1&after=${encodeURIComponent(cursor)}`
+        : `?limit=${limit}&sync=1`;
       const resp: {
         data: Row[];
         next_cursor: string | null;
@@ -2916,6 +2989,9 @@ export class SyncEngine {
         return { rows: out, truncated: false };
       }
       cursor = resp.next_cursor;
+      if (resp.data.length >= limit) {
+        limit = Math.min(limit * 2, SyncEngine.MAX_RECONCILE_PAGE_ROWS);
+      }
     }
     // Exhausted the page cap while the server still had more rows: the set
     // is incomplete. Surface it so reconcile upserts-only instead of
@@ -2963,7 +3039,7 @@ export class SyncEngine {
     const removalIds: string[] = [];
     if (truncated) {
       console.warn(
-        `[reconcile] "${entity}" exceeds the ${20_000}-row client-replication ` +
+        `[reconcile] "${entity}" exceeds the ${SyncEngine.RECONCILE_ROW_CAP}-row client-replication ` +
           `cap; skipping stale-row cleanup to avoid deleting un-fetched rows. ` +
           `Mark large server-queried entities \`sync: false\` and read them via ` +
           `search + by-id instead of replicating the whole table.`,
@@ -4481,6 +4557,14 @@ export class SyncEngine {
           // cached side persist without the reconcile pass.
           if (this.lastPullStartedFromZero && !this._hadCachedReplica) {
             this.lastPullStartedFromZero = false;
+            return;
+          }
+          // A complete snapshot (from 0, or a far-behind catch-up) already
+          // replaced the replica's view with the server's, deletions
+          // included: same reason.
+          if (this.lastPullCompletedSnapshot) {
+            this.lastPullStartedFromZero = false;
+            this.lastPullCompletedSnapshot = false;
             return;
           }
           this.lastPullStartedFromZero = false;

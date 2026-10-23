@@ -1421,6 +1421,41 @@ fn delta_pull_far_behind_cuts_over_to_snapshot_resync() {
     );
     assert_eq!(r1["error"]["code"], "RESYNC_REQUIRED", "{r1}");
 
+    // A client that sends `snapshot_ok=1` gets the snapshot in the same
+    // response instead: current rows, flagged as a snapshot, and on the last
+    // page the entities it covers, so the client deletes local rows the
+    // snapshot no longer holds and resumes the log from its seq.
+    let (sc, body) = http(
+        port,
+        "GET",
+        &format!("/api/sync/pull?since={cursor}&snapshot_ok=1"),
+        Some(&token),
+        None,
+    );
+    let rc: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(sc, 200, "{rc}");
+    assert_eq!(rc["snapshot"], true, "{rc}");
+    assert_eq!(rc["has_more"], false, "{rc}");
+    let surviving = rc["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["entity"] == "Note")
+        .count();
+    assert_eq!(surviving, 1, "only the surviving anchor: {rc}");
+    assert!(
+        rc["snapshot_entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e == "Note"),
+        "{rc}"
+    );
+    assert!(
+        rc["cursor"]["last_seq"].as_u64().unwrap() > cursor,
+        "the client resumes the log from the snapshot's seq: {rc}"
+    );
+
     // The client's 410 recovery path: reset to since=0 and re-snapshot.
     // It must land at the tip with no Note rows.
     let (s2, r2) = pull(port, &token, 0);
@@ -1868,4 +1903,62 @@ fn capped_tail_wider_than_a_batch_pages_instead_of_looping() {
         1200,
         "every capped-tail row must arrive exactly once across pages"
     );
+}
+
+/// `limit=` sets the page size of both pull paths.
+#[test]
+fn pull_pages_follow_the_requested_limit() {
+    let rt = Arc::new(Runtime::in_memory(test_manifest()).unwrap());
+    let port = start_server(rt);
+    let token = mint_guest(port);
+    for i in 0..25 {
+        insert_note(port, &token, &format!("n{i}"));
+    }
+
+    // Snapshot: 25 notes at 10 per page is 3 pages.
+    let mut pages = 0;
+    let mut notes = 0;
+    let mut query = "since=0&limit=10".to_string();
+    let cursor = loop {
+        let (status, body) = http(
+            port,
+            "GET",
+            &format!("/api/sync/pull?{query}"),
+            Some(&token),
+            None,
+        );
+        assert_eq!(status, 200, "{body}");
+        let r: Value = serde_json::from_str(&body).unwrap();
+        pages += 1;
+        let page_notes = r["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["entity"] == "Note")
+            .count();
+        assert!(r["changes"].as_array().unwrap().len() <= 10, "{r}");
+        notes += page_notes;
+        match r["snapshot_after"].as_str() {
+            Some(next) => query = format!("since=0&limit=10&snapshot_after={next}"),
+            None => break r["cursor"]["last_seq"].as_u64().unwrap(),
+        }
+    };
+    assert_eq!(notes, 25);
+    assert!(pages >= 3, "pages: {pages}");
+
+    // Delta: 25 new notes at 10 per page.
+    for i in 0..25 {
+        insert_note(port, &token, &format!("m{i}"));
+    }
+    let (status, body) = http(
+        port,
+        "GET",
+        &format!("/api/sync/pull?since={cursor}&limit=10"),
+        Some(&token),
+        None,
+    );
+    let r: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(r["changes"].as_array().unwrap().len(), 10, "{r}");
+    assert_eq!(r["has_more"], true, "{r}");
 }

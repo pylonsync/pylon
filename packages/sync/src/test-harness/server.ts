@@ -452,6 +452,57 @@ export class TestServer {
     return this.visible(entity, all, auth).map((r) => this.project(entity, r));
   }
 
+  /** When true, /api/sync/pull answers like the real server's snapshot
+   *  path: a pull from 0 (or a delta pull with `snapshot_ok=1` and a cursor
+   *  `farBehind` accepts) gets the current visible rows as insert events,
+   *  paged by `limit`, flagged `snapshot`, with `snapshot_entities` on the
+   *  last page. Off by default: older tests expect the log replay. */
+  snapshotMode = false;
+  /** In `snapshotMode`: delta cursors answered with a snapshot. */
+  farBehind: (since: number) => boolean = () => false;
+
+  /** One snapshot page for `snapshotMode`. `offset` is the continuation. */
+  snapshotPage(
+    token: string | undefined,
+    offset: number,
+    limit: number,
+  ): {
+    changes: ChangeEvent[];
+    cursor: SyncCursor;
+    has_more: boolean;
+    snapshot: true;
+    snapshot_after: string | null;
+    snapshot_entities?: string[];
+  } {
+    if (offset === 0) this.snapshotPullCount += 1;
+    const auth = this.authContextFor(token);
+    const entities = [...this.rows.keys()].sort();
+    const all: ChangeEvent[] = [];
+    for (const entity of entities) {
+      const rows = this.visible(entity, Array.from(this.rows.get(entity)?.values() ?? []), auth);
+      for (const row of rows) {
+        all.push({
+          seq: this.nextSeq,
+          entity,
+          row_id: (row as { id: string }).id,
+          kind: "insert",
+          data: this.project(entity, row),
+          timestamp: "",
+        } as ChangeEvent);
+      }
+    }
+    const page = all.slice(offset, offset + limit);
+    const done = offset + limit >= all.length;
+    return {
+      changes: page,
+      cursor: { last_seq: done ? this.nextSeq : 0 },
+      has_more: !done,
+      snapshot: true,
+      snapshot_after: done ? null : String(offset + limit),
+      ...(done ? { snapshot_entities: entities } : {}),
+    };
+  }
+
   /** /api/sync/pull — every visible change since `since`. */
   async pull(token: string | undefined, since: number): Promise<{
     changes: ChangeEvent[];

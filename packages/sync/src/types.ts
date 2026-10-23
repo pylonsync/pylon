@@ -20,6 +20,16 @@ export interface PullResponse {
   changes: ChangeEvent[];
   cursor: SyncCursor;
   has_more: boolean;
+  /** Set on every page of a snapshot (current rows, not the log): a pull
+   *  from 0, or a far-behind catch-up the client accepted with
+   *  `snapshot_ok=1`. */
+  snapshot?: boolean;
+  /** Continuation of a snapshot that spans pages. Opaque; send it back
+   *  verbatim. */
+  snapshot_after?: string | null;
+  /** On a snapshot's last page: the entities it holds every visible row
+   *  of. Rows of these entities that it did not send are gone. */
+  snapshot_entities?: string[];
 }
 
 /**

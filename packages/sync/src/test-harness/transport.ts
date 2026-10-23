@@ -251,6 +251,15 @@ async function handle(
     }
     server.pullUrls.push(url);
     const since = Number(new URL(url, "http://test").searchParams.get("since") ?? "0");
+    if (server.snapshotMode) {
+      const params = new URL(url, "http://test").searchParams;
+      const after = params.get("snapshot_after");
+      const limit = Number(params.get("limit") ?? "1000");
+      const snapshotOk = params.get("snapshot_ok") === "1";
+      if (since === 0 || after !== null || (snapshotOk && server.farBehind(since))) {
+        return { status: 200, body: server.snapshotPage(token, Number(after ?? "0"), limit) };
+      }
+    }
     // Cluster-divergence sim: a delta pull lands on an instance that
     // can't serve our cursor → 410. A snapshot (since=0) still succeeds.
     if (since > 0 && server.force410OnDelta) {
