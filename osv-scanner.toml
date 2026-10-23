@@ -1,0 +1,8 @@
+# osv-scanner settings for the lockfile gate (tools/osv-gate.py). An ignore
+# stops applying on its ignoreUntil date, so the gate fails again until a
+# person reviews it.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2023-0071"
+ignoreUntil = 2027-01-31
+reason = "rsa Marvin attack: no fixed version; Pylon only signs with rsa (see .cargo/audit.toml)."

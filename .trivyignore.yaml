@@ -1,0 +1,10 @@
+# Trivy ignores for the image scans (CI and the nightly scan). Each entry
+# needs a statement and an expired_at date; Trivy stops ignoring it after
+# that date. Example:
+#
+# vulnerabilities:
+#   - id: CVE-2026-00000
+#     paths: ["usr/local/bin/bun"]
+#     statement: "Why it does not apply, who reviewed it."
+#     expired_at: 2027-01-31
+vulnerabilities: []

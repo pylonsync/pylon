@@ -88,7 +88,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # Match the build stage on trixie so the linked libxmlsec1 ABI lines
 # up with what the binary was compiled against. Mixing bookworm runtime
 # with trixie-built binary would fail at dlopen time.
-FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
+# runtime-base holds everything from Debian, Bun and npm; the stage after it
+# adds Pylon. CI builds and scans this stage alone (`--target runtime-base`)
+# without the Rust build.
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS runtime-base
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl unzip \
@@ -126,6 +129,8 @@ RUN ln -s /usr/local/bin/bun /usr/local/bin/bunx \
 # reproducible where it mattered most — the thing writing customer code. Bump
 # deliberately, with a dev-env build verified against the new version.
 RUN BUN_INSTALL=/usr/local bun install -g opencode-ai@1.18.5
+
+FROM runtime-base
 
 COPY --from=rust-builder /usr/local/bin/pylon /usr/local/bin/pylon
 # The server runs as the non-root `pylon` user. Shard WebTransport listens on

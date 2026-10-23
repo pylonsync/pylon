@@ -27,6 +27,7 @@ jobs:
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       ts: ${{ steps.filter.outputs.ts }}
+      images: ${{ steps.filter.outputs.images }}
       swift: ${{ steps.filter.outputs.swift }}
       csharp: ${{ steps.filter.outputs.csharp }}
     steps:
@@ -44,6 +45,11 @@ jobs:
               - 'rust-toolchain*'
               - '.config/nextest.toml'
               - '.github/workflows/release.yml'
+              - '.github/workflows/ci.yml'
+            images:
+              - 'Dockerfile'
+              - 'builder/**'
+              - '.trivyignore.yaml'
               - '.github/workflows/ci.yml'
             ts:
               - 'packages/**'
@@ -450,31 +456,72 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bash tools/smoke-shard-codecs.sh
 
+  # Dependency advisories. Fails on a vulnerability with a fixed version;
+  # every ignore has a reason and a review date (.cargo/audit.toml,
+  # deny.toml, osv-scanner.toml). SECURITY.md has the policy.
   audit:
-    name: cargo audit
+    name: dependency advisories
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ts == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+      - name: Ignores are within their review dates
+        run: bash tools/check-security-ignores.sh
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo install --locked cargo-audit
-      # RUSTSEC-2023-0071 (rsa "Marvin" timing sidechannel) has no fixed
-      # upstream version. It requires an RSA *decryption* oracle to recover
-      # a key. Pylon's `rsa` use is sign-only (crates/auth/src/oidc_provider.rs
-      # issues OIDC ID tokens); SAML/SSO signature *verification* uses `ring`,
-      # and the only payload decryption is ChaCha20. With no RSA decryption
-      # path, the attack is unreachable here. Justification reviewed
-      # 2026-06-11; revisit if a decrypting RSA code path is ever added or
-      # the `rsa` crate ships a fix (then drop this ignore).
-      # RUSTSEC-2026-0381 (webpki-roots < 1.0.10 trusts the distrusted
-      # emSign ECC Root CA - G3) matches webpki-roots 0.26.11, which ureq 2
-      # and tungstenite 0.24 still require. 0.26.11 holds no roots of its
-      # own: its lib.rs is `pub use parent::TLS_SERVER_ROOTS` from
-      # webpki-roots 1.x, and crates/shard-client-ffi requires 1.0.10, so
-      # the lockfile's roots are the fixed set. Drop this ignore when ureq
-      # and tungstenite move to webpki-roots 1.x. Reviewed 2026-10-21.
-      - run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0381
+      - run: cargo install --locked cargo-audit cargo-deny
+      - run: cargo audit
+      # Advisories, licenses and crate sources (deny.toml).
+      - run: cargo deny check
+      - name: osv-scanner on the lockfiles
+        env:
+          OSV_VERSION: v2.7.0
+          OSV_SHA256: 160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b
+        run: |
+          curl -fsSL -o osv-scanner "https://github.com/google/osv-scanner/releases/download/${OSV_VERSION}/osv-scanner_linux_amd64"
+          echo "${OSV_SHA256}  osv-scanner" | sha256sum -c -
+          chmod +x osv-scanner
+          # Exit 1 means findings; the gate decides which ones fail.
+          ./osv-scanner scan source --config osv-scanner.toml --format json \
+            --lockfile Cargo.lock --lockfile bun.lock \
+            --lockfile crates/studio_api/web/bun.lock > osv.json || [ $? -eq 1 ]
+          python3 tools/osv-gate.py < osv.json
+
+  # The runtime image's Debian, Bun and npm layer (the Dockerfile's
+  # runtime-base stage) and the builder image, scanned with Trivy. Fails on a
+  # high or critical vulnerability with a fixed version. The Rust binary's
+  # dependencies are covered by the audit job.
+  image-scan:
+    name: image scan
+    needs: changes
+    if: needs.changes.outputs.images == 'true'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: runtime-base
+            file: Dockerfile
+            target: runtime-base
+          - name: builder
+            file: builder/Dockerfile
+            target: ""
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build ${{ matrix.name }}
+        env:
+          FILE: ${{ matrix.file }}
+          TARGET: ${{ matrix.target }}
+          TAG: pylon-${{ matrix.name }}:scan
+        run: docker build -f "$FILE" ${TARGET:+--target "$TARGET"} -t "$TAG" .
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: pylon-${{ matrix.name }}:scan
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          exit-code: "1"
+          format: table
 
   # -----------------------------------------------------------------
   # Terminal gate. Always runs (even when every real job is skipped),
@@ -698,6 +745,7 @@ jobs:
       - wasm-shard-smoke
       - shard-cluster-smoke
       - audit
+      - image-scan
       - swift
       - csharp
       - shard-plugins

@@ -1,0 +1,44 @@
+# Dependency updates. Security updates (a PR that fixes an open Dependabot
+# alert) open as soon as the alert does and use these settings too. Version
+# updates are weekly and grouped. SECURITY.md has the response times.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      cargo-minor:
+        update-types: [minor, patch]
+
+  - package-ecosystem: bun
+    directories:
+      - /
+      - /crates/studio_api/web
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      bun-minor:
+        update-types: [minor, patch]
+
+  # Base images are pinned by digest. A PR moves the tag and the digest
+  # together when the base image gets a new build.
+  - package-ecosystem: docker
+    directories:
+      - /
+      - /builder
+    schedule:
+      interval: weekly
+    groups:
+      base-images:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

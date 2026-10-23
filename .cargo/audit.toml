@@ -1,0 +1,17 @@
+# cargo audit settings. Each ignore has a reason and a review date;
+# tools/check-security-ignores.sh fails CI once a review date has passed.
+# deny.toml carries the same rsa ignore for cargo deny.
+
+[advisories]
+ignore = [
+    # rsa "Marvin" timing side channel. No fixed version exists. The attack
+    # needs an RSA decryption oracle. Pylon only signs with rsa (OIDC ID
+    # tokens in crates/auth/src/oidc_provider.rs); SAML verification uses
+    # ring and payload decryption is ChaCha20. Review by 2027-01-31.
+    "RUSTSEC-2023-0071",
+    # webpki-roots 0.26.11 (via ureq 2 and tungstenite 0.24) holds no roots
+    # of its own: it re-exports webpki-roots 1.x, and the lockfile has the
+    # fixed 1.0.10. Drop when ureq and tungstenite move to webpki-roots 1.x.
+    # Review by 2027-01-31.
+    "RUSTSEC-2026-0381",
+]
