@@ -2021,36 +2021,9 @@ export async function _doBuildInner(
       // against; the build itself is fine.
     }
 
-    // Scan a built JS file for STATIC `import` literals pointing at
-    // `./chunks/<file>.js` and return them resolved to outdir-relative paths.
-    // Bun's minified output uses simple double quotes for module specifiers,
-    // so a `matchAll` covers both `import X from "Y"` and bare `import "Y"`.
-    //
-    // DYNAMIC `import("Y")` is deliberately NOT matched. This list becomes the
-    // route's modulepreload set, and a chunk the author deferred behind
-    // `import()` must not be downloaded eagerly anyway — that would split the
-    // code out of the entry (so it isn't parsed on load) while still shipping
-    // every byte, which is the expensive half of the cost with none of the
-    // saving. The trailing `(` is what distinguishes the two forms.
-    function scanChunkImports(jsAbsPath: string): string[] {
-      let src: string;
-      try {
-        src = fs.readFileSync(jsAbsPath, "utf8");
-      } catch {
-        return [];
-      }
-      const found = new Set<string>();
-      const matches = src.matchAll(/(?:from\s*|import\s*)["']([^"']+)["']/g);
-      for (const m of matches) {
-        const spec = m[1];
-        if (spec.startsWith("./chunks/") || spec.startsWith("chunks/")) {
-          const base = path.basename(spec);
-          const hit = chunksByBasename.get(base);
-          if (hit) found.add(hit.relPath);
-        }
-      }
-      return Array.from(found);
-    }
+    const chunkRelPaths = new Set(
+      Array.from(chunksByBasename.values()).map((c) => c.relPath),
+    );
 
     const manifest: PylonBundleManifest = {
       build_id: makeBuildId(),
@@ -2064,22 +2037,9 @@ export async function _doBuildInner(
       const stem = `client-entry-${slug}`;
       const entry = entriesByStem.get(stem);
       if (!entry) continue;
-      // Walk transitively in case Bun emits chunks that reference
-      // other chunks (rare in the single-level splitting we use,
-      // but free to compute).
-      const seen = new Set<string>();
-      const queue: string[] = scanChunkImports(entry.absPath);
-      for (const q of queue) seen.add(q);
-      while (queue.length > 0) {
-        const relChunk = queue.shift()!;
-        const absChunk = path.join(outdir, relChunk);
-        for (const nested of scanChunkImports(absChunk)) {
-          if (!seen.has(nested)) {
-            seen.add(nested);
-            queue.push(nested);
-          }
-        }
-      }
+      // The SSR head modulepreloads every file in the static graph, so the
+      // browser fetches them in parallel instead of level by level.
+      const seen = staticImportGraph(fs, path, outdir, entry.absPath, chunkRelPaths);
       manifest.routes[r.component] = {
         file: entry.relPath,
         imports: Array.from(seen),
@@ -2372,6 +2332,65 @@ const ASSET_RE = /\.(wasm|png|jpe?g|gif|webp|avif|ico|svg|woff2?|ttf|otf|mp3|mp4
  * the absolute URL. A stylesheet's `url(...)` is left to Bun: CSS cannot
  * import a JavaScript module.
  */
+/**
+ * The outdir-relative chunks a built entry reaches through STATIC imports,
+ * nearest first. Specifiers are relative to the importing file: an entry
+ * imports `./chunks/<file>.js`, a chunk imports its siblings as
+ * `./<file>.js`. Following only the first form dropped every chunk-to-chunk
+ * import, so those chunks were missing from the route's modulepreload set
+ * and loaded in a second wave (3 of 28 files on the Veritas home page).
+ *
+ * DYNAMIC `import("Y")` is deliberately not followed. This list becomes the
+ * route's modulepreload set, and a chunk the author deferred behind
+ * `import()` must not be downloaded eagerly: that would ship every byte the
+ * split was meant to defer. The trailing `(` tells the forms apart; Bun's
+ * minified output quotes specifiers plainly, so one pattern covers
+ * `import X from "Y"`, `import{a}from"Y"` and bare `import "Y"`.
+ */
+export function staticImportGraph(
+  fs: any,
+  path: any,
+  outdir: string,
+  entryAbsPath: string,
+  chunkRelPaths: Set<string>,
+): Set<string> {
+  const toUrlPath = (p: string) => p.replace(/\\/g, "/");
+  const scan = (jsAbsPath: string): string[] => {
+    let src: string;
+    try {
+      src = fs.readFileSync(jsAbsPath, "utf8");
+    } catch {
+      return [];
+    }
+    const found = new Set<string>();
+    const dir = path.dirname(jsAbsPath);
+    for (const m of src.matchAll(/(?:from\s*|import\s*)["']([^"']+)["']/g)) {
+      const spec = m[1]!;
+      if (!spec.startsWith("./") && !spec.startsWith("../") && !spec.startsWith("chunks/")) {
+        continue;
+      }
+      const rel = toUrlPath(
+        path.relative(outdir, path.resolve(spec.startsWith("chunks/") ? outdir : dir, spec)),
+      );
+      if (chunkRelPaths.has(rel)) found.add(rel);
+    }
+    return Array.from(found);
+  };
+  const seen = new Set<string>();
+  const queue = scan(entryAbsPath);
+  for (const q of queue) seen.add(q);
+  while (queue.length > 0) {
+    const rel = queue.shift()!;
+    for (const nested of scan(path.join(outdir, rel))) {
+      if (!seen.has(nested)) {
+        seen.add(nested);
+        queue.push(nested);
+      }
+    }
+  }
+  return seen;
+}
+
 /**
  * Rewrite named imports from namespace barrels (`radix-ui`) in app source
  * into imports of the re-exported packages, so a route bundles only the

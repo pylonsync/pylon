@@ -251,3 +251,29 @@ test("the worker precaches exactly the files the route's HTML loads", async () =
   expect(config.precache).toContain("/icons/512.png");
   expect(config.shells).toEqual(["/"]);
 });
+
+test("the head modulepreloads the route entry and its whole static graph", async () => {
+  const dir = makeApp(SESSION_ONLY_PAGE);
+  const { html } = await render(dir);
+  const head = html.slice(0, html.indexOf("</head>"));
+  const preloaded = [...head.matchAll(/<link rel="modulepreload" href="([^"]+)">/g)].map((m) => m[1]);
+  const route = BUNDLE_MANIFEST.routes["app/page"];
+  expect(preloaded).toEqual([route.file, ...route.imports].map((f) => "/_pylon/build/" + f));
+});
+
+test("modulepreloads are capped for a pathological graph", async () => {
+  const { MAX_MODULEPRELOADS } = await import("./ssr-route-assets");
+  const imports = Array.from({ length: MAX_MODULEPRELOADS + 20 }, (_, i) => `chunks/c${i}-aaaa1111.js`);
+  const manifest = {
+    ...BUNDLE_MANIFEST,
+    routes: { "app/page": { ...BUNDLE_MANIFEST.routes["app/page"], imports } },
+  };
+  const dir = makeApp(SESSION_ONLY_PAGE, manifest);
+  const { html } = await render(dir);
+  const head = html.slice(0, html.indexOf("</head>"));
+  const preloaded = [...head.matchAll(/<link rel="modulepreload" href="([^"]+)">/g)];
+  expect(preloaded.length).toBe(MAX_MODULEPRELOADS);
+  // The entry comes first, then the nearest imports.
+  expect(preloaded[0]![1]).toBe("/_pylon/build/" + BUNDLE_MANIFEST.routes["app/page"].file);
+  expect(preloaded[1]![1]).toBe("/_pylon/build/chunks/c0-aaaa1111.js");
+});

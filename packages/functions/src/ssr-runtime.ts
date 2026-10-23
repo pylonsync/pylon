@@ -10,6 +10,7 @@
 import { withMetaSlot } from "./ssr-page-tree";
 import { moduleKey, serverBundle } from "./server-bundle";
 import {
+  modulepreloadFiles,
   routeAssetFiles,
   routeScriptFiles,
   type RouteAssetFiles,
@@ -2471,7 +2472,7 @@ async function renderBoundaryToClient(
     for (const css of manifestRoute.css) {
       headBlob += await cssHeadTag(css, publicPrefix);
     }
-    for (const chunk of manifestRoute.imports) {
+    for (const chunk of modulepreloadFiles(manifestRoute)) {
       headBlob += `<link rel="modulepreload"${co} href="${publicPrefix}${chunk}">`;
     }
   } else {

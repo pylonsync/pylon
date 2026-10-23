@@ -28,6 +28,8 @@ pylon start dist
 
 Pylon sends the brotli copy of a client file when the browser accepts `br`, else the gzip copy, with `Content-Encoding` and `Vary: Accept-Encoding`. Hashed file names get `Cache-Control: public, max-age=31536000, immutable`. A server that builds the client at boot (with no artifact) writes the copies too.
 
+Each page's head carries `<link rel="modulepreload">` for its route entry and the entry's whole static import graph (up to 64 files), so the browser fetches every chunk the page needs in parallel. Code behind a dynamic `import()` is not preloaded.
+
 A named import from a namespace barrel, such as `import { Dialog } from "radix-ui"`, is rewritten at build time to an import of the package it re-exports (`@radix-ui/react-dialog`). A route then bundles only the Radix packages it uses, instead of one shared chunk of all of them. On the Veritas home screen this took the JavaScript from 191 KB to 158 KB gzip.
 
 API and sync responses (JSON of 1 KB or more) are compressed per response: brotli when the client accepts `br`, else gzip. A sync page of 3.3 MB is about 0.6 MB on the wire. `/api/auth/*` responses are not compressed, because they carry session tokens.

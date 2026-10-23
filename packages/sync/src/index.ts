@@ -64,6 +64,10 @@ export {
   type RoomSubscriber,
 } from "./room-subscriptions";
 export { IndexedDBPersistence, persistChange } from "./persistence";
+// Static, not `import()`: every browser start opens the replica before it
+// can show cached rows, so a dynamic import put one more round trip (a
+// separate chunk the page could not modulepreload) in front of first render.
+import { IndexedDBPersistence, persistChange } from "./persistence";
 export type { ReplicaPersistence } from "./persistence";
 export {
   BEARER_REJECTED_HEADER,
@@ -1016,7 +1020,6 @@ export class SyncEngine {
         if (this.config.persistence) {
           this.persistence = this.config.persistence;
         } else {
-          const { IndexedDBPersistence } = await import("./persistence");
           this.persistence = new IndexedDBPersistence(this.config.appName);
         }
         await this.persistence.open();
@@ -1100,7 +1103,6 @@ export class SyncEngine {
         // "cursor ahead of replica" on crash AND on quota/abort.
         const persistence = this.persistence;
         this.store._persistFn = async (change: ChangeEvent) => {
-          const { persistChange } = await import("./persistence");
           if (!persistence) return true;
           return persistChange(persistence, change);
         };
