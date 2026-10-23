@@ -1,0 +1,23 @@
+{
+  "about": "Filters answered from the local replica must match the server's answer. packages/react/src/queryFilter.test.ts runs these on the client; crates/runtime/tests/query_filter_parity.rs runs them on the server. Rows are stored as the server returns them (datetimes in canonical UTC form).",
+  "rows": [
+    { "key": "k1", "title": "apple", "occurredAt": "2026-09-30T23:59:59.999Z", "rank": 1 },
+    { "key": "k2", "title": "Banana", "occurredAt": "2026-10-01T00:00:00.000Z", "rank": 2 },
+    { "key": "k3", "title": "cherry", "occurredAt": "2026-10-01T12:30:00.000Z", "rank": 3 },
+    { "key": "k4", "title": "banana", "occurredAt": "2026-10-02T00:00:00.000Z", "rank": 4 },
+    { "key": "k5", "title": "", "occurredAt": null, "rank": 5 }
+  ],
+  "cases": [
+    { "where": { "occurredAt": { "$gte": "2026-10-01T00:00:00Z" } }, "keys": ["k2", "k3", "k4"] },
+    { "where": { "occurredAt": { "$lt": "2026-10-02T00:00:00.000Z" } }, "keys": ["k1", "k2", "k3"] },
+    { "where": { "occurredAt": { "$gte": "2026-09-30T20:00:00-04:00" } }, "keys": ["k2", "k3", "k4"] },
+    { "where": { "occurredAt": { "$gte": "2026-10-01T00:00:00.000Z", "$lt": "2026-10-01T23:00:00Z" } }, "keys": ["k2", "k3"] },
+    { "where": { "occurredAt": { "$lte": "2026-09-30T23:59:59.999Z" } }, "keys": ["k1"] },
+    { "where": { "occurredAt": { "$gt": "2026-10-01T00:00:00.000Z" } }, "keys": ["k3", "k4"] },
+    { "where": { "occurredAt": { "$gte": "2026-10-01" } }, "keys": ["k2", "k3", "k4"] },
+    { "where": { "title": { "$gte": "b" } }, "keys": ["k3", "k4"] },
+    { "where": { "title": { "$lt": "a" } }, "keys": ["k2", "k5"] },
+    { "where": { "rank": { "$gt": 2 } }, "keys": ["k3", "k4", "k5"] },
+    { "where": { "rank": { "$gte": 2, "$lte": 3 } }, "keys": ["k2", "k3"] }
+  ]
+}

@@ -1,5 +1,6 @@
 "use client";
 
+import { compareForOrder, compileWhere } from "./queryFilter";
 import { SyncEngine, generateId, pylonFetch, type Row } from "@pylonsync/sync";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { callFn, clientTransport } from "./index";
@@ -476,79 +477,12 @@ function applyClientFilter(rows: Iterable<Row>, options?: QueryOptions): Row[] {
     if (!matches || matches(row)) out.push(row);
   }
   for (const [field, dir] of order) {
-    out.sort((a, b) => compare(a[field], b[field], dir));
+    out.sort((a, b) => compareForOrder(a[field], b[field], dir));
   }
   if (typeof limit === "number") {
     return out.slice(0, limit);
   }
   return out;
-}
-
-function compileWhere(where: QueryFilter): (row: Row) => boolean {
-  const fields = Object.entries(where)
-    .filter(([key]) => key !== "$order" && key !== "$limit")
-    .map(([key, val]) => ({
-      key,
-      val,
-      operators: val !== null && typeof val === "object" && !Array.isArray(val)
-        ? Object.entries(val as Record<string, unknown>).map(([op, opVal]) => ({
-            op,
-            opVal,
-            members: op === "$in" && Array.isArray(opVal) ? new Set(opVal) : undefined,
-          }))
-        : undefined,
-    }));
-  return (row) => {
-    for (const { key, val, operators } of fields) {
-      const rowVal = row[key];
-      if (operators) {
-        for (const { op, opVal, members } of operators) {
-          switch (op) {
-            case "$not":
-              if (rowVal === opVal) return false;
-              break;
-            case "$gt":
-              if (!(typeof rowVal === "number" && typeof opVal === "number" && rowVal > opVal))
-                return false;
-              break;
-            case "$gte":
-              if (!(typeof rowVal === "number" && typeof opVal === "number" && rowVal >= opVal))
-                return false;
-              break;
-            case "$lt":
-              if (!(typeof rowVal === "number" && typeof opVal === "number" && rowVal < opVal))
-                return false;
-              break;
-            case "$lte":
-              if (!(typeof rowVal === "number" && typeof opVal === "number" && rowVal <= opVal))
-                return false;
-              break;
-            case "$like":
-              if (
-                !(typeof rowVal === "string" && typeof opVal === "string" && rowVal.includes(opVal))
-              )
-                return false;
-              break;
-            case "$in":
-              if (!members?.has(rowVal)) return false;
-              break;
-          }
-        }
-      } else {
-        if (rowVal !== val) return false;
-      }
-    }
-    return true;
-  };
-}
-
-function compare(a: unknown, b: unknown, dir: "asc" | "desc"): number {
-  const mult = dir === "desc" ? -1 : 1;
-  if (a === b) return 0;
-  if (a === undefined || a === null) return mult;
-  if (b === undefined || b === null) return -mult;
-  if (typeof a === "number" && typeof b === "number") return (a - b) * mult;
-  return String(a).localeCompare(String(b)) * mult;
 }
 
 // ---------------------------------------------------------------------------

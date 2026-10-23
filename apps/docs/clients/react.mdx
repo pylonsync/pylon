@@ -60,6 +60,15 @@ const { data } = db.useQuery<Todo>("Todo", {
 });
 ```
 
+`where` takes a value (equality) or operators: `$gt`, `$gte`, `$lt`, `$lte`, `$not`, `$in`, `$like`. The query runs on the local replica and gives the same rows as the server:
+
+- Numbers compare as numbers.
+- Strings compare by character code, so `"B"` comes before `"a"`.
+- Two RFC 3339 timestamps compare as times, whatever their offset or precision. `occurredAt: { $gte: "2026-10-01T00:00:00Z" }` matches `2026-10-01T00:00:00.000Z`.
+- A row with no value for the field matches no range.
+
+An operator that cannot apply, such as a number against a string or an unknown operator, matches no rows and logs a warning in development.
+
 ### `db.useQueryOne` — single row by ID
 
 ```tsx
