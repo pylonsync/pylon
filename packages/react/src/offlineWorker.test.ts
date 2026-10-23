@@ -85,3 +85,26 @@ test("a browser without service workers is a no-op", async () => {
     await registerOfflineWorker({ optedIn: true, production: true, navigator: {} }),
   ).toBeNull();
 });
+
+test("passes the page's build to useAppUpdate, in production and in dev", async () => {
+  const { appUpdate } = await import("./appUpdate");
+  const f = fakeContainer();
+  await registerOfflineWorker({
+    optedIn: true,
+    production: true,
+    navigator: { serviceWorker: f.container },
+    whenLoaded: loaded,
+    build: { version: "abc", builtAt: "2026-10-22T10:00:00.000Z" },
+  });
+  expect(appUpdate.getSnapshot().version).toBe("abc");
+  expect(appUpdate.getSnapshot().builtAt).toBe("2026-10-22T10:00:00.000Z");
+
+  // Under pylon dev the updater stays empty.
+  await registerOfflineWorker({
+    optedIn: true,
+    production: false,
+    navigator: { serviceWorker: f.container },
+    build: { version: "abc", builtAt: null },
+  });
+  expect(appUpdate.getSnapshot().version).toBeNull();
+});

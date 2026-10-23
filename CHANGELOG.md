@@ -4,6 +4,10 @@
 
 ### Features
 
+* **offline:** `useAppUpdate()` in `@pylonsync/react` reports a new deploy to an open app (`updateReady`, `version`, `builtAt`, `latestVersion`). It checks `/_pylon/version` when the page becomes visible and every five minutes, and sees a new service worker when it finishes installing. `apply()` waits until the outbox has no pending writes, tells the new worker to take over, and reloads once; a reload that lands on the same build does not reload again. `<AppUpdateBar />` is a minimal unstyled notice.
+* **offline:** the runtime serves `/_pylon/version` (`{ version, builtAt, install }`, `no-store`) from `pylon-version.json` in the client build. The service worker answers `pylon:skip-waiting` and `pylon:version` messages.
+* **offline:** `reinstallRecommended` is true on an iOS home-screen app when the manifest's name, short name, icons (including the icon file bytes), display mode or start URL changed since it was added. A change to these values also gives the build a new service worker version.
+
 * **connections:** `owner: "app"` declares one connection for the whole app (the business's own account). Any server function reads it with `ctx.connections.get`, including for an anonymous visitor; only an admin connects, changes, or removes it.
 * **connections:** `kind: "api_key"` stores key fields instead of an OAuth grant. `ctx.connections.setCredentials(name, fields)` stores them; for Stripe, Square, and Toast the provider checks the key first.
 * **connections:** business providers `square`, `stripe` (Connect), `clover`, `calendly` (PKCE), and `mailchimp`. `get` returns `accountId` (the merchant or account id) and `metadata` (Mailchimp's `dc`).

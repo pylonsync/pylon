@@ -205,6 +205,14 @@ export { UploadQueueFullError, UploadRejectedError } from "@pylonsync/sync";
 export { registerOfflineWorker } from "./offlineWorker";
 export type { OfflineWorkerOptions } from "./offlineWorker";
 
+// App updates: a newer build is deployed, load it.
+export { useAppUpdate } from "./useAppUpdate";
+export type { UseAppUpdateReturn } from "./useAppUpdate";
+export { AppUpdateBar } from "./AppUpdateBar";
+export type { AppUpdateBarProps } from "./AppUpdateBar";
+export { createAppUpdate, AppUpdater } from "./appUpdate";
+export type { AppBuild, AppUpdateState, AppUpdateEnv } from "./appUpdate";
+
 // One-liner API
 export { db, init, getSync, setSessionToken } from "./db";
 

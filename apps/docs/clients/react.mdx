@@ -170,6 +170,14 @@ function SyncStatus() {
 
 `queueUpload(file, { attach })` keeps a file on the device and uploads it when there is a network, then sets it on its record. `useFileUrl(value)` shows a `local:` value from the copy on the device. See [Offline apps](/ssr/offline#photos-taken-offline).
 
+### `useAppUpdate` — a new deploy is available
+
+In an app with `buildManifest({ offline })`, `useAppUpdate()` reports when a newer build is deployed. `apply()` waits until the outbox has no pending writes, then loads the new build. `<AppUpdateBar />` is a minimal notice that uses it. See [Offline apps](/ssr/offline#new-deploys).
+
+```tsx
+const { updateReady, applying, apply } = useAppUpdate();
+```
+
 ### `db.useSearch` — live faceted search
 
 ```tsx

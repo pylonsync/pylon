@@ -3,12 +3,13 @@
 //   - `readManifestOffline`: the `offline` block of pylon.manifest.json.
 //   - `buildOfflineWorker`: computes the service worker config for one client
 //     build (the precache list comes from `routeAssetUrls`, the same list the
-//     SSR render emits tags for) and writes `pylon-sw.js` into the build.
+//     SSR render emits tags for) and writes `pylon-sw.js` into the build,
+//     with `pylon-version.json` beside it (served at `/_pylon/version`).
 //   - `offlineHeadTags`: the install tags every page's `<head>` gets.
 //
 // The worker itself is offline-sw.ts. The Rust host serves
-// `/manifest.webmanifest` and `/pylon-sw.js` (crates/runtime/src/frontend/
-// offline.rs).
+// `/manifest.webmanifest`, `/pylon-sw.js` and `/_pylon/version`
+// (crates/runtime/src/frontend/offline.rs).
 
 import { renderServiceWorker, type ServiceWorkerConfig } from "./offline-sw";
 import { matchRoute } from "./ssr-route-match";
@@ -37,7 +38,23 @@ export interface BundleOffline {
   routes: string[];
   /** The service worker's version (its cache names carry it). */
   version: string;
+  /** When this build was made (ISO 8601). Not part of `version`: two
+   *  machines that build the same app get the same version. */
+  builtAt: string;
 }
+
+/** `pylon-version.json` in the client build, served at `/_pylon/version`.
+ *  `useAppUpdate` in @pylonsync/react polls it. */
+export interface BuildVersionFile {
+  version: string;
+  builtAt: string;
+  /** Hash of what a home-screen app reads only when it is added (see
+   *  `installIdentity`). */
+  install: string;
+}
+
+/** The file the runtime serves at `/_pylon/version`. */
+export const VERSION_FILE = "pylon-version.json";
 
 /** How long a navigation to an offline route waits for the network before
  *  the worker shows the kept page. Long enough for a slow but working
@@ -98,10 +115,88 @@ export function isDynamicPattern(pattern: string): boolean {
   return /\[[^\]]+\]/.test(pattern);
 }
 
-/** The service worker config for this build. */
+/**
+ * Hash of what iOS reads from the web app manifest and the head tags only
+ * when the app is added to the home screen: the name, the short name, the
+ * display mode, the start URL and the icons (with the bytes of each icon
+ * file in `public/`). When it changes, an installed app keeps the old
+ * values until it is removed and added again.
+ *
+ * The manifest is the one the runtime serves: `public/manifest.webmanifest`,
+ * then `<appDir>/manifest.webmanifest`, else the `offline` config (see
+ * `web_manifest_source` in crates/runtime/src/frontend/offline.rs).
+ */
+export async function installIdentity(
+  fs: any,
+  path: any,
+  cwd: string,
+  appDirRel: string,
+  offline: ManifestOfflineInput,
+): Promise<string> {
+  let served: any = null;
+  for (const candidate of [
+    path.join(cwd, "public", "manifest.webmanifest"),
+    path.join(cwd, appDirRel, "manifest.webmanifest"),
+  ]) {
+    if (!fs.existsSync(candidate)) continue;
+    try {
+      served = JSON.parse(fs.readFileSync(candidate, "utf8"));
+    } catch {
+      served = { unreadable: fs.readFileSync(candidate, "utf8") };
+    }
+    break;
+  }
+  const { createHash } = await import("node:crypto");
+  const iconContent = (src: unknown): string | null => {
+    if (typeof src !== "string" || !src.startsWith("/") || src.startsWith("//")) return null;
+    const file = path.join(cwd, "public", src.split(/[?#]/)[0]);
+    if (!fs.existsSync(file)) return null;
+    return createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  };
+  const icons = (list: unknown) =>
+    (Array.isArray(list) ? list : []).map((icon: any) => ({
+      src: icon?.src ?? null,
+      sizes: icon?.sizes ?? null,
+      purpose: icon?.purpose ?? null,
+      content: iconContent(icon?.src),
+    }));
+  const identity = served
+    ? {
+        name: served.name ?? null,
+        shortName: served.short_name ?? null,
+        display: served.display ?? null,
+        startUrl: served.start_url ?? null,
+        icons: icons(served.icons),
+        unreadable: served.unreadable ?? null,
+      }
+    : {
+        name: offline.name,
+        shortName: offline.shortName ?? offline.name,
+        display: offline.display,
+        startUrl: offline.startUrl,
+        icons: icons(offline.icons),
+      };
+  // The head tags come from the `offline` config even when the app ships its
+  // own manifest file.
+  const touch = touchIcon(offline.icons);
+  const head = {
+    title: offline.shortName ?? offline.name,
+    touchIcon: touch,
+    touchIconContent: iconContent(touch),
+  };
+  return createHash("sha256")
+    .update(JSON.stringify({ identity, head }))
+    .digest("hex")
+    .slice(0, 16);
+}
+
+/** The service worker config for this build. `install` is
+ *  `installIdentity`; it is part of the version, so a manifest change
+ *  installs a new worker (which precaches the new manifest). */
 export async function offlineWorkerConfig(
   manifest: RouteAssetManifest,
   offline: ManifestOfflineInput,
+  install: string = "",
 ): Promise<{ config: ServiceWorkerConfig; unknownRoutes: string[] }> {
   const prefix = manifest.public_prefix || "/_pylon/build/";
   const { matched, unknown } = resolveOfflineRoutes(manifest, offline.routes);
@@ -132,22 +227,26 @@ export async function offlineWorkerConfig(
   // changed per boot would reinstall the worker on every deploy machine.
   const { createHash } = await import("node:crypto");
   const version = createHash("sha256")
-    .update(JSON.stringify(base))
+    .update(JSON.stringify({ ...base, install }))
     .digest("hex")
     .slice(0, 16);
   return { config: { version, ...base }, unknownRoutes: unknown };
 }
 
-/** Write `pylon-sw.js` into `outdir` and return the bundle manifest's
- *  `offline` block. */
+/** Write `pylon-sw.js` and `pylon-version.json` into `outdir` and return
+ *  the bundle manifest's `offline` block. `cwd` and `appDirRel` locate the
+ *  app's own manifest file and its icons. */
 export async function buildOfflineWorker(
   fs: any,
   path: any,
   outdir: string,
   manifest: RouteAssetManifest,
   offline: ManifestOfflineInput,
+  cwd: string,
+  appDirRel: string,
 ): Promise<BundleOffline> {
-  const { config, unknownRoutes } = await offlineWorkerConfig(manifest, offline);
+  const install = await installIdentity(fs, path, cwd, appDirRel, offline);
+  const { config, unknownRoutes } = await offlineWorkerConfig(manifest, offline, install);
   if (unknownRoutes.length > 0) {
     // eslint-disable-next-line no-console
     console.warn(
@@ -156,6 +255,12 @@ export async function buildOfflineWorker(
     );
   }
   fs.writeFileSync(path.join(outdir, "pylon-sw.js"), renderServiceWorker(config), "utf8");
+  const versionFile: BuildVersionFile = {
+    version: config.version,
+    builtAt: new Date().toISOString(),
+    install,
+  };
+  fs.writeFileSync(path.join(outdir, VERSION_FILE), JSON.stringify(versionFile), "utf8");
   return {
     name: offline.name,
     ...(offline.shortName ? { shortName: offline.shortName } : {}),
@@ -164,6 +269,7 @@ export async function buildOfflineWorker(
     startUrl: offline.startUrl,
     routes: offline.routes,
     version: config.version,
+    builtAt: versionFile.builtAt,
   };
 }
 

@@ -7,6 +7,8 @@
 // `pylon dev`: a worker serves cached build files first, which would hide
 // every edit until the next install.
 
+import { configureAppUpdate, type AppBuild } from "./appUpdate";
+
 const WORKER_URL = "/pylon-sw.js";
 
 export interface OfflineWorkerOptions {
@@ -23,6 +25,9 @@ export interface OfflineWorkerOptions {
   /** Resolves when the page has loaded, so the worker's downloads do not
    *  compete with the page's own. Defaults to the window `load` event. */
   whenLoaded?: () => Promise<void>;
+  /** The build this page runs, from `__PYLON_DATA__`. `useAppUpdate`
+   *  compares it with the latest build. */
+  build?: AppBuild;
 }
 
 /** The parts of `ServiceWorkerContainer` this module uses. */
@@ -69,6 +74,9 @@ function isPylonWorker(reg: RegistrationLike): boolean {
 export async function registerOfflineWorker(
   opts: OfflineWorkerOptions,
 ): Promise<unknown | null> {
+  // Before the service worker checks: a browser without service workers
+  // still learns about new builds from `/_pylon/version`.
+  if (opts.build) configureAppUpdate(opts.build, opts.optedIn && opts.production);
   const nav =
     opts.navigator ??
     (typeof navigator !== "undefined" ? (navigator as any) : undefined);

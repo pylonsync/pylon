@@ -956,10 +956,69 @@ describe("offline service worker (buildManifest({ offline }))", () => {
     expect(config.precache).not.toContain(prefix + manifest.routes["app/settings/page"].file);
     expect(config.precache).toContain("/icons/192.png");
 
+    // `/_pylon/version` serves this file.
+    const versionFile = JSON.parse(fs.readFileSync(path.join(outdir, "pylon-version.json"), "utf8"));
+    expect(versionFile.version).toBe(manifest.offline!.version);
+    expect(versionFile.builtAt).toBe(manifest.offline!.builtAt);
+    expect(Number.isNaN(Date.parse(versionFile.builtAt))).toBe(false);
+    expect(versionFile.install).toMatch(/^[0-9a-f]{16}$/);
+
     // The same build gives the same version: no reinstall per boot.
     const again = await buildClientBundle();
     const second = JSON.parse(fs.readFileSync(again.manifestPath, "utf8")) as PylonBundleManifest;
     expect(second.offline?.version).toBe(manifest.offline!.version);
+  });
+
+  test("a change to the app's name or icon changes the version and the install identity", async () => {
+    tempDir = makeFixture(
+      { "page.tsx": PAGE_BODY("Home"), "leads/page.tsx": PAGE_BODY("Leads") },
+      { "layout.tsx": LAYOUT_BODY },
+    );
+    const offline = {
+      name: "Field Sales",
+      icons: [{ src: "/icons/192.png", sizes: "192x192" }],
+      startUrl: "/leads",
+      display: "standalone",
+      routes: ["/leads"],
+    };
+    const writeManifest = (o: object) =>
+      fs.writeFileSync(path.join(tempDir, "pylon.manifest.json"), JSON.stringify({ offline: o }));
+    fs.mkdirSync(path.join(tempDir, "public", "icons"), { recursive: true });
+    fs.writeFileSync(path.join(tempDir, "public", "icons", "192.png"), "icon-a");
+    writeManifest(offline);
+    originalCwd = process.cwd();
+    process.chdir(tempDir);
+
+    const read = async () => {
+      const { outdir } = await buildClientBundle();
+      return JSON.parse(fs.readFileSync(path.join(outdir, "pylon-version.json"), "utf8"));
+    };
+    const base = await read();
+
+    // New icon bytes at the same URL.
+    fs.writeFileSync(path.join(tempDir, "public", "icons", "192.png"), "icon-b");
+    const icon = await read();
+    expect(icon.install).not.toBe(base.install);
+    expect(icon.version).not.toBe(base.version);
+
+    // A new name.
+    writeManifest({ ...offline, name: "Veritas" });
+    const named = await read();
+    expect(named.install).not.toBe(icon.install);
+
+    // The app's own manifest file wins over the config.
+    fs.writeFileSync(
+      path.join(tempDir, "public", "manifest.webmanifest"),
+      JSON.stringify({ name: "Own", display: "standalone", icons: [] }),
+    );
+    const own = await read();
+    expect(own.install).not.toBe(named.install);
+    // A field iOS does not read at install (theme color) changes nothing.
+    fs.writeFileSync(
+      path.join(tempDir, "public", "manifest.webmanifest"),
+      JSON.stringify({ name: "Own", display: "standalone", icons: [], theme_color: "#000" }),
+    );
+    expect((await read()).install).toBe(own.install);
   });
 
   test("an app without offline gets no worker", async () => {

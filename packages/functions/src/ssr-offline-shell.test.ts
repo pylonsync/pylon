@@ -59,6 +59,7 @@ const BUNDLE_MANIFEST = {
     startUrl: "/",
     routes: ["/"],
     version: "v1",
+    builtAt: "2026-10-22T12:00:00.000Z",
   },
 };
 
@@ -204,10 +205,14 @@ test("every page of an offline app gets the install tags and the register flag",
   expect(html).toContain('<meta name="theme-color" content="#0b2545">');
   expect(html).toContain('<meta name="apple-mobile-web-app-title" content="Sales">');
   expect(html).toContain('<link rel="apple-touch-icon" href="/icons/512.png">');
-  expect(data.offline).toEqual({ dev: false });
+  expect(data.offline).toEqual({
+    dev: false,
+    version: "v1",
+    builtAt: "2026-10-22T12:00:00.000Z",
+  });
 
   const dev = await render(dir, { env: { PYLON_DEV_MODE: "1" } });
-  expect(dev.data.offline).toEqual({ dev: true });
+  expect(dev.data.offline.dev).toBe(true);
 });
 
 test("an app without offline gets neither", async () => {

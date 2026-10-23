@@ -1342,8 +1342,8 @@ pub fn try_handle(
         return serve_pylon_client_bundle(cfg, request, path_only, cors_origin);
     }
 
-    // Installable app (`buildManifest({ offline })`): the web app manifest
-    // and the service worker. See `frontend/offline.rs`.
+    // Installable app (`buildManifest({ offline })`): the web app manifest,
+    // the service worker and the build version. See `frontend/offline.rs`.
     if path_only == "/manifest.webmanifest" {
         let cwd = std::env::current_dir().unwrap_or_default();
         let app_dir = cwd.join(derive_app_dir(&cfg.ssr_routes));
@@ -1361,17 +1361,23 @@ pub fn try_handle(
             cors_origin,
         );
     }
-    if path_only == "/pylon-sw.js" && cfg.offline.is_some() {
+    if (path_only == "/pylon-sw.js" || path_only == offline::BUILD_VERSION_PATH)
+        && cfg.offline.is_some()
+    {
         let outdir = match cfg.fn_ops.as_ref() {
             Some(fn_ops) => {
                 if let Err(e) = warm_client_bundle(fn_ops, &derive_app_dir(&cfg.ssr_routes)) {
-                    tracing::warn!("service worker unavailable (client build failed): {e}");
+                    tracing::warn!("{path_only} unavailable (client build failed): {e}");
                 }
                 cached_bundle_outdir().lock().unwrap().clone()
             }
             None => None,
         };
-        offline::serve_service_worker(request, outdir.as_deref(), cors_origin);
+        if path_only == offline::BUILD_VERSION_PATH {
+            offline::serve_build_version(request, outdir.as_deref(), cors_origin);
+        } else {
+            offline::serve_service_worker(request, outdir.as_deref(), cors_origin);
+        }
         return Ok(());
     }
 

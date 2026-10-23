@@ -166,7 +166,64 @@ The rules:
 
 ## New deploys
 
-Each build gets a new worker with its own caches. The new worker installs in the background and waits. It takes over on the next launch, when every tab of the app is closed. Then it deletes the caches of the old build. A deploy never changes the code of a page that is open.
+Each build gets a new worker with its own caches. The new worker installs in the background and waits. It takes over when every tab of the app is closed, or when the page tells it to. Then it deletes the caches of the old build. A deploy never changes the code of a page that is open by itself.
+
+An app on the iOS home screen can stay open in the background for days. Show the user that a new version is available with `useAppUpdate()`:
+
+```tsx
+import { useAppUpdate } from "@pylonsync/react";
+
+export function UpdateNotice() {
+  const { updateReady, applying, waitingForSync, apply } = useAppUpdate();
+  if (!updateReady) return null;
+  return (
+    <div role="status">
+      <p>A new version of the app is available.</p>
+      <button onClick={apply} disabled={applying}>
+        {waitingForSync ? "Saving changes" : "Update"}
+      </button>
+    </div>
+  );
+}
+```
+
+| Field | What it is |
+| --- | --- |
+| `version` | The build this page runs. A hash of the build. |
+| `builtAt` | When this build was made (ISO 8601). |
+| `latestVersion`, `latestBuiltAt` | The latest build the server reported. `null` until the first check. |
+| `updateReady` | A newer build exists. |
+| `applying` | `apply()` is running. |
+| `waitingForSync` | `apply()` waits for pending writes to reach the server. |
+| `reinstallRecommended` | The app is on the iOS home screen, and its name, icons, display mode, or start URL changed since the user added it. |
+| `apply()` | Loads the newest build. See below. |
+| `check()` | Asks the server for the latest build now. |
+
+The hook checks `/_pylon/version` when the page becomes visible, and every five minutes while it is visible. It also learns of a new worker when the worker finishes installing.
+
+`apply()` does these things in sequence:
+
+1. It waits until the outbox has no pending writes. A write made offline waits for the network, so `apply()` waits too. Failed writes do not block it.
+2. It waits for the new worker to finish installing, for up to 30 seconds.
+3. It tells the new worker to take over, and reloads the page once when it does.
+
+When a reload does not change the build (for example, a CDN serves old HTML), a second `apply()` in the next 60 seconds does not reload. Thus a page that calls `apply()` automatically cannot reload in a loop.
+
+`/_pylon/version` returns the latest build and is never cached:
+
+```json
+{ "version": "3f2a9c1d0b7e4a56", "builtAt": "2026-10-22T14:03:11.204Z", "install": "9c0d4e1f2a3b5c6d" }
+```
+
+`<AppUpdateBar />` shows a minimal notice with an Update button, and renders nothing when there is no update. It has no styles. Give it a `className`, or style `[data-pylon-app-update]`. To use your own components, use the hook.
+
+Under `pylon dev`, in an app without `offline`, and during the server render, `updateReady` is `false` and `apply()` does nothing.
+
+### Changes to the name or the icon
+
+iOS reads the app's name, icons, display mode, and start URL only when the user adds the app to the home screen. A later deploy does not change them. When one of these changes, `reinstallRecommended` becomes `true` on an iOS home-screen app. Tell the user to remove the app from the home screen and add it again. Android and desktop browsers update an installed app from the manifest, so `reinstallRecommended` stays `false` there.
+
+The `install` field of `/_pylon/version` is a hash of these values, and of the icon files in `public/`.
 
 ## Install the app
 

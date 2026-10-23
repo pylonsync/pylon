@@ -25,7 +25,13 @@
 //     cached. Data comes from the sync engine, not the HTTP cache.
 //   - activate: delete caches from other builds. A new deploy installs a new
 //     worker, which waits until every tab of the app is closed (the next
-//     launch) before it takes over. No `skipWaiting`.
+//     launch) before it takes over, or until the page posts
+//     `{ type: "pylon:skip-waiting" }` (`useAppUpdate().apply()` in
+//     @pylonsync/react does, after the outbox is empty).
+//   - messages: `pylon:session` (the signed-in bit, see below),
+//     `pylon:skip-waiting`, and `pylon:version`, which answers on the
+//     message's port with `{ type: "pylon:version", version }`. The page asks
+//     a waiting worker for its version this way.
 
 /** The build-specific values inlined into `/pylon-sw.js`. */
 export interface ServiceWorkerConfig {
@@ -89,6 +95,7 @@ export function classifyRequest(
       "/health",
       "/metrics",
       "/.well-known/",
+      "/_pylon/version",
     ];
     for (const prefix of neverCached) {
       if (path === prefix.replace(/\/$/, "") || path.startsWith(prefix)) return "network";
@@ -310,8 +317,14 @@ export function pylonServiceWorker(
 
   sw.addEventListener("message", (event: any) => {
     const data = event.data;
-    if (data && data.type === "pylon:session" && typeof data.signedIn === "boolean") {
+    if (!data) return;
+    if (data.type === "pylon:session" && typeof data.signedIn === "boolean") {
       event.waitUntil(syncSession(data.signedIn));
+    } else if (data.type === "pylon:skip-waiting") {
+      event.waitUntil(sw.skipWaiting());
+    } else if (data.type === "pylon:version") {
+      const port = event.ports && event.ports[0];
+      if (port) port.postMessage({ type: "pylon:version", version: config.version });
     }
   });
 }

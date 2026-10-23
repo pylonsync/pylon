@@ -67,6 +67,7 @@ describe("classifyRequest", () => {
       "/studio",
       "/health",
       "/pylon-sw.js",
+      "/_pylon/version",
       "/.well-known/openid-configuration",
     ]) {
       expect(classifyRequest(req(path), CONFIG, ORIGIN)).toBe("network");
@@ -126,6 +127,10 @@ function makeScope(fetchImpl: (url: string, init?: any) => Promise<Response>) {
     setTimeout,
     clearTimeout,
     claimed: false,
+    skippedWaiting: 0,
+    skipWaiting: async () => {
+      s.skippedWaiting++;
+    },
     clients: {
       claim: async () => {
         s.claimed = true;
@@ -353,5 +358,36 @@ describe("activate and session changes", () => {
     signedIn = false;
     await env.dispatch("message", { data: { type: "pylon:session", signedIn: false } });
     expect(await env.caches.get("pylon-v1-shells")!.match("/leads")).toBeUndefined();
+  });
+});
+
+describe("app updates", () => {
+  test("skip-waiting activates the waiting worker", async () => {
+    const env = makeScope(onlineServer());
+    await env.dispatch("install");
+    expect(env.s.skippedWaiting).toBe(0);
+    await env.dispatch("message", { data: { type: "pylon:skip-waiting" } });
+    expect(env.s.skippedWaiting).toBe(1);
+  });
+
+  test("a version request is answered on its port", async () => {
+    const env = makeScope(onlineServer());
+    const replies: unknown[] = [];
+    await env.dispatch("message", {
+      data: { type: "pylon:version" },
+      ports: [{ postMessage: (m: unknown) => replies.push(m) }],
+    });
+    expect(replies).toEqual([{ type: "pylon:version", version: "v1" }]);
+    // No port: nothing to answer on, and no error.
+    await env.dispatch("message", { data: { type: "pylon:version" } });
+    expect(replies).toHaveLength(1);
+  });
+
+  test("other messages do nothing", async () => {
+    const env = makeScope(onlineServer());
+    await env.dispatch("message", { data: { type: "something-else" } });
+    await env.dispatch("message", { data: null });
+    expect(env.s.skippedWaiting).toBe(0);
+    expect(env.fetchLog).toHaveLength(0);
   });
 });

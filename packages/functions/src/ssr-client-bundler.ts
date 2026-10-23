@@ -774,10 +774,17 @@ export function hydrate(component, Page, Layouts) {
     installNavHandlers();
     // Registers the offline service worker for an app that opted in, and
     // removes one left on this origin by an earlier build otherwise.
+    // \`build\` is the build this page runs, for useAppUpdate. An option
+    // rather than its own import, so an app on an older @pylonsync/react
+    // still builds.
     registerOfflineWorker({
       optedIn: !!data.offline,
       production: !(data.offline && data.offline.dev),
       signedIn: !!(data.props && data.props.session && data.props.session.exists),
+      build:
+        data.offline && data.offline.version
+          ? { version: data.offline.version, builtAt: data.offline.builtAt || null }
+          : undefined,
     });
     if (data.offline) {
       // The service worker answered this load with the page it kept for
@@ -2066,7 +2073,15 @@ export async function _doBuildInner(
     try {
       const offline = readManifestOffline(fs, path, cwd, manifestFile);
       if (offline) {
-        manifest.offline = await buildOfflineWorker(fs, path, outdir, manifest, offline);
+        manifest.offline = await buildOfflineWorker(
+          fs,
+          path,
+          outdir,
+          manifest,
+          offline,
+          cwd,
+          appDirRel,
+        );
       }
     } catch (oErr: any) {
       if (opts.strict) throw new Error(`offline worker build failed: ${oErr?.message ?? oErr}`);

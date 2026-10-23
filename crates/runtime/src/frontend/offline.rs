@@ -1,6 +1,6 @@
 //! Installable, offline-capable apps (`buildManifest({ offline })`).
 //!
-//! Two framework URLs:
+//! Three framework URLs:
 //!
 //! - `/manifest.webmanifest`: the web app manifest. An app's own file
 //!   (`public/manifest.webmanifest`, then `<appDir>/manifest.webmanifest`)
@@ -11,6 +11,10 @@
 //!   site root so its scope covers the whole app without a
 //!   `Service-Worker-Allowed` header, and with `no-cache` so the browser
 //!   checks for a new build on every launch.
+//! - `/_pylon/version`: the build's version, build time and install identity
+//!   (`pylon-version.json` in the client build, written next to the worker).
+//!   `useAppUpdate` in `@pylonsync/react` polls it while the app is open, so
+//!   it is served with `no-store`.
 //!
 //! The SSR side marks a page render requested by the service worker
 //! (`X-Pylon-Offline-Shell: 1`) as an offline shell only when its HTML does
@@ -31,6 +35,13 @@ pub(crate) const OFFLINE_SHELL_RESPONSE_HEADER: &str = "Pylon-Offline-Shell";
 
 /// The service worker file inside the client build.
 pub(crate) const SERVICE_WORKER_FILE: &str = "pylon-sw.js";
+
+/// The build version file inside the client build, served at
+/// [`BUILD_VERSION_PATH`].
+pub(crate) const BUILD_VERSION_FILE: &str = "pylon-version.json";
+
+/// Where the runtime serves [`BUILD_VERSION_FILE`].
+pub(crate) const BUILD_VERSION_PATH: &str = "/_pylon/version";
 
 /// Where `/manifest.webmanifest` comes from.
 #[derive(Debug, PartialEq, Eq)]
@@ -141,6 +152,39 @@ pub(crate) fn serve_service_worker(request: Request, outdir: Option<&Path>, cors
     }
 }
 
+/// Serve `/_pylon/version` from the client build at `outdir`, with
+/// `no-store`: a cached answer would hide a deploy from an app that stays
+/// open. A missing file (a build that failed, or one made before the app
+/// opted in) answers 404.
+pub(crate) fn serve_build_version(request: Request, outdir: Option<&Path>, cors_origin: &str) {
+    let file = outdir
+        .map(|dir| dir.join(BUILD_VERSION_FILE))
+        .and_then(|path| open_static_file(&path).ok());
+    match file {
+        Some((file, length)) => respond_static_reader(
+            request,
+            file,
+            length,
+            "application/json",
+            "no-store",
+            cors_origin,
+        ),
+        None => {
+            let mut response = Response::from_data(b"{\"error\":\"no build version\"}".to_vec())
+                .with_status_code(404u16);
+            for (name, value) in [
+                ("Content-Type", "application/json"),
+                ("Cache-Control", "no-store"),
+            ] {
+                if let Ok(h) = Header::from_bytes(name, value) {
+                    response = response.with_header(h);
+                }
+            }
+            let _ = request.respond(response);
+        }
+    }
+}
+
 /// Whether the request asks for an offline shell (sent by the service worker
 /// when it stores a route's HTML).
 pub(crate) fn is_offline_shell_request(request: &Request) -> bool {
@@ -245,6 +289,73 @@ mod tests {
         assert_eq!(status, 404);
         let (status, _, _) = get_via_try_handle(frontend(None), "/pylon-sw.js");
         assert_eq!(status, 404);
+        let (status, _, _) = get_via_try_handle(frontend(None), BUILD_VERSION_PATH);
+        assert_eq!(status, 404);
+    }
+
+    #[test]
+    fn a_configured_app_without_a_build_answers_the_version_with_404_no_store() {
+        // No client build (no function runtime): the version endpoint is
+        // claimed by the offline app, but there is no file to serve.
+        let (status, head, body) =
+            get_via_try_handle(frontend(Some(config())), "/_pylon/version?t=1");
+        assert_eq!(status, 404, "{head}");
+        assert!(head.contains("cache-control: no-store"), "{head}");
+        assert!(head.contains("content-type: application/json"), "{head}");
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "no build version");
+    }
+
+    #[test]
+    fn the_build_version_is_served_from_the_build_without_storing() {
+        use std::io::{Read, Write};
+        let outdir = tempfile::tempdir().unwrap();
+        let file = br#"{"version":"0123456789abcdef","builtAt":"2026-10-22T10:00:00.000Z","install":"fedcba9876543210"}"#;
+        std::fs::write(outdir.path().join(BUILD_VERSION_FILE), file).unwrap();
+        let outdir_path = outdir.path().to_path_buf();
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        let worker = std::thread::spawn(move || {
+            for dir in [Some(outdir_path), None] {
+                let request = server
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap()
+                    .unwrap();
+                serve_build_version(request, dir.as_deref(), "*");
+            }
+        });
+        let fetch = || {
+            let mut client = std::net::TcpStream::connect(addr).unwrap();
+            client
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            write!(
+                client,
+                "GET /_pylon/version HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            let mut wire = Vec::new();
+            client.read_to_end(&mut wire).unwrap();
+            let end = wire.windows(4).position(|b| b == b"\r\n\r\n").unwrap();
+            (
+                std::str::from_utf8(&wire[..end])
+                    .unwrap()
+                    .to_ascii_lowercase(),
+                wire[end + 4..].to_vec(),
+            )
+        };
+        let (head, body) = fetch();
+        assert!(head.starts_with("http/1.1 200"), "{head}");
+        assert!(head.contains("content-type: application/json"), "{head}");
+        assert!(head.contains("cache-control: no-store"), "{head}");
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["version"], "0123456789abcdef");
+        assert_eq!(json["builtAt"], "2026-10-22T10:00:00.000Z");
+        assert_eq!(json["install"], "fedcba9876543210");
+        let (head, _) = fetch();
+        assert!(head.starts_with("http/1.1 404"), "{head}");
+        assert!(head.contains("cache-control: no-store"), "{head}");
+        worker.join().unwrap();
     }
 
     #[test]

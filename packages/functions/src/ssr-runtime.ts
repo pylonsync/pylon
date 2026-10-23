@@ -2222,8 +2222,9 @@ export function buildHydrationTail(args: {
   // raw `auth` is replaced AFTER the live-handle strip below.
   bucketAuth?: { signedIn: boolean };
   /** The app opted into `buildManifest({ offline })`: the client registers
-   *  the service worker (production only). */
-  offline?: boolean;
+   *  the service worker (production only), and `useAppUpdate` compares this
+   *  build's version with `/_pylon/version`. */
+  offline?: { version: string; builtAt?: string };
   /** Client-side NAVIGATION payload: emit the `__PYLON_DATA__` blob and
    *  nothing else. The client already has the runtime and resolves the route
    *  entry from the build manifest, so the entry `<script>`, the preload tags
@@ -2289,7 +2290,13 @@ export function buildHydrationTail(args: {
     typeof process !== "undefined" ? process.env.PYLON_APP_NAME : undefined;
   if (appName) hydrationPayload.app = appName;
   // App-global, identity-free: safe in a shared or offline tail.
-  if (args.offline) hydrationPayload.offline = { dev: isDevMode() };
+  if (args.offline) {
+    hydrationPayload.offline = {
+      dev: isDevMode(),
+      version: args.offline.version,
+      builtAt: args.offline.builtAt ?? null,
+    };
+  }
   if (args.kind) hydrationPayload.kind = args.kind;
   const json = escapeScriptJson(JSON.stringify(hydrationPayload));
   let tail = `<script id="__PYLON_DATA__" type="application/json">${json}</script>`;
@@ -3918,8 +3925,8 @@ export async function handleRenderRoute(
     let preloadPolyfills: string | undefined;
     // The same file list the offline service worker precaches for this route.
     let preloadAssets: RouteAssetFiles | null = null;
-    // Whether the app opted into `buildManifest({ offline })`.
-    let offlineApp = false;
+    // The build's version when the app opted into `buildManifest({ offline })`.
+    let offlineApp: { version: string; builtAt?: string } | undefined;
     try {
       const { getManifest } = await import("./ssr-client-bundler");
       const manifest = await getManifest();
@@ -3927,7 +3934,12 @@ export async function handleRenderRoute(
       preloadManifestRoute = manifest.routes[msg.component] ?? null;
       preloadPolyfills = manifest.polyfills;
       preloadAssets = routeAssetFiles(manifest, msg.component);
-      offlineApp = !!manifest.offline;
+      if (manifest.offline) {
+        offlineApp = {
+          version: manifest.offline.version,
+          builtAt: manifest.offline.builtAt,
+        };
+      }
       if (!preloadManifestRoute) {
         preloadManifestErr = `manifest has no entry for "${msg.component}"`;
       }
