@@ -617,12 +617,19 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ts == 'true'
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
     services:
       postgres:
-        # The official image from Amazon's public mirror of Docker Hub. Pulls
-        # from Docker Hub without an account hit its rate limit, which GitHub
-        # runners share, and failed the job before any test ran.
-        image: public.ecr.aws/docker/library/postgres:16
+        # The official image, copied to ghcr by mirror-ci-images.yml.
+        # Anonymous pulls from Docker Hub and Amazon's public mirror share a
+        # per-IP data limit across GitHub's runners and failed the job
+        # before any test ran.
+        image: ghcr.io/pylonsync/ci-postgres:16
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
         env:
           POSTGRES_PASSWORD: postgres
         ports:

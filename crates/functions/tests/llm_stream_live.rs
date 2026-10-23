@@ -317,18 +317,50 @@ export default {
     runner.kill();
 }
 
+/// Idle budget for the two timeout tests. Seconds, not milliseconds: on a
+/// loaded CI runner (Windows especially) Bun can take longer than a short
+/// budget to send the call's first frame, and the call then times out
+/// before the provider starts. The provider timings below are multiples
+/// of this, so each test still crosses the deadline while the provider
+/// runs, whatever the runner's speed.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(3);
+
+const PING_FN: &str = r#"
+export default { type: "action", handler: async () => ({ ok: true }) };
+"#;
+
+/// One call at the default timeout, so the short-budget call that follows
+/// does not also pay for the runtime's first call.
+fn warm_up(runner: &FnRunner) {
+    runner
+        .call(
+            &NullStore,
+            "ping",
+            FnType::Action,
+            serde_json::json!({}),
+            auth(),
+            None,
+            None,
+            None,
+        )
+        .expect("warm-up call succeeds");
+}
+
 #[test]
 fn a_silent_provider_does_not_trip_the_idle_timeout() {
     if !bun_available() {
         eprintln!("skipped: bun is not on PATH");
         return;
     }
-    let dir = app_dir("silent", &[("streamer", FORWARDING_FN)]);
+    let dir = app_dir("silent", &[("streamer", FORWARDING_FN), ("ping", PING_FN)]);
     let runner = start_runner(&dir);
-    runner.set_call_timeout(Duration::from_millis(700));
+    warm_up(&runner);
+    runner.set_call_timeout(IDLE_TIMEOUT);
     runner.set_llm_stream_hook(Box::new(|_req, _auth, on_event, _cancel| {
-        // Thinking: nothing for longer than the idle timeout.
-        std::thread::sleep(Duration::from_millis(1500));
+        // Thinking: nothing for longer than the idle timeout. The budget
+        // restarts when the provider request reaches the host, which is
+        // just before this hook runs, so it always lapses mid-sleep.
+        std::thread::sleep(IDLE_TIMEOUT + IDLE_TIMEOUT / 3);
         on_event(serde_json::json!({ "type": "text_delta", "text": "done" }));
         Ok(response("done"))
     }));
@@ -357,24 +389,33 @@ fn a_handler_that_resumes_after_the_provider_gets_a_fresh_idle_budget() {
         eprintln!("skipped: bun is not on PATH");
         return;
     }
-    const RESUMING_FN: &str = r#"
-export default {
+    // Work after the provider answered: half an idle timeout.
+    let resuming_fn = format!(
+        r#"
+export default {{
   type: "action",
-  handler: async (ctx) => {
-    const res = await ctx.llm.stream({ messages: [{ role: "user", content: "hi" }] }, () => {});
-    // Work after the provider answered, well within one idle timeout.
-    await new Promise((r) => setTimeout(r, 450));
-    return { stop: res.stop_reason };
-  },
-};
-"#;
-    let dir = app_dir("resume", &[("resumer", RESUMING_FN)]);
+  handler: async (ctx) => {{
+    const res = await ctx.llm.stream({{ messages: [{{ role: "user", content: "hi" }}] }}, () => {{}});
+    await new Promise((r) => setTimeout(r, {after_ms}));
+    return {{ stop: res.stop_reason }};
+  }},
+}};
+"#,
+        after_ms = (IDLE_TIMEOUT / 2).as_millis()
+    );
+    let dir = app_dir(
+        "resume",
+        &[("resumer", resuming_fn.as_str()), ("ping", PING_FN)],
+    );
     let runner = start_runner(&dir);
-    runner.set_call_timeout(Duration::from_millis(700));
-    // Finishes just before the extended deadline the running provider
-    // earned (700 ms after the first timeout at 700 ms).
+    warm_up(&runner);
+    runner.set_call_timeout(IDLE_TIMEOUT);
+    // The budget lapses at 1x while the provider runs and is extended to
+    // 2x. The provider finishes at 1.85x and the handler at 2.35x, past
+    // that extended deadline: only the fresh budget from the provider's
+    // finish (to 3x) lets the call return, with 0.65x of slack.
     runner.set_llm_stream_hook(Box::new(|_req, _auth, _on_event, _cancel| {
-        std::thread::sleep(Duration::from_millis(1250));
+        std::thread::sleep(IDLE_TIMEOUT.mul_f64(1.85));
         Ok(response("done"))
     }));
     let (value, _) = runner
