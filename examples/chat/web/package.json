@@ -15,7 +15,7 @@
     "@pylonsync/loro": "workspace:*",
     "@pylonsync/react": "workspace:*",
     "@pylonsync/sync": "workspace:*",
-    "lucide-react": "^0.469.0",
+    "lucide-react": "^0.577.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
