@@ -1,0 +1,186 @@
+# Daily security check, 12:00 UTC.
+#
+#   1. SBOMs (syft) for the latest published runtime and builder images and
+#      for the repository's lockfiles.
+#   2. Trivy on those SBOMs with that day's advisory data, osv-scanner on
+#      the lockfiles, cargo audit and cargo deny. Findings are diffed against
+#      yesterday's run (kept as the `security-findings` artifact).
+#   3. Claude reviews the last 24 hours of commits to main for security bugs
+#      (tools/security_ai_review.py). Skipped when no commits landed or when
+#      ANTHROPIC_API_KEY is not set.
+#   4. Fix pull requests come from Dependabot (security updates open as soon
+#      as an alert does); the report lists the open ones. Nothing here
+#      pushes to main.
+#   5. One Slack message to SECURITY_SLACK_WEBHOOK_URL. Without that secret
+#      the report goes to the job summary and the job fails.
+#
+# Mondays add a deeper Claude pass over one source area, rotating weekly.
+# docs/ops/SECURITY_PATCHING.md has the response steps.
+name: security-daily
+
+on:
+  schedule:
+    - cron: "0 12 * * *"
+  workflow_dispatch:
+    inputs:
+      weekly:
+        description: "Also run the weekly deep review"
+        type: boolean
+        default: false
+
+concurrency:
+  group: security-daily
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+  packages: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install syft, Trivy and osv-scanner
+        env:
+          SYFT_VERSION: 1.55.0
+          SYFT_SHA256: bb65249542db5fedeeb4d3f9b018b75e7264dbfbbb10486f044581a92f90490d
+          TRIVY_VERSION: 0.76.1
+          TRIVY_SHA256: c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0
+          OSV_VERSION: v2.7.0
+          OSV_SHA256: 160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o syft.tgz "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+          echo "${SYFT_SHA256}  syft.tgz" | sha256sum -c -
+          tar -xzf syft.tgz syft
+          curl -fsSL -o trivy.tgz "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  trivy.tgz" | sha256sum -c -
+          tar -xzf trivy.tgz trivy
+          curl -fsSL -o osv-scanner "https://github.com/google/osv-scanner/releases/download/${OSV_VERSION}/osv-scanner_linux_amd64"
+          echo "${OSV_SHA256}  osv-scanner" | sha256sum -c -
+          chmod +x syft trivy osv-scanner
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install --locked cargo-audit cargo-deny
+
+      - name: SBOMs and scans
+        run: |
+          set -uo pipefail
+          mkdir -p results
+          version="$(npm view @pylonsync/cli version)"
+          images=""
+          for image in "ghcr.io/pylonsync/pylon:$version" "ghcr.io/pylonsync/pylon-builder:$version"; do
+            name="$(echo "$image" | tr '/:' '__')"
+            if syft scan "registry:$image" -q -o "cyclonedx-json=sbom-$name.json"; then
+              trivy sbom -q --format json --severity MEDIUM,HIGH,CRITICAL \
+                --ignorefile .trivyignore.yaml "sbom-$name.json" > "results/trivy-$name.json"
+              images="$images $image"
+            else
+              echo "::warning::Could not build an SBOM for $image"
+            fi
+          done
+          # Exit 1 means findings; the report decides what matters.
+          osv-scanner scan source --config osv-scanner.toml --format json \
+            --lockfile Cargo.lock --lockfile bun.lock \
+            --lockfile crates/studio_api/web/bun.lock > results/osv.json || true
+          audit=passed; cargo audit >/dev/null 2>&1 || audit=failed
+          deny=passed; cargo deny check >/dev/null 2>&1 || deny=failed
+          ignores=passed; bash tools/check-security-ignores.sh || ignores=failed
+          jq -n --arg date "$(date -u +%F)" --arg repo "$GITHUB_REPOSITORY" \
+            --arg run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --arg images "$images" --arg audit "$audit" --arg deny "$deny" --arg ignores "$ignores" \
+            '{date: $date, repo: $repo, run_url: $run,
+              images: ($images | split(" ") | map(select(. != ""))),
+              checks: {"cargo audit": $audit, "cargo deny": $deny, "ignore review dates": $ignores}}' \
+            > results/meta.json
+
+      - name: Open fix pull requests
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr list --author app/dependabot --state open --json number,title,url \
+            --jq '.[] | "- #\(.number) \(.title): \(.url)"' > results/fix-prs.md || true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --quiet anthropic
+
+      - name: AI review of the last day's commits
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
+            echo "Skipped: ANTHROPIC_API_KEY is not set." > results/ai-review.md
+            exit 0
+          fi
+          first="$(git log --since='24 hours ago' --first-parent --format=%H origin/main | tail -1)"
+          if [[ -z "$first" ]]; then
+            echo "No findings. No commits landed on main in the last 24 hours." > results/ai-review.md
+            exit 0
+          fi
+          git diff "${first}^" origin/main -- . ':!*.lock' ':!**/bun.lock' ':!packages/csharp/Plugins/**' > day.diff
+          python3 tools/security_ai_review.py daily day.diff results/ai-review.md
+
+      - name: Weekly deep review (Mondays)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          FORCE_WEEKLY: ${{ inputs.weekly }}
+        run: |
+          set -euo pipefail
+          if [[ "$(date -u +%u)" != "1" && "${FORCE_WEEKLY:-}" != "true" ]]; then exit 0; fi
+          if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
+            echo "Weekly review skipped: ANTHROPIC_API_KEY is not set." >> results/ai-review.md
+            exit 0
+          fi
+          case "$(( 10#$(date -u +%V) % 3 ))" in
+            0) area="auth and sessions"; paths="crates/auth/src crates/router/src/routes/auth.rs" ;;
+            1) area="sync, policies and tenant isolation"; paths="crates/policy/src crates/sync/src crates/router/src/routes/sync.rs crates/router/src/routes/queries.rs" ;;
+            *) area="uploads, SSR and the sandbox"; paths="crates/storage/src/files.rs crates/runtime/src/file_urls.rs crates/runtime/src/frontend.rs crates/runtime/src/shard_wasm.rs packages/functions/src/ssr-runtime.ts" ;;
+          esac
+          python3 tools/security_ai_review.py weekly "$area" weekly.md $paths
+          { echo; echo "## Weekly review: $area"; cat weekly.md; } >> results/ai-review.md
+
+      - name: Yesterday's findings
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          prev="$(gh run list --workflow security-daily.yml --status completed --limit 10 \
+            --json databaseId --jq '.[].databaseId' | grep -v "^${GITHUB_RUN_ID}$" | head -1 || true)"
+          if [[ -n "$prev" ]] && gh run download "$prev" -n security-findings -D previous 2>/dev/null; then
+            echo "PREVIOUS=previous/findings.json" >> "$GITHUB_ENV"
+          else
+            echo "PREVIOUS=" >> "$GITHUB_ENV"
+          fi
+
+      - name: Report
+        run: |
+          python3 tools/security_daily.py results "$PREVIOUS" out
+          cat out/report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: security-findings
+          path: out/findings.json
+          retention-days: 30
+
+      - name: Post to Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SECURITY_SLACK_WEBHOOK_URL }}
+        run: |
+          if [[ -z "$SLACK_WEBHOOK_URL" ]]; then
+            echo "::error::SECURITY_SLACK_WEBHOOK_URL is not set. The report is in the job summary."
+            exit 1
+          fi
+          jq -n --rawfile text out/slack.txt '{text: $text}' \
+            | curl -fsS -X POST -H 'content-type: application/json' --data @- "$SLACK_WEBHOOK_URL"
