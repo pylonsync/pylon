@@ -1736,6 +1736,12 @@ export class SyncEngine {
    *  push whose current token differs holds owned writes: the token may
    *  belong to someone else. `undefined` until a session is committed. */
   private sessionToken: string | null | undefined = undefined;
+  /** The `/api/auth/me` request in flight, and the token it was sent with.
+   *  `refreshSessionIfStale` joins it instead of sending another. */
+  private sessionFetch: {
+    token: string | null;
+    promise: Promise<{ session: ResolvedSession; token: string | null } | null>;
+  } | null = null;
   private identityRetryTimer: ReturnType<typeof setTimeout> | null = null;
   /** Delayed push / pull retries scheduled through `later()`. `stop()`
    *  clears them, so a stopped engine makes no further requests. */
@@ -3032,11 +3038,23 @@ export class SyncEngine {
    * caller's next pull cycle (or the WS `session-changed` envelope)
    * will retry. Errors must not abort bootstrap.
    */
-  private async fetchSessionBootstrap(): Promise<
+  private fetchSessionBootstrap(): Promise<
     { session: ResolvedSession; token: string | null } | null
   > {
+    const token = this.currentToken();
+    const promise = this.fetchSession(token);
+    this.sessionFetch = { token, promise };
+    const clear = () => {
+      if (this.sessionFetch?.promise === promise) this.sessionFetch = null;
+    };
+    promise.then(clear, clear);
+    return promise;
+  }
+
+  private async fetchSession(
+    token: string | null,
+  ): Promise<{ session: ResolvedSession; token: string | null } | null> {
     try {
-      const token = this.currentToken();
       const res = await this.rawFetch("/api/auth/me");
       if (!res.ok) return null;
       const raw = (await res.json()) as {
@@ -3358,6 +3376,29 @@ export class SyncEngine {
    */
   notifySessionChanged(): Promise<void> {
     return this.refreshResolvedSession();
+  }
+
+  /**
+   * Refresh the session only when it is not known for the current token:
+   * no answer yet this run, or the token changed since the last answer.
+   * A request already in flight for the token is joined, not repeated.
+   * `useSession` calls this on mount, so a screen with many session
+   * readers makes at most one `/api/auth/me` request per resolve.
+   * After a server-side session change, use `notifySessionChanged`,
+   * which always fetches.
+   */
+  async refreshSessionIfStale(): Promise<void> {
+    if (!this.isMultiTabLeader) return;
+    const token = this.currentToken();
+    if (this.session.hasObserved() && this.sessionToken === token) return;
+    const inflight = this.sessionFetch;
+    if (inflight && inflight.token === token) {
+      // The request's owner (start() or a refresh) applies the answer.
+      await inflight.promise;
+      await this.sessionChain;
+      return;
+    }
+    await this.refreshResolvedSession();
   }
 
   /**

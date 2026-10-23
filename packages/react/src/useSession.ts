@@ -69,9 +69,11 @@ export function useSession(sync: SyncEngine): UseSessionReturn {
   // app writes a new token without going through `notifySessionChanged`,
   // our cached session still matches the old identity until the next
   // pull. A `storage` event covers the cross-tab case; a mount-time
-  // refresh covers the same-tab write-then-mount race.
+  // check covers the same-tab write-then-mount race. The check fetches
+  // only when the session is not known for the current token, and joins
+  // a request in flight, so a screen of session readers makes one call.
   useEffect(() => {
-    void sync.notifySessionChanged();
+    void sync.refreshSessionIfStale();
     const onStorage = (e: StorageEvent) => {
       // Only refresh when the key that actually changed looks like a
       // pylon token. Skip unrelated keys so we don't generate an
