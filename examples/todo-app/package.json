@@ -24,6 +24,6 @@
     "@types/react-dom": "^19.2.0",
     "tailwindcss": "^4.1.0",
     "tw-animate-css": "^1.2.0",
-    "typescript": "^5.9.3"
+    "typescript": "^7.0.2"
   }
 }

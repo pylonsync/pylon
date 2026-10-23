@@ -15,7 +15,7 @@
     "bun-types": "^1.3.14",
     "fake-indexeddb": "^6.2.5",
     "turbo": "^2.5.0",
-    "typescript": "^5.9.3"
+    "typescript": "^7.0.2"
   },
   "scripts": {
     "dev": "turbo dev",
