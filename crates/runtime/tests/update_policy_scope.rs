@@ -733,3 +733,55 @@ fn a_removed_member_loses_the_org_on_the_next_request() {
     let (s, _) = app.call("POST", "/api/auth/select-org", json!({ "orgId": ORG_A }));
     assert_eq!(s, 403);
 }
+
+/// Framework tables (`_Connection`, `_CronLease`, …) have no policies. The
+/// policy engine let any caller through on them and left it to each route
+/// to refuse underscore entities, and the query, lookup, aggregate and
+/// graph routes did not: anyone, signed out, could list every user's
+/// connected accounts.
+#[test]
+fn framework_entities_are_not_readable_through_the_query_routes() {
+    let mut schema = manifest();
+    schema.entities.push(ManifestEntity {
+        name: "_Connection".into(),
+        fields: vec![field("userId", false), field("provider", false)],
+        ..Default::default()
+    });
+    let app = start_manifest(schema);
+    app.runtime
+        .insert(
+            "_Connection",
+            &json!({"userId": "victim", "provider": "google"}),
+        )
+        .unwrap();
+    let port = app.port;
+    for (method, path, body) in [
+        ("POST", "/api/query/_Connection", json!({})),
+        ("GET", "/api/lookup/_Connection/userId/victim", Value::Null),
+        (
+            "POST",
+            "/api/aggregate/_Connection",
+            json!({"count": "*", "groupBy": ["provider"]}),
+        ),
+        ("POST", "/api/query", json!({"_Connection": {}})),
+    ] {
+        for token in [None, Some(app.alice.as_str())] {
+            let (s, out) = request(port, method, path, &body.to_string(), token);
+            assert!(
+                !out.to_string().contains("victim") && !out.to_string().contains("google"),
+                "{method} {path} (signed in: {}) returned a framework row: {s} {out}",
+                token.is_some()
+            );
+        }
+    }
+    // The admin token still reads it.
+    let (s, out) = request(
+        port,
+        "POST",
+        "/api/query/_Connection",
+        "{}",
+        Some(ADMIN_TOKEN),
+    );
+    assert_eq!(s, 200, "{out}");
+    assert!(out.to_string().contains("victim"));
+}

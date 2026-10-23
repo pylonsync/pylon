@@ -473,15 +473,13 @@ impl PolicyEngine {
         // write a policy. Apps that genuinely want a public entity
         // declare `policy({entity: "X", allow: "true"})` explicitly.
         //
-        // Pylon-internal scaffolding entities (anything starting with
-        // an underscore — `_PylonSchemaVersion`, `_PylonJobs`,
-        // `_PylonWorkflows`, etc.) bypass the gate. Apps don't write
-        // policies for framework-owned tables, and the public API
-        // doesn't expose them anyway.
+        // Framework tables (underscore-prefixed: `_Connection`,
+        // `_CronLease`, …) are no exception. They used to bypass this
+        // gate on the assumption that every route refused them, and the
+        // query, lookup, aggregate and graph routes did not, so anyone
+        // could list every user's `_Connection` rows. The framework reads
+        // and writes these tables through the store, never this engine.
         if policies.is_empty() {
-            if entity_name.starts_with('_') {
-                return PolicyResult::Allowed;
-            }
             return PolicyResult::Denied {
                 policy_name: "_default_deny".into(),
                 reason: self.default_deny_reason(entity_name),
@@ -583,12 +581,9 @@ impl PolicyEngine {
 
         let policies = self.entity_policies_for(entity_name);
 
-        // Default-deny / framework-internal handling mirrors
-        // check_entity (kept in sync with that method's branch).
+        // Default-deny mirrors check_entity (kept in sync with that
+        // method's branch, framework tables included).
         if policies.is_empty() {
-            if entity_name.starts_with('_') {
-                return PolicyResult::Allowed;
-            }
             return PolicyResult::Denied {
                 policy_name: "_default_deny".into(),
                 reason: self.default_deny_reason(entity_name),
@@ -2976,15 +2971,25 @@ mod tests {
     }
 
     #[test]
-    fn underscore_entities_bypass_default_deny() {
+    fn underscore_entities_are_admin_only() {
         let engine = PolicyEngine::from_manifest(&test_manifest());
-        let anon = AuthContext::anonymous();
-        // Pylon-internal scaffolding tables (underscore-prefixed) are
-        // exempt from the gate so the framework can bootstrap without
-        // every app having to write a policy for `_PylonSchemaVersion`,
-        // `_PylonJobs`, etc.
-        let result = engine.check_entity_read("_PylonSchemaVersion", &anon, None);
-        assert!(result.is_allowed());
+        // Framework tables have no policies, so default-deny applies: a
+        // client reaches them only as an unscoped admin.
+        for auth in [
+            AuthContext::anonymous(),
+            AuthContext::authenticated("u1".into()),
+        ] {
+            assert!(!engine
+                .check_entity_read("_Connection", &auth, None)
+                .is_allowed());
+            assert!(!engine.check_entity_scan("_Connection", &auth).is_allowed());
+            assert!(!engine
+                .check_entity_read_aggregate("_Connection", &auth)
+                .is_allowed());
+        }
+        assert!(engine
+            .check_entity_read("_Connection", &AuthContext::admin(), None)
+            .is_allowed());
     }
 
     #[test]
