@@ -147,6 +147,10 @@ The engine pulls from its saved cursor:
 - **Recent cursor.** The server sends the change log since the cursor.
 - **Far-behind cursor.** When the log since the cursor is longer than a snapshot, or the log no longer holds the cursor, the server sends a snapshot instead. The engine applies it over the rows it has, deletes the rows that the snapshot does not hold, and continues from the snapshot's position in the log. Rows stay on screen during the catch-up. Writes that are not on the server yet are kept.
 
+The session resolves as soon as `/api/auth/me` answers, before the replica has filled. After a sign-in, the old user's rows are removed first, then `useSession()` reports the new user while the new rows arrive. Read `useSyncProgress()` (`pulling`, `snapshot`, `rows`, `pages`, `synced`) to show progress. `useSyncStatus()` reports the connection.
+
+The automatic reconcile (on connect, and when the tab becomes visible) downloads every replicated row to catch rows that the change log does not carry. It skips when a complete snapshot or a full reconcile ran in the last 5 minutes (`autoReconcileIntervalMs`). Server hints (`sync-reconcile`) still reconcile at once. An explicit `engine.reconcile()` always runs.
+
 Pages start at 1,000 rows. Each full page doubles the next one, up to 10,000 rows or about 4 MB. A first sync of 25,000 rows takes 5 requests. `PYLON_SYNC_PAGE_BYTES` sets the byte limit per page on the server.
 
 ## Auth integration

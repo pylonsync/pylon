@@ -89,6 +89,25 @@ export {
 /** The store channel the outbox notifies on. `store.subscribe(cb,
  *  OUTBOX_CHANNEL)` hears outbox changes and no entity changes. */
 export const OUTBOX_CHANNEL = "$outbox";
+
+/** The store channel `syncProgress()` changes notify on. */
+export const SYNC_PROGRESS_CHANNEL = "$sync-progress";
+
+/** How far the current pull has got. See `SyncEngine.syncProgress()`. */
+export interface SyncProgress {
+  /** A pull is running. */
+  pulling: boolean;
+  /** The pull is a snapshot of current rows (first sync, or a far-behind
+   *  catch-up) rather than the change log. */
+  snapshot: boolean;
+  /** Rows received by this pull so far. */
+  rows: number;
+  /** Pages received by this pull so far. */
+  pages: number;
+  /** A pull has completed against the server since the last replica
+   *  reset (`isSynced()`). */
+  synced: boolean;
+}
 export { generateId } from "./ids";
 export {
   uploadBytes,
@@ -205,6 +224,17 @@ export interface SyncEngineConfig {
    * becomes visible).
    */
   reconcileOnVisibility?: boolean;
+  /**
+   * The automatic sweeps (on connect and when the tab becomes visible)
+   * skip when the replica matched the server this recently: a complete
+   * snapshot, or a full reconcile. Each sweep downloads every replicated
+   * row, which on a phone app that is opened many times a day is most of
+   * its data traffic. The change log covers writes in between; server
+   * hints (`sync-reconcile`) cover rows that became readable. `0` sweeps
+   * on every trigger. Default 300000 (5 minutes). An explicit
+   * `reconcile()` call always runs.
+   */
+  autoReconcileIntervalMs?: number;
   /**
    * Keep the local replica across ORG switches (same user). Default
    * `true`: a tenant flip wipes the replica and re-bootstraps, because
@@ -350,10 +380,46 @@ export class SyncEngine {
     return this._synced;
   }
 
+  private _progress: SyncProgress = {
+    pulling: false,
+    snapshot: false,
+    rows: 0,
+    pages: 0,
+    synced: false,
+  };
+
+  /**
+   * How far the current pull has got: whether one is running, whether it
+   * is a snapshot, and the rows and pages received. Apps render from the
+   * session as soon as it resolves and show this while the replica fills.
+   * A new object on every change, so it works as a `useSyncExternalStore`
+   * snapshot. Follower tabs report `pulling: false` (the leader pulls).
+   */
+  syncProgress(): SyncProgress {
+    return this._progress;
+  }
+
+  private setProgress(patch: Partial<SyncProgress>): void {
+    const next = { ...this._progress, ...patch, synced: this._synced };
+    const prev = this._progress;
+    if (
+      next.pulling === prev.pulling &&
+      next.snapshot === prev.snapshot &&
+      next.rows === prev.rows &&
+      next.pages === prev.pages &&
+      next.synced === prev.synced
+    ) {
+      return;
+    }
+    this._progress = next;
+    this.store.notify(SYNC_PROGRESS_CHANNEL);
+  }
+
   /** Flip `_synced` true (idempotent), notify, and tell follower tabs. */
   private markSynced(): void {
     if (this._synced) return;
     this._synced = true;
+    this.setProgress({});
     this.store.notify();
     if (this.isMultiTabLeader) this.broadcastToTabs({ type: "synced" });
   }
@@ -1492,7 +1558,7 @@ export class SyncEngine {
         if (!this.isMultiTabLeader) return;
         if (this.observedEntities.has(entity)) return;
         this.observedEntities.add(entity);
-        if (this.isHydrated() && this.store.list(entity).length === 0) {
+        if (this.isHydrated() && this.store.list(entity).length === 0 && this.emptyMayBeStale()) {
           void this.reconcile([entity]);
         }
       },
@@ -1641,7 +1707,7 @@ export class SyncEngine {
       // doesn't duplicate the cursor-catch-up work pull is already
       // doing. They're serial via the queue, not concurrent.
       void this.pull();
-      void this.reconcile();
+      if (this.autoReconcileDue()) void this.reconcile();
     };
     document.addEventListener("visibilitychange", this.visibilityHandler);
   }
@@ -2065,6 +2131,7 @@ export class SyncEngine {
     // did nothing: an org switch dropped straight to the new org's empty list.
     this._initialSyncSettled = false;
     this._synced = false;
+    this.setProgress({});
     this.armInitialSyncFallback();
     this.store.clearAll();
     // Disk is about to be wiped + re-pulled from 0, so any prior
@@ -2273,7 +2340,7 @@ export class SyncEngine {
     // bootstrap reconcile (the snapshot path already returned every
     // policy-visible row, per-entity refetch right after is waste).
     const startedFromZero = this.cursor.last_seq === 0;
-    this.lastPullCompletedSnapshot = false;
+    this.setProgress({ pulling: true, snapshot: false, rows: 0, pages: 0 });
     // Open the live-event hold for the pull's whole (possibly multi-page)
     // duration so a racing WS frame can't leapfrog the cursor — past the
     // snapshot's rows on a from-zero pull, or past the not-yet-pulled gap
@@ -2364,6 +2431,11 @@ export class SyncEngine {
         if (resp.changes.length >= pageRows) {
           pageRows = Math.min(pageRows * 2, SyncEngine.MAX_PULL_PAGE_ROWS);
         }
+        this.setProgress({
+          snapshot: resp.snapshot === true || this._progress.snapshot,
+          rows: this._progress.rows + resp.changes.length,
+          pages: this._progress.pages + 1,
+        });
         // Guard against a server that reports more pages without
         // advancing the cursor (a transient no-progress page): break
         // rather than refetch the same page forever. The next poll /
@@ -2483,6 +2555,7 @@ export class SyncEngine {
       // already drained + nulled the hold, so this is a no-op there — and
       // the 410 recursion drained or re-owned it before we got here.
       if (this.pullHold !== null) this.pullHold = null;
+      this.setProgress({ pulling: false });
     }
   }
 
@@ -2521,7 +2594,8 @@ export class SyncEngine {
         await this.enqueueReconcile(entity, [], removalIds, tombstoneSeq);
       }
     }
-    this.lastPullCompletedSnapshot = true;
+    this.matchedServerAt = Date.now();
+    this.snapshotEpoch = this.replicaEpoch;
   }
 
   /** Consecutive 410 RESYNC_REQUIRED responses since the last successful
@@ -2546,10 +2620,19 @@ export class SyncEngine {
    *  cleared on read so a subsequent reconnect-after-disconnect still
    *  runs reconcile normally. */
   private lastPullStartedFromZero = false;
-  /** The last pull received a complete snapshot and deleted the local
-   *  rows it did not hold, so the replica matches the server: the
-   *  reconcile that follows a connect would fetch the same rows again. */
-  private lastPullCompletedSnapshot = false;
+  /** When the replica last matched the server: a complete snapshot
+   *  (local rows it did not hold deleted) or a full reconcile. 0 = never
+   *  this run. */
+  private matchedServerAt = 0;
+  /** The replica epoch a complete snapshot filled. An entity with no
+   *  rows in it is empty on the server too. */
+  private snapshotEpoch = -1;
+
+  /** Whether an automatic sweep (connect, visibility) should run. */
+  private autoReconcileDue(): boolean {
+    const interval = this.config.autoReconcileIntervalMs ?? 300_000;
+    return this.matchedServerAt === 0 || Date.now() - this.matchedServerAt >= interval;
+  }
 
   /** Timestamp of the last `reconcile()` invocation. Used to debounce —
    *  reconcile runs on connect, WS reconnect, AND visibility-change, so
@@ -2640,11 +2723,20 @@ export class SyncEngine {
       this.broadcastToTabs({ type: "entity-observe", entity });
       return;
     }
-    if (this.isHydrated() && this.store.list(entity).length === 0) {
+    if (this.isHydrated() && this.store.list(entity).length === 0 && this.emptyMayBeStale()) {
       // Scoped reconcile bypasses the no-arg debounce and reuses the
       // session-flip / cursor-drift guards in reconcileInner.
       void this.reconcile([entity]);
     }
+  }
+
+  /** Whether an entity with no local rows may still have rows on the
+   *  server that no pull will deliver. Not when a snapshot is coming (the
+   *  cursor is 0 and no pull has completed since the last reset) or one
+   *  already filled this replica: a snapshot sends every visible row. */
+  private emptyMayBeStale(): boolean {
+    const snapshotComing = this.cursor.last_seq === 0 && !this._synced;
+    return !snapshotComing && this.snapshotEpoch !== this.replicaEpoch;
   }
 
   async reconcile(entities?: string[]): Promise<void> {
@@ -2950,6 +3042,9 @@ export class SyncEngine {
         done.push(entity);
       }),
     );
+    // A full sweep that reconciled every entity matched the replica to the
+    // server (see autoReconcileDue).
+    if (entities === undefined && skipped.length === 0) this.matchedServerAt = Date.now();
     return { done, skipped, startedAt };
   }
 
@@ -3238,12 +3333,58 @@ export class SyncEngine {
     // need to handle) errors from a session refresh.
     this.sessionChain = prev.then(async () => {
       // Defer the null→X / X→Y / first-resolution distinction to the
-      // resolver, but DON'T commit the new resolved session until
-      // after the engine has finished acting on the verdict — that
-      // closes the brief window where useSession would report the
-      // new tenant while useQuery still has the old tenant's rows.
+      // resolver, but DON'T commit the new resolved session until the
+      // old identity's rows are gone — that closes the window where
+      // useSession would report the new tenant while useQuery still has
+      // the old tenant's rows. It does not wait for the new rows: the
+      // re-pull can take seconds on a slow phone.
       const verdict = this.session.inspectSession(next);
       const prevUserId = this.session.resolved().userId;
+      // Commit the session and act on it. Runs once: right after the wipe
+      // when there is one, so `useSession` and `sessionResolved()` update
+      // while the replica refills from the server (an app renders from the
+      // session and shows `useSyncProgress` for the data), else after the
+      // branch below.
+      let committed = false;
+      const commit = () => {
+        if (committed) return;
+        committed = true;
+        const firstResolution = !this.session.hasObserved();
+        this.session.commitObservation(next);
+        // The reset above tagged the replica with the outgoing user (the
+        // session was not committed yet). Re-tag it with the new owner.
+        if (userFlipped && this.isMultiTabLeader) this.persistReplicaIdentity();
+        // The session now says who the token belongs to: push writes
+        // that were waiting for it (their owner may be this user).
+        if (this.isMultiTabLeader) {
+          const wasPending = this.identityPending || firstResolution;
+          if (opts.token !== undefined) this.sessionToken = opts.token;
+          // Writes made before any session resolved belong to this one.
+          if (firstResolution) this.mutations.stampPendingOwner(next.userId);
+          this.identityPending = false;
+          this.identityRetryAttempts = 0;
+          if ((wasPending || userFlipped) && this.mutations.pending().length > 0) {
+            void this.push();
+          }
+          // Uploads follow the same owner rule: stamp the ones made before
+          // the session was known, then send (or, for another user's,
+          // discard) what is queued.
+          if (wasPending || userFlipped) {
+            const stamp = firstResolution
+              ? this.uploads.stampPendingOwner(next.userId)
+              : Promise.resolve();
+            void stamp.then(() => this.uploads.process());
+          }
+        }
+        if (verdict.identityChanged || firstResolution) {
+          // The first answer flips `sessionResolved()` even when the
+          // session itself matches the placeholder (anonymous caller).
+          this.store.notify();
+        }
+        if (broadcast && this.isMultiTabLeader) {
+          this.broadcastToTabs({ type: "session", resolved: next });
+        }
+      };
       // USER flip (sign-in, sign-out, account switch) observed on a
       // session refresh. The rows, the cursor, and the live socket all
       // belong to the previous identity, and a tenant verdict alone
@@ -3270,7 +3411,7 @@ export class SyncEngine {
           this.cycleTransport();
           // Queued writes stay: each carries its owner, and push drops
           // the ones that belong to someone else.
-          await this.resetAndPull({ wipeMutations: false });
+          await this.resetAndPull({ wipeMutations: false }, commit);
         }
       } else if (userFlipped) {
         // Follower: the leader's reset already wiped this tab.
@@ -3290,12 +3431,17 @@ export class SyncEngine {
           // Reset and re-pull in one op-queue slot (see resetAndPull).
           // The tenant's view changed → wipe the outgoing tenant's
           // pending offline writes too.
-          await this.resetAndPull({ wipeMutations: true });
+          await this.resetAndPull({ wipeMutations: true }, commit);
         }
         if (this.isMultiTabLeader) {
           // Only the leader pulls — followers receive subsequent
           // applied broadcasts that close the catch-up window.
-          if (!reset) await this.pull();
+          // No wipe: the replica is valid for the new tenant as it is
+          // (membership-scoped reads), so the session commits first.
+          if (!reset) {
+            commit();
+            await this.pull();
+          }
           if (skipReset) {
             // No wipe happened, so rows of an org the user only just
             // JOINED aren't in the replica and no change event will
@@ -3305,41 +3451,7 @@ export class SyncEngine {
           }
         }
       }
-      const firstResolution = !this.session.hasObserved();
-      this.session.commitObservation(next);
-      // The reset above tagged the replica with the outgoing user (the
-      // session was not committed yet). Re-tag it with the new owner.
-      if (userFlipped && this.isMultiTabLeader) this.persistReplicaIdentity();
-      // The session now says who the token belongs to: push writes
-      // that were waiting for it (their owner may be this user).
-      if (this.isMultiTabLeader) {
-        const wasPending = this.identityPending || firstResolution;
-        if (opts.token !== undefined) this.sessionToken = opts.token;
-        // Writes made before any session resolved belong to this one.
-        if (firstResolution) this.mutations.stampPendingOwner(next.userId);
-        this.identityPending = false;
-        this.identityRetryAttempts = 0;
-        if ((wasPending || userFlipped) && this.mutations.pending().length > 0) {
-          void this.push();
-        }
-        // Uploads follow the same owner rule: stamp the ones made before
-        // the session was known, then send (or, for another user's,
-        // discard) what is queued.
-        if (wasPending || userFlipped) {
-          const stamp = firstResolution
-            ? this.uploads.stampPendingOwner(next.userId)
-            : Promise.resolve();
-          void stamp.then(() => this.uploads.process());
-        }
-      }
-      if (verdict.identityChanged || firstResolution) {
-        // The first answer flips `sessionResolved()` even when the
-        // session itself matches the placeholder (anonymous caller).
-        this.store.notify();
-      }
-      if (broadcast && this.isMultiTabLeader) {
-        this.broadcastToTabs({ type: "session", resolved: next });
-      }
+      commit();
     }).catch(() => {});
     return this.sessionChain;
   }
@@ -3347,9 +3459,15 @@ export class SyncEngine {
   /** Reset the replica and pull from zero in ONE op-queue slot, so no
    *  live frame can move the cursor between the reset and the pull's
    *  hold (the pull would then run as a delta and miss rows). */
-  private resetAndPull(opts: { wipeMutations: boolean }): Promise<void> {
+  private resetAndPull(
+    opts: { wipeMutations: boolean },
+    afterReset?: () => void,
+  ): Promise<void> {
     return this.opQueue.enqueue("reset-pull", async () => {
       await this.resetReplicaInner(opts);
+      // The replica is empty: the caller commits the new session here, so
+      // the app does not wait for the whole re-pull to learn who is signed in.
+      afterReset?.();
       await this.pullInner();
     }).then(() => {
       if (this.isMultiTabLeader) this.markInitialSyncSettled();
@@ -4559,15 +4677,11 @@ export class SyncEngine {
             this.lastPullStartedFromZero = false;
             return;
           }
-          // A complete snapshot (from 0, or a far-behind catch-up) already
-          // replaced the replica's view with the server's, deletions
-          // included: same reason.
-          if (this.lastPullCompletedSnapshot) {
-            this.lastPullStartedFromZero = false;
-            this.lastPullCompletedSnapshot = false;
-            return;
-          }
           this.lastPullStartedFromZero = false;
+          // A complete snapshot or a full reconcile in the last few
+          // minutes already matched the replica to the server, deletions
+          // included (see `autoReconcileIntervalMs`).
+          if (!this.autoReconcileDue()) return;
           return this.reconcile();
         });
       },

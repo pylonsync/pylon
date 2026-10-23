@@ -190,6 +190,8 @@ export type { UseSessionReturn, ResolvedSession } from "./useSession";
 
 export { useSyncStatus } from "./useSyncStatus";
 export type { SyncConnectionStatus } from "./useSyncStatus";
+export { useSyncProgress } from "./useSyncProgress";
+export type { SyncProgress } from "./useSyncProgress";
 
 // Writes not yet on the server, and writes the server rejected.
 export { useOutbox } from "./useOutbox";

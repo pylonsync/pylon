@@ -71,6 +71,8 @@ export interface CreateTestEnvOptions {
    *  wall-clock waiting on every reconnect scenario; pass a small
    *  value when the test specifically exercises the reconnect path. */
   reconnectDelay?: number;
+  /** Passed through to the engine config (SyncEngineConfig). */
+  autoReconcileIntervalMs?: number;
 }
 
 export interface TestEnv {
@@ -127,6 +129,7 @@ export function createTestEnv(opts: CreateTestEnvOptions = {}): TestEnv {
     transport: opts.transport ?? "websocket",
     reconnectDelay: opts.reconnectDelay,
     resetOnTenantFlip: opts.resetOnTenantFlip,
+    autoReconcileIntervalMs: opts.autoReconcileIntervalMs,
     // Tight timings so scenarios don't have to sleep seconds. The
     // engine's reconcile debounce is also relaxed so back-to-back
     // visibility-change triggers don't get coalesced away in tests.
