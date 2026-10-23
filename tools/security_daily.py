@@ -201,7 +201,12 @@ def main():
         slack = f"Security check, {date} ({repo}): no new issues. {run}"
     else:
         parts = [f"Security check, {date} ({repo}): {len(new)} new finding(s)."]
-        for sev in ("CRITICAL", "HIGH", "MEDIUM"):
+        # Slack lists new high and critical findings; mediums are a count
+        # (the run's summary lists them all).
+        mediums = sum(1 for f in new if f["severity"] == "MEDIUM")
+        if mediums:
+            parts.append(f"{mediums} new medium finding(s) are in the run's summary.")
+        for sev in ("CRITICAL", "HIGH"):
             group = [f for f in new if f["severity"] == sev]
             if group:
                 parts.append(f"{sev.title()}:")
