@@ -118,6 +118,7 @@ trivy image --severity HIGH,CRITICAL --ignore-unfixed <that image>
 | `security-daily.yml` (pylon and stack0-apps) | 12:00 UTC | SBOMs, Trivy, osv-scanner, cargo audit and deny, runtime watch, open fix PRs, apps behind the latest Pylon; one Slack message | `SECURITY_SLACK_WEBHOOK_URL` |
 | `security-ai-review.yml` (pylon and stack0-apps) | 08:00 UTC, deep pass Sundays | Claude Code `/security-review` of the day's security-relevant changes | `CLAUDE_CODE_OAUTH_TOKEN` |
 | Codex review (stack0-apps only) | 08:30 UTC | `codex exec -s read-only` over the day's security-relevant changes in both repos | `CODEX_AUTH_JSON`, `CODEX_AUTH_WRITEBACK_TOKEN` |
+| `security-probe.yml` (stack0-apps) | Sundays 09:00 UTC | `pylon test:security` against every live Stack0 app with no session; fails on a function that answers past its auth gate or an entity that lists rows anonymously. Public entities are listed in `.github/security-probe-targets.json` | `SECURITY_SLACK_WEBHOOK_URL` |
 
 The AI reviews use the owner's subscriptions, never API keys, and are skipped
 when their secret is missing. Codex runs only in the private stack0-apps
