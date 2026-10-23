@@ -39,8 +39,22 @@ What finds them:
 - **Dependabot** opens a security update when an alert opens, and weekly
   grouped minor and patch updates for cargo, bun, Docker base images and
   GitHub Actions.
-- **The nightly scan** checks the published images and every Pylon version
-  running on Stack0 Cloud against fresh advisory data.
+- **The daily check** (`security-daily.yml`, 12:00 UTC) makes SBOMs of the
+  published images and scans them with that day's advisory data, checks the
+  pinned Bun, Node and Rust versions and base image digests against their
+  security releases (`tools/runtime_watch.py`), and posts what is new since
+  yesterday to Slack. Stack0's copy covers every image running on Stack0
+  Cloud and lists the apps behind the latest Pylon release.
+- **An AI review** (`security-ai-review.yml`, 08:00 UTC) runs Claude Code's
+  `/security-review` on the day's security-relevant changes, on the owner's
+  Claude subscription. Sundays add a deeper pass over one area.
+
+Supply-chain guards: every GitHub Action is pinned by commit SHA, Dependabot
+waits 3 days before proposing a new release (security updates do not wait),
+CI and the runtime and builder images install from frozen lockfiles
+(`docker/*/bun.lock`, checked by `tools/check-image-locks.sh`), and Bun runs
+no dependency install scripts unless a package is listed in
+`trustedDependencies`.
 
 An advisory with no fix, or one that does not apply, is ignored in the file
 for its tool, with a reason and a review date:

@@ -110,3 +110,55 @@ Scan what is running, not what was built:
 fly machines list -a <app> --json | jq -r '.[].config.image'
 trivy image --severity HIGH,CRITICAL --ignore-unfixed <that image>
 ```
+
+## 8. Daily and weekly checks
+
+| Workflow | When | What | Secrets |
+| --- | --- | --- | --- |
+| `security-daily.yml` (pylon and stack0-apps) | 12:00 UTC | SBOMs, Trivy, osv-scanner, cargo audit and deny, runtime watch, open fix PRs, apps behind the latest Pylon; one Slack message | `SECURITY_SLACK_WEBHOOK_URL` |
+| `security-ai-review.yml` (pylon and stack0-apps) | 08:00 UTC, deep pass Sundays | Claude Code `/security-review` of the day's security-relevant changes | `CLAUDE_CODE_OAUTH_TOKEN` |
+| Codex review (stack0-apps only) | 08:30 UTC | `codex exec -s read-only` over the day's security-relevant changes in both repos | `CODEX_AUTH_JSON`, `CODEX_AUTH_WRITEBACK_TOKEN` |
+
+The AI reviews use the owner's subscriptions, never API keys, and are skipped
+when their secret is missing. Codex runs only in the private stack0-apps
+repository: OpenAI's guide to ChatGPT-login auth in CI excludes public
+repositories, and pylonsync/pylon is public.
+
+Setting the secrets (the owner runs these; the values never go in a file):
+
+```sh
+# Slack: an incoming webhook for the security channel.
+gh secret set SECURITY_SLACK_WEBHOOK_URL -R pylonsync/pylon
+gh secret set SECURITY_SLACK_WEBHOOK_URL -R stack0dev/stack0-apps
+
+# Claude: a long-lived subscription token.
+claude setup-token
+gh secret set CLAUDE_CODE_OAUTH_TOKEN -R pylonsync/pylon
+gh secret set CLAUDE_CODE_OAUTH_TOKEN -R stack0dev/stack0-apps
+
+# Codex: a separate ChatGPT login used only by CI, never the Mac's.
+export CODEX_HOME="$(mktemp -d)"
+codex login --device-auth
+jq '{auth_mode, has_refresh_token: ((.tokens.refresh_token // "") != "")}' "$CODEX_HOME/auth.json"
+gh secret set CODEX_AUTH_JSON -R stack0dev/stack0-apps < "$CODEX_HOME/auth.json"
+rm "$CODEX_HOME/auth.json"
+# A fine-grained token for stack0dev/stack0-apps with only
+# "Secrets: Read and write", so the job can save the refreshed login:
+gh secret set CODEX_AUTH_WRITEBACK_TOKEN -R stack0dev/stack0-apps
+```
+
+## 9. Monthly infrastructure review
+
+Once a month, check what the daily scans cannot see:
+
+- Fly: apps and machines that should not exist, public ports and services
+  (`fly ips list`, `fly services list` per app), and who has org access.
+- Cloudflare: DNS records pointing at retired apps, proxy and TLS settings.
+- Tigris and S3 buckets: public ACLs and bucket policies; uploads must stay
+  private unless an app marked them public.
+- Keys and tokens: deploy tokens, fleet tokens, provider keys and GitHub
+  tokens older than a year or belonging to people who left; rotate them
+  (docs/ops/TOKEN_ROTATION.md).
+- GitHub: repository and organization admins, Actions settings, and secrets
+  nothing uses any more.
+
