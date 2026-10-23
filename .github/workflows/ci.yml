@@ -31,7 +31,7 @@ jobs:
       swift: ${{ steps.filter.outputs.swift }}
       csharp: ${{ steps.filter.outputs.csharp }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
         id: filter
         with:
@@ -76,7 +76,7 @@ jobs:
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -86,7 +86,7 @@ jobs:
     name: vendored files in sync
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       # Catches drift between /templates + /packages/sdk and the copies
       # vendored into crates/cli/ (cargo publish strips paths outside the
       # crate root), and between /scripts and the installers the site
@@ -113,7 +113,7 @@ jobs:
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -147,7 +147,7 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       # wasm32: crates/runtime/tests/shard_wasm.rs builds the example guest.
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -180,7 +180,7 @@ jobs:
         uses: ./.github/actions/setup-xmlsec-windows
       # The C# live sign-in test runs in wasm-shard-smoke with a required SDK.
       # Clippy checks standalone benchmarks; perf-guard runs release benchmarks.
-      - uses: taiki-e/install-action@v2.87.27
+      - uses: taiki-e/install-action@v2.87.29
         with:
           tool: cargo-nextest@0.9.148
           fallback: none
@@ -230,7 +230,7 @@ jobs:
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install xmlsec1 + libxml2 (pylon-runtime build dep)
@@ -261,7 +261,7 @@ jobs:
         target:
           - x86_64-unknown-linux-gnu
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -278,7 +278,7 @@ jobs:
       - run: cargo build --release --locked --bin pylon --target ${{ matrix.target }}
       - name: Save release binary
         if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: ci-release-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/pylon
@@ -300,7 +300,7 @@ jobs:
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -319,7 +319,7 @@ jobs:
     if: needs.changes.outputs.ts == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.4"
@@ -356,8 +356,8 @@ jobs:
     if: needs.changes.outputs.ts == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           package-manager-cache: false
           node-version: 22
@@ -375,8 +375,8 @@ jobs:
     if: needs.changes.outputs.ts == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           package-manager-cache: false
           node-version: 22
@@ -402,13 +402,13 @@ jobs:
       matrix:
         os: [ubuntu-24.04, windows-latest]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: native-debug
           save-if: false
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           package-manager-cache: false
           node-version: 22
@@ -440,7 +440,7 @@ jobs:
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ts == 'true' || needs.changes.outputs.swift == 'true'
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -465,7 +465,7 @@ jobs:
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ts == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Ignores are within their review dates
         run: bash tools/check-security-ignores.sh
       - uses: dtolnay/rust-toolchain@stable
@@ -507,7 +507,7 @@ jobs:
             file: builder/Dockerfile
             target: ""
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Build ${{ matrix.name }}
         env:
           FILE: ${{ matrix.file }}
@@ -547,7 +547,7 @@ jobs:
       run:
         working-directory: packages/swift
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: swift build
         # Retry with backoff: SwiftPM downloads the LoroFFI binary
         # xcframework from GitHub releases on a cold cache, and that
@@ -571,8 +571,8 @@ jobs:
         os: [ubuntu-24.04, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-dotnet@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: "8.0.x"
       # The core as a .NET Standard 2.1 library with Unity's C# version and
@@ -592,7 +592,7 @@ jobs:
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.csharp == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: The binaries match the sources
@@ -626,7 +626,7 @@ jobs:
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ts == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -642,7 +642,7 @@ jobs:
         run: bun install --frozen-lockfile && bun run build
       - name: Install xmlsec1 + libxml2
         run: sudo apt-get update && sudo apt-get install -y libxml2-dev libxmlsec1-dev libxmlsec1-openssl
-      - uses: actions/setup-dotnet@v5
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: "8.0.x"
       - run: bun install --frozen-lockfile
@@ -684,7 +684,7 @@ jobs:
         options: >-
           --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
