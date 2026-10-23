@@ -686,3 +686,50 @@ fn bulk_import_and_export_require_admin_without_an_active_tenant() {
     assert_eq!(body["imported"], 1);
     assert_eq!(app.runtime.list("Doc").unwrap().len(), 2);
 }
+
+/// A member removed from an org loses it at once. The active org was only
+/// checked when it was selected, so a removed member kept reading and
+/// writing the org's rows with their old session (sessions last months).
+#[test]
+fn a_removed_member_loses_the_org_on_the_next_request() {
+    use pylon_http::DataStore;
+    let app = start();
+    let id = app.insert("Project", ORG_A);
+    let (s, _) = app.call("GET", &format!("/api/entities/Project/{id}"), Value::Null);
+    assert_eq!(s, 200);
+
+    // Remove alice from org A (the owner's DELETE route and the federated
+    // mirror both delete this row).
+    let membership = DataStore::list(app.runtime.as_ref(), "OrgMember")
+        .unwrap()
+        .into_iter()
+        .find(|m| m["userId"] == "alice" && m["orgId"] == ORG_A)
+        .expect("alice's membership");
+    DataStore::delete(
+        app.runtime.as_ref(),
+        "OrgMember",
+        membership["id"].as_str().unwrap(),
+    )
+    .unwrap();
+
+    let (s, body) = app.call("GET", "/api/auth/session", Value::Null);
+    assert_eq!(s, 200, "{body}");
+    assert!(
+        body["session"]["user_id"] == "alice" && body["session"]["tenant_id"].is_null(),
+        "session still in the org: {body}"
+    );
+
+    let (s, body) = app.call("GET", &format!("/api/entities/Project/{id}"), Value::Null);
+    assert_ne!(s, 200, "a removed member read the org's row: {body}");
+
+    let (s, body) = app.call(
+        "POST",
+        "/api/entities/Project",
+        json!({"orgId": ORG_A, "name": "after removal"}),
+    );
+    assert_ne!(s, 201, "a removed member wrote into the org: {body}");
+
+    // Re-selecting the org is refused too.
+    let (s, _) = app.call("POST", "/api/auth/select-org", json!({ "orgId": ORG_A }));
+    assert_eq!(s, 403);
+}

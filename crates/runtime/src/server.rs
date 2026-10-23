@@ -2791,6 +2791,15 @@ fn start_server(
         runtime.clone() as Arc<dyn pylon_http::DataStore>,
         runtime.manifest().auth.org.clone(),
     ));
+    // A session's active org is checked against the membership table on
+    // every lookup, so removing a member ends their access to the org at
+    // once (on every machine), not when their session expires.
+    if orgs.enabled() {
+        let orgs_for_check = Arc::clone(&orgs);
+        session_store.set_tenant_membership_check(Arc::new(move |tenant: &str, user: &str| {
+            orgs_for_check.role_of(tenant, user).is_some()
+        }));
+    }
     // Re-runs the federated org mirror while users stay signed in.
     let org_resync = pylon_router::OrgResync::new(Arc::clone(&orgs), Arc::clone(&account_store));
     let siwe = auth_stores.siwe;

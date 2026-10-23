@@ -1919,13 +1919,20 @@ impl WsHub {
                 if handle.token.is_none() {
                     continue;
                 }
-                let user_id = match handle.auth.read() {
-                    Ok(g) => g.user_id.clone(),
-                    Err(poisoned) => poisoned.into_inner().user_id.clone(),
+                let (user_id, tenant_id) = match handle.auth.read() {
+                    Ok(g) => (g.user_id.clone(), g.tenant_id.clone()),
+                    Err(poisoned) => {
+                        let g = poisoned.into_inner();
+                        (g.user_id.clone(), g.tenant_id.clone())
+                    }
                 };
+                // The tenant counts too: a session whose org membership
+                // ended resolves without its org, and the socket must not
+                // keep receiving that org's rows. The client reconnects
+                // with the same token and gets the current identity.
                 let still_valid = resolver
                     .recheck_token(handle.token.as_deref(), Surface::App)
-                    .is_ok_and(|ctx| ctx.user_id == user_id);
+                    .is_ok_and(|ctx| ctx.user_id == user_id && ctx.tenant_id == tenant_id);
                 if !still_valid {
                     self.end_client(id, &handle);
                     ended.push(id);
@@ -4052,6 +4059,47 @@ mod tests {
             vec!["editor".into()],
         );
         assert!(hub.client_may_use_room(1, "@Doc/d1", true));
+    }
+
+    /// A socket authenticated with an org selected is closed by the
+    /// revalidation pass once the user is removed from that org: the session
+    /// now resolves without the org, so the socket's identity is stale.
+    #[test]
+    fn revalidation_closes_a_socket_whose_org_membership_ended() {
+        let manifest = Arc::new(pylon_kernel::AppManifest::default());
+        let hub = WsHub::new(
+            Arc::new(PolicyEngine::from_manifest(&manifest)),
+            manifest.clone(),
+            manifest.auth.user.clone(),
+        );
+        let sessions = Arc::new(pylon_auth::SessionStore::new());
+        let member = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let member_for_check = Arc::clone(&member);
+        sessions.set_tenant_membership_check(Arc::new(move |tenant: &str, user: &str| {
+            tenant == "org1"
+                && user == "alice"
+                && member_for_check.load(std::sync::atomic::Ordering::SeqCst)
+        }));
+        let session = sessions.create("alice".into());
+        assert!(sessions.set_tenant(&session.token, Some("org1".into())));
+        hub.set_auth_resolver(crate::request_auth::AuthResolver::from_sessions(
+            Arc::clone(&sessions),
+        ));
+        let stream: Box<dyn WsStream> = Box::new(std::io::Cursor::new(Vec::<u8>::new()));
+        let auth = sessions.resolve(Some(&session.token));
+        assert_eq!(auth.tenant_id.as_deref(), Some("org1"));
+        hub.shards[0].add(
+            0,
+            WebSocket::from_raw_socket(stream, Role::Server, None),
+            auth,
+            Some(session.token.clone()),
+            Vec::new(),
+        );
+
+        assert!(hub.revalidate_all_clients().is_empty(), "still a member");
+        member.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(hub.revalidate_all_clients(), vec![0]);
+        assert_eq!(hub.client_count(), 0);
     }
 
     #[test]

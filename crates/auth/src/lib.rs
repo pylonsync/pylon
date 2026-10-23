@@ -2653,7 +2653,14 @@ pub struct SessionStore {
     default_lifetime_secs: u64,
     /// Called after sessions end. See [`SessionStore::on_session_end`].
     end_listeners: Mutex<Vec<SessionEndListener>>,
+    /// Whether a user still belongs to a tenant. See
+    /// [`SessionStore::set_tenant_membership_check`].
+    tenant_check: std::sync::RwLock<Option<TenantMembershipCheck>>,
 }
+
+/// `(tenant_id, user_id) -> is a member`. The runtime installs one backed by
+/// the org membership table.
+pub type TenantMembershipCheck = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
 
 /// Called with the user ids (each once) whose sessions ended in one
 /// operation: revoked (sign-out, password change or reset, account
@@ -2676,6 +2683,7 @@ impl SessionStore {
             backend: None,
             default_lifetime_secs: Session::DEFAULT_LIFETIME_SECS,
             end_listeners: Mutex::new(Vec::new()),
+            tenant_check: std::sync::RwLock::new(None),
         }
     }
 
@@ -2737,6 +2745,7 @@ impl SessionStore {
             backend: Some(backend),
             default_lifetime_secs: Session::DEFAULT_LIFETIME_SECS,
             end_listeners: Mutex::new(Vec::new()),
+            tenant_check: std::sync::RwLock::new(None),
         }
     }
 
@@ -2765,15 +2774,40 @@ impl SessionStore {
 
     /// Look up a session by token. Returns None if the session is expired.
     pub fn get(&self, token: &str) -> Option<Session> {
-        let mut sessions = self.sessions.lock().unwrap();
-        match sessions.get(token) {
-            Some(s) if s.is_expired() => {
-                sessions.remove(token);
-                None
+        let mut session = {
+            let mut sessions = self.sessions.lock().unwrap();
+            match sessions.get(token) {
+                Some(s) if s.is_expired() => {
+                    sessions.remove(token);
+                    return None;
+                }
+                Some(s) => s.clone(),
+                None => return None,
             }
-            Some(s) => Some(s.clone()),
-            None => None,
+        };
+        // The active tenant was checked when it was selected, but membership
+        // can end afterwards. Check it on every lookup, outside the sessions
+        // lock (the check reads the database), and hand back the session
+        // without the tenant once the user no longer belongs to it. The
+        // stored session keeps its value, so a failed lookup never resets
+        // anyone's org for good; a later lookup checks again.
+        if let Some(tenant) = session.tenant_id.clone() {
+            let check = self.tenant_check.read().unwrap().clone();
+            if let Some(check) = check {
+                if !check(&tenant, &session.user_id) {
+                    session.tenant_id = None;
+                }
+            }
         }
+        Some(session)
+    }
+
+    /// Install the membership check [`SessionStore::get`] applies to a
+    /// session's active tenant. Without it, a member removed from an org
+    /// keeps acting in that org for as long as their session lives, because
+    /// the tenant is only checked when it is selected.
+    pub fn set_tenant_membership_check(&self, check: TenantMembershipCheck) {
+        *self.tenant_check.write().unwrap() = Some(check);
     }
 
     /// Resolve a token to an auth context.
