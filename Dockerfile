@@ -34,7 +34,10 @@ ARG RUST_VERSION=1.98
 # inside rust-builder) lets BuildKit cache the studio bundle independently
 # of the cargo build, so changes to Rust code don't redo the bun build
 # and vice versa.
-FROM oven/bun:1.2 AS studio-builder
+# Base images are pinned by digest; Renovate opens the PRs that move them.
+FROM oven/bun:1.4.4@sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d AS bun
+
+FROM bun AS studio-builder
 WORKDIR /studio
 COPY crates/studio_api/web/package.json crates/studio_api/web/bun.lock ./
 RUN bun install --frozen-lockfile
@@ -46,7 +49,7 @@ RUN bun run build
 # `size_t`-typed `xmlSecSize`. Bookworm ships libxmlsec1 1.2.37 where
 # the type is `unsigned int` — bindgen emits `u32` and samael fails to
 # compile with `expected usize, found u32`. Trixie ships 1.3.x.
-FROM rust:${RUST_VERSION}-slim-trixie AS rust-builder
+FROM rust:${RUST_VERSION}-slim-trixie@sha256:4cd829461bd5c4d511c32e269da9cb8929223b666519d8004e35fc8d1d771ab7 AS rust-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential pkg-config libssl-dev ca-certificates \
@@ -85,7 +88,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # Match the build stage on trixie so the linked libxmlsec1 ABI lines
 # up with what the binary was compiled against. Mixing bookworm runtime
 # with trixie-built binary would fail at dlopen time.
-FROM debian:trixie-slim
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl unzip \
@@ -104,9 +107,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     sqlite3 \
     # setcap, for the pylon binary's port-binding capability below.
     libcap2-bin \
-    && rm -rf /var/lib/apt/lists/* \
-    && curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash \
-    && ln -s /usr/local/bin/bun /usr/bin/bun
+    && rm -rf /var/lib/apt/lists/*
+
+# Bun from the pinned oven/bun image, the same version CI tests with
+# (setup-bun in ci.yml). The install script took whatever Bun was newest
+# on the day of the build.
+COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
+RUN ln -s /usr/local/bin/bun /usr/local/bin/bunx \
+    && ln -s /usr/local/bin/bun /usr/bin/bun \
+    && bun --version
 
 # OpenCode — the colocated coding agent for cloud dev-mode envs
 # (build.pylonsync.com). Installed to /usr/local so the non-root `pylon` user

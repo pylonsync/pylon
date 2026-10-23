@@ -4,7 +4,7 @@
 #
 # It does NOT run the pylon runtime; it only fetches source (via a signed url —
 # no GitHub token), `bun install`s, runs the app build, bundles full-prebuilt,
-# and uploads to Tigris. Keep Bun roughly in step with the runtime image so the
+# and uploads to Tigris. Keep Bun in step with the runtime image so the
 # shipped node_modules is ABI-compatible with the runtime's Bun.
 #
 # Build/publish in CI (release.yml) → ghcr.io/pylonsync/pylon-builder. The
@@ -31,7 +31,10 @@
 # the mismatch the runtime Dockerfile already warns about, which fails at dlopen
 # time rather than at install time. Keep this base in step with the runtime
 # image's `debian:trixie-slim`.
-FROM debian:trixie-slim
+FROM oven/bun:1.4.4@sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d AS bun
+
+# Pinned by digest; Renovate opens the PRs that move it.
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
 
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends \
@@ -40,8 +43,11 @@ RUN apt-get update \
 		# The pylon CLI links against these at startup, so a builder without
 		# them cannot run `pylon build` at all.
 		libxml2 libxmlsec1 libxmlsec1-openssl \
-	&& rm -rf /var/lib/apt/lists/* \
-	&& curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash \
+	&& rm -rf /var/lib/apt/lists/*
+
+# The same Bun as the runtime image (see ../Dockerfile).
+COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
+RUN ln -s /usr/local/bin/bun /usr/local/bin/bunx \
 	&& ln -s /usr/local/bin/bun /usr/bin/bun
 
 WORKDIR /build

@@ -680,7 +680,7 @@ if (!isUnified) {
 	// stable for whichever PM the user picked. npm doesn't enforce this
 	// field but turbo still expects it to be present.
 	const PACKAGE_MANAGERS = {
-		bun: "bun@1.2.19",
+		bun: "bun@1.4.4",
 		pnpm: "pnpm@9.12.0",
 		yarn: "yarn@4.5.0",
 		npm: "npm@10.9.0",
