@@ -74,7 +74,7 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 # Same library powers Remboard's iOS (loro-swift) and web (loro-crdt npm)
 # clients, so all three platforms speak the same wire format.
 loro = "1.11"
-hmac = "0.12"
+hmac = "0.13"
 sha2 = "0.10"
 sha1 = "0.10"
 rand = "0.8"
