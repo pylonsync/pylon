@@ -94,7 +94,7 @@ hmac = { workspace = true }
 # ~35-45% under WebP on photographic content) dominates. asm feature
 # off: keeps the build free of a nasm system dep.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
-fast_image_resize = { version = "5", features = ["image"] }
+fast_image_resize = { version = "6", features = ["image"] }
 mozjpeg = { version = "0.10", default-features = false }
 webp = "0.3"
 ravif = { version = "0.11", default-features = false, features = ["threading"] }
