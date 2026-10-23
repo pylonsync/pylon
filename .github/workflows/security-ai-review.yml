@@ -1,0 +1,148 @@
+# Daily AI security review, 08:00 UTC, on the owner's Claude subscription
+# (CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`; no API key).
+#
+# Daily: Claude Code's /security-review on the last 24 hours of changes to
+# main, limited to security-relevant paths, plus our focus list. Skipped when
+# none of those paths changed. Sundays: a deeper pass over one source area,
+# rotating weekly. Both are skipped, not failed, without the token.
+#
+# The findings are kept as the `ai-review` artifact; security-daily.yml (12:00
+# UTC) puts them in its Slack message.
+name: security-ai-review
+
+on:
+  schedule:
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+    inputs:
+      deep:
+        description: "Run the deep pass (normally Sundays)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: security-ai-review
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  # The paths a security review covers. Everything else is skipped.
+  REVIEW_PATHS: >-
+    crates/auth crates/router crates/policy crates/sync crates/runtime/src
+    crates/storage/src crates/functions/src crates/shard-guest crates/workers/src
+    crates/http/src packages/functions/src packages/sync/src packages/react/src
+    packages/sdk/src Dockerfile builder
+
+jobs:
+  review:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          fetch-depth: 0
+
+      - name: What to review
+        id: plan
+        env:
+          HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+          FORCE_DEEP: ${{ inputs.deep }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          if [[ "$HAS_TOKEN" != "true" ]]; then
+            echo "Skipped: CLAUDE_CODE_OAUTH_TOKEN is not set." > out/ai-review.md
+            echo "daily=false" >> "$GITHUB_OUTPUT"; echo "deep=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          deep=false
+          if [[ "$(date -u +%u)" == "7" || "${FORCE_DEEP:-}" == "true" ]]; then deep=true; fi
+          echo "deep=$deep" >> "$GITHUB_OUTPUT"
+          first="$(git log --since='24 hours ago' --first-parent --format=%H origin/main -- $REVIEW_PATHS | tail -1)"
+          if [[ -z "$first" ]]; then
+            echo "No findings. No security-relevant changes in the last 24 hours." > out/ai-review.md
+            echo "daily=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base="$(git rev-parse "${first}^")"
+          echo "daily=true" >> "$GITHUB_OUTPUT"
+          # /security-review reviews pending changes: start from the code as it
+          # was 24 hours ago and apply the day's changes on top, uncommitted.
+          git diff "$base" origin/main -- $REVIEW_PATHS > /tmp/day.diff
+          git checkout --quiet --detach "$base"
+          git apply --index /tmp/day.diff
+          git diff --cached --stat | tail -1
+
+      - name: Daily review
+        id: daily
+        if: steps.plan.outputs.daily == 'true'
+        uses: anthropics/claude-code-action@8d70a0dd265122bd65b8e09d3d959e65373ae2a1  # v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            /security-review
+
+            This repository is Pylon, an app framework that runs many customer apps
+            on the public internet. Besides your usual checks, look hard at:
+            policies and tenant isolation, sync and realtime leaks, the SSR cache,
+            file uploads and downloads, the WebAssembly and function sandbox, SSRF
+            from server-side fetches, and secrets in logs or responses.
+            Report each finding with severity, file:line, the attack as concrete
+            steps, and the fix. If nothing is exploitable, answer exactly: No findings.
+          claude_args: |
+            --max-turns 30
+            --allowedTools Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*)
+
+      - name: Deep review of one area (Sundays)
+        id: deep
+        if: steps.plan.outputs.deep == 'true'
+        uses: anthropics/claude-code-action@8d70a0dd265122bd65b8e09d3d959e65373ae2a1  # v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            Red-team one area of Pylon, an app framework that runs many customer apps
+            on the public internet. This week's area is chosen by ISO week number
+            modulo 3 (run `date -u +%V`):
+              0: auth and sessions (crates/auth/src, crates/router/src/routes/auth.rs)
+              1: sync, policies and tenant isolation (crates/policy/src, crates/sync/src,
+                 crates/router/src/routes/sync.rs, crates/router/src/routes/queries.rs)
+              2: uploads, SSR and the sandbox (crates/storage/src/files.rs,
+                 crates/runtime/src/file_urls.rs, crates/runtime/src/frontend.rs,
+                 crates/runtime/src/shard_wasm.rs, packages/functions/src/ssr-runtime.ts)
+            Find exploitable bugs only. Report each with severity, file:line, the
+            attack as concrete steps, and the fix. If nothing is exploitable, answer
+            exactly: No findings.
+          claude_args: |
+            --max-turns 60
+            --allowedTools Read,Grep,Glob,Bash(date:*),Bash(git log:*),Bash(git show:*)
+
+      - name: Collect the findings
+        if: always()
+        env:
+          DAILY: ${{ steps.daily.outputs.execution_file }}
+          DEEP: ${{ steps.deep.outputs.execution_file }}
+        run: |
+          set -uo pipefail
+          # The last result message of each run is its answer.
+          answer() { jq -r '[.[] | select(.type == "result")] | last | .result // empty' "$1" 2>/dev/null; }
+          if [[ -n "${DAILY:-}" && -f "$DAILY" ]]; then
+            answer "$DAILY" > out/ai-review.md
+            [[ -s out/ai-review.md ]] || echo "The daily review produced no answer; see the run." > out/ai-review.md
+          fi
+          if [[ -n "${DEEP:-}" && -f "$DEEP" ]]; then
+            { echo; echo "## Deep review"; answer "$DEEP"; } >> out/ai-review.md
+          fi
+          [[ -f out/ai-review.md ]] || echo "Not run." > out/ai-review.md
+          cat out/ai-review.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        if: always()
+        with:
+          name: ai-review
+          path: out/ai-review.md
+          retention-days: 14

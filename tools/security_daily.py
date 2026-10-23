@@ -9,6 +9,8 @@ Usage:
     osv.json              osv-scanner --format json
     ai-review.md          the AI review of the last day's commits
     fix-prs.md            open security fix pull requests, one per line
+    runtime-watch.json    tools/runtime_watch.py output
+    fleet.json            {"latest": "0.22.58", "apps": {"<app>": "<running pylon version>"}}
     meta.json             {"date", "repo", "run_url", "images": [...],
                            "checks": {"cargo audit": "passed", ...},
                            "labels": {"<key>": "image (apps that run it)"}}
@@ -121,6 +123,28 @@ def from_osv(path):
     return out
 
 
+def vt(v):
+    return tuple(int(x) for x in v.split(".")[:3])
+
+
+def rollout(fleet):
+    """Running apps whose Pylon is older than the latest release, with the
+    command that moves them."""
+    if not fleet or not fleet.get("latest"):
+        return []
+    latest = fleet["latest"]
+    lines = []
+    for app, version in sorted(fleet.get("apps", {}).items(), key=lambda kv: vt(kv[1])):
+        if vt(version) >= vt(latest):
+            continue
+        if vt(version)[:2] == vt(latest)[:2]:
+            how = f"`pylon runtime {latest}` in the app's directory"
+        else:
+            how = f"upgrade @pylonsync/* to {latest} and deploy (an older minor line cannot swap runtimes)"
+        lines.append(f"{app} on {version}: {how}")
+    return lines
+
+
 def key(f):
     return f"{f['where']}|{f['package']}|{f['version']}|{f['id']}"
 
@@ -168,6 +192,9 @@ def main():
         except OSError:
             return ""
 
+    watch = load(os.path.join(results, "runtime-watch.json")) or {}
+    behind = watch.get("behind", [])
+    behind_rollout = rollout(load(os.path.join(results, "fleet.json")))
     ai = read("ai-review.md")
     prs = read("fix-prs.md")
     date = meta.get("date", "")
@@ -189,6 +216,12 @@ def main():
         md += ["## New", ""] + [f"- {line(f)}" for f in new] + [""]
     if fixable:
         md += ["## High or critical with a fix", ""] + [f"- {line(f)}" for f in fixable] + [""]
+    md += ["## Runtimes behind a security release", ""]
+    md += [f"- {b}" for b in behind] or ["None."]
+    md += [f"- {i}" for i in watch.get("info", [])]
+    md += [""]
+    if behind_rollout:
+        md += ["## Apps behind the latest Pylon", ""] + [f"- {r}" for r in behind_rollout] + [""]
     md += ["## AI review of the last day's commits", "", ai or "Not run.", ""]
     md += ["## Fix pull requests", "", prs or "None open.", ""]
     md += [f"Run: {run}"]
@@ -197,22 +230,30 @@ def main():
 
     # Slack: one message, plain words.
     ai_has_findings = bool(ai) and not ai.lower().startswith(("no findings", "not run", "skipped"))
-    if not new and not ai_has_findings and all(v == "passed" for v in checks.values()):
+    if not new and not ai_has_findings and not behind and all(v == "passed" for v in checks.values()):
         slack = f"Security check, {date} ({repo}): no new issues. {run}"
     else:
         parts = [f"Security check, {date} ({repo}): {len(new)} new finding(s)."]
-        # Slack lists new high and critical findings; mediums are a count
-        # (the run's summary lists them all).
+        # One line per image or lockfile: how many new high and critical
+        # findings, and which packages to update. The run's summary lists
+        # every finding.
+        groups = {}
+        for f in new:
+            if f["severity"] not in ("CRITICAL", "HIGH"):
+                continue
+            g = groups.setdefault(f["where"], {"CRITICAL": set(), "HIGH": set(), "pkgs": set()})
+            g[f["severity"]].add(f["id"])
+            g["pkgs"].add(f["package"] + (f" to {f['fixed']}" if f["fixed"] else " (no fix yet)"))
+        for where_, g in sorted(groups.items(), key=lambda kv: (-len(kv[1]["CRITICAL"]), -len(kv[1]["HIGH"]))):
+            pkgs = ", ".join(sorted(g["pkgs"]))
+            if len(pkgs) > 300:
+                pkgs = pkgs[:300] + "..."
+            parts.append(f"- {where_}: {len(g['CRITICAL'])} critical, {len(g['HIGH'])} high. Update: {pkgs}")
         mediums = sum(1 for f in new if f["severity"] == "MEDIUM")
         if mediums:
             parts.append(f"{mediums} new medium finding(s) are in the run's summary.")
-        for sev in ("CRITICAL", "HIGH"):
-            group = [f for f in new if f["severity"] == sev]
-            if group:
-                parts.append(f"{sev.title()}:")
-                parts += [f"- {line(f)}" for f in group[:15]]
-                if len(group) > 15:
-                    parts.append(f"- and {len(group) - 15} more")
+        if behind:
+            parts += ["Behind on a security release:"] + [f"- {b}" for b in behind]
         if ai_has_findings:
             parts += ["AI review:", ai[:2500]]
         if prs:
@@ -224,6 +265,9 @@ def main():
             parts.append(f"{len(fixable)} high or critical finding(s) have a fix waiting; see the run.")
         parts.append(run)
         slack = "\n".join(parts)
+    if behind_rollout:
+        slack += f"\n{len(behind_rollout)} running app(s) are behind Pylon {load(os.path.join(results, 'fleet.json'))['latest']}:\n"
+        slack += "\n".join(f"- {r}" for r in behind_rollout[:30])
     with open(os.path.join(out_dir, "slack.txt"), "w") as f:
         f.write(slack + "\n")
     return 0

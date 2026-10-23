@@ -4,17 +4,17 @@
 #      for the repository's lockfiles.
 #   2. Trivy on those SBOMs with that day's advisory data, osv-scanner on
 #      the lockfiles, cargo audit and cargo deny. Findings are diffed against
-#      yesterday's run (kept as the `security-findings` artifact).
-#   3. Claude reviews the last 24 hours of commits to main for security bugs
-#      (tools/security_ai_review.py). Skipped when no commits landed or when
-#      ANTHROPIC_API_KEY is not set.
+#      yesterday's run (kept as the `security-findings` artifact). The runtime
+#      watch (tools/runtime_watch.py) checks the pinned Bun, Node and Rust
+#      versions and base image digests against their security releases.
+#   3. The findings of security-ai-review.yml (08:00 UTC: Claude Code's
+#      /security-review of the day's security-relevant changes) are included.
 #   4. Fix pull requests come from Dependabot (security updates open as soon
 #      as an alert does); the report lists the open ones. Nothing here
 #      pushes to main.
 #   5. One Slack message to SECURITY_SLACK_WEBHOOK_URL. Without that secret
 #      the report goes to the job summary and the job fails.
 #
-# Mondays add a deeper Claude pass over one source area, rotating weekly.
 # docs/ops/SECURITY_PATCHING.md has the response steps.
 name: security-daily
 
@@ -22,11 +22,6 @@ on:
   schedule:
     - cron: "0 12 * * *"
   workflow_dispatch:
-    inputs:
-      weekly:
-        description: "Also run the weekly deep review"
-        type: boolean
-        default: false
 
 concurrency:
   group: security-daily
@@ -43,7 +38,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
           fetch-depth: 0
 
@@ -69,7 +64,7 @@ jobs:
           chmod +x syft trivy osv-scanner
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec  # stable
       - run: cargo install --locked cargo-audit cargo-deny
 
       - name: SBOMs and scans
@@ -103,6 +98,11 @@ jobs:
               checks: {"cargo audit": $audit, "cargo deny": $deny, "ignore review dates": $ignores}}' \
             > results/meta.json
 
+      - name: Runtime watch
+        # Bun, Node, Rust and base image pins against their official security
+        # releases (Trivy does not see runtimes copied into an image).
+        run: python3 tools/runtime_watch.py results/runtime-watch.json . || echo "::warning::runtime watch failed"
+
       - name: Open fix pull requests
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -110,46 +110,19 @@ jobs:
           gh pr list --author app/dependabot --state open --json number,title,url \
             --jq '.[] | "- #\(.number) \(.title): \(.url)"' > results/fix-prs.md || true
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install --quiet anthropic
-
-      - name: AI review of the last day's commits
+      - name: Today's AI review
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
-          if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-            echo "Skipped: ANTHROPIC_API_KEY is not set." > results/ai-review.md
-            exit 0
+          # security-ai-review.yml runs at 08:00 UTC and keeps its findings
+          # as the ai-review artifact.
+          run="$(gh run list --workflow security-ai-review.yml --status success --limit 1 \
+            --created ">=$(date -u +%F)" --json databaseId --jq '.[0].databaseId // empty')"
+          if [[ -n "$run" ]] && gh run download "$run" -n ai-review -D ai 2>/dev/null; then
+            cp ai/ai-review.md results/ai-review.md
+          else
+            echo "Not run today." > results/ai-review.md
           fi
-          first="$(git log --since='24 hours ago' --first-parent --format=%H origin/main | tail -1)"
-          if [[ -z "$first" ]]; then
-            echo "No findings. No commits landed on main in the last 24 hours." > results/ai-review.md
-            exit 0
-          fi
-          git diff "${first}^" origin/main -- . ':!*.lock' ':!**/bun.lock' ':!packages/csharp/Plugins/**' > day.diff
-          python3 tools/security_ai_review.py daily day.diff results/ai-review.md
-
-      - name: Weekly deep review (Mondays)
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          FORCE_WEEKLY: ${{ inputs.weekly }}
-        run: |
-          set -euo pipefail
-          if [[ "$(date -u +%u)" != "1" && "${FORCE_WEEKLY:-}" != "true" ]]; then exit 0; fi
-          if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-            echo "Weekly review skipped: ANTHROPIC_API_KEY is not set." >> results/ai-review.md
-            exit 0
-          fi
-          case "$(( 10#$(date -u +%V) % 3 ))" in
-            0) area="auth and sessions"; paths="crates/auth/src crates/router/src/routes/auth.rs" ;;
-            1) area="sync, policies and tenant isolation"; paths="crates/policy/src crates/sync/src crates/router/src/routes/sync.rs crates/router/src/routes/queries.rs" ;;
-            *) area="uploads, SSR and the sandbox"; paths="crates/storage/src/files.rs crates/runtime/src/file_urls.rs crates/runtime/src/frontend.rs crates/runtime/src/shard_wasm.rs packages/functions/src/ssr-runtime.ts" ;;
-          esac
-          python3 tools/security_ai_review.py weekly "$area" weekly.md $paths
-          { echo; echo "## Weekly review: $area"; cat weekly.md; } >> results/ai-review.md
 
       - name: Yesterday's findings
         env:
@@ -168,7 +141,7 @@ jobs:
           python3 tools/security_daily.py results "$PREVIOUS" out
           cat out/report.md >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: security-findings
           path: out/findings.json
