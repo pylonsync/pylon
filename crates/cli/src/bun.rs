@@ -237,6 +237,81 @@ fn find_nearest_package_json(entry_file: &str) -> Option<PathBuf> {
     }
 }
 
+/// The root of the Bun workspace `pkg_dir` belongs to: the nearest ancestor
+/// whose package.json lists `pkg_dir` under `workspaces` (an array, or the
+/// `packages` array of an object). `None` when `pkg_dir` is not a member,
+/// as for an app deployed on its own.
+fn enclosing_bun_workspace(pkg_dir: &Path) -> Option<PathBuf> {
+    let pkg_dir = pkg_dir.canonicalize().ok()?;
+    let mut ancestor = pkg_dir.clone();
+    while ancestor.pop() {
+        let Ok(text) = std::fs::read_to_string(ancestor.join("package.json")) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let patterns = match value.get("workspaces") {
+            Some(serde_json::Value::Array(list)) => list.clone(),
+            Some(serde_json::Value::Object(obj)) => match obj.get("packages") {
+                Some(serde_json::Value::Array(list)) => list.clone(),
+                _ => continue,
+            },
+            _ => continue,
+        };
+        let Ok(rel) = pkg_dir.strip_prefix(&ancestor) else {
+            continue;
+        };
+        let rel: Vec<&str> = rel
+            .components()
+            .filter_map(|c| c.as_os_str().to_str())
+            .collect();
+        let mut member = false;
+        for pattern in patterns.iter().filter_map(|p| p.as_str()) {
+            match pattern.strip_prefix('!') {
+                Some(excluded) if workspace_pattern_matches(excluded, &rel) => return None,
+                Some(_) => {}
+                None if workspace_pattern_matches(pattern, &rel) => member = true,
+                None => {}
+            }
+        }
+        if member {
+            return Some(ancestor);
+        }
+    }
+    None
+}
+
+/// Whether a `workspaces` glob matches a member's path segments. `*`
+/// matches within one segment and `**` matches any number of segments.
+fn workspace_pattern_matches(pattern: &str, rel: &[&str]) -> bool {
+    fn segments(pattern: &[&str], rel: &[&str]) -> bool {
+        match pattern.split_first() {
+            None => rel.is_empty(),
+            Some((&"**", rest)) => (0..=rel.len()).any(|i| segments(rest, &rel[i..])),
+            Some((first, rest)) => {
+                !rel.is_empty()
+                    && segment(first.as_bytes(), rel[0].as_bytes())
+                    && segments(rest, &rel[1..])
+            }
+        }
+    }
+    fn segment(pattern: &[u8], name: &[u8]) -> bool {
+        match pattern.split_first() {
+            None => name.is_empty(),
+            Some((b'*', rest)) => (0..=name.len()).any(|i| segment(rest, &name[i..])),
+            Some((c, rest)) => name.first() == Some(c) && segment(rest, &name[1..]),
+        }
+    }
+    let pattern: Vec<&str> = pattern
+        .trim_start_matches("./")
+        .trim_end_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+    segments(&pattern, rel)
+}
+
 /// Ensure the npm dependencies declared in the nearest
 /// `package.json` are installed before we eval the user's schema.
 ///
@@ -386,38 +461,48 @@ fn bun_install_in_dir_with_source(
             find_workspace_package_dir(name, source_hint).is_some()
         })
         .collect();
+    // Inside a Bun workspace, `bun install` resolves workspace:* deps
+    // itself, so they stay in package.json. Stripping them there is
+    // harmful: Bun 1.4's isolated linker removes the node_modules links of
+    // dependencies package.json no longer declares, and the eval then
+    // fails with "Cannot find module '@pylonsync/sdk'".
+    let workspace_root = enclosing_bun_workspace(pkg_dir);
     // pkg_json_backup_path declared at the top for the crash-recovery
     // block; the strip path below reuses the same binding.
-    let restore_after =
-        if !workspace_deps.is_empty() && satisfied_workspace_deps.len() == workspace_deps.len() {
-            let stripped = strip_workspace_deps_from_pkg_json(&pkg_json_text, &workspace_deps);
-            if let Err(e) = std::fs::rename(&pkg_json, &pkg_json_backup_path) {
-                return Err(Diagnostic {
-                    severity: Severity::Error,
-                    code: "PKG_JSON_BACKUP_FAILED".into(),
-                    message: format!(
-                        "Failed to back up package.json before stripping workspace:* deps: {e}"
-                    ),
-                    span: None,
-                    hint: None,
-                });
-            }
-            if let Err(e) = std::fs::write(&pkg_json, stripped) {
-                let _ = std::fs::rename(&pkg_json_backup_path, &pkg_json);
-                return Err(Diagnostic {
-                    severity: Severity::Error,
-                    code: "PKG_JSON_WRITE_FAILED".into(),
-                    message: format!("Failed to write stripped package.json: {e}"),
-                    span: None,
-                    hint: None,
-                });
-            }
-            true
-        } else {
-            false
-        };
+    let restore_after = if workspace_root.is_none()
+        && !workspace_deps.is_empty()
+        && satisfied_workspace_deps.len() == workspace_deps.len()
+    {
+        let stripped = strip_workspace_deps_from_pkg_json(&pkg_json_text, &workspace_deps);
+        if let Err(e) = std::fs::rename(&pkg_json, &pkg_json_backup_path) {
+            return Err(Diagnostic {
+                severity: Severity::Error,
+                code: "PKG_JSON_BACKUP_FAILED".into(),
+                message: format!(
+                    "Failed to back up package.json before stripping workspace:* deps: {e}"
+                ),
+                span: None,
+                hint: None,
+            });
+        }
+        if let Err(e) = std::fs::write(&pkg_json, stripped) {
+            let _ = std::fs::rename(&pkg_json_backup_path, &pkg_json);
+            return Err(Diagnostic {
+                severity: Severity::Error,
+                code: "PKG_JSON_WRITE_FAILED".into(),
+                message: format!("Failed to write stripped package.json: {e}"),
+                span: None,
+                hint: None,
+            });
+        }
+        true
+    } else {
+        false
+    };
 
-    let has_lockfile = lockfile_text.is_file() || lockfile_bin.is_file();
+    // A workspace member has no lockfile of its own; the root's covers it.
+    let lock_dir = workspace_root.as_deref().unwrap_or(pkg_dir);
+    let has_lockfile = lock_dir.join("bun.lock").is_file() || lock_dir.join("bun.lockb").is_file();
     let mut cmd = std::process::Command::new("bun");
     cmd.arg("install").current_dir(pkg_dir);
     // Frozen only for deploy/prod (reproducible tree). In the dev loop we let
@@ -930,6 +1015,107 @@ mod tests {
         }
         let mut f = fs::File::create(path).unwrap();
         f.write_all(contents.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn workspace_patterns_match_member_paths() {
+        assert!(workspace_pattern_matches(
+            "examples/*",
+            &["examples", "shard-arena"]
+        ));
+        assert!(workspace_pattern_matches(
+            "./examples/*/web",
+            &["examples", "chat", "web"]
+        ));
+        assert!(workspace_pattern_matches(
+            "packages/**",
+            &["packages", "plugins", "x"]
+        ));
+        assert!(workspace_pattern_matches(
+            "apps/app-*",
+            &["apps", "app-one"]
+        ));
+        assert!(!workspace_pattern_matches(
+            "examples/*",
+            &["examples", "chat", "web"]
+        ));
+        assert!(!workspace_pattern_matches("apps/*", &["examples", "chat"]));
+    }
+
+    #[test]
+    fn enclosing_bun_workspace_finds_the_root_that_lists_the_app() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(
+            &root.join("package.json"),
+            r#"{"workspaces": ["examples/*", "!examples/private"]}"#,
+        );
+        write(&root.join("examples/arena/package.json"), "{}");
+        write(&root.join("examples/private/package.json"), "{}");
+        write(&root.join("tools/app/package.json"), "{}");
+        assert_eq!(
+            enclosing_bun_workspace(&root.join("examples/arena")),
+            Some(root.canonicalize().unwrap())
+        );
+        assert_eq!(
+            enclosing_bun_workspace(&root.join("examples/private")),
+            None
+        );
+        assert_eq!(enclosing_bun_workspace(&root.join("tools/app")), None);
+    }
+
+    /// An app inside a Bun workspace keeps its workspace:* deps through the
+    /// install. Bun 1.4 removes the links of deps package.json stops
+    /// declaring, so stripping them broke `pylon shards build` in
+    /// examples/shard-arena.
+    #[test]
+    fn a_workspace_member_installs_without_stripping_workspace_deps() {
+        if std::process::Command::new("bun")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipped: bun is not on PATH");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(
+            &root.join("package.json"),
+            r#"{"name": "root", "private": true, "workspaces": ["libs/*", "apps/*"]}"#,
+        );
+        write(
+            &root.join("libs/lib/package.json"),
+            r#"{"name": "lib", "version": "1.0.0", "main": "index.ts"}"#,
+        );
+        write(&root.join("libs/lib/index.ts"), "export const x = 1;\n");
+        let app_pkg = r#"{"name": "app", "private": true, "dependencies": {"lib": "workspace:*"}}"#;
+        write(&root.join("apps/app/package.json"), app_pkg);
+        write(&root.join("apps/app/app.ts"), "");
+        let install = std::process::Command::new("bun")
+            .arg("install")
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(install.status.success(), "{install:?}");
+        let app = root.join("apps/app");
+        assert!(
+            app.join("node_modules/lib/package.json").is_file()
+                || root.join("node_modules/lib/package.json").is_file()
+        );
+
+        ensure_npm_deps_installed(app.join("app.ts").to_str().unwrap(), false).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(app.join("package.json")).unwrap(),
+            app_pkg
+        );
+        let resolve = std::process::Command::new("bun")
+            .args(["-e", "await import('lib')"])
+            .current_dir(&app)
+            .output()
+            .unwrap();
+        assert!(resolve.status.success(), "{resolve:?}");
     }
 
     #[test]
