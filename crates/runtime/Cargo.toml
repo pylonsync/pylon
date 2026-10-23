@@ -108,7 +108,7 @@ rand = { workspace = true }
 # inside text nodes, inline JSON hydration payloads, and quoted attribute
 # values that any regex mis-slices.
 htmd = "0.5"
-markup5ever_rcdom = "0.38"
+markup5ever_rcdom = "0.39"
 
 # Raw accept() with a null address — see `accept_tcp` (panic-proof accept
 # around libstd's macOS dual-stack sockaddr assertion). Windows takes the
