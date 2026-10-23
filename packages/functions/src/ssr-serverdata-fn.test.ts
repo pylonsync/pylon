@@ -8,7 +8,7 @@
  *  - promise caching per (name, args) so React 19 `use()` gets the SAME
  *    promise on the post-suspense re-render;
  *  - resolved values recorded into the valueCache (the ssrData blob);
- *  - the onFnCall notification that lets the render veto shared caching for
+ *  - the onIdentityRead notification that lets the render veto shared caching for
  *    identity-carrying requests;
  *  - the client runtime template carrying the matching `fn` shim.
  */
@@ -47,7 +47,7 @@ describe("makeServerData.fn", () => {
     ]);
   });
 
-  test("onFnCall fires once per unique call (the cache-veto hook)", async () => {
+  test("onIdentityRead fires once per unique fn call (the cache-veto hook)", async () => {
     let touches = 0;
     const sd = makeServerData(
       noopReader,

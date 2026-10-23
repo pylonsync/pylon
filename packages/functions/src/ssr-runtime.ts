@@ -2682,20 +2682,23 @@ export function makeServerData(
   // executes it exactly like ctx.runQuery). Lets a page SSR data whose safe
   // public projection lives in a gated query instead of open row policies.
   callFn?: (name: string, args?: Record<string, unknown>) => Promise<unknown>,
-  // Fired on every serverData.fn call so the render can veto shared caching
-  // when the call carried a real identity (the fn may read ctx.auth, making
-  // its output identity-specific without the page ever touching props.auth).
-  onFnCall?: () => void,
+  // Fired on every call whose result can depend on the caller: serverData.fn
+  // (the fn may read ctx.auth) and every policy-filtered read (the host applies
+  // the caller's read policies to `ssrRead` reads). The render vetoes shared
+  // caching when it carried a real identity. `serverData.unsafe.*` skips
+  // policies, so its rows are the same for every caller and it does not fire.
+  onIdentityRead?: () => void,
   // Fired on every serverData read (fn calls included), so an offline-shell
   // render can refuse a page that needs the server to render.
   onRead?: () => void,
 ): any {
   const promiseCache = new Map<string, Promise<any>>();
-  const wrap = (r: any, prefix: string): any => {
+  const wrap = (r: any, prefix: string, callerFiltered: boolean): any => {
     const out: any = {};
     for (const m of SERVER_DATA_METHODS) {
       out[m] = (...args: any[]) => {
         onRead?.();
+        if (callerFiltered) onIdentityRead?.();
         const key = prefix + m + ":" + stableStringify(args);
         let p = promiseCache.get(key);
         if (!p) {
@@ -2710,8 +2713,8 @@ export function makeServerData(
     }
     return out;
   };
-  const sd = wrap(reader, "");
-  if (reader.unsafe) sd.unsafe = wrap(reader.unsafe, "u:");
+  const sd = wrap(reader, "", true);
+  if (reader.unsafe) sd.unsafe = wrap(reader.unsafe, "u:", false);
   if (callFn) {
     sd.fn = (name: string, args?: Record<string, unknown>) => {
       onRead?.();
@@ -2720,7 +2723,7 @@ export function makeServerData(
       const key = "fn:" + name + ":" + stableStringify(args ?? {});
       let p = promiseCache.get(key);
       if (!p) {
-        onFnCall?.();
+        onIdentityRead?.();
         p = callFn(name, args).then((value: any) => {
           valueCache[key] = value;
           return value;
@@ -2812,11 +2815,11 @@ export function computeCacheVerdict(args: {
  *    `authTouched` proves a bucketable body depends on nothing but the binary
  *    session bit.
  *  - `dynamicTouched` — reading request headers/cookies makes it request-specific.
- *  - `strictPolicies` — in strict mode serverData reads are auth-FILTERED, so the
- *    body/ssrData would vary by identity even without the page reading auth. In
- *    the default (non-strict) mode serverData reads bypass the policy gate and
- *    return identity-independent rows, so the cached body is safe to share within
- *    the bucket. Strict mode therefore must NOT bucket.
+ *  - `strictPolicies` — kept as a veto. Safe serverData reads are filtered by
+ *    the caller's read policies in EVERY mode (not only strict), so an
+ *    identity-carrying render that reads serverData sets `authTouched` itself
+ *    (makeServerData's onIdentityRead); that, not this flag, is what keeps a
+ *    signed-in render with policy-filtered rows out of the bucket.
  *  - cookieCount / forceDynamic / wantsStream / non-200 — same reasons as the
  *    anon verdict (a Set-Cookie, a streaming head, or an error/redirect can't be
  *    safely shared).
@@ -2881,8 +2884,11 @@ export function computeOfflineShellVerdict(args: {
   status: number;
 }): { ok: true } | { ok: false; reason: string } {
   if (args.status !== 200) return { ok: false, reason: `status ${args.status}` };
-  if (args.authTouched) return { ok: false, reason: "the page read props.auth" };
+  // serverData before auth: a signed-in serverData read also sets authTouched
+  // (it returns the caller's rows), and "read serverData" is the actionable
+  // reason.
   if (args.serverDataTouched) return { ok: false, reason: "the page read serverData" };
+  if (args.authTouched) return { ok: false, reason: "the page read props.auth" };
   if (args.dynamicTouched) {
     return { ok: false, reason: "the page read request headers or cookies" };
   }
@@ -3453,12 +3459,13 @@ export async function handleRenderRoute(
       buildDbReader(msg.call_id, true),
       ssrValueCache,
       buildSsrFnCaller(msg.call_id),
-      // A query function runs with the page's auth and may read ctx.auth
-      // internally — identity-specific output the read-tracking proxies
-      // can't see. An identity-carrying render that called serverData.fn
-      // must therefore veto shared caches exactly as if it read props.auth.
-      // Anonymous renders stay cacheable: the anonymous result is uniform
-      // across every anonymous visitor.
+      // A query function may read ctx.auth, and a safe read returns only the
+      // rows the caller's read policies allow: identity-specific output the
+      // read-tracking proxies can't see. An identity-carrying render that
+      // called serverData.fn or made a safe read must therefore veto shared
+      // caches exactly as if it read props.auth. Anonymous renders stay
+      // cacheable: the anonymous result is uniform across every anonymous
+      // visitor.
       () => {
         const a = msg.auth as Record<string, unknown> | undefined;
         if (a && (a.user_id || a.is_admin || a.tenant_id)) {
