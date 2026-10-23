@@ -445,6 +445,7 @@ fn parse_byte_range(header: &str, total: u64) -> RangeSpec {
 /// answers a range request with `200` instead of `206`, so without this every
 /// video served from `public/` shows a black box with a slashed-out play button
 /// on iPhone/iPad (desktop tolerates `200`, which masks it).
+#[cfg(test)]
 pub(crate) fn respond_static_file(
     request: Request,
     bytes: Vec<u8>,
@@ -460,6 +461,54 @@ pub(crate) fn respond_static_file(
         content_type,
         cache,
         cors_origin,
+    );
+}
+
+/// Serve an uploaded file from the app's origin. The uploader chose its
+/// bytes and declared type, so it must not be able to run script here:
+///
+/// - only types that cannot run script display inline
+///   (`pylon_storage::files::displays_inline`); anything else, HTML, SVG,
+///   XML and JavaScript included, is sent as `application/octet-stream`
+///   with `Content-Disposition: attachment`,
+/// - `X-Content-Type-Options: nosniff` stops the browser from guessing a
+///   runnable type from the bytes,
+/// - `Content-Security-Policy: sandbox` runs anything that still renders in
+///   an opaque origin with scripts off. PDF is left out so the browser's
+///   viewer keeps working; a PDF cannot reach the page's origin.
+pub(crate) fn respond_user_file(
+    request: Request,
+    bytes: Vec<u8>,
+    declared_type: &str,
+    cache: &str,
+    cors_origin: &str,
+) {
+    let media = pylon_storage::files::normalize_media_type(declared_type)
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let inline = pylon_storage::files::displays_inline(&media);
+    let content_type = if inline {
+        media.as_str()
+    } else {
+        "application/octet-stream"
+    };
+    let mut extra = vec![Header::from_bytes("X-Content-Type-Options", "nosniff").unwrap()];
+    if content_type != "application/pdf" {
+        extra.push(
+            Header::from_bytes("Content-Security-Policy", "default-src 'none'; sandbox").unwrap(),
+        );
+    }
+    if !inline {
+        extra.push(Header::from_bytes("Content-Disposition", "attachment").unwrap());
+    }
+    let total = bytes.len();
+    respond_reader_with_headers(
+        request,
+        std::io::Cursor::new(bytes),
+        total,
+        content_type,
+        cache,
+        cors_origin,
+        extra,
     );
 }
 
@@ -479,11 +528,33 @@ fn open_static_file(path: &Path) -> std::io::Result<(std::fs::File, usize)> {
 
 fn respond_static_reader<R: std::io::Read + std::io::Seek + Send + 'static>(
     request: Request,
+    reader: R,
+    total: usize,
+    content_type: &str,
+    cache: &str,
+    cors_origin: &str,
+) {
+    respond_reader_with_headers(
+        request,
+        reader,
+        total,
+        content_type,
+        cache,
+        cors_origin,
+        Vec::new(),
+    );
+}
+
+/// [`respond_static_reader`] plus `extra` headers on every response,
+/// partial and unsatisfiable ones included.
+fn respond_reader_with_headers<R: std::io::Read + std::io::Seek + Send + 'static>(
+    request: Request,
     mut reader: R,
     total: usize,
     content_type: &str,
     cache: &str,
     cors_origin: &str,
+    extra: Vec<Header>,
 ) {
     let spec = request
         .headers()
@@ -498,7 +569,7 @@ fn respond_static_reader<R: std::io::Read + std::io::Seek + Send + 'static>(
     let cors = Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes()).unwrap();
     let cache_h = Header::from_bytes("Cache-Control", cache).unwrap();
     let accept_ranges = Header::from_bytes("Accept-Ranges", "bytes").unwrap();
-    let (status, length, headers) = match spec {
+    let (status, length, mut headers) = match spec {
         RangeSpec::Partial(start, end) => {
             if reader.seek(std::io::SeekFrom::Start(start)).is_err() {
                 let _ = request.respond(Response::empty(500));
@@ -520,6 +591,7 @@ fn respond_static_reader<R: std::io::Read + std::io::Seek + Send + 'static>(
         }
         RangeSpec::Full => (200, total, vec![ct, cors, cache_h, accept_ranges]),
     };
+    headers.extend(extra);
     let response = Response::new(
         tiny_http::StatusCode(status),
         headers,

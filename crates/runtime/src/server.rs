@@ -1856,8 +1856,10 @@ mod file_auth_tests {
             None,
             true
         ));
-        // Unowned (Ok(None)) → allowed; the caller claims it on write.
-        assert!(!local_put_owned_by_other(&Ok(None), "me", None, false));
+        // Unowned (Ok(None), a `store()`d file) → refused; it used to be
+        // claimed by whoever wrote first.
+        assert!(local_put_owned_by_other(&Ok(None), "me", None, false));
+        assert!(!local_put_owned_by_other(&Ok(None), "admin", None, true));
         // Unreadable sidecar (Err) → fail CLOSED, refuse the write.
         assert!(local_put_owned_by_other(
             &Err(FileStorageError {
@@ -6590,7 +6592,38 @@ fn start_server(
                 }
             };
             let filename = v["filename"].as_str().unwrap_or("upload");
-            let mime_type = v["mimeType"].as_str().unwrap_or("application/octet-stream");
+            // The declared type is stored and later sent as a header, so
+            // it must be a plain `type/subtype` (no line breaks, which would
+            // add headers of the uploader's choosing to every download).
+            let mime_type = match pylon_storage::files::normalize_media_type(
+                v["mimeType"].as_str().unwrap_or("application/octet-stream"),
+            ) {
+                Some(t) => t,
+                None => {
+                    let err = json_error(
+                        "INVALID_MIME_TYPE",
+                        "mimeType must be a media type such as image/png",
+                    );
+                    let response = with_security_headers(
+                        Response::from_string(&err)
+                            .with_status_code(400u16)
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            )
+                            .with_header(
+                                Header::from_bytes(
+                                    "Access-Control-Allow-Origin",
+                                    cors_origin.as_bytes().to_vec(),
+                                )
+                                .unwrap(),
+                            ),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request("POST", 400);
+                    return;
+                }
+            };
+            let mime_type = mime_type.as_str();
             let size = v["size"].as_u64().unwrap_or(0) as usize;
             let public = match parse_file_visibility(&v["visibility"]) {
                 Ok(public) => public,
@@ -6914,6 +6947,22 @@ fn start_server(
         if method == Method::Put {
             if let Some(rest) = url.strip_prefix("/api/files/local-put/") {
                 let asset_id = rest.split('?').next().unwrap_or(rest);
+                // Only the local backend receives bytes here. With S3 or
+                // Stack0 active, uploads go to the provider; without this,
+                // any signed-in user could fill the machine's disk.
+                if !file_ops.storage.requires_owner_check() {
+                    let err = json_error("NOT_FOUND", "Not found");
+                    let response = with_security_headers(
+                        Response::from_string(&err)
+                            .with_status_code(404u16)
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            ),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request("PUT", 404);
+                    return;
+                }
                 if auth_ctx.user_id.is_none() {
                     let err = json_error(
                         "AUTH_REQUIRED",
@@ -6993,13 +7042,11 @@ fn start_server(
                     return;
                 }
                 let local = pylon_storage::files::local_from_env();
-                // Owner gate: the byte-receiver must refuse a write to an asset
-                // owned by a DIFFERENT user — otherwise any authenticated user
-                // could overwrite another user's pending upload OR a confirmed
-                // file by knowing/guessing its id. Fresh assets are bound to
-                // their initiator at `/api/files/init`; unowned assets (legacy,
-                // or a direct `store()`) are CLAIMED on first write below. Fail
-                // CLOSED on a lookup error.
+                // Owner gate: the byte-receiver writes only to an asset bound
+                // to the caller at `/api/files/init`. A different owner, no
+                // owner (a file server code saved with `store()`), or an
+                // unreadable record all refuse, or any signed-in user could
+                // overwrite a file whose id they had seen.
                 use pylon_storage::files::FileStorage as _;
                 let caller = auth_ctx.user_id.clone().unwrap_or_default();
                 let prior_owner = local.owner_of(asset_id);
@@ -7035,20 +7082,7 @@ fn start_server(
                     return;
                 }
                 let (status, body) = match local.write_bytes(asset_id, &bytes) {
-                    Ok(()) => {
-                        // Claim an unowned asset for the caller so a later,
-                        // different user can't overwrite it (the asset had no
-                        // init-time binding — legacy or direct write).
-                        if matches!(prior_owner, Ok(None)) && !caller.is_empty() {
-                            let owner = pylon_storage::files::FileOwner {
-                                user_id: caller.clone(),
-                                tenant_id: auth_ctx.tenant_id.clone(),
-                                public: false,
-                            };
-                            let _ = local.record_owner(asset_id, &owner);
-                        }
-                        (204u16, String::new())
-                    }
+                    Ok(()) => (204u16, String::new()),
                     Err(e) => (500u16, json_error(&e.code, &e.message)),
                 };
                 let response = with_security_headers(
@@ -7399,7 +7433,7 @@ fn start_server(
                             } else {
                                 "private, max-age=0, must-revalidate"
                             };
-                            crate::frontend::respond_static_file(
+                            crate::frontend::respond_user_file(
                                 request,
                                 content,
                                 &ct,
@@ -11254,10 +11288,9 @@ fn ephemeral_sessions_boot_check(force_in_memory: bool, is_dev: bool) -> Result<
     }
 }
 
-/// Decide whether a `local-put` byte write must be REFUSED because the asset is
-/// already owned by another user or tenant. Fails CLOSED: an ownership-
-/// lookup error refuses the write. An unowned asset (`Ok(None)`) is allowed —
-/// the caller claims it on write. Admins bypass the owner match.
+/// Decide whether a `local-put` byte write must be REFUSED: the asset is
+/// owned by another user or tenant, has no owner record, or its record is
+/// unreadable. Only an unscoped admin bypasses the owner match.
 fn local_put_owned_by_other(
     prior_owner: &Result<
         Option<pylon_storage::files::FileOwner>,
@@ -11269,7 +11302,9 @@ fn local_put_owned_by_other(
 ) -> bool {
     match prior_owner {
         Ok(Some(owner)) => !is_admin && !file_owner_matches(owner, Some(caller), caller_tenant_id),
-        Ok(None) => false,
+        // No owner record: a file server code saved with `store()` (init
+        // always records one). Only an unscoped admin may replace it.
+        Ok(None) => !is_admin,
         Err(_) => true,
     }
 }

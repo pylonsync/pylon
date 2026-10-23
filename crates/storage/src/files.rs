@@ -166,6 +166,79 @@ pub(crate) fn read_limited(
     Ok(if buf.len() > max { None } else { Some(buf) })
 }
 
+/// An uploader's declared type as a bare `type/subtype`, lowercase, or
+/// `None` when it is not one. Parameters (`; charset=...`) are dropped.
+///
+/// The type ends up in a response header, so anything outside RFC 9110's
+/// token characters is refused: a line break in it would let the uploader
+/// add headers of their own (Set-Cookie) to every download of the file.
+pub fn normalize_media_type(declared: &str) -> Option<String> {
+    let essence = declared.split(';').next().unwrap_or("").trim();
+    let (kind, sub) = essence.split_once('/')?;
+    let token = |s: &str| {
+        !s.is_empty()
+            && s.bytes().all(|b| {
+                b.is_ascii_alphanumeric()
+                    || matches!(
+                        b,
+                        b'!' | b'#'
+                            | b'$'
+                            | b'&'
+                            | b'\''
+                            | b'*'
+                            | b'+'
+                            | b'-'
+                            | b'.'
+                            | b'^'
+                            | b'_'
+                            | b'`'
+                            | b'|'
+                            | b'~'
+                    )
+            })
+    };
+    if !token(kind) || !token(sub) {
+        return None;
+    }
+    // Parameters may not smuggle control characters either.
+    if declared
+        .bytes()
+        .any(|b| b.is_ascii_control() || !b.is_ascii())
+    {
+        return None;
+    }
+    Some(format!(
+        "{}/{}",
+        kind.to_ascii_lowercase(),
+        sub.to_ascii_lowercase()
+    ))
+}
+
+/// Whether a browser may display an uploaded file of this (normalized) type
+/// inline on the app's origin. Only types that cannot run script: raster
+/// images, audio, video, PDF and plain text. Everything else (HTML, SVG,
+/// XML, JavaScript, and types this list does not know) is served as a
+/// download.
+pub fn displays_inline(media_type: &str) -> bool {
+    const RASTER_IMAGES: &[&str] = &[
+        "image/png",
+        "image/jpeg",
+        "image/gif",
+        "image/webp",
+        "image/avif",
+        "image/bmp",
+        "image/heic",
+        "image/heif",
+        "image/x-icon",
+        "image/vnd.microsoft.icon",
+    ];
+    RASTER_IMAGES.contains(&media_type)
+        || media_type.starts_with("audio/")
+        || media_type.starts_with("video/")
+        || media_type == "application/pdf"
+        || media_type == "text/plain"
+}
+
 /// Result of `FileStorage::init_upload`.
 ///
 /// Wire shape mirrors what the HTTP layer returns from
@@ -407,14 +480,17 @@ impl LocalFileStorage {
     /// perfectly good file, and failing the upload over a sidecar would be
     /// worse than serving it as octet-stream later.
     fn record_content_type(&self, id: &str, content_type: &str) {
-        if validate_local_id(id).is_err() || content_type.trim().is_empty() {
+        if validate_local_id(id).is_err() {
             return;
         }
+        let Some(content_type) = normalize_media_type(content_type) else {
+            return;
+        };
         let dir = self.dir.join(".contenttype");
         if std::fs::create_dir_all(&dir).is_err() {
             return;
         }
-        let _ = std::fs::write(self.content_type_sidecar_path(id), content_type.trim());
+        let _ = std::fs::write(self.content_type_sidecar_path(id), content_type);
     }
 
     /// Receive raw bytes from a client PUT against the `upload_url`
@@ -446,17 +522,22 @@ fn validate_local_id(id: &str) -> Result<(), FileStorageError> {
     Ok(())
 }
 
-/// Mint a fresh asset ID for the local backend. Uses high-resolution
-/// timestamp + sanitised filename so concurrent uploads don't collide
-/// AND IDs sort by upload time (useful when manually inspecting the
-/// uploads dir).
+/// Mint a fresh asset ID for the local backend: a timestamp (IDs sort by
+/// upload time in the uploads dir), 64 random bits, then the sanitised
+/// filename, which stays last because `stored_content_type` reads the
+/// extension from the tail.
+///
+/// The random part is required. The clock often has only microsecond
+/// resolution, so two uploads of the same filename could get the same ID,
+/// and the second init then overwrote the first's owner and type.
 fn local_mint_id(name: &str) -> String {
     format!(
-        "file_{}_{}",
+        "file_{}_{:016x}_{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos(),
+        rand::random::<u64>(),
         name.replace(['/', '\\', '.'], "_")
     )
 }
@@ -990,6 +1071,57 @@ impl FileStorage for Stack0FileStorage {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn media_types_are_normalized_or_refused() {
+        use super::normalize_media_type as n;
+        assert_eq!(n("image/PNG").as_deref(), Some("image/png"));
+        assert_eq!(n("text/html; charset=utf-8").as_deref(), Some("text/html"));
+        assert_eq!(
+            n("application/vnd.api+json").as_deref(),
+            Some("application/vnd.api+json")
+        );
+        for bad in [
+            "",
+            "text",
+            "text/",
+            "/plain",
+            "text/plain\r\nSet-Cookie: a=1",
+            "text/plain; x=\"\n\"",
+            "image/pngé",
+            "a b/c",
+        ] {
+            assert_eq!(n(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn only_types_that_cannot_run_script_display_inline() {
+        use super::displays_inline as inline;
+        for ok in [
+            "image/png",
+            "image/jpeg",
+            "video/mp4",
+            "audio/mpeg",
+            "application/pdf",
+            "text/plain",
+        ] {
+            assert!(inline(ok), "{ok}");
+        }
+        for no in [
+            "text/html",
+            "image/svg+xml",
+            "application/xhtml+xml",
+            "text/xml",
+            "application/xml",
+            "application/javascript",
+            "text/javascript",
+            "application/octet-stream",
+            "multipart/x-mixed-replace",
+        ] {
+            assert!(!inline(no), "{no}");
+        }
+    }
+
     use super::*;
 
     #[test]

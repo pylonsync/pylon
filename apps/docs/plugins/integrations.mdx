@@ -102,6 +102,12 @@ await db.insert("Post", { imageUrl: photo.url, caption });
 
 Use `"public"` for files every visitor sees, such as feed photos or listing images. Writes and deletes stay with the uploader either way. Any other value is refused with `400 INVALID_VISIBILITY`. On Stack0 and on a public bucket, `stored.url` is a CDN URL that anyone can load, whatever the visibility.
 
+### File types
+
+`GET /api/files/<id>` serves files from the app's own domain, so a file must not be able to run script there. Raster images, audio, video, PDF and plain text display in the browser with their declared type. Any other type, including HTML, SVG, XML and JavaScript, downloads as `application/octet-stream` with `Content-Disposition: attachment`. Every file response carries `X-Content-Type-Options: nosniff`, and every type except PDF carries `Content-Security-Policy: default-src 'none'; sandbox`.
+
+`mimeType` on `/api/files/init` must be a media type such as `image/png`. Anything else is refused with `400 INVALID_MIME_TYPE`.
+
 <Note>
 The multipart `POST /api/files/upload` was removed in 0.3.91 and returns `410 Gone`. `uploadFile` used it until 0.11.2; update `@pylonsync/react` if `<FileUpload>` fails with that status.
 </Note>
