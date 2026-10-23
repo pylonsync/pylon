@@ -6200,6 +6200,22 @@ pub(crate) fn handle(
         ));
     }
     if url == "/api/auth/passkey/login/begin" && method == HttpMethod::Post {
+        let rl = pylon_auth::rate_limit::AuthRateLimiter::shared();
+        if let pylon_auth::rate_limit::RateLimitDecision::Deny { retry_after_secs } = rl.check(
+            pylon_auth::rate_limit::AuthBucket::ChallengeIssue,
+            ctx.peer_ip,
+            None,
+        ) {
+            ctx.add_response_header("Retry-After", retry_after_secs.to_string());
+            return Some((
+                429,
+                json_error_with_hint(
+                    "RATE_LIMITED",
+                    "Too many passkey sign-in attempts",
+                    &format!("Try again in {retry_after_secs}s"),
+                ),
+            ));
+        }
         let (rp_id, _) = match webauthn_rp_id_and_origin() {
             Ok(p) => p,
             Err(reason) => return Some((500, json_error("WEBAUTHN_NOT_CONFIGURED", &reason))),

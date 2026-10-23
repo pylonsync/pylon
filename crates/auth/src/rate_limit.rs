@@ -48,6 +48,10 @@ pub enum AuthBucket {
     /// per-app guest quota for everyone else. Per-IP only: a guest has
     /// no account to key on.
     GuestIssue,
+    /// `/api/auth/passkey/login/begin` — public endpoint that stores a
+    /// challenge in the in-process `PasskeyStore` for five minutes.
+    /// Per-IP only: login begin has no account yet.
+    ChallengeIssue,
 }
 
 impl AuthBucket {
@@ -95,6 +99,10 @@ impl AuthBucket {
             // headroom. Load tests (`pylon bench --join`) raise it.
             Self::GuestIssue => {
                 return (env_cap("PYLON_AUTH_GUEST_IP_PER_MIN", 120), 0);
+            }
+            // Matches Verify: a passkey sign-in begins once per attempt.
+            Self::ChallengeIssue => {
+                return (env_cap("PYLON_AUTH_CHALLENGE_IP_PER_MIN", 30), 0);
             }
         };
         (env_cap(ip_env, ip_default), env_cap(acct_env, acct_default))

@@ -175,8 +175,26 @@ impl PasskeyStore {
         let mut bytes = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut bytes);
         let challenge = base64_url(bytes);
-        let expires_at = now_secs() + 5 * 60;
-        self.challenges.lock().unwrap().insert(
+        let now = now_secs();
+        let expires_at = now + 5 * 60;
+        let mut map = self.challenges.lock().unwrap();
+        // Login begin is public, and an unused challenge used to stay until
+        // the process restarted. Keep the map bounded: drop expired entries
+        // when it is full, then the ones closest to expiring.
+        if map.len() >= MAX_PENDING_CHALLENGES {
+            map.retain(|_, c| c.expires_at > now);
+            while map.len() >= MAX_PENDING_CHALLENGES {
+                let Some(oldest) = map
+                    .iter()
+                    .min_by_key(|(_, c)| c.expires_at)
+                    .map(|(k, _)| k.clone())
+                else {
+                    break;
+                };
+                map.remove(&oldest);
+            }
+        }
+        map.insert(
             challenge.clone(),
             PasskeyChallenge {
                 challenge: challenge.clone(),
@@ -465,6 +483,11 @@ pub fn verify_registration(
     expected_origin: &str,
     expected_rp_id: &str,
 ) -> Result<RegistrationOutcome, WebauthnError> {
+    // Only `fmt: "none"` is accepted, which is well under 1 KiB. Refuse
+    // anything far larger before parsing it.
+    if attestation_object.len() > MAX_ATTESTATION_OBJECT_BYTES {
+        return Err(WebauthnError::AttestationFormatUnsupported);
+    }
     // 1. Parse + validate clientDataJSON.
     let client_data: serde_json::Value =
         serde_json::from_slice(client_data_json).map_err(|_| WebauthnError::BadClientData)?;
@@ -650,6 +673,16 @@ fn parse_cbor_map(bytes: &[u8]) -> Option<HashMap<CborKey, CborVal>> {
     }
 }
 
+/// Most challenges held at once (about 1.5 MB). See `mint_challenge`.
+const MAX_PENDING_CHALLENGES: usize = 10_000;
+
+/// Largest attestation object `verify_registration` parses.
+const MAX_ATTESTATION_OBJECT_BYTES: usize = 16 * 1024;
+
+/// How deep CBOR containers may nest. An attestation object nests about
+/// three levels (attStmt → x5c → certificate bytes); a COSE key one.
+const MAX_CBOR_DEPTH: usize = 16;
+
 struct CborParser<'a> {
     bytes: &'a [u8],
     pos: usize,
@@ -724,6 +757,17 @@ impl<'a> CborParser<'a> {
     }
 
     fn read_value(&mut self) -> Option<CborVal> {
+        self.read_value_at(0)
+    }
+
+    /// `depth` counts the containers around this value. Past
+    /// [`MAX_CBOR_DEPTH`] the input is refused: the parser recurses into
+    /// arrays and maps, so unbounded nesting in a request body (one byte
+    /// per level) would overflow the thread's stack and abort the server.
+    fn read_value_at(&mut self, depth: usize) -> Option<CborVal> {
+        if depth > MAX_CBOR_DEPTH {
+            return None;
+        }
         let head = self.read_u8()?;
         let major = head >> 5;
         let additional = head & 0x1F;
@@ -749,7 +793,7 @@ impl<'a> CborParser<'a> {
                 let len = self.read_container_len(additional)?;
                 let mut arr = Vec::with_capacity(len);
                 for _ in 0..len {
-                    arr.push(self.read_value()?);
+                    arr.push(self.read_value_at(depth + 1)?);
                 }
                 // We don't model arrays — collapse into Other.
                 let _ = arr;
@@ -759,13 +803,13 @@ impl<'a> CborParser<'a> {
                 let len = self.read_container_len(additional)?;
                 let mut map = HashMap::with_capacity(len);
                 for _ in 0..len {
-                    let key_val = self.read_value()?;
+                    let key_val = self.read_value_at(depth + 1)?;
                     let key = match key_val {
                         CborVal::I(n) => CborKey::I(n),
                         CborVal::Text(s) => CborKey::S(s),
                         _ => return None,
                     };
-                    let val = self.read_value()?;
+                    let val = self.read_value_at(depth + 1)?;
                     map.insert(key, val);
                 }
                 Some(CborVal::Map(map))
@@ -1104,6 +1148,49 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, WebauthnError::AttestationFormatUnsupported);
+    }
+
+    #[test]
+    fn pending_challenges_stay_bounded() {
+        let store = PasskeyStore::new();
+        for _ in 0..MAX_PENDING_CHALLENGES + 500 {
+            store.mint_challenge(String::new(), ChallengeKind::Assertion);
+        }
+        assert!(store.challenges.lock().unwrap().len() <= MAX_PENDING_CHALLENGES);
+        // The newest still works.
+        let last = store.mint_challenge("u".into(), ChallengeKind::Assertion);
+        assert!(store
+            .take_challenge(&last, ChallengeKind::Assertion)
+            .is_some());
+    }
+
+    /// Each 0x81 opens a one-element array, and the parser recursed into
+    /// it before checking anything, so a request body of nested arrays
+    /// overflowed the stack and killed the server process. Parsed on a
+    /// small stack so the overflow is deterministic.
+    #[test]
+    fn cbor_deep_nesting_is_refused_not_a_stack_overflow() {
+        for open in [0x81u8, 0xA1] {
+            let mut buf = vec![0xA1, 0x01]; // {1: ...
+            for _ in 0..100_000 {
+                buf.push(open);
+                if open == 0xA1 {
+                    buf.push(0x01); // key of each nested map
+                }
+            }
+            buf.push(0x00);
+            let parsed = std::thread::Builder::new()
+                .stack_size(256 * 1024)
+                .spawn(move || parse_cbor_map(&buf).is_none())
+                .unwrap()
+                .join()
+                .expect("the parser must not overflow the stack");
+            assert!(parsed, "deep nesting must be refused");
+        }
+        // A real COSE key nests one level and still parses.
+        let mut ok = vec![0xA2, 0x01, 0x02, 0x20, 0x81];
+        ok.push(0x01);
+        assert!(parse_cbor_map(&ok).is_some());
     }
 
     #[test]
