@@ -434,7 +434,22 @@ where
                     use chunked_transfer::Encoder;
 
                     let mut writer = Encoder::new(writer);
-                    io::copy(&mut reader, &mut writer)?;
+                    // Pylon: send each read as soon as it arrives. A body of
+                    // unknown length is a stream (a server-rendered page
+                    // flushing Suspense boundaries); `io::copy` held it until
+                    // 8 KB filled the chunk buffer and 1 KB the socket buffer.
+                    let mut buf = vec![0u8; 16 * 1024];
+                    loop {
+                        let n = match reader.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => n,
+                            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                            Err(e) => return Err(e),
+                        };
+                        writer.write_all(&buf[..n])?;
+                        writer.flush()?;
+                        writer.get_mut().flush()?;
+                    }
                 }
 
                 Some(TransferEncoding::Identity) => {

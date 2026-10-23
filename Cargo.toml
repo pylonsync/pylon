@@ -128,7 +128,10 @@ samael = { path = "vendor/samael" }
 # the connection's reader/writer halves into one opaque Box<dyn ReadWrite>,
 # which makes concurrent read + broadcast-write on a multiplexed WebSocket
 # impossible (the per-client writer thread needs its own write half).
-# Drop when upstream exposes the split halves. (tiny_http is MIT/Apache-2.0;
+# The vendored copy also flushes a chunked (unknown-length) body after every
+# read, so a streamed SSR page reaches the browser boundary by boundary
+# (upstream buffers 8 KB first). Drop when upstream exposes the split
+# halves and flushes chunked bodies. (tiny_http is MIT/Apache-2.0;
 # license files retained in vendor/tiny_http.)
 tiny_http = { path = "vendor/tiny_http" }
 

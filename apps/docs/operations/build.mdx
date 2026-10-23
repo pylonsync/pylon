@@ -32,6 +32,8 @@ A named import from a namespace barrel, such as `import { Dialog } from "radix-u
 
 API and sync responses (JSON of 1 KB or more) are compressed per response: brotli when the client accepts `br`, else gzip. A sync page of 3.3 MB is about 0.6 MB on the wire. `/api/auth/*` responses are not compressed, because they carry session tokens.
 
+Server-rendered pages are compressed too, and still stream: the encoder flushes at each streamed chunk, so the browser paints the shell before slow Suspense boundaries arrive. A page requested with credentials (the session cookie or an `Authorization` header) is compressed only when its URL has no query string and no dynamic segment. Compressing a user's secrets next to text an attacker put in the URL would let the attacker read them from response sizes (BREACH). Cached pages are compressed for every request, because a cached page holds no user's secrets.
+
 Dev mode (`pylon dev`) does not change. It runs your source files, and does not write compressed copies.
 
 ## Data paths

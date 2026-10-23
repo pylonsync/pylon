@@ -2942,16 +2942,37 @@ fn serve_via_ssr_rpc(
                     response_headers.push(h);
                 }
             }
-            let response = Response::new(
-                tiny_http::StatusCode(status),
-                response_headers,
-                crate::server::StreamingBody::new(body_rx),
-                None, // content-length unknown → tiny_http uses chunked transfer
-                None,
-            );
-            // request.respond drains StreamingBody chunk-by-chunk as HTTP
-            // chunked-transfer frames; returns at EOF (render thread done).
-            let _ = request.respond(response);
+            // Compressed when the client accepts it and BREACH does not apply
+            // (see ssr_stream_encoding). Each streamed chunk is flushed through
+            // the encoder, so the page still paints boundary by boundary.
+            let encoding = ssr_stream_encoding(cfg, &request, &matched.params, &page_headers);
+            if ssr_body_compressible(&page_headers) {
+                add_vary_accept_encoding(&mut response_headers);
+            }
+            if let Some(encoding) = encoding {
+                if let Ok(h) = Header::from_bytes("Content-Encoding", encoding.header_value()) {
+                    response_headers.push(h);
+                }
+                let response = Response::new(
+                    tiny_http::StatusCode(status),
+                    response_headers,
+                    crate::compress::StreamingEncoder::new(body_rx, encoding),
+                    None,
+                    None,
+                );
+                let _ = request.respond(response);
+            } else {
+                let response = Response::new(
+                    tiny_http::StatusCode(status),
+                    response_headers,
+                    crate::server::StreamingBody::new(body_rx),
+                    None, // content-length unknown → tiny_http uses chunked transfer
+                    None,
+                );
+                // request.respond drains StreamingBody chunk-by-chunk as HTTP
+                // chunked-transfer frames; returns at EOF (render thread done).
+                let _ = request.respond(response);
+            }
             None
         }
     };
@@ -3496,7 +3517,9 @@ fn serve_cached_ssr(
         content_type: md.map(|m| m.representation.content_type()),
         alternate_md: md_url.as_deref(),
     };
-    let mut resp = Response::from_data(entry.body).with_status_code(entry.status);
+    let (body, encoding) = encode_cached_ssr_body(&request, &page_headers, entry.body);
+    let mut resp = Response::from_data(body).with_status_code(entry.status);
+    resp = with_cached_encoding_headers(resp, &page_headers, encoding);
     // Reached only for cookie-anonymous, eligible requests (the cache READ gate),
     // and the stored body is the anonymous render → safe to advertise `public`.
     // EXCEPT for a navigation payload: the origin keys HTML and JSON apart, but
@@ -3531,7 +3554,9 @@ fn serve_cached_bucket_ssr(
         content_type: md.map(|m| m.representation.content_type()),
         alternate_md: md_url.as_deref(),
     };
-    let mut resp = Response::from_data(entry.body).with_status_code(entry.status);
+    let (body, encoding) = encode_cached_ssr_body(&request, &page_headers, entry.body);
+    let mut resp = Response::from_data(body).with_status_code(entry.status);
+    resp = with_cached_encoding_headers(resp, &page_headers, encoding);
     for h in build_ssr_response_headers(
         &page_headers,
         cors_origin,
@@ -3633,7 +3658,9 @@ fn serve_cached_ssr_stale(
     let is_bucket = page_headers
         .keys()
         .any(|k| k.eq_ignore_ascii_case("x-pylon-bucket"));
-    let mut resp = Response::from_data(entry.body).with_status_code(entry.status);
+    let (body, encoding) = encode_cached_ssr_body(&request, &page_headers, entry.body);
+    let mut resp = Response::from_data(body).with_status_code(entry.status);
+    resp = with_cached_encoding_headers(resp, &page_headers, encoding);
     for h in build_ssr_response_headers(
         &page_headers,
         cors_origin,
@@ -3968,6 +3995,120 @@ fn html_alternate_md_url(
 struct VariantHeaders<'a> {
     content_type: Option<&'static str>,
     alternate_md: Option<&'a str>,
+}
+
+/// A stored SSR render, compressed when the client accepts it. A cache
+/// entry is identity-free by construction (the anonymous render, or the
+/// session-bucket render that carries only the signed-in bit) and its URL
+/// has no query string, so BREACH has no secret to find in it.
+fn encode_cached_ssr_body(
+    request: &Request,
+    page_headers: &std::collections::HashMap<String, String>,
+    body: Vec<u8>,
+) -> (Vec<u8>, Option<crate::compress::Encoding>) {
+    if !ssr_body_compressible(page_headers) {
+        return (body, None);
+    }
+    let accept = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Accept-Encoding"))
+        .map(|h| h.value.as_str().to_string());
+    match crate::compress::negotiate(accept.as_deref())
+        .and_then(|e| crate::compress::compress(&body, e).map(|b| (b, e)))
+    {
+        Some((compressed, encoding)) => (compressed, Some(encoding)),
+        None => (body, None),
+    }
+}
+
+/// `Content-Encoding` for a compressed cached body, and `Vary:
+/// Accept-Encoding` on any compressible one. Added after the page's headers,
+/// so the page's own `Vary` stays a separate header line.
+fn with_cached_encoding_headers<R: std::io::Read>(
+    mut resp: Response<R>,
+    page_headers: &std::collections::HashMap<String, String>,
+    encoding: Option<crate::compress::Encoding>,
+) -> Response<R> {
+    if let Some(encoding) = encoding {
+        if let Ok(h) = Header::from_bytes("Content-Encoding", encoding.header_value()) {
+            resp = resp.with_header(h);
+        }
+    }
+    if ssr_body_compressible(page_headers) {
+        if let Ok(h) = Header::from_bytes("Vary", "Accept-Encoding") {
+            resp = resp.with_header(h);
+        }
+    }
+    resp
+}
+
+/// Whether an SSR response body is text worth compressing: the page's own
+/// Content-Type when it set one (an `opengraph-image` route answers PNG),
+/// else HTML.
+fn ssr_body_compressible(page_headers: &std::collections::HashMap<String, String>) -> bool {
+    page_headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        .map_or(true, |(_, v)| crate::compress::compressible_content_type(v))
+}
+
+/// The encoding for a streamed SSR response, or `None` to send it as is.
+///
+/// BREACH: compressing a response that holds a secret next to text an
+/// attacker chose lets the attacker learn the secret from response sizes.
+/// A request with credentials (the session cookie or an Authorization
+/// header) may render that user's secrets, so it is compressed only when
+/// the URL carries no attacker-chosen input: no query string and no dynamic
+/// route segment. Anonymous requests have no secret to leak.
+fn ssr_stream_encoding(
+    cfg: &FrontendConfig,
+    request: &Request,
+    params: &std::collections::HashMap<String, String>,
+    page_headers: &std::collections::HashMap<String, String>,
+) -> Option<crate::compress::Encoding> {
+    if !ssr_body_compressible(page_headers) {
+        return None;
+    }
+    let credentialed = session_cookie_present(cfg, request)
+        || request
+            .headers()
+            .iter()
+            .any(|h| h.field.equiv("Authorization"));
+    if credentialed {
+        let has_query = request
+            .url()
+            .split_once('?')
+            .is_some_and(|(_, q)| !q.is_empty());
+        if has_query || !params.is_empty() {
+            return None;
+        }
+    }
+    let accept = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Accept-Encoding"))
+        .map(|h| h.value.as_str().to_string());
+    crate::compress::negotiate(accept.as_deref())
+}
+
+/// Add `Accept-Encoding` to the response's `Vary`, merging with one that is
+/// already there.
+fn add_vary_accept_encoding(headers: &mut Vec<Header>) {
+    if let Some(i) = headers.iter().position(|h| h.field.equiv("Vary")) {
+        let current = headers[i].value.as_str().to_string();
+        if current
+            .split(',')
+            .any(|v| v.trim().eq_ignore_ascii_case("accept-encoding"))
+        {
+            return;
+        }
+        if let Ok(h) = Header::from_bytes("Vary", format!("{current}, Accept-Encoding")) {
+            headers[i] = h;
+        }
+    } else if let Ok(h) = Header::from_bytes("Vary", "Accept-Encoding") {
+        headers.push(h);
+    }
 }
 
 fn build_ssr_response_headers(
