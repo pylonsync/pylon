@@ -46,7 +46,7 @@ rpassword = "7"
 # macOS, inotify on Linux). Replaces a 500ms mtime poll that measured as
 # the single largest slice of edit→reload latency. Falls back to the poll
 # if the platform watcher can't be created.
-notify = "6.1.1"
+notify = "8.2.0"
 tar = "0.4"
 flate2 = "1.0"
 # .gitignore / .pylonignore rules for the `pylon deploy` upload.
