@@ -1,0 +1,47 @@
+# Copies the third-party images CI runs as services to ghcr.io, so CI
+# pulls them with its own token. Anonymous pulls from Docker Hub and from
+# Amazon's public mirror share a per-IP limit across GitHub's runners
+# ("toomanyrequests: Data limit exceeded") and failed release CI runs
+# 0.22.51 to 0.22.55.
+#
+# The source is Google's mirror of Docker Hub's official images. The
+# weekly run picks up patch releases of each tag.
+name: Mirror CI images
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 5 * * 1"
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/mirror-ci-images.yml
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  mirror:
+    name: Mirror ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - source: mirror.gcr.io/library/postgres:16
+            target: ci-postgres:16
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Copy every platform of the image
+        env:
+          SOURCE: ${{ matrix.source }}
+          TARGET: ghcr.io/${{ github.repository_owner }}/${{ matrix.target }}
+        run: |
+          docker buildx imagetools create --tag "$TARGET" "$SOURCE"
+          docker buildx imagetools inspect "$TARGET"
