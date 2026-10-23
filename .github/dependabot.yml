@@ -1,6 +1,7 @@
 # Dependency updates. Security updates (a PR that fixes an open Dependabot
-# alert) open as soon as the alert does and use these settings too. Version
-# updates are weekly and grouped. SECURITY.md has the response times.
+# alert) open as soon as the alert does. Version updates are weekly, one
+# grouped PR per ecosystem, minor and patch only: a major version is a
+# planned change, not a weekly PR. SECURITY.md has the response times.
 version: 2
 updates:
   - package-ecosystem: cargo
@@ -8,6 +9,9 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     groups:
       cargo-minor:
         update-types: [minor, patch]
@@ -19,6 +23,9 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     groups:
       bun-minor:
         update-types: [minor, patch]
