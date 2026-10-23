@@ -163,10 +163,11 @@ async function setUp() {
     "<!DOCTYPE html>" + html.replace("</body>", pylonData("app/home/page", "/") + "</body>"),
     "text/html",
   );
-  win.document.replaceChild(
-    win.document.importNode(parsed.documentElement, true),
-    win.document.documentElement,
-  );
+  // Remove, then append: happy-dom 20's replaceChild inserts the new root
+  // before it removes the old one, which a document refuses.
+  const root = win.document.importNode(parsed.documentElement, true);
+  win.document.documentElement.remove();
+  win.document.appendChild(root);
 
   rt = await import(path.join(dir, "client-runtime.ts"));
   rt.hydrate("app/home/page", Home, [Layout]);
