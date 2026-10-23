@@ -36,7 +36,48 @@ type MatchRoute = (manifest: any, pathname: string) => ClientRouteMatch | null;
  * A static scan: the bundler reads the page file without running it.
  */
 export function declaresClientNavigation(source: string): boolean {
-  return /export\s+const\s+navigation\s*(?::[^=]+)?=\s*(["'`])client\1/.test(source);
+  return /export\s+const\s+navigation\s*(?::[^=]+)?=\s*(["'`])client\1/.test(
+    stripComments(source),
+  );
+}
+
+/**
+ * `source` with `//` and `/* *\/` comments replaced by spaces, so a static
+ * scan sees code only (a commented-out export is not an export). Strings
+ * and template literals are skipped over intact, so a `//` inside one is
+ * not taken for a comment.
+ */
+export function stripComments(source: string): string {
+  let out = "";
+  let i = 0;
+  while (i < source.length) {
+    const c = source[i]!;
+    const next = source[i + 1];
+    if (c === "/" && next === "/") {
+      const end = source.indexOf("\n", i);
+      const stop = end === -1 ? source.length : end;
+      out += " ".repeat(stop - i);
+      i = stop;
+    } else if (c === "/" && next === "*") {
+      const end = source.indexOf("*/", i + 2);
+      const stop = end === -1 ? source.length : end + 2;
+      out += source.slice(i, stop).replace(/[^\n]/g, " ");
+      i = stop;
+    } else if (c === '"' || c === "'" || c === "`") {
+      let j = i + 1;
+      while (j < source.length && source[j] !== c) {
+        if (source[j] === "\\") j++;
+        else if (c !== "`" && source[j] === "\n") break;
+        j++;
+      }
+      out += source.slice(i, j + 1);
+      i = j + 1;
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  return out;
 }
 
 /** Whether `pathname` is one of the app's offline routes. */

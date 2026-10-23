@@ -452,7 +452,7 @@ pub fn lint_offline_routes(
     };
     for pattern in &offline.routes {
         let page = manifest.routes.iter().find(|r| {
-            r.path == *pattern
+            route_pattern_key(&r.path) == route_pattern_key(pattern)
                 && r.component.is_some()
                 && matches!(r.kind.as_deref(), None | Some("page"))
         });
@@ -543,11 +543,153 @@ pub fn lint_client_navigation(
     findings
 }
 
+/// A route pattern in one spelling. `buildManifest({ offline: { routes } })`
+/// takes file-system patterns (`/leads/[id]`, the form the client route
+/// matcher uses), while the app manifest's routes carry the server's tokens
+/// (`/leads/:id`, `*slug`, `*?slug`). Both become the server form.
+fn route_pattern_key(pattern: &str) -> String {
+    pattern
+        .split('/')
+        .map(|seg| {
+            if let Some(name) = seg.strip_prefix("[[...").and_then(|s| s.strip_suffix("]]")) {
+                format!("*?{name}")
+            } else if let Some(name) = seg.strip_prefix("[...").and_then(|s| s.strip_suffix(']')) {
+                format!("*{name}")
+            } else if let Some(name) = seg.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                format!(":{name}")
+            } else {
+                seg.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// `src` with comments blanked out, and quoted strings too when
+/// `blank_strings`, so the checks below see code only:
+/// `// no serverData here` is not a read, and
+/// `// export const navigation = "client"` is not a declaration. Template
+/// literals keep their `${...}` expressions, which are code. Lengths and
+/// line breaks are kept.
+fn code_only(src: &str, blank_strings: bool) -> String {
+    let b = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0;
+    // Template literal nesting: each entry is the brace depth at which a
+    // `${` opened, so its `}` returns to the template.
+    let mut template_braces: Vec<usize> = Vec::new();
+    let mut in_template = false;
+    let mut depth = 0usize;
+    let blank_comment = |out: &mut String, c: char| out.push(if c == '\n' { '\n' } else { ' ' });
+    let blank = |out: &mut String, c: char| {
+        if blank_strings {
+            out.push(if c == '\n' { '\n' } else { ' ' });
+        } else {
+            out.push(c);
+        }
+    };
+    while i < b.len() {
+        let c = src[i..].chars().next().unwrap();
+        let len = c.len_utf8();
+        if in_template {
+            if c == '\\' && i + 1 < b.len() {
+                blank(&mut out, c);
+                i += 1;
+                let n = src[i..].chars().next().unwrap();
+                blank(&mut out, n);
+                i += n.len_utf8();
+                continue;
+            }
+            if c == '`' {
+                out.push('`');
+                in_template = false;
+                i += 1;
+                continue;
+            }
+            if c == '$' && b.get(i + 1) == Some(&b'{') {
+                out.push_str("${");
+                template_braces.push(depth);
+                depth += 1;
+                in_template = false;
+                i += 2;
+                continue;
+            }
+            blank(&mut out, c);
+            i += len;
+            continue;
+        }
+        match c {
+            '/' if b.get(i + 1) == Some(&b'/') => {
+                let end = src[i..].find('\n').map_or(b.len(), |e| i + e);
+                for _ in src[i..end].chars() {
+                    out.push(' ');
+                }
+                i = end;
+            }
+            '/' if b.get(i + 1) == Some(&b'*') => {
+                let end = src[i + 2..].find("*/").map_or(b.len(), |e| i + 2 + e + 2);
+                for ch in src[i..end].chars() {
+                    blank_comment(&mut out, ch);
+                }
+                i = end;
+            }
+            '"' | '\'' => {
+                out.push(c);
+                i += 1;
+                while i < b.len() {
+                    let ch = src[i..].chars().next().unwrap();
+                    if ch == '\\' && i + 1 < b.len() {
+                        blank(&mut out, ch);
+                        i += 1;
+                        let n = src[i..].chars().next().unwrap();
+                        blank(&mut out, n);
+                        i += n.len_utf8();
+                        continue;
+                    }
+                    if ch == c || ch == '\n' {
+                        out.push(ch);
+                        i += ch.len_utf8();
+                        break;
+                    }
+                    blank(&mut out, ch);
+                    i += ch.len_utf8();
+                }
+            }
+            '`' => {
+                out.push('`');
+                in_template = true;
+                i += 1;
+            }
+            '{' => {
+                depth += 1;
+                out.push('{');
+                i += 1;
+            }
+            '}' => {
+                depth = depth.saturating_sub(1);
+                out.push('}');
+                i += 1;
+                if template_braces.last() == Some(&depth) {
+                    template_braces.pop();
+                    in_template = true;
+                }
+            }
+            _ => {
+                out.push(c);
+                i += len;
+            }
+        }
+    }
+    out
+}
+
 /// Whether page source declares `export const navigation = "client"`. The
 /// same rule as `declaresClientNavigation` in
 /// packages/functions/src/ssr-client-nav.ts: single, double or backtick
 /// quotes, with an optional type annotation.
 fn declares_client_navigation(src: &str) -> bool {
+    let code = code_only(src, false);
+    let src = code.as_str();
     let mut from = 0;
     while let Some(pos) = src[from..].find("export") {
         let start = from + pos;
@@ -601,6 +743,9 @@ fn strip_keyword<'a>(src: &'a str, keyword: &str) -> Option<&'a str> {
 /// Whether module source uses `serverData` as an identifier (not as part of
 /// a longer name).
 fn reads_server_data(src: &str) -> bool {
+    // Code only: a comment or a string that names serverData is not a read.
+    let code = code_only(src, true);
+    let src = code.as_str();
     let bytes = src.as_bytes();
     let needle = b"serverData";
     let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
@@ -1067,6 +1212,68 @@ mod tests {
         assert!(lint_client_navigation(&m, &plain).is_empty());
         m.offline = None;
         assert_eq!(lint_client_navigation(&m, &src).len(), 2);
+    }
+
+    #[test]
+    fn comments_and_strings_are_not_reads_or_declarations() {
+        assert!(!reads_server_data(
+            "// this page reads no serverData\nconst x = 1;"
+        ));
+        assert!(!reads_server_data(
+            "/* serverData is not used */ const x = 1;"
+        ));
+        assert!(!reads_server_data("const label = \"serverData\";"));
+        assert!(!reads_server_data("const t = `no serverData here`;"));
+        assert!(reads_server_data(
+            "const t = `${props.serverData.get(\"Lead\", id)}`;"
+        ));
+        assert!(reads_server_data(
+            "// a comment\nconst rows = use(props.serverData.list(\"Lead\"));"
+        ));
+        assert!(reads_server_data(
+            "const url = \"http://x\"; const { serverData } = props;"
+        ));
+        assert!(!declares_client_navigation(
+            "// export const navigation = \"client\";"
+        ));
+        assert!(!declares_client_navigation(
+            "/* export const navigation = 'client' */"
+        ));
+        assert!(declares_client_navigation(
+            "// navigation runs on the client\nexport const navigation = \"client\";"
+        ));
+    }
+
+    #[test]
+    fn offline_routes_match_dynamic_pages_in_either_spelling() {
+        assert_eq!(route_pattern_key("/jobs/[id]"), "/jobs/:id");
+        assert_eq!(route_pattern_key("/docs/[...slug]"), "/docs/*slug");
+        assert_eq!(route_pattern_key("/docs/[[...slug]]"), "/docs/*?slug");
+        assert_eq!(route_pattern_key("/jobs/:id"), "/jobs/:id");
+        // The app manifest writes `:id`; offline.routes uses `[id]`.
+        let mut m = offline_app(&["/leads", "/leads/[id]"]);
+        m.routes = vec![
+            pylon_kernel::ManifestRoute {
+                path: "/leads".into(),
+                mode: "ssr".into(),
+                component: Some("app/leads/page".into()),
+                layouts: vec!["app/layout".into()],
+                ..Default::default()
+            },
+            pylon_kernel::ManifestRoute {
+                path: "/leads/:id".into(),
+                mode: "ssr".into(),
+                component: Some("app/leads/[id]/page".into()),
+                layouts: vec!["app/layout".into()],
+                ..Default::default()
+            },
+        ];
+        let findings = lint_offline_routes(&m, &sources);
+        assert!(findings.iter().all(|f| f.rule != "PYL009"), "{findings:?}");
+        // The dynamic page reads serverData, so PYL008 now reaches it.
+        assert!(findings
+            .iter()
+            .any(|f| f.rule == "PYL008" && f.message.contains("[id]")));
     }
 
     #[test]

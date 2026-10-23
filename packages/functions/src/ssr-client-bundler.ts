@@ -42,7 +42,7 @@ import {
   type ManifestBuildConfig,
 } from "./build-compat";
 import { serverBundle } from "./server-bundle";
-import { declaresClientNavigation } from "./ssr-client-nav";
+import { declaresClientNavigation, stripComments } from "./ssr-client-nav";
 import { precompressBuild } from "./ssr-precompress";
 import { parseNamespaceBarrel, rewriteBarrelImports } from "./ssr-barrel-imports";
 import { buildOfflineWorker, readManifestOffline, type BundleOffline } from "./ssr-offline";
@@ -1375,9 +1375,10 @@ function readComponentSource(fs: any, path: any, cwd: string, component: string)
  *  it to the runtime, which takes the title from it on a navigation with no
  *  page fetch. A static scan, so a page without one imports nothing extra. */
 export function exportsStaticMetadata(source: string): boolean {
+  const code = stripComments(source);
   return (
-    /\bexport\s+(?:const|let|var)\s+metadata\b/.test(source) ||
-    /\bexport\s*\{[^}]*\bmetadata\b[^}]*\}/.test(source)
+    /\bexport\s+(?:const|let|var)\s+metadata\b/.test(code) ||
+    /\bexport\s*\{[^}]*\bmetadata\b[^}]*\}/.test(code)
   );
 }
 

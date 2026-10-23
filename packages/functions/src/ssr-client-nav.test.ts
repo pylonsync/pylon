@@ -35,11 +35,17 @@ describe("declaresClientNavigation", () => {
       `const navigation = "client";`,
       `export const navigationMode = "client";`,
       `// navigation = "client"`,
+      `// export const navigation = "client";`,
+      `/* export const navigation = "client"; */`,
       "",
     ]) {
       expect(declaresClientNavigation(src)).toBe(false);
     }
   });
+});
+
+test("comments are stripped; strings that contain // are not", () => {
+  expect(declaresClientNavigation(`const u = "http://x"; export const navigation = "client";`)).toBe(true);
 });
 
 describe("clientRouteFor", () => {
@@ -74,5 +80,6 @@ describe("exportsStaticMetadata", () => {
     expect(exportsStaticMetadata(`const metadata = {}; export { metadata };`)).toBe(true);
     expect(exportsStaticMetadata(`export async function generateMetadata() {}`)).toBe(false);
     expect(exportsStaticMetadata(`const metadata = {};`)).toBe(false);
+    expect(exportsStaticMetadata(`// export const metadata = { title: "x" };`)).toBe(false);
   });
 });
