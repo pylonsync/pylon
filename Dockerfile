@@ -124,11 +124,31 @@ RUN ln -s /usr/local/bin/bun /usr/local/bin/bunx \
 # (build.pylonsync.com). Installed to /usr/local so the non-root `pylon` user
 # can run it; dev-env-boot.sh starts `opencode serve` next to `pylon dev` when
 # the control plane grants model access (via pylon-model-proxy, never a raw key).
-# Pinned: an unpinned `bun install -g` meant two builds of the SAME Pylon
-# release could ship different agent versions, so a reproducible image wasn't
-# reproducible where it mattered most — the thing writing customer code. Bump
+# Pinned with a committed lockfile (docker/opencode): an unpinned install
+# meant two builds of the SAME Pylon release could ship different agent
+# versions, and a global install still floated its dependencies. Bump
 # deliberately, with a dev-env build verified against the new version.
-RUN BUN_INSTALL=/usr/local bun install -g opencode-ai@1.18.5
+COPY docker/opencode/package.json docker/opencode/bun.lock /usr/local/lib/opencode/
+RUN cd /usr/local/lib/opencode && bun install --frozen-lockfile \
+    && ln -s /usr/local/lib/opencode/node_modules/.bin/opencode /usr/local/bin/opencode \
+    && opencode --version
+
+# The npm dependencies the image ships beside the @pylonsync/* packages, from
+# committed lockfiles, frozen. A stage of its own so CI can build and scan it
+# without the Rust build (ci.yml, image-scan).
+FROM bun AS image-deps
+# Runtime deps of the @pylonsync/* packages, for a customer's web build to
+# resolve through Node's walk-up from /pylon/packages/<name>/src/ ("Rollup
+# failed to resolve import 'loro-crdt'" without them). The list and its exact
+# versions are docker/framework-deps; tools/check-image-locks.sh keeps them
+# equal to what the monorepo's bun.lock resolves. They were "*" before, so
+# each build took whatever npm served that day.
+COPY docker/framework-deps/package.json docker/framework-deps/bun.lock /pylon/
+RUN cd /pylon && bun install --production --frozen-lockfile
+# @pylonsync/example-ui's dependencies (@radix-ui/*, clsx, lucide-react…),
+# linked in as its node_modules in the final stage.
+COPY docker/example-ui-deps/package.json docker/example-ui-deps/bun.lock /pylon/example-ui-deps/
+RUN cd /pylon/example-ui-deps && bun install --production --frozen-lockfile
 
 FROM runtime-base
 
@@ -170,7 +190,11 @@ COPY --from=rust-builder /build/examples/_shared /pylon/packages/example-ui
 # "Cannot find module @radix-ui/react-slot". Producing the install at
 # image-build time is much cheaper than re-doing it on every
 # customer-machine boot.
-RUN cd /pylon/packages/example-ui && bun install --production
+#
+# Installed in the image-deps stage from a committed lockfile and linked in
+# as the package's node_modules (its own package.json stays for its exports).
+COPY --from=image-deps /pylon/example-ui-deps /pylon/example-ui-deps
+RUN ln -s /pylon/example-ui-deps/node_modules /pylon/packages/example-ui/node_modules
 
 # Pre-install the non-workspace runtime deps of the @pylonsync/* packages
 # (clsx for client, loro-crdt for loro) into /pylon/node_modules/ so a
@@ -179,25 +203,9 @@ RUN cd /pylon/packages/example-ui && bun install --production
 # "Rollup failed to resolve import 'loro-crdt' from
 # /pylon/packages/loro/src/registry.ts" — the package is imported but
 # /pylon/node_modules/ only has the @pylonsync/* symlinks; no real npm
-# deps. Keep this dependency list in sync with the `dependencies` blocks
-# across packages/*/package.json; new non-workspace transitive deps go
-# here.
-RUN <<'EOF'
-cat > /pylon/package.json <<'JSON'
-{
-  "name": "pylon-framework-image-deps",
-  "version": "0.0.0",
-  "private": true,
-  "dependencies": {
-    "clsx": "*",
-    "loro-crdt": "*",
-    "satori": "*",
-    "@resvg/resvg-wasm": "*"
-  }
-}
-JSON
-cd /pylon && bun install --production
-EOF
+# deps. Installed in the image-deps stage (see there).
+COPY --from=image-deps /pylon/package.json /pylon/bun.lock /pylon/
+COPY --from=image-deps /pylon/node_modules /pylon/node_modules
 
 # Pre-create /app with the workspace deps wired in so customer code
 # dropped at /app/app.ts can `import {entity, ...} from "@pylonsync/sdk"`

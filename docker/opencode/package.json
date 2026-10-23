@@ -1,0 +1,10 @@
+{
+  "name": "pylon-image-opencode",
+  "version": "0.0.0",
+  "private": true,
+  "description": "OpenCode for cloud dev environments, installed frozen from this lockfile into /usr/local/lib/opencode. Bump the version deliberately, with a dev-env build verified against it.",
+  "dependencies": {
+    "opencode-ai": "1.18.5"
+  },
+  "trustedDependencies": ["opencode-ai"]
+}

@@ -93,7 +93,7 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
       - id: v
         shell: bash
         run: |
@@ -137,8 +137,8 @@ jobs:
       contents: read
       id-token: write        # required for npm provenance
     steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
         with:
           # Pin to the same version the repo declares in package.json's
           # `packageManager`. `latest` upgraded to 1.3.x mid-cycle and
@@ -146,7 +146,7 @@ jobs:
           # failing with "missing authentication" even though
           # NODE_AUTH_TOKEN was set. Pin tracks `packageManager`.
           bun-version: "1.4.4"
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           package-manager-cache: false
           node-version: 22
@@ -401,7 +401,7 @@ jobs:
           - folder: packages/create-pylon/templates
             repo: pylonsync/pylon-templates
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
       - name: Copy ${{ matrix.folder }} to ${{ matrix.repo }}
         env:
           TOKEN: ${{ secrets.MIRROR_REPOS_TOKEN || secrets.RELEASES_REPO_TOKEN }}
@@ -435,8 +435,8 @@ jobs:
     runs-on: ubuntu-24.04
     environment: Production
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec  # stable
         with:
           targets: wasm32-unknown-unknown
       - name: Check the guest builds for wasm32
@@ -510,12 +510,12 @@ jobs:
           # the target ABI is msvc. A SAML-disabled Windows variant was
           # never on the table.
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec  # stable
         if: runner.os != 'Linux'
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2
         if: runner.os != 'Linux'
       - if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
@@ -566,7 +566,7 @@ jobs:
         uses: ./.github/actions/setup-xmlsec-windows
       # `pylon-studio-api`'s build.rs requires `web/dist/index.html` to
       # exist. Build the Studio UI bundle before cargo runs.
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
         if: runner.os != 'Linux'
         with:
           bun-version: "1.4.4"
@@ -670,7 +670,7 @@ jobs:
           "$hash  $asset" | Out-File -FilePath "$asset.sha256" -Encoding ascii -NoNewline
       # Publish to the private source repo (so internal tooling, the
       # release-please flow, and crates/npm jobs all observe the same tag).
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
           files: |
             pylon-${{ github.ref_name }}-${{ matrix.target }}.*
@@ -679,7 +679,7 @@ jobs:
       # binaries reachable while the source repo is still private. Append-only
       # against an existing release tag (idempotent across matrix jobs).
       - name: Publish to public release repo
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
           repository: pylonsync/pylon-releases
           token: ${{ secrets.RELEASES_REPO_TOKEN }}
@@ -693,7 +693,7 @@ jobs:
       # @pylonsync/cli-* package directly.
       - name: Upload raw binary artifact
         if: matrix.archive == 'tar.gz'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: pylon-bin-${{ matrix.target }}
           # lib/ only exists for macOS (the vendored libxmlsec1 closure) and
@@ -710,7 +710,7 @@ jobs:
       # `publish-cli-npm` maps over.
       - name: Upload raw binary artifact (windows)
         if: matrix.archive == 'zip'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: pylon-bin-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/pylon.exe
@@ -729,18 +729,18 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
         with:
           bun-version: "1.4.4"
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           package-manager-cache: false
           node-version: 22
           registry-url: https://registry.npmjs.org
       # Pull every binary artifact uploaded by the binaries matrix.
       # Each lands at artifacts/<artifact-name>/pylon.
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
         with:
           path: artifacts
           pattern: pylon-bin-*
@@ -883,9 +883,9 @@ jobs:
     needs: verify
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -942,7 +942,7 @@ jobs:
           check pylon-builder builder
           check pylon-dev     dev
 
-      - uses: docker/metadata-action@v5
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051  # v5
         id: meta
         with:
           images: ghcr.io/${{ github.repository_owner }}/pylon
@@ -950,7 +950,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
         if: steps.immutable.outputs.pylon != 'true'
         with:
           context: .
@@ -977,7 +977,7 @@ jobs:
       # pushed plus the coding agent's browser and web search
       # (docker/dev.Dockerfile). Customer apps never boot it, so Chromium
       # stays out of the runtime image.
-      - uses: docker/metadata-action@v5
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051  # v5
         id: meta-dev
         with:
           images: ghcr.io/${{ github.repository_owner }}/pylon-dev
@@ -985,7 +985,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
         if: steps.immutable.outputs.dev != 'true'
         with:
           context: .
@@ -1002,7 +1002,7 @@ jobs:
       # pylon-builder: the ephemeral image the Cloud build-artifact pipeline
       # runs on a throwaway Fly machine (builder/Dockerfile). Tiny + fast to
       # build (Bun base + one script), so it rides the same release.
-      - uses: docker/metadata-action@v5
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051  # v5
         id: meta-builder
         with:
           images: ghcr.io/${{ github.repository_owner }}/pylon-builder
@@ -1010,7 +1010,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
         if: steps.immutable.outputs.builder != 'true'
         with:
           context: .

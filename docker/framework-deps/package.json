@@ -1,0 +1,12 @@
+{
+  "name": "pylon-framework-image-deps",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Runtime deps of the @pylonsync/* packages, installed into /pylon/node_modules in the runtime image. Versions must match what the monorepo's bun.lock resolves (tools/check-image-locks.sh).",
+  "dependencies": {
+    "@resvg/resvg-wasm": "2.6.2",
+    "clsx": "2.1.1",
+    "loro-crdt": "1.17.1",
+    "satori": "0.26.0"
+  }
+}

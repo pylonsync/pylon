@@ -2,12 +2,17 @@
 # alert) open as soon as the alert does. Version updates are weekly, one
 # grouped PR per ecosystem, minor and patch only: a major version is a
 # planned change, not a weekly PR. SECURITY.md has the response times.
+# Every entry has a 3-day cooldown: a new release waits 3 days before a PR,
+# so a compromised or broken release is usually pulled first. Security
+# updates do not wait.
 version: 2
 updates:
   - package-ecosystem: cargo
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 3
     open-pull-requests-limit: 10
     ignore:
       - dependency-name: "*"
@@ -20,8 +25,14 @@ updates:
     directories:
       - /
       - /crates/studio_api/web
+      # What the runtime image installs (tools/check-image-locks.sh).
+      - /docker/framework-deps
+      - /docker/example-ui-deps
+      - /docker/opencode
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 3
     open-pull-requests-limit: 10
     ignore:
       - dependency-name: "*"
@@ -38,6 +49,8 @@ updates:
       - /builder
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 3
     groups:
       base-images:
         patterns: ["*"]
@@ -46,6 +59,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 3
     groups:
       actions:
         patterns: ["*"]
