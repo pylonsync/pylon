@@ -58,7 +58,7 @@
     "@types/react-dom": "^19.0.0",
     "browserslist": "^4.29.1",
     "core-js": "^3.50.0",
-    "happy-dom": "^20.8.9",
+    "happy-dom": "^21.0.4",
     "lightningcss": "~1.32.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

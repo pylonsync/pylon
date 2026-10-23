@@ -42,7 +42,7 @@
     "prosemirror-state": "^1.4.3",
     "prosemirror-schema-basic": "^1.2.4",
     "prosemirror-view": "^1.42.3",
-    "@happy-dom/global-registrator": "^20.10.0"
+    "@happy-dom/global-registrator": "^21.0.4"
   },
   "peerDependenciesMeta": {
     "loro-prosemirror": {

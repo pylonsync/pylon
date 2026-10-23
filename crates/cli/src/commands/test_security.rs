@@ -428,9 +428,21 @@ enum ProbeResult {
 }
 
 /// Times a probe waits out a 429 before reporting it.
-const RATE_LIMIT_RETRIES: u32 = 10;
+const RATE_LIMIT_RETRIES: u32 = 8;
 /// Longest wait for one 429, whatever Retry-After says.
 const MAX_RETRY_AFTER_SECS: u64 = 30;
+
+/// Seconds to wait before retry `attempt` (0-based). Retry-After, but at
+/// least 2^attempt: a limiter with a one-minute window answers
+/// `Retry-After: 1` while its window is still full, and ten one-second
+/// waits ran out before it emptied.
+fn rate_limit_wait(retry_after: Option<u64>, attempt: u32) -> u64 {
+    let backoff = 1u64 << attempt.min(5);
+    retry_after
+        .unwrap_or(1)
+        .max(backoff)
+        .clamp(1, MAX_RETRY_AFTER_SECS)
+}
 
 /// Anonymous POST. No Authorization header. Returns the error body so a
 /// CSRF refusal can be told apart from an auth refusal.
@@ -454,9 +466,9 @@ fn probe_anon_get(agent: &ureq::Agent, url: &str) -> ProbeResult {
     with_rate_limit_retry(|| agent.get(url).call().map_err(Box::new))
 }
 
-/// Send, and on a 429 wait for the server's Retry-After and send again.
-/// A probe run is a burst of anonymous requests from one IP, which is
-/// what a per-IP rate limit exists to slow down.
+/// Send, and on a 429 wait and send again. A probe run is a burst of
+/// anonymous requests from one IP, which is what a per-IP rate limit
+/// exists to slow down.
 fn with_rate_limit_retry(
     send: impl Fn() -> Result<ureq::Response, Box<ureq::Error>>,
 ) -> ProbeResult {
@@ -468,11 +480,10 @@ fn with_rate_limit_retry(
                 return ProbeResult::Status(status, resp.into_string().unwrap_or_default());
             }
             Err(ureq::Error::Status(429, resp)) if attempt < RATE_LIMIT_RETRIES => {
-                let wait = resp
+                let retry_after = resp
                     .header("Retry-After")
-                    .and_then(|v| v.trim().parse::<u64>().ok())
-                    .unwrap_or(1)
-                    .clamp(1, MAX_RETRY_AFTER_SECS);
+                    .and_then(|v| v.trim().parse::<u64>().ok());
+                let wait = rate_limit_wait(retry_after, attempt);
                 std::thread::sleep(Duration::from_secs(wait));
                 attempt += 1;
             }
@@ -672,6 +683,15 @@ mod tests {
         );
         assert_eq!(list_row_count(r#"{"data":[]}"#), 0);
         assert_eq!(list_row_count("not json"), 0);
+    }
+
+    #[test]
+    fn rate_limit_waits_grow() {
+        assert_eq!(rate_limit_wait(Some(1), 0), 1);
+        assert_eq!(rate_limit_wait(Some(1), 3), 8);
+        assert_eq!(rate_limit_wait(Some(20), 1), 20);
+        assert_eq!(rate_limit_wait(None, 7), 30);
+        assert_eq!(rate_limit_wait(Some(600), 0), 30);
     }
 
     #[test]
