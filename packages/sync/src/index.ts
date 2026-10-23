@@ -225,14 +225,16 @@ export interface SyncEngineConfig {
    */
   reconcileOnVisibility?: boolean;
   /**
-   * The automatic sweeps (on connect and when the tab becomes visible)
-   * skip when the replica matched the server this recently: a complete
-   * snapshot, or a full reconcile. Each sweep downloads every replicated
-   * row, which on a phone app that is opened many times a day is most of
-   * its data traffic. The change log covers writes in between; server
-   * hints (`sync-reconcile`) cover rows that became readable. `0` sweeps
-   * on every trigger. Default 300000 (5 minutes). An explicit
-   * `reconcile()` call always runs.
+   * The automatic sweep (on connect and when the tab becomes visible)
+   * downloads every replicated row to catch changes the change log does not
+   * carry. It runs only when the app was offline (the connection dropped,
+   * or it started from a cached replica) and the replica last matched the
+   * server (a complete snapshot, or a full sweep) at least this long ago;
+   * or after a snapshot that could not remove deleted rows itself. It
+   * never runs right after a complete snapshot or merely because the tab
+   * came to the foreground. Server hints (`sync-reconcile`) reconcile at
+   * once, and an explicit `reconcile()` call always runs. Default 300000
+   * (5 minutes).
    */
   autoReconcileIntervalMs?: number;
   /**
@@ -1047,6 +1049,9 @@ export class SyncEngine {
         // whose pull-from-cursor misses an offline server-side delete
         // depends on that reconcile pass to catch the ghost row.
         this._hadCachedReplica = hadCache;
+        // Rows from an earlier run: the server may have changed them while
+        // this app was closed, which counts as offline.
+        if (hadCache) this.offlineSinceMatch = true;
         // Which identity the hydrated rows belong to. Compared against the
         // resolved session in `guardReplicaIdentity` before the first pull
         // so a reload-time account switch drops the prior user's rows.
@@ -2390,6 +2395,12 @@ export class SyncEngine {
       // answer to a far-behind cursor). When the snapshot completes, local
       // rows it did not send are deleted: a snapshot has no tombstones.
       let snapshotSeen: Map<string, Set<string>> | null = null;
+      // A snapshot replaced rows this replica already held (a catch-up, or a
+      // pull from 0 over a cached replica), and whether its last page said
+      // which entities it covers. Without that list the deletes can't be
+      // swept here, and the next automatic reconcile has to.
+      let replacedRows = startedFromZero && this._hadCachedReplica;
+      let snapshotCompleted = false;
       while (firstPass || snapshotAfter || hasMore) {
         firstPass = false;
         // `snapshot_after` is an OPAQUE cursor the server already URL-encoded
@@ -2412,6 +2423,7 @@ export class SyncEngine {
         pendingApply = this.enqueueApply(resp.changes, resp.cursor, {
           isPull: true,
         });
+        if (resp.snapshot && !startedFromZero) replacedRows = true;
         if (resp.snapshot) {
           snapshotSeen ??= new Map();
           for (const ev of resp.changes) {
@@ -2420,6 +2432,7 @@ export class SyncEngine {
             ids.add(ev.row_id);
           }
           if (resp.snapshot_entities) {
+            snapshotCompleted = true;
             const entities = resp.snapshot_entities;
             const seen = snapshotSeen;
             const tombstoneSeq = resp.cursor.last_seq;
@@ -2447,6 +2460,7 @@ export class SyncEngine {
         hasMore = !snapshotAfter && resp.has_more && advanced;
       }
       if (pendingApply) await pendingApply;
+      if (replacedRows && !snapshotCompleted) this.sweepNeeded = true;
       // Clear the resync circuit breaker ONLY on a successful DELTA
       // pull — one that started from a real, non-zero cursor the server
       // honored. A snapshot pull from cursor=0 succeeding does NOT prove
@@ -2594,7 +2608,7 @@ export class SyncEngine {
         await this.enqueueReconcile(entity, [], removalIds, tombstoneSeq);
       }
     }
-    this.matchedServerAt = Date.now();
+    this.markMatchedServer();
     this.snapshotEpoch = this.replicaEpoch;
   }
 
@@ -2629,9 +2643,32 @@ export class SyncEngine {
   private snapshotEpoch = -1;
 
   /** Whether an automatic sweep (connect, visibility) should run. */
+  /** The connection dropped (or this run started from a cached replica)
+   *  since the replica last matched the server. */
+  private offlineSinceMatch = false;
+  /** A snapshot replaced cached rows without saying which entities it
+   *  covers, so rows deleted on the server may still be here. */
+  private sweepNeeded = false;
+
+  /**
+   * Whether an automatic sweep (connect, visibility) should run: after a
+   * snapshot that could not sweep its own deletes, or when the app was
+   * offline since the replica last matched the server and the last match
+   * is `autoReconcileIntervalMs` old. Never right after a complete
+   * snapshot, and not merely because the app came to the foreground.
+   */
   private autoReconcileDue(): boolean {
+    if (this.sweepNeeded) return true;
+    if (!this.offlineSinceMatch) return false;
     const interval = this.config.autoReconcileIntervalMs ?? 300_000;
     return this.matchedServerAt === 0 || Date.now() - this.matchedServerAt >= interval;
+  }
+
+  /** The replica matches the server now. */
+  private markMatchedServer(): void {
+    this.matchedServerAt = Date.now();
+    this.offlineSinceMatch = false;
+    this.sweepNeeded = false;
   }
 
   /** Timestamp of the last `reconcile()` invocation. Used to debounce —
@@ -3044,7 +3081,7 @@ export class SyncEngine {
     );
     // A full sweep that reconciled every entity matched the replica to the
     // server (see autoReconcileDue).
-    if (entities === undefined && skipped.length === 0) this.matchedServerAt = Date.now();
+    if (entities === undefined && skipped.length === 0) this.markMatchedServer();
     return { done, skipped, startedAt };
   }
 
@@ -4686,9 +4723,10 @@ export class SyncEngine {
         });
       },
       onDisconnected: () => {
-        /* Engine has no work on disconnect — the transport's own
-         *  reconnect loop drives the recovery. The connection-status
-         *  flip already happened inside the transport. */
+        // The transport's own reconnect loop drives the recovery; the
+        // connection-status flip already happened inside the transport.
+        // Record the gap: the next automatic sweep may be due.
+        this.offlineSinceMatch = true;
       },
       setStatus: (s) => this.setConnectionStatus(s),
       performPollTick: async () => {

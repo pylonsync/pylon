@@ -72,3 +72,76 @@ test("a reconnect within the interval skips the sweep; after it, the sweep runs"
   await env.flush(100);
   expect(urls.some((u) => u.includes("/api/entities/Property/cursor"))).toBe(true);
 });
+
+/** A minimal `document` so the engine attaches its visibility listener. */
+function installDocument() {
+  const target = new EventTarget() as EventTarget & { visibilityState: string };
+  target.visibilityState = "visible";
+  const g = globalThis as { document?: unknown };
+  const previous = g.document;
+  g.document = target;
+  return {
+    foreground() {
+      target.dispatchEvent(new Event("visibilitychange"));
+    },
+    restore() {
+      if (previous === undefined) delete g.document;
+      else g.document = previous;
+    },
+  };
+}
+
+test("coming to the foreground does not sweep unless the app was offline", async () => {
+  const doc = installDocument();
+  try {
+    env = await createTestEnv({ transport: "websocket", autoReconcileIntervalMs: 20, reconnectDelay: 5 });
+    env.server.snapshotMode = true;
+    env.signIn({ userId: "u1" });
+    env.server.seed("Property", [{ id: "p1" }]);
+    await env.engine.start();
+    await env.flush();
+    const urls = recordUrls();
+
+    // Long past the interval, but the connection never dropped.
+    await new Promise((r) => setTimeout(r, 40));
+    doc.foreground();
+    await env.flush();
+    expect(urls.filter((u) => u.includes("/cursor"))).toEqual([]);
+
+    // The connection drops (a phone in a pocket), then the app comes back.
+    env.transport.closeLatestWs();
+    await env.flush(50);
+    doc.foreground();
+    await env.flush(50);
+    expect(urls.some((u) => u.includes("/api/entities/Property/cursor"))).toBe(true);
+
+    // Swept: the next foreground does not sweep again.
+    const swept = urls.length;
+    doc.foreground();
+    await env.flush();
+    expect(urls.slice(swept).filter((u) => u.includes("/cursor"))).toEqual([]);
+  } finally {
+    doc.restore();
+  }
+});
+
+test("a catch-up snapshot that could not remove deletes is followed by a sweep", async () => {
+  env = await createTestEnv({ transport: "websocket", reconnectDelay: 5 });
+  env.server.snapshotMode = true;
+  env.signIn({ userId: "u1" });
+  env.server.seed("Lead", [{ id: "a" }, { id: "b" }]);
+  await env.engine.start();
+  await env.flush();
+
+  // An older server: its snapshot does not list the entities it covers.
+  env.server.omitSnapshotEntities = true;
+  env.server.farBehind = () => true;
+  env.server.delete("Lead", "b");
+  const urls = recordUrls();
+  await env.engine.pull();
+  // The snapshot could not drop b.
+  env.transport.closeLatestWs();
+  await env.flush(50);
+  expect(urls.some((u) => u.includes("/api/entities/Lead/cursor"))).toBe(true);
+  expect(env.engine.store.list("Lead").map((r) => r.id)).toEqual(["a"]);
+});

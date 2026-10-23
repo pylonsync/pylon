@@ -460,6 +460,9 @@ export class TestServer {
   snapshotMode = false;
   /** In `snapshotMode`: delta cursors answered with a snapshot. */
   farBehind: (since: number) => boolean = () => false;
+  /** In `snapshotMode`: leave `snapshot_entities` off the last page, like a
+   *  server from before it was added. */
+  omitSnapshotEntities = false;
 
   /** One snapshot page for `snapshotMode`. `offset` is the continuation. */
   snapshotPage(
@@ -499,7 +502,7 @@ export class TestServer {
       has_more: !done,
       snapshot: true,
       snapshot_after: done ? null : String(offset + limit),
-      ...(done ? { snapshot_entities: entities } : {}),
+      ...(done && !this.omitSnapshotEntities ? { snapshot_entities: entities } : {}),
     };
   }
 
