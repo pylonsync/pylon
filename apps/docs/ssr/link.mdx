@@ -16,8 +16,8 @@ import { Link } from "@pylonsync/react";
 | Phase | Behavior |
 |---|---|
 | SSR / no JS | Renders `<a href data-pylon-link>...</a>`. Same as a regular anchor. |
-| In viewport, or when the browser is idle | IntersectionObserver, and `requestIdleCallback` for links off screen, `modulepreload` the destination's client chunks: its own route entry plus what it imports. This waits for the page's `load` event, so warming many links never competes with the current page's own render. For a route with [instant navigation](#instant-navigation), the runtime also loads the entry, so the first tap renders at once. |
-| Hover / touchstart / focus | This also fetches the page payload and holds it in memory for the click. A route with instant navigation has no payload to fetch. `focus` is included so a keyboard user tabbing to a link gets the same warm path as a mouse cursor. |
+| Rendered | After the page has painted, when the browser is idle (`requestIdleCallback`), the runtime `modulepreload`s the destination's client chunks: its own route entry plus what it imports. This covers links off screen, such as a tab bar. It never competes with the current page's first paint, and it is skipped when the browser reports Save-Data or a 2G connection. For a route with [instant navigation](#instant-navigation), the runtime also loads the entry, so the first tap renders at once. |
+| Hover / touchstart / pointerdown / focus | The chunks are fetched at once, and the page payload is fetched and held in memory for the click. A route with instant navigation has no payload to fetch. `focus` is included so a keyboard user tabbing to a link gets the same warm path as a mouse cursor. |
 | Click | `preventDefault()`, consume the prefetched payload (or fetch it), render the new route, and re-render the React root in place. |
 | Modifier keys / target="_blank" | Falls through to the browser's default behavior, such as opening a new tab. |
 

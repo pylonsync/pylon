@@ -68,4 +68,12 @@ describe("instant client navigation", () => {
       expect(o.historyLength).toBe(slow.historyLength);
     }
   });
+
+  test("prefetch on sight waits for idle and skips Save-Data; intent fetches at once", () => {
+    const { sightBeforeIdle, sightAfterIdle, saveDataSight, intent } = report.prefetch;
+    expect(sightBeforeIdle).toBe(0);
+    expect(sightAfterIdle).toBeGreaterThan(0);
+    expect(saveDataSight).toBe(0);
+    expect(intent).toBeGreaterThan(0);
+  });
 });

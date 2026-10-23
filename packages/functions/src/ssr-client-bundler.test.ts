@@ -1090,3 +1090,45 @@ describe("precompressed build files", () => {
     expect(files.filter((f) => f.endsWith(".br") || f.endsWith(".gz"))).toEqual([]);
   });
 });
+
+describe("namespace barrels (radix-ui)", () => {
+  test("a route bundles only the barrel packages it imports", async () => {
+    const dir = makeFixture(
+      {
+        "alpha/page.tsx": `import { Alpha } from "fake-ui";\nexport default function P() { return <div>{Alpha.name}</div>; }\n`,
+        "beta/page.tsx": `import { Beta as B } from "fake-ui";\nexport default function P() { return <div>{B.name}</div>; }\n`,
+      },
+      { "layout.tsx": LAYOUT_BODY },
+    );
+    tempDir = dir;
+    // A barrel and the two packages it re-exports, resolvable from app/.
+    const nm = path.join(dir, "app", "node_modules");
+    const pkg = (name: string, files: Record<string, string>) => {
+      fs.mkdirSync(path.join(nm, name), { recursive: true });
+      for (const [f, body] of Object.entries(files)) fs.writeFileSync(path.join(nm, name, f), body);
+    };
+    pkg("fake-ui", {
+      "package.json": JSON.stringify({ name: "fake-ui", module: "index.mjs", main: "index.mjs", sideEffects: false }),
+      "index.mjs": `import * as Alpha from "@fake/alpha";\nimport * as Beta from "@fake/beta";\nexport { Alpha, Beta };\n`,
+    });
+    for (const [name, marker] of [["alpha", "ALPHA_ONLY_CODE"], ["beta", "BETA_ONLY_CODE"]]) {
+      pkg(`@fake/${name}`, {
+        "package.json": JSON.stringify({ name: `@fake/${name}`, module: "index.mjs", main: "index.mjs", sideEffects: false }),
+        "index.mjs": `export const name = ${JSON.stringify(marker + " " + "x".repeat(2000))};\n`,
+      });
+    }
+    originalCwd = process.cwd();
+    process.chdir(dir);
+
+    const { manifestPath, outdir } = await _doBuildInner(fs, path, dir, "app", { precompress: false });
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as PylonBundleManifest;
+    const code = (component: string) => {
+      const r = manifest.routes[component];
+      return [r.file, ...r.imports].map((f) => fs.readFileSync(path.join(outdir, f), "utf8")).join("\n");
+    };
+    expect(code("app/alpha/page")).toContain("ALPHA_ONLY_CODE");
+    expect(code("app/alpha/page")).not.toContain("BETA_ONLY_CODE");
+    expect(code("app/beta/page")).toContain("BETA_ONLY_CODE");
+    expect(code("app/beta/page")).not.toContain("ALPHA_ONLY_CODE");
+  });
+});

@@ -203,7 +203,47 @@ function observe(): Observation {
   return seen;
 }
 
-const report: Record<string, Observation> = {};
+const report: Record<string, any> = {};
+
+const preloads = () =>
+  [...win.document.querySelectorAll('link[rel="modulepreload"]')].map((l: any) => l.getAttribute("href"));
+
+/** Prefetch timing: chunks for a link on screen wait for idle and skip
+ *  Save-Data; intent fetches at once. */
+async function prefetchTiming() {
+  const pylon = win.__pylon;
+  const before = preloads().length;
+  // Idle callbacks run only when the test says so.
+  const idle: Array<() => void> = [];
+  win.requestIdleCallback = (fn: () => void) => {
+    idle.push(fn);
+    return idle.length;
+  };
+  await pylon.prefetch("/fast");
+  await settle();
+  const sightBeforeIdle = preloads().length - before;
+  for (const fn of idle.splice(0)) fn();
+  await settle();
+  const sightAfterIdle = preloads().length - before;
+
+  // Save-Data: nothing on sight, even when idle.
+  Object.defineProperty(win.navigator, "connection", {
+    value: { saveData: true, effectiveType: "4g" },
+    configurable: true,
+  });
+  const beforeSave = preloads().length;
+  await pylon.prefetch("/offline");
+  await settle();
+  for (const fn of idle.splice(0)) fn();
+  await settle();
+  const saveDataSight = preloads().length - beforeSave;
+
+  // Intent fetches at once, Save-Data or not.
+  await pylon.prefetch("/offline", { document: true });
+  await settle();
+  const intent = preloads().length - beforeSave;
+  return { sightBeforeIdle, sightAfterIdle, saveDataSight, intent };
+}
 try {
   await setUp();
   report.hydrated = observe();
@@ -224,6 +264,7 @@ try {
   report.forward1 = observe();
   await traverse("forward");
   report.forward2 = observe();
+  report.prefetch = await prefetchTiming();
 } finally {
   if (dir) fs.rmSync(dir, { recursive: true, force: true });
 }

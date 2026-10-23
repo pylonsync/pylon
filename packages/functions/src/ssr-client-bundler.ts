@@ -44,6 +44,7 @@ import {
 import { serverBundle } from "./server-bundle";
 import { declaresClientNavigation } from "./ssr-client-nav";
 import { precompressBuild } from "./ssr-precompress";
+import { parseNamespaceBarrel, rewriteBarrelImports } from "./ssr-barrel-imports";
 import { buildOfflineWorker, readManifestOffline, type BundleOffline } from "./ssr-offline";
 
 type Send = (msg: Record<string, unknown>) => void;
@@ -709,18 +710,32 @@ async function prefetch(href, opts) {
     navPayloads.prefetch(url.pathname + url.search);
   }
   if (!manifest) return;
-  if (clientRoute) whenIdle(() => warmRouteEntry(clientRoute.component));
   // Chunk prefetch. The page payload above is the half that was already
   // cheap: nothing can render until the destination's own entry chunk lands,
   // so warming only the HTML leaves a full round-trip on the click.
   const targets = prefetchTargets(manifest, url.pathname);
-  whenLoaded(() =>
+  const warm = () => {
     preloadChunks({
       public_prefix: manifest.public_prefix,
       file: targets.file,
       imports: targets.imports,
-    }),
-  );
+    });
+    if (clientRoute) warmRouteEntry(clientRoute.component);
+  };
+  // Intent (hover, touch, pointerdown, focus): the tap is coming, fetch now.
+  // Otherwise (a link on screen) wait until the page has painted and the
+  // browser is idle, so warming routes never counts against this page's
+  // first paint, and skip it on a connection the user asked to save.
+  if (opts && opts.document) warm();
+  else if (!saveData()) whenIdle(warm);
+}
+
+// The user asked for less data (Save-Data), or the connection is 2G.
+// Prefetch on sight costs bytes the user may never use.
+function saveData() {
+  const c = typeof navigator !== "undefined" ? navigator.connection : undefined;
+  if (!c) return false;
+  return c.saveData === true || /(^|-)2g$/.test(c.effectiveType || "");
 }
 
 async function loadRouteEntry(component) {
@@ -1878,6 +1893,7 @@ export async function _doBuildInner(
       // to the browser.
       plugins: [
         absoluteAssetPlugin(outdir, fs, path, (await import("node:crypto")).createHash),
+        ...[barrelImportsPlugin(fs, path, cwd)].filter((p) => p !== null),
         {
           name: "pylon-server-only",
           setup(build) {
@@ -2356,6 +2372,106 @@ const ASSET_RE = /\.(wasm|png|jpe?g|gif|webp|avif|ico|svg|woff2?|ttf|otf|mp3|mp4
  * the absolute URL. A stylesheet's `url(...)` is left to Bun: CSS cannot
  * import a JavaScript module.
  */
+/**
+ * Rewrite named imports from namespace barrels (`radix-ui`) in app source
+ * into imports of the re-exported packages, so a route bundles only the
+ * ones it uses. See ssr-barrel-imports.ts.
+ *
+ * The app's files are scanned before the build and the plugin loads only
+ * the files whose source changes. An onLoad that matches a file changes how
+ * Bun resolves that file's own imports (a workspace package's CommonJS
+ * dependency stopped resolving when every file went through one), so the
+ * filter names exactly those files.
+ */
+function barrelImportsPlugin(
+  fs: typeof import("node:fs"),
+  path: typeof import("node:path"),
+  cwd: string,
+): { name: string; setup(build: BunPluginBuild): void } | null {
+  const resolve = (spec: string, from: string): string | null => {
+    try {
+      return (Bun as any).resolveSync(spec, from) as string;
+    } catch {
+      return null;
+    }
+  };
+  // Barrel entry file → its namespaces (null: not a barrel).
+  const parsed = new Map<string, Map<string, string> | null>();
+  const rewritten = new Map<string, string>();
+  const SOURCE = /\.(tsx|ts|jsx|js|mjs)$/;
+  const NAMED_BARE_IMPORT = /import\s*\{[^}]*\}\s*from\s*["'][^"'./]/;
+  const walk = (dir: string) => {
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!entry.isFile() || !SOURCE.test(entry.name)) continue;
+      const source = fs.readFileSync(full, "utf8");
+      if (!NAMED_BARE_IMPORT.test(source)) continue;
+      const fileDir = path.dirname(full);
+      const entriesBySpec = new Map<string, string>();
+      const barrelOf = (spec: string) => {
+        const entryFile = resolve(spec, fileDir);
+        if (!entryFile || !entryFile.split(path.sep).includes("node_modules")) return null;
+        entriesBySpec.set(spec, entryFile);
+        if (!parsed.has(entryFile)) {
+          let map: Map<string, string> | null = null;
+          try {
+            map = parseNamespaceBarrel(fs.readFileSync(entryFile, "utf8"));
+          } catch {
+            map = null;
+          }
+          parsed.set(entryFile, map);
+        }
+        return parsed.get(entryFile) ?? null;
+      };
+      // The re-exported package as the barrel resolves it; the bare name
+      // when this file resolves it to the same file.
+      const target = (barrel: string, spec: string) => {
+        const fromBarrel = resolve(spec, path.dirname(entriesBySpec.get(barrel)!));
+        if (!fromBarrel) return spec;
+        return resolve(spec, fileDir) === fromBarrel ? spec : fromBarrel;
+      };
+      const out = rewriteBarrelImports(source, barrelOf, target);
+      if (out !== source) {
+        // Bun may name the file by either path when the app dir sits
+        // behind a symlink (/var and /private/var on macOS).
+        rewritten.set(full, out);
+        rewritten.set(fs.realpathSync(full), out);
+      }
+    }
+  };
+  walk(cwd);
+  if (rewritten.size === 0) return null;
+  const escape = (p: string) => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const filter = new RegExp(`^(?:${[...rewritten.keys()].map(escape).join("|")})$`);
+  const loaders: Record<string, "tsx" | "ts" | "jsx" | "js"> = {
+    ".tsx": "tsx",
+    ".ts": "ts",
+    ".jsx": "jsx",
+    ".js": "js",
+    ".mjs": "js",
+  };
+  return {
+    name: "pylon-barrel-imports",
+    setup(build) {
+      build.onLoad({ filter }, (args) => {
+        const contents = rewritten.get(args.path) ?? fs.readFileSync(args.path, "utf8");
+        return { contents, loader: loaders[path.extname(args.path)] ?? "tsx" } as any;
+      });
+    },
+  };
+}
+
 function absoluteAssetPlugin(
   outdir: string,
   fs: typeof import("node:fs"),

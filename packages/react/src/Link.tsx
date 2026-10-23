@@ -9,14 +9,16 @@
 //     that match across the two routes survive reconciliation, so
 //     their state persists.
 //   - Prefetches in two stages, because the two halves cost very
-//     different things. On viewport entry (IntersectionObserver), or when
-//     the browser is next idle (requestIdleCallback), the runtime
+//     different things. For every rendered link, the runtime
 //     modulepreloads the destination's client chunks — static, immutable,
-//     cacheable. The idle pass covers links off screen, such as a tab bar
-//     below the fold, so the first tap is warm too. For a route that
-//     navigates with no page fetch (`navigation = "client"` or an offline
-//     route), the runtime also loads its entry then. On hover, touch, or
-//     focus it also fetches
+//     cacheable — once the page has painted and the browser is idle
+//     (requestIdleCallback), and not at all under Save-Data or on 2G. That
+//     covers links off screen, such as a tab bar, so the first tap is warm
+//     too, without counting against this page's first paint. For a route
+//     that navigates with no page fetch (`navigation = "client"` or an
+//     offline route), the runtime also loads its entry then. On hover,
+//     touch, pointerdown, or focus it fetches the chunks at once and also
+//     fetches
 //     the page itself, which costs a server render, so that waits for a
 //     real signal of intent rather than firing for a screenful of links.
 //     Focus is included so a keyboard user tabbing to a link gets the
@@ -167,6 +169,8 @@ export function Link({
 
     el.addEventListener("mouseenter", warmPage);
     el.addEventListener("touchstart", warmPage, { passive: true });
+    // A press starts ~100 ms before the click: enough to start the fetch.
+    el.addEventListener("pointerdown", warmPage);
     // Focus is the keyboard's version of hover, and a stronger signal: a
     // cursor slides across links it isn't aiming at, but nobody tabs onto one
     // idly. Without it, tabbing to a link and pressing Enter took the cold
@@ -179,6 +183,7 @@ export function Link({
       io?.disconnect();
       el.removeEventListener("mouseenter", warmPage);
       el.removeEventListener("touchstart", warmPage);
+      el.removeEventListener("pointerdown", warmPage);
       el.removeEventListener("focus", warmPage);
     };
   }, [href, prefetch]);
