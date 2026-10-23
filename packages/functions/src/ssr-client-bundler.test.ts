@@ -970,10 +970,11 @@ describe("offline service worker (buildManifest({ offline }))", () => {
   });
 
   test("a change to the app's name or icon changes the version and the install identity", async () => {
-    tempDir = makeFixture(
+    const dir = makeFixture(
       { "page.tsx": PAGE_BODY("Home"), "leads/page.tsx": PAGE_BODY("Leads") },
       { "layout.tsx": LAYOUT_BODY },
     );
+    tempDir = dir;
     const offline = {
       name: "Field Sales",
       icons: [{ src: "/icons/192.png", sizes: "192x192" }],
@@ -982,12 +983,12 @@ describe("offline service worker (buildManifest({ offline }))", () => {
       routes: ["/leads"],
     };
     const writeManifest = (o: object) =>
-      fs.writeFileSync(path.join(tempDir, "pylon.manifest.json"), JSON.stringify({ offline: o }));
-    fs.mkdirSync(path.join(tempDir, "public", "icons"), { recursive: true });
-    fs.writeFileSync(path.join(tempDir, "public", "icons", "192.png"), "icon-a");
+      fs.writeFileSync(path.join(dir, "pylon.manifest.json"), JSON.stringify({ offline: o }));
+    fs.mkdirSync(path.join(dir, "public", "icons"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "public", "icons", "192.png"), "icon-a");
     writeManifest(offline);
     originalCwd = process.cwd();
-    process.chdir(tempDir);
+    process.chdir(dir);
 
     const read = async () => {
       const { outdir } = await buildClientBundle();
@@ -996,7 +997,7 @@ describe("offline service worker (buildManifest({ offline }))", () => {
     const base = await read();
 
     // New icon bytes at the same URL.
-    fs.writeFileSync(path.join(tempDir, "public", "icons", "192.png"), "icon-b");
+    fs.writeFileSync(path.join(dir, "public", "icons", "192.png"), "icon-b");
     const icon = await read();
     expect(icon.install).not.toBe(base.install);
     expect(icon.version).not.toBe(base.version);
@@ -1008,14 +1009,14 @@ describe("offline service worker (buildManifest({ offline }))", () => {
 
     // The app's own manifest file wins over the config.
     fs.writeFileSync(
-      path.join(tempDir, "public", "manifest.webmanifest"),
+      path.join(dir, "public", "manifest.webmanifest"),
       JSON.stringify({ name: "Own", display: "standalone", icons: [] }),
     );
     const own = await read();
     expect(own.install).not.toBe(named.install);
     // A field iOS does not read at install (theme color) changes nothing.
     fs.writeFileSync(
-      path.join(tempDir, "public", "manifest.webmanifest"),
+      path.join(dir, "public", "manifest.webmanifest"),
       JSON.stringify({ name: "Own", display: "standalone", icons: [], theme_color: "#000" }),
     );
     expect((await read()).install).toBe(own.install);
