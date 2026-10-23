@@ -13,7 +13,7 @@
     "@pylonsync/react": "workspace:*",
     "@pylonsync/sdk": "workspace:*",
     "@tailwindcss/cli": "^4.3.0",
-    "lucide-react": "^0.475.0",
+    "lucide-react": "^1.60.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tailwindcss": "^4.3.0",
