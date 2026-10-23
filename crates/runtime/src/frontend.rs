@@ -5178,7 +5178,7 @@ fn precompressed_variant(
 ) -> Option<(PathBuf, &'static str)> {
     let accept = accept_encoding?;
     for (coding, ext) in [("br", "br"), ("gzip", "gz")] {
-        if !accepts_encoding(accept, coding) {
+        if !crate::compress::accepts_encoding(accept, coding) {
             continue;
         }
         let candidate = precompressed_path(file_path, ext);
@@ -5200,28 +5200,6 @@ fn precompressed_path(file_path: &Path, ext: &str) -> PathBuf {
     name.push(".");
     name.push(ext);
     PathBuf::from(name)
-}
-
-/// Whether an `Accept-Encoding` value accepts `coding` (RFC 9110 §12.5.3):
-/// listed, or covered by `*`, with a non-zero q-value. An explicit entry
-/// for the coding wins over `*`.
-fn accepts_encoding(header: &str, coding: &str) -> bool {
-    let mut wildcard = None;
-    for item in header.split(',') {
-        let mut parts = item.split(';');
-        let name = parts.next().unwrap_or("").trim();
-        let q = parts
-            .filter_map(|p| p.trim().strip_prefix("q="))
-            .find_map(|v| v.trim().parse::<f32>().ok())
-            .unwrap_or(1.0);
-        if name.eq_ignore_ascii_case(coding) {
-            return q > 0.0;
-        }
-        if name == "*" {
-            wildcard = Some(q > 0.0);
-        }
-    }
-    wildcard.unwrap_or(false)
 }
 
 /// Heuristic: does this filename look hash-stamped? Matches
@@ -5982,20 +5960,6 @@ mod tests {
 
         // Traversal out of public/ stays rejected.
         assert!(resolve_safe(&public, "/models/../../secrets.txt").is_none());
-    }
-
-    #[test]
-    fn accept_encoding_parsing() {
-        assert!(accepts_encoding("gzip, deflate, br", "br"));
-        assert!(accepts_encoding("gzip, deflate, br", "gzip"));
-        assert!(accepts_encoding("BR;q=0.5", "br"));
-        assert!(!accepts_encoding("gzip", "br"));
-        assert!(!accepts_encoding("br;q=0, gzip", "br"));
-        assert!(accepts_encoding("*", "br"));
-        assert!(!accepts_encoding("*;q=0", "gzip"));
-        // An explicit entry wins over the wildcard.
-        assert!(!accepts_encoding("*, br;q=0", "br"));
-        assert!(!accepts_encoding("", "gzip"));
     }
 
     #[test]

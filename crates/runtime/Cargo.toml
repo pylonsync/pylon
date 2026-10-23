@@ -116,6 +116,10 @@ markup5ever_rcdom = "0.38"
 # Dual-stack listeners need IPV6_V6ONLY set before bind, which
 # std::net::TcpListener does not expose. See bind_dual_stack_tcp.
 socket2 = "0.6"
+# Response compression (src/compress.rs): brotli and gzip for API and
+# sync bodies.
+brotli = { workspace = true }
+flate2 = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

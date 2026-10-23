@@ -28,6 +28,8 @@ pylon start dist
 
 Pylon sends the brotli copy of a client file when the browser accepts `br`, else the gzip copy, with `Content-Encoding` and `Vary: Accept-Encoding`. Hashed file names get `Cache-Control: public, max-age=31536000, immutable`. A server that builds the client at boot (with no artifact) writes the copies too.
 
+API and sync responses (JSON of 1 KB or more) are compressed per response: brotli when the client accepts `br`, else gzip. A sync page of 3.3 MB is about 0.6 MB on the wire. `/api/auth/*` responses are not compressed, because they carry session tokens.
+
 Dev mode (`pylon dev`) does not change. It runs your source files, and does not write compressed copies.
 
 ## Data paths

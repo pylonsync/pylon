@@ -8,6 +8,7 @@ pub mod cache_handlers;
 pub mod cache_server;
 pub mod change_log_persister;
 pub mod change_log_store;
+pub mod compress;
 pub mod config;
 pub mod connections;
 pub mod crdt_cache;

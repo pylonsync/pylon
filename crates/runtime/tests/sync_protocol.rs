@@ -1962,3 +1962,76 @@ fn pull_pages_follow_the_requested_limit() {
     assert_eq!(r["changes"].as_array().unwrap().len(), 10, "{r}");
     assert_eq!(r["has_more"], true, "{r}");
 }
+
+/// GET with `Accept-Encoding`; returns (status, lowercased head, raw body).
+fn get_encoded(port: u16, path: &str, token: &str, accept: &str) -> (u16, String, Vec<u8>) {
+    let req = format!(
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nAccept-Encoding: {accept}\r\nConnection: close\r\n\r\n"
+    );
+    let mut s = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect");
+    s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    s.write_all(req.as_bytes()).unwrap();
+    let mut buf = Vec::new();
+    let _ = s.read_to_end(&mut buf);
+    let end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+    let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    (status, head, buf[end + 4..].to_vec())
+}
+
+/// Sync pulls and other API JSON are compressed when the client accepts
+/// it, and decompress to the same body. Auth responses are not.
+#[test]
+fn api_responses_are_compressed_by_accept_encoding() {
+    use std::io::Read as _;
+    let rt = Arc::new(Runtime::in_memory(test_manifest()).unwrap());
+    let port = start_server(rt);
+    let token = mint_guest(port);
+    for i in 0..40 {
+        insert_note(
+            port,
+            &token,
+            &format!("note number {i} with some text to compress"),
+        );
+    }
+    let (_, plain) = pull(port, &token, 0);
+
+    let (status, head, body) = get_encoded(port, "/api/sync/pull?since=0", &token, "gzip");
+    assert_eq!(status, 200, "{head}");
+    assert!(head.contains("content-encoding: gzip"), "{head}");
+    assert!(head.contains("vary: accept-encoding"), "{head}");
+    let mut json = String::new();
+    flate2::read::GzDecoder::new(&body[..])
+        .read_to_string(&mut json)
+        .unwrap();
+    let decoded: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded["changes"], plain["changes"]);
+    assert!(
+        body.len() < json.len() / 2,
+        "{} vs {}",
+        body.len(),
+        json.len()
+    );
+
+    let (_, head, body) = get_encoded(port, "/api/sync/pull?since=0", &token, "br, gzip");
+    assert!(head.contains("content-encoding: br"), "{head}");
+    let mut json = String::new();
+    brotli::Decompressor::new(&body[..], 4096)
+        .read_to_string(&mut json)
+        .unwrap();
+    let decoded: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded["changes"], plain["changes"]);
+
+    // No Accept-Encoding: plain JSON.
+    let (_, head, body) = get_encoded(port, "/api/sync/pull?since=0", &token, "identity");
+    assert!(!head.contains("content-encoding"), "{head}");
+    assert!(serde_json::from_slice::<Value>(&body).is_ok());
+
+    // Auth responses carry tokens: never compressed.
+    let (_, head, _) = get_encoded(port, "/api/auth/me", &token, "gzip");
+    assert!(!head.contains("content-encoding"), "{head}");
+}

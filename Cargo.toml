@@ -97,6 +97,7 @@ sha3 = "0.10"
 # OASIS SAML 2.0 Bindings §3.4.4 mandates deflate compression of the
 # AuthnRequest XML before base64 encoding into the redirect URL.
 flate2 = "1"
+brotli = "8"
 # SAML 2.0 protocol primitives + XMLDSig signature verification. The
 # `xmlsec` feature pulls in libxml + libxmlsec1 system bindings; that
 # system dep is the cost of correct SAML signature verification.

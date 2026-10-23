@@ -9863,8 +9863,31 @@ fn start_server(
         // response. The streaming/upload paths (/api/files/*, SSE) have
         // their own respond sites; they'll stay at 0 until separately
         // stamped, which is an acceptable known undercount for now.
-        crate::metrics::set_current_response_bytes(response_body.len());
-        let mut response = Response::from_string(response_body)
+        // Compress JSON and text bodies the client accepts (a sync pull
+        // page is megabytes of JSON). Not /api/auth/*: those bodies carry
+        // session tokens, and compressing a secret next to request-chosen
+        // text is what BREACH-style attacks measure.
+        let accept_encoding = request
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv("Accept-Encoding"))
+            .map(|h| h.value.as_str().to_string());
+        let compressed = if crate::compress::compressible_content_type(&content_type)
+            && !url.starts_with("/api/auth/")
+        {
+            crate::compress::negotiate(accept_encoding.as_deref()).and_then(|encoding| {
+                crate::compress::compress(response_body.as_bytes(), encoding)
+                    .map(|body| (encoding, body))
+            })
+        } else {
+            None
+        };
+        let (wire_body, content_encoding) = match compressed {
+            Some((encoding, body)) => (body, Some(encoding.header_value())),
+            None => (response_body.into_bytes(), None),
+        };
+        crate::metrics::set_current_response_bytes(wire_body.len());
+        let mut response = Response::from_data(wire_body)
             .with_status_code(status)
             .with_header(
                 Header::from_bytes("Content-Type", content_type.as_bytes().to_vec())
@@ -9913,6 +9936,15 @@ fn start_server(
         if bearer_rejected {
             response = response
                 .with_header(Header::from_bytes(BEARER_REJECTED_HEADER, "1").unwrap());
+        }
+        if let Some(encoding) = content_encoding {
+            response = response
+                .with_header(Header::from_bytes("Content-Encoding", encoding).unwrap());
+        }
+        if crate::compress::compressible_content_type(&content_type) {
+            // The body depends on Accept-Encoding whether or not this one
+            // was compressed.
+            response = response.with_header(Header::from_bytes("Vary", "Accept-Encoding").unwrap());
         }
         // Cookie-based auth requires `Access-Control-Allow-Credentials:
         // true` on the response, paired with a specific origin. Vary
