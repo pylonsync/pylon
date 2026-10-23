@@ -19,14 +19,16 @@ pylon start dist
 | `server/runner.js`, `server/chunks/` | Your functions, workflows, page modules, and the Pylon runtime. |
 | `server/assets/` | Files the server reads at run time, such as the OG image fonts. |
 | `server/node_modules/` | Only the packages in `build.server.external`, with their dependencies and peers. |
-| `client/` | The hydration bundle and CSS, served under `/_pylon/build/`. |
+| `client/` | The hydration bundle and CSS, served under `/_pylon/build/`, with a `.br` and a `.gz` copy of each text file of 1 KB or more. |
 | `public/` | A copy of `public/`. |
 | `app/` | Image and text files from `app/` (icons, social images). |
 | `static/` | Pages for routes with `mode: "static"`. |
 | `web/dist/` | The build of a `web/` SPA, when the project has one. |
 | `bin/` | The `pylon` and `bun` binaries, with `--compile` only. |
 
-Dev mode (`pylon dev`) does not change. It runs your source files.
+Pylon sends the brotli copy of a client file when the browser accepts `br`, else the gzip copy, with `Content-Encoding` and `Vary: Accept-Encoding`. Hashed file names get `Cache-Control: public, max-age=31536000, immutable`. A server that builds the client at boot (with no artifact) writes the copies too.
+
+Dev mode (`pylon dev`) does not change. It runs your source files, and does not write compressed copies.
 
 ## Data paths
 

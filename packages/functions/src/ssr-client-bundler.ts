@@ -43,6 +43,7 @@ import {
 } from "./build-compat";
 import { serverBundle } from "./server-bundle";
 import { declaresClientNavigation } from "./ssr-client-nav";
+import { precompressBuild } from "./ssr-precompress";
 import { buildOfflineWorker, readManifestOffline, type BundleOffline } from "./ssr-offline";
 
 type Send = (msg: Record<string, unknown>) => void;
@@ -1586,6 +1587,10 @@ export interface ClientBuildOptions {
   /** The app manifest (fonts, build settings). Default
    *  `<cwd>/pylon.manifest.json`. */
   manifestPath?: string;
+  /** Write brotli and gzip copies of the build's text files for the
+   *  runtime to send. Default: on, except in dev (`NODE_ENV=development`),
+   *  where every edit rebuilds and the browser is local. */
+  precompress?: boolean;
 }
 
 /** The `build` block of `<cwd>/pylon.manifest.json`, if any. */
@@ -2222,6 +2227,21 @@ export async function _doBuildInner(
 
   const manifestPath = path.join(outdir, "manifest.json");
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+
+  // Last, so the copies cover every file above (CSS, fonts' CSS, the
+  // service worker, the manifest).
+  const precompress = opts.precompress ?? process.env.NODE_ENV !== "development";
+  if (precompress) {
+    const zlib: any = await import("node:zlib");
+    const { files, bytes, brotliBytes } = precompressBuild(fs, path, zlib.default ?? zlib, outdir);
+    if (files > 0) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[pylon ssr] precompressed ${files} files: ${Math.round(bytes / 1024)} KB, ` +
+          `${Math.round(brotliBytes / 1024)} KB with brotli`,
+      );
+    }
+  }
 
   // Bump our in-process manifest cache so SSR re-reads on next request.
   _manifestCache = null;

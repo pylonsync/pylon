@@ -4,6 +4,9 @@
 
 ### Features
 
+* **runtime:** the client build has brotli and gzip copies of its text files, written at build time; the runtime sends one by `Accept-Encoding`, with `Vary: Accept-Encoding`. A 2.5 MB build is 0.6 MB with brotli.
+* **runtime:** static files (`/_pylon/build/*`, `public/`, a built `web/dist/`, the offline app's worker, manifest and version) no longer count against the per-IP rate limiter. A page load could 429 its own chunks after about 50 requests.
+* **sync:** `useSession()` asks `/api/auth/me` only when the session is not known for the current token, and joins a request in flight (`refreshSessionIfStale`). A screen that mounted many session readers sent one request each.
 * **ssr:** instant navigation. A client navigation to an offline route, or to a page that exports `navigation = "client"`, renders from the client route table with no page fetch. History, scroll and the `pylon:navigation` event are unchanged; the title comes from the page's static `metadata.title`. Routes that need `serverData` fetch as before.
 * **ssr:** `<Link>` warms route chunks when the browser is idle, not only on viewport entry, and loads the entry of an instant-navigation route ahead of the tap. Hover no longer fetches a page payload for such a route.
 * **lint:** PYL010 flags a page that exports `navigation = "client"` and reads `serverData`.

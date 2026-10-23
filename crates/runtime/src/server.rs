@@ -6023,7 +6023,15 @@ fn start_server(
         // that the browser can't interpret as a valid CORS response —
         // the user-visible symptom is "Failed to fetch" on login. Skip.
         let is_preflight = matches!(method, Method::Options);
-        if !is_preflight {
+        // Static files (client build chunks, `public/`, the offline app's
+        // worker and manifest) are not API requests. One page load fetches
+        // dozens of chunks, so counting them 429'd the page's own scripts
+        // after a burst of about 50. Serving a file costs no more than
+        // counting it.
+        let is_static_asset = matches!(method, Method::Get | Method::Head)
+            && frontend_config.is_active()
+            && crate::frontend::is_static_asset_request(&frontend_config, &url);
+        if !is_preflight && !is_static_asset {
             if let Err(retry_after) = rate_limiter.check(&peer_ip) {
                 // Browser navigation (Accept: text/html) → friendly HTML page,
                 // not the raw API JSON envelope. API/fetch callers still get

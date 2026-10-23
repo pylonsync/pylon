@@ -16,6 +16,14 @@ Always-on, tiered per-window request budgets. Buckets authenticated callers by u
 
 The window is 60s. In dev mode (`PYLON_DEV_MODE` truthy) both tiers are effectively off (100k/min). The anonymous cap is deliberately low. Anonymous traffic against `/api/auth/*` is the brute-force surface.
 
+Static files do not count against the per-IP limit:
+
+- client build files under `/_pylon/build/`
+- files in `public/` and in a built `web/dist/`
+- `/pylon-sw.js`, `/manifest.webmanifest`, and `/_pylon/version` in an offline app
+
+A page load fetches many chunks, and serving a file costs no more than counting it. Page renders and API requests still count.
+
 Beyond this global limiter, the runtime applies additional budgets automatically:
 
 - `/api/ai/stream` has its own per-user (per-IP for anon) rate limiter.

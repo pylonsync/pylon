@@ -1066,3 +1066,27 @@ describe("instant navigation (export const navigation = \"client\")", () => {
     expect(code("app/leads/page")).toMatch(/title:\s*"Leads"/);
   });
 });
+
+describe("precompressed build files", () => {
+  test("a production build writes .br and .gz copies of its chunks; precompress: false does not", async () => {
+    const dir = makeFixture({ "page.tsx": PAGE_BODY("Home") }, { "layout.tsx": LAYOUT_BODY });
+    tempDir = dir;
+    originalCwd = process.cwd();
+    process.chdir(dir);
+
+    const { manifestPath, outdir } = await _doBuildInner(fs, path, dir, "app", { precompress: true });
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as PylonBundleManifest;
+    const route = manifest.routes["app/page"];
+    // The shared chunk holds React: large, and compressed.
+    const shared = route.imports
+      .map((f) => path.join(outdir, f))
+      .sort((a, b) => fs.statSync(b).size - fs.statSync(a).size)[0];
+    expect(fs.existsSync(shared + ".br")).toBe(true);
+    expect(fs.existsSync(shared + ".gz")).toBe(true);
+    expect(fs.statSync(shared + ".br").size).toBeLessThan(fs.statSync(shared).size / 2);
+
+    const again = await _doBuildInner(fs, path, dir, "app", { precompress: false });
+    const files = fs.readdirSync(again.outdir, { recursive: true }) as string[];
+    expect(files.filter((f) => f.endsWith(".br") || f.endsWith(".gz"))).toEqual([]);
+  });
+});

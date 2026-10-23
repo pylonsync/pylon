@@ -804,6 +804,31 @@ fn resolve_safe(root: &Path, request_path: &str) -> Option<PathBuf> {
     }
 }
 
+/// Whether a GET/HEAD for `url` asks for a static file: a client build file
+/// (`/_pylon/build/*`), the offline app's worker, web app manifest or build
+/// version, a file in `public/`, or a file in the built frontend dir. The
+/// per-IP rate limiter skips these (see server.rs).
+pub fn is_static_asset_request(cfg: &FrontendConfig, url: &str) -> bool {
+    let path_only = url.split('?').next().unwrap_or(url);
+    if path_only.starts_with("/_pylon/build/") && cfg.fn_ops.is_some() {
+        return true;
+    }
+    if cfg.offline.is_some()
+        && matches!(
+            path_only,
+            "/pylon-sw.js" | "/manifest.webmanifest" | offline::BUILD_VERSION_PATH
+        )
+    {
+        return true;
+    }
+    if resolve_safe(&public_dir(), path_only).is_some() {
+        return true;
+    }
+    cfg.dir
+        .as_deref()
+        .is_some_and(|dir| resolve_safe(dir, path_only).is_some())
+}
+
 /// Like `resolve_safe` but for a WRITE target: the leaf need not exist yet.
 /// Rejects `..`/`.`/empty segments (so the join can't climb out of `root`) and,
 /// as defense-in-depth against a symlinked subdir, canonicalizes the parent when
@@ -5074,7 +5099,21 @@ fn serve_pylon_client_bundle(
         }
     }
 
-    let (file, length) = match open_static_file(&file_path) {
+    // The build writes `.br` and `.gz` copies of text files (see
+    // packages/functions/src/ssr-precompress.ts). Send one when the client
+    // accepts it; otherwise the file itself.
+    let accept_encoding = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Accept-Encoding"))
+        .map(|h| h.value.as_str().to_string());
+    let variant = precompressed_variant(accept_encoding.as_deref(), &file_path);
+    let has_variants = variant.is_some() || has_precompressed_copy(&file_path);
+    let (open_path, content_encoding) = match &variant {
+        Some((path, encoding)) => (path.clone(), Some(*encoding)),
+        None => (file_path.clone(), None),
+    };
+    let (file, length) = match open_static_file(&open_path) {
         Ok(file) => file,
         Err(_) => {
             // 404 — no such bundle file. Don't invalidate the
@@ -5103,7 +5142,7 @@ fn serve_pylon_client_bundle(
         "no-cache"
     };
 
-    let response = Response::new(
+    let mut response = Response::new(
         tiny_http::StatusCode(200),
         Vec::new(),
         file,
@@ -5119,8 +5158,70 @@ fn serve_pylon_client_bundle(
         )
         .unwrap(),
     );
+    if let Some(encoding) = content_encoding {
+        response = response.with_header(Header::from_bytes("Content-Encoding", encoding).unwrap());
+    }
+    if has_variants {
+        // Caches between here and the browser must key on the encoding.
+        response = response.with_header(Header::from_bytes("Vary", "Accept-Encoding").unwrap());
+    }
     let _ = request.respond(response);
     Ok(())
+}
+
+/// The precompressed copy of `file_path` to send, and its
+/// `Content-Encoding`: brotli when the request accepts it and
+/// `<file>.br` exists, else gzip when accepted and `<file>.gz` exists.
+fn precompressed_variant(
+    accept_encoding: Option<&str>,
+    file_path: &Path,
+) -> Option<(PathBuf, &'static str)> {
+    let accept = accept_encoding?;
+    for (coding, ext) in [("br", "br"), ("gzip", "gz")] {
+        if !accepts_encoding(accept, coding) {
+            continue;
+        }
+        let candidate = precompressed_path(file_path, ext);
+        if candidate.is_file() {
+            return Some((candidate, coding));
+        }
+    }
+    None
+}
+
+fn has_precompressed_copy(file_path: &Path) -> bool {
+    ["br", "gz"]
+        .iter()
+        .any(|ext| precompressed_path(file_path, ext).is_file())
+}
+
+fn precompressed_path(file_path: &Path, ext: &str) -> PathBuf {
+    let mut name = file_path.as_os_str().to_owned();
+    name.push(".");
+    name.push(ext);
+    PathBuf::from(name)
+}
+
+/// Whether an `Accept-Encoding` value accepts `coding` (RFC 9110 §12.5.3):
+/// listed, or covered by `*`, with a non-zero q-value. An explicit entry
+/// for the coding wins over `*`.
+fn accepts_encoding(header: &str, coding: &str) -> bool {
+    let mut wildcard = None;
+    for item in header.split(',') {
+        let mut parts = item.split(';');
+        let name = parts.next().unwrap_or("").trim();
+        let q = parts
+            .filter_map(|p| p.trim().strip_prefix("q="))
+            .find_map(|v| v.trim().parse::<f32>().ok())
+            .unwrap_or(1.0);
+        if name.eq_ignore_ascii_case(coding) {
+            return q > 0.0;
+        }
+        if name == "*" {
+            wildcard = Some(q > 0.0);
+        }
+    }
+    wildcard.unwrap_or(false)
 }
 
 /// Heuristic: does this filename look hash-stamped? Matches
@@ -5881,6 +5982,93 @@ mod tests {
 
         // Traversal out of public/ stays rejected.
         assert!(resolve_safe(&public, "/models/../../secrets.txt").is_none());
+    }
+
+    #[test]
+    fn accept_encoding_parsing() {
+        assert!(accepts_encoding("gzip, deflate, br", "br"));
+        assert!(accepts_encoding("gzip, deflate, br", "gzip"));
+        assert!(accepts_encoding("BR;q=0.5", "br"));
+        assert!(!accepts_encoding("gzip", "br"));
+        assert!(!accepts_encoding("br;q=0, gzip", "br"));
+        assert!(accepts_encoding("*", "br"));
+        assert!(!accepts_encoding("*;q=0", "gzip"));
+        // An explicit entry wins over the wildcard.
+        assert!(!accepts_encoding("*, br;q=0", "br"));
+        assert!(!accepts_encoding("", "gzip"));
+    }
+
+    #[test]
+    fn precompressed_copies_are_chosen_by_accept_encoding() {
+        let tmp = TempDir::new().unwrap();
+        let js = tmp.path().join("chunk-abcd1234.js");
+        fs::write(&js, b"plain").unwrap();
+        fs::write(tmp.path().join("chunk-abcd1234.js.br"), b"br").unwrap();
+        fs::write(tmp.path().join("chunk-abcd1234.js.gz"), b"gz").unwrap();
+
+        let pick = |accept: Option<&str>| {
+            precompressed_variant(accept, &js)
+                .map(|(p, enc)| (p.file_name().unwrap().to_string_lossy().into_owned(), enc))
+        };
+        assert_eq!(
+            pick(Some("gzip, deflate, br")),
+            Some(("chunk-abcd1234.js.br".into(), "br"))
+        );
+        assert_eq!(
+            pick(Some("gzip")),
+            Some(("chunk-abcd1234.js.gz".into(), "gzip"))
+        );
+        assert_eq!(pick(Some("identity")), None);
+        assert_eq!(pick(None), None);
+
+        // Only a gzip copy (the brotli copy was not smaller): gzip.
+        fs::remove_file(tmp.path().join("chunk-abcd1234.js.br")).unwrap();
+        assert_eq!(
+            pick(Some("br, gzip")),
+            Some(("chunk-abcd1234.js.gz".into(), "gzip"))
+        );
+        assert!(has_precompressed_copy(&js));
+        let small = tmp.path().join("tiny-abcd1234.js");
+        fs::write(&small, b"x").unwrap();
+        assert!(!has_precompressed_copy(&small));
+    }
+
+    #[test]
+    fn static_asset_requests_are_files_not_routes() {
+        let tmp = TempDir::new().unwrap();
+        let dist = tmp.path().join("dist");
+        fs::create_dir_all(dist.join("assets")).unwrap();
+        fs::write(dist.join("assets/app-abcd1234.js"), b"//").unwrap();
+        fs::write(dist.join("index.html"), b"<html></html>").unwrap();
+        let mut cfg = FrontendConfig::from_env(tmp.path());
+        cfg.dir = Some(dist);
+        assert!(is_static_asset_request(&cfg, "/assets/app-abcd1234.js?v=1"));
+        // A page, an API path, a missing file: not static.
+        assert!(!is_static_asset_request(&cfg, "/"));
+        assert!(!is_static_asset_request(&cfg, "/api/auth/me"));
+        assert!(!is_static_asset_request(&cfg, "/assets/missing.js"));
+        assert!(!is_static_asset_request(&cfg, "/assets/../index.html"));
+        // Build files only when the app has a client build (function runtime).
+        assert!(!is_static_asset_request(
+            &cfg,
+            "/_pylon/build/chunk-abcd1234.js"
+        ));
+        // The offline app's own files.
+        assert!(!is_static_asset_request(&cfg, "/pylon-sw.js"));
+        let offline = cfg.with_offline(Some(std::sync::Arc::new(pylon_kernel::ManifestOffline {
+            name: "App".into(),
+            short_name: None,
+            description: None,
+            icons: vec![],
+            theme_color: None,
+            background_color: None,
+            start_url: "/".into(),
+            display: "standalone".into(),
+            routes: vec![],
+        })));
+        for path in ["/pylon-sw.js", "/manifest.webmanifest", "/_pylon/version"] {
+            assert!(is_static_asset_request(&offline, path), "{path}");
+        }
     }
 
     #[test]
