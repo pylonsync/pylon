@@ -32,7 +32,7 @@ uuid = { version = "1", features = ["v4", "js"] }
 # disable-client-setinfo: the connection setup sends nothing when there is no
 # password and no database, so every read after the TCP connect has a
 # timeout (see redis_bus::connect_with_timeouts).
-redis = { version = "0.27", optional = true, default-features = false, features = ["script", "disable-client-setinfo"] }
+redis = { version = "0.32", optional = true, default-features = false, features = ["script", "disable-client-setinfo"] }
 ureq = { workspace = true, optional = true }
 tungstenite = { workspace = true, optional = true, features = ["rustls-tls-webpki-roots"] }
 
