@@ -48,7 +48,7 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "satori": "^0.26.0",
+    "satori": "^0.63.2",
     "@resvg/resvg-wasm": "^2.6.2",
     "typescript": "^5.5"
   },
@@ -59,7 +59,7 @@
     "browserslist": "^4.29.1",
     "core-js": "^3.50.0",
     "happy-dom": "^20.8.9",
-    "lightningcss": "~1.32.0",
+    "lightningcss": "~1.33.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
