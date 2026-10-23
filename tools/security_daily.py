@@ -5,12 +5,13 @@ Usage:
     security_daily.py <results-dir> <previous-findings.json or ""> <out-dir>
 
 <results-dir> holds whatever the workflow produced (missing files are fine):
-    trivy-*.json          trivy sbom/image --format json (one per SBOM)
+    trivy-<key>.json      trivy sbom/image --format json (one per SBOM)
     osv.json              osv-scanner --format json
     ai-review.md          the AI review of the last day's commits
     fix-prs.md            open security fix pull requests, one per line
     meta.json             {"date", "repo", "run_url", "images": [...],
-                           "checks": {"cargo audit": "passed", ...}}
+                           "checks": {"cargo audit": "passed", ...},
+                           "labels": {"<key>": "image (apps that run it)"}}
 
 Writes to <out-dir>:
     findings.json   every finding, for tomorrow's diff (kept as an artifact)
@@ -50,13 +51,15 @@ def load(path):
         return None
 
 
-def from_trivy(path):
+def from_trivy(path, labels):
     data = load(path)
     out = []
     if not data:
         return out
-    # An image reference is enough to find it; the digest only adds noise.
-    target = (data.get("ArtifactName") or os.path.basename(path)).split("@sha256:")[0]
+    # meta.json may label each scan ("image (apps that run it)"); otherwise
+    # the image reference, without the digest.
+    stem = os.path.basename(path)[len("trivy-"):-len(".json")]
+    target = labels.get(stem) or (data.get("ArtifactName") or stem).split("@sha256:")[0]
     for result in data.get("Results") or []:
         for v in result.get("Vulnerabilities") or []:
             out.append(
@@ -144,7 +147,7 @@ def main():
     for name in sorted(os.listdir(results)):
         path = os.path.join(results, name)
         if name.startswith("trivy-") and name.endswith(".json"):
-            findings += from_trivy(path)
+            findings += from_trivy(path, meta.get("labels", {}))
     findings += from_osv(os.path.join(results, "osv.json"))
     findings = [f for f in dedupe(findings) if f["severity"] in ("CRITICAL", "HIGH", "MEDIUM")]
 
