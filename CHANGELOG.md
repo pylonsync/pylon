@@ -4,6 +4,9 @@
 
 ### Features
 
+* **ssr:** instant navigation. A client navigation to an offline route, or to a page that exports `navigation = "client"`, renders from the client route table with no page fetch. History, scroll and the `pylon:navigation` event are unchanged; the title comes from the page's static `metadata.title`. Routes that need `serverData` fetch as before.
+* **ssr:** `<Link>` warms route chunks when the browser is idle, not only on viewport entry, and loads the entry of an instant-navigation route ahead of the tap. Hover no longer fetches a page payload for such a route.
+* **lint:** PYL010 flags a page that exports `navigation = "client"` and reads `serverData`.
 * **offline:** `useAppUpdate()` in `@pylonsync/react` reports a new deploy to an open app (`updateReady`, `version`, `builtAt`, `latestVersion`). It checks `/_pylon/version` when the page becomes visible and every five minutes, and sees a new service worker when it finishes installing. `apply()` waits until the outbox has no pending writes, tells the new worker to take over, and reloads once; a reload that lands on the same build does not reload again. `<AppUpdateBar />` is a minimal unstyled notice.
 * **offline:** the runtime serves `/_pylon/version` (`{ version, builtAt, install }`, `no-store`) from `pylon-version.json` in the client build. The service worker answers `pylon:skip-waiting` and `pylon:version` messages.
 * **offline:** `reinstallRecommended` is true on an iOS home-screen app when the manifest's name, short name, icons (including the icon file bytes), display mode or start URL changed since it was added. A change to these values also gives the build a new service worker version.

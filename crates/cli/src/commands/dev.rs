@@ -905,6 +905,13 @@ fn run_rebuild_and_get_manifest(
             eprintln!("[{n}] \u{26a0} offline {}: {}", f.rule, f.message);
             eprintln!("       fix: {}", f.fix);
         }
+        for f in crate::commands::lint::lint_client_navigation(
+            &manifest,
+            &crate::commands::lint::read_project_module,
+        ) {
+            eprintln!("[{n}] \u{26a0} navigation {}: {}", f.rule, f.message);
+            eprintln!("       fix: {}", f.fix);
+        }
     }
 
     if has_errors {

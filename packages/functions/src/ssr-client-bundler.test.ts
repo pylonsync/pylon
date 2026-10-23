@@ -1032,3 +1032,37 @@ describe("offline service worker (buildManifest({ offline }))", () => {
     expect(fs.existsSync(path.join(outdir, "pylon-sw.js"))).toBe(false);
   });
 });
+
+describe("instant navigation (export const navigation = \"client\")", () => {
+  test("the manifest marks the page, and its entry passes the static metadata", async () => {
+    const dir = makeFixture(
+      {
+        "page.tsx": PAGE_BODY("Home"),
+        "leads/page.tsx":
+          `export const navigation = "client";\nexport const metadata = { title: "Leads" };\n` +
+          PAGE_BODY("Leads"),
+        "reports/page.tsx": PAGE_BODY("Reports"),
+      },
+      { "layout.tsx": LAYOUT_BODY },
+    );
+    tempDir = dir;
+    originalCwd = process.cwd();
+    process.chdir(dir);
+
+    const { manifestPath, outdir } = await buildClientBundle();
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as PylonBundleManifest;
+    expect(manifest.routes["app/leads/page"].navigation).toBe("client");
+    expect(manifest.routes["app/reports/page"].navigation).toBeUndefined();
+    expect(manifest.routes["app/page"].navigation).toBeUndefined();
+
+    // The built client code carries the title for the runtime; a page without
+    // static metadata imports none.
+    const code = (component: string) => {
+      const r = manifest.routes[component];
+      return [r.file, ...r.imports]
+        .map((f) => fs.readFileSync(path.join(outdir, f), "utf8"))
+        .join("\n");
+    };
+    expect(code("app/leads/page")).toMatch(/title:\s*"Leads"/);
+  });
+});

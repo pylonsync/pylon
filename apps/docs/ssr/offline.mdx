@@ -164,6 +164,10 @@ The rules:
 />
 ```
 
+## Instant navigation
+
+A navigation to an offline route renders from the device, with no page fetch, also when the network is good. A tap on a tab bar paints in the same frame. To get the same for a route that is not in `routes`, export `navigation = "client"` from its page. See [Instant navigation](/ssr/link#instant-navigation).
+
 ## New deploys
 
 Each build gets a new worker with its own caches. The new worker installs in the background and waits. It takes over when every tab of the app is closed, or when the page tells it to. Then it deletes the caches of the old build. A deploy never changes the code of a page that is open by itself.

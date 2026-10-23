@@ -45,6 +45,11 @@
 //!
 //!   PYL009  An offline route that names no page in the app.
 //!
+//!   PYL010  A page that exports `navigation = "client"` whose page or
+//!           layouts read `serverData`. A client navigation renders it
+//!           with no page fetch, so serverData has nothing to return.
+//!           Offline routes are PYL008's.
+//!
 //! Runs standalone (`pylon lint`) and also at `pylon dev` startup
 //! (via a small invocation in `commands/dev.rs`) so issues land in
 //! front of the developer the moment they save app.ts.
@@ -382,6 +387,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     };
     let mut findings = lint_manifest(&manifest);
     findings.extend(lint_offline_routes(&manifest, &read_project_module));
+    findings.extend(lint_client_navigation(&manifest, &read_project_module));
     let warnings = findings
         .iter()
         .filter(|f| f.severity == Severity::Warning)
@@ -486,6 +492,110 @@ pub fn lint_offline_routes(
         }
     }
     findings
+}
+
+/// PYL010: pages that export `navigation = "client"` and read `serverData`.
+/// Routes listed in `offline.routes` are skipped: PYL008 reports those.
+pub fn lint_client_navigation(
+    manifest: &AppManifest,
+    read_source: &dyn Fn(&str) -> Option<String>,
+) -> Vec<Finding> {
+    let offline: HashSet<&str> = manifest
+        .offline
+        .as_ref()
+        .map(|o| o.routes.iter().map(String::as_str).collect())
+        .unwrap_or_default();
+    let mut findings = Vec::new();
+    for route in &manifest.routes {
+        let Some(component) = route.component.as_deref() else {
+            continue;
+        };
+        if !matches!(route.kind.as_deref(), None | Some("page"))
+            || offline.contains(route.path.as_str())
+        {
+            continue;
+        }
+        if !read_source(component).is_some_and(|src| declares_client_navigation(&src)) {
+            continue;
+        }
+        let readers: Vec<&str> = route
+            .layouts
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(component))
+            .filter(|m| read_source(m).is_some_and(|src| reads_server_data(&src)))
+            .collect();
+        if !readers.is_empty() {
+            findings.push(Finding {
+                rule: "PYL010",
+                severity: Severity::Warning,
+                entity: None,
+                policy: None,
+                message: format!(
+                    "\"{}\" exports navigation = \"client\" but reads serverData in {}. A client navigation renders it with no page fetch, so serverData returns nothing.",
+                    route.path,
+                    readers.join(", ")
+                ),
+                fix: "Read the data with db.useQuery (the local replica), or remove the navigation export.",
+            });
+        }
+    }
+    findings
+}
+
+/// Whether page source declares `export const navigation = "client"`. The
+/// same rule as `declaresClientNavigation` in
+/// packages/functions/src/ssr-client-nav.ts: single, double or backtick
+/// quotes, with an optional type annotation.
+fn declares_client_navigation(src: &str) -> bool {
+    let mut from = 0;
+    while let Some(pos) = src[from..].find("export") {
+        let start = from + pos;
+        from = start + "export".len();
+        let rest = &src[from..];
+        let Some(rest) = strip_keyword(rest, "const") else {
+            continue;
+        };
+        let Some(rest) = strip_keyword(rest, "navigation") else {
+            continue;
+        };
+        // An optional type annotation, up to the `=`.
+        let rest = rest.trim_start();
+        let rest = match rest.strip_prefix(':') {
+            Some(annotated) => match annotated.find('=') {
+                Some(eq) => &annotated[eq..],
+                None => continue,
+            },
+            None => rest,
+        };
+        let Some(rest) = rest.strip_prefix('=') else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        for quote in ['"', '\'', '`'] {
+            if let Some(value) = rest.strip_prefix(quote) {
+                if value.starts_with("client") && value["client".len()..].starts_with(quote) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// `src` after whitespace and then `keyword` as a whole word, or None.
+fn strip_keyword<'a>(src: &'a str, keyword: &str) -> Option<&'a str> {
+    let trimmed = src.trim_start();
+    if trimmed.len() == src.len() {
+        // A keyword must follow whitespace.
+        return None;
+    }
+    let rest = trimmed.strip_prefix(keyword)?;
+    let next = rest.chars().next();
+    if next.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') {
+        return None;
+    }
+    Some(rest)
 }
 
 /// Whether module source uses `serverData` as an identifier (not as part of
@@ -924,6 +1034,60 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, "PYL009");
         assert!(findings[0].message.contains("/lead/[id]"));
+    }
+
+    #[test]
+    fn pyl010_flags_a_client_navigation_page_that_reads_server_data() {
+        let mut m = offline_app(&["/leads/[id]"]);
+        let src = |module: &str| -> Option<String> {
+            Some(
+                match module {
+                    "app/layout" => "export default function L({ children }) { return children; }",
+                    // Opted in, reads the replica: fine.
+                    "app/leads/page" => "export const navigation = \"client\";\nconst rows = db.useQuery(\"Lead\");",
+                    // Opted in, reads serverData: flagged.
+                    "app/reports/page" => "export const navigation: \"client\" = 'client';\nconst { serverData } = props;",
+                    // An offline route: PYL008's, not PYL010's.
+                    "app/leads/[id]/page" => "export const navigation = \"client\"; use(props.serverData.get(\"Lead\", id));",
+                    _ => return None,
+                }
+                .to_string(),
+            )
+        };
+        let findings = lint_client_navigation(&m, &src);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].rule, "PYL010");
+        assert!(findings[0].message.contains("\"/reports\""));
+        assert!(findings[0].message.contains("app/reports/page"));
+
+        // Without the export, reading serverData is the normal fetched path.
+        let plain = |module: &str| -> Option<String> {
+            src(module).map(|s| s.replace("export const navigation", "const navigationMode"))
+        };
+        assert!(lint_client_navigation(&m, &plain).is_empty());
+        m.offline = None;
+        assert_eq!(lint_client_navigation(&m, &src).len(), 2);
+    }
+
+    #[test]
+    fn client_navigation_export_detection() {
+        for yes in [
+            "export const navigation = \"client\";",
+            "export const navigation='client'",
+            "export const navigation = `client`",
+            "export  const navigation: \"client\" | \"server\" = \"client\" as const;",
+        ] {
+            assert!(declares_client_navigation(yes), "{yes}");
+        }
+        for no in [
+            "export const navigation = \"server\";",
+            "const navigation = \"client\";",
+            "export const navigationMode = \"client\";",
+            "export const navigation = \"clientele\";",
+            "",
+        ] {
+            assert!(!declares_client_navigation(no), "{no}");
+        }
     }
 
     #[test]

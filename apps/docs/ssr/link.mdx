@@ -16,8 +16,8 @@ import { Link } from "@pylonsync/react";
 | Phase | Behavior |
 |---|---|
 | SSR / no JS | Renders `<a href data-pylon-link>...</a>`. Same as a regular anchor. |
-| In viewport | IntersectionObserver `modulepreload`s the destination's client chunks: its own route entry plus what it imports. This is deferred until the page's `load` event, so warming many links never competes with the current page's own render. |
-| Hover / touchstart / focus | This also fetches the page payload and holds it in memory for the click. `focus` is included so a keyboard user tabbing to a link gets the same warm path as a mouse cursor. |
+| In viewport, or when the browser is idle | IntersectionObserver, and `requestIdleCallback` for links off screen, `modulepreload` the destination's client chunks: its own route entry plus what it imports. This waits for the page's `load` event, so warming many links never competes with the current page's own render. For a route with [instant navigation](#instant-navigation), the runtime also loads the entry, so the first tap renders at once. |
+| Hover / touchstart / focus | This also fetches the page payload and holds it in memory for the click. A route with instant navigation has no payload to fetch. `focus` is included so a keyboard user tabbing to a link gets the same warm path as a mouse cursor. |
 | Click | `preventDefault()`, consume the prefetched payload (or fetch it), render the new route, and re-render the React root in place. |
 | Modifier keys / target="_blank" | Falls through to the browser's default behavior, such as opening a new tab. |
 
@@ -107,6 +107,37 @@ The runtime loads as part of the shared chunk. `window.__pylon` is defined as so
 7. The runtime calls `history.pushState` and scrolls to top. Navigation is done.
 
 If anything fails, for example the fetch errored, the response was not HTML, or the manifest did not know the component, the runtime falls back to `window.location.href = href`. The browser then handles the navigation as a normal document load.
+
+## Instant navigation
+
+A route whose page does not need the server renders with no page fetch. The runtime takes the page from the route table and its warmed chunk, and paints it in the same frame as the tap. Data comes from the local replica, through `db.useQuery` and `db.useQueryOne`.
+
+A route gets instant navigation in one of two ways:
+
+- Its URL is in `buildManifest({ offline: { routes } })`. See [Offline apps](/ssr/offline).
+- Its page exports `navigation`:
+
+```tsx
+// app/leads/page.tsx
+export const navigation = "client";
+export const metadata = { title: "Leads" };
+
+export default function Leads() {
+  const { data: leads } = db.useQuery("Lead");
+  return <LeadList leads={leads} />;
+}
+```
+
+Such a page and its layouts must follow these rules:
+
+1. Do not read `serverData`. A navigation with no page fetch has no server data. `pylon lint` warns about a page that exports `navigation = "client"` and reads `serverData` (PYL010).
+2. Do not read `props.auth`, `props.headers`, or `props.cookies` during the render. The page gets the identity-free props that the last page had. Use `props.session.exists` for a signed-in check, and `useSession()` for the user.
+
+History, the scroll reset, and the `pylon:navigation` event are the same as for a fetched navigation. Back and forward render the page again with no fetch.
+
+The page title comes from the page's static `metadata.title`. Other head tags, such as the description and the Open Graph tags, do not change on a navigation with no page fetch. A crawler or a shared link loads the page from the server, which renders all of them. A page with `generateMetadata` keeps the previous title.
+
+A first load of the URL, and a reload, still render on the server.
 
 ## Differences from Next.js's `<Link>`
 

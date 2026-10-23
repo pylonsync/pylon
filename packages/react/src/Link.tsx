@@ -9,9 +9,14 @@
 //     that match across the two routes survive reconciliation, so
 //     their state persists.
 //   - Prefetches in two stages, because the two halves cost very
-//     different things. On viewport entry (IntersectionObserver) the
-//     runtime modulepreloads the destination's client chunks — static,
-//     immutable, cacheable. On hover, touch, or focus it also fetches
+//     different things. On viewport entry (IntersectionObserver), or when
+//     the browser is next idle (requestIdleCallback), the runtime
+//     modulepreloads the destination's client chunks — static, immutable,
+//     cacheable. The idle pass covers links off screen, such as a tab bar
+//     below the fold, so the first tap is warm too. For a route that
+//     navigates with no page fetch (`navigation = "client"` or an offline
+//     route), the runtime also loads its entry then. On hover, touch, or
+//     focus it also fetches
 //     the page itself, which costs a server render, so that waits for a
 //     real signal of intent rather than firing for a screenful of links.
 //     Focus is included so a keyboard user tabbing to a link gets the
@@ -138,6 +143,12 @@ export function Link({
       window.__pylon?.prefetch(href, { document: true });
     };
 
+    // Every rendered link, not only those in view, once the browser is idle.
+    const idle =
+      typeof window.requestIdleCallback === "function"
+        ? window.requestIdleCallback(warmChunks, { timeout: 2000 })
+        : window.setTimeout(warmChunks, 200);
+
     let io: IntersectionObserver | null = null;
     if (typeof IntersectionObserver !== "undefined") {
       io = new IntersectionObserver(
@@ -163,6 +174,8 @@ export function Link({
     el.addEventListener("focus", warmPage);
 
     return () => {
+      if (typeof window.cancelIdleCallback === "function") window.cancelIdleCallback(idle);
+      else window.clearTimeout(idle);
       io?.disconnect();
       el.removeEventListener("mouseenter", warmPage);
       el.removeEventListener("touchstart", warmPage);
