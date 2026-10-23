@@ -3279,7 +3279,7 @@ checksum = "e0c5ccf5294c6ccd63a74f1565028353830a9c2f5eb0c682c355c471726a6e3f"
 
 [[package]]
 name = "pylon-action"
-version = "0.22.56"
+version = "0.22.57"
 dependencies = [
  "pylon-kernel",
  "serde_json",
@@ -3287,7 +3287,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-auth"
-version = "0.22.56"
+version = "0.22.57"
 dependencies = [
  "argon2",
  "base64",
@@ -3315,7 +3315,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-cli"
-version = "0.22.56"
+version = "0.22.57"
 dependencies = [
  "base64",
  "dotenvy",
@@ -3359,7 +3359,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-cluster"
-version = "0.22.56"
+version = "0.22.57"
 dependencies = [
  "base64",
  "pylon-auth",
@@ -3375,7 +3375,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-crdt"
-version = "0.22.56"
+version = "0.22.57"
 dependencies = [
  "flate2",
  "loro",
@@ -3388,7 +3388,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-functions"
-version = "0.22.56"
+version = "0.22.57"
 dependencies = [
  "base64",
  "pylon-http",
@@ -3400,7 +3400,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-http"
-version = "0.22.56"
+version = "0.22.57"
 dependencies = [
  "pylon-kernel",
  "serde_json",
@@ -3408,7 +3408,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-kernel"
-version = "0.22.56"
+version = "0.22.57"
 dependencies = [
  "js-sys",
  "serde",
@@ -3418,7 +3418,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-migrate"
-version = "0.22.56"
+version = "0.22.57"
 dependencies = [
  "pylon-kernel",
  "serde",
@@ -3427,7 +3427,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-observability"
-version = "0.22.56"
+version = "0.22.57"
 dependencies = [
  "serde",
  "serde_json",
@@ -3436,7 +3436,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-plugin"
-version = "0.22.56"
+version = "0.22.57"
 dependencies = [
  "argon2",
  "hashlink",
@@ -3452,7 +3452,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-policy"
-version = "0.22.56"
+version = "0.22.57"
 dependencies = [
  "chrono",
  "pylon-auth",
@@ -3462,7 +3462,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-query"
-version = "0.22.56"
+version = "0.22.57"
 dependencies = [
  "pylon-kernel",
  "serde_json",
@@ -3470,7 +3470,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-realtime"
-version = "0.22.56"
+version = "0.22.57"
 dependencies = [
  "base64",
  "bincode",
@@ -3487,11 +3487,11 @@ dependencies = [
 
 [[package]]
 name = "pylon-replication"
-version = "0.22.56"
+version = "0.22.57"
 
 [[package]]
 name = "pylon-router"
-version = "0.22.56"
+version = "0.22.57"
 dependencies = [
  "base64",
  "pylon-auth",
@@ -3510,7 +3510,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-runtime"
-version = "0.22.56"
+version = "0.22.57"
 dependencies = [
  "base64",
  "brotli",
@@ -3569,7 +3569,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-schema"
-version = "0.22.56"
+version = "0.22.57"
 dependencies = [
  "pylon-kernel",
 ]
@@ -3586,7 +3586,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-shard-guest"
-version = "0.22.56"
+version = "0.22.57"
 dependencies = [
  "pylon-replication",
  "rmp-serde",
@@ -3596,7 +3596,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-staticgen"
-version = "0.22.56"
+version = "0.22.57"
 dependencies = [
  "pylon-kernel",
  "serde_json",
@@ -3604,7 +3604,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-storage"
-version = "0.22.56"
+version = "0.22.57"
 dependencies = [
  "bytes",
  "chrono",
@@ -3629,7 +3629,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-studio-api"
-version = "0.22.56"
+version = "0.22.57"
 dependencies = [
  "pylon-kernel",
  "serde_json",
@@ -3637,7 +3637,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-sync"
-version = "0.22.56"
+version = "0.22.57"
 dependencies = [
  "serde",
  "serde_json",
@@ -3645,7 +3645,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-workers"
-version = "0.22.56"
+version = "0.22.57"
 dependencies = [
  "async-trait",
  "futures",
