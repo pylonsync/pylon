@@ -386,9 +386,15 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
     let auth_user = &manifest.auth.user;
     let mut changes: Vec<ChangeEvent> = Vec::new();
     let mut scanned: usize = 0;
-    let mut next_after: Option<(String, Option<String>, usize)> = None;
+    // (entity, ascending `after` id, rows emitted for the entity, backward
+    // `before` id of a capped entity's tail walk)
+    let mut next_after: Option<(String, Option<String>, usize, Option<String>)> = None;
     let resume_entity = snapshot_after.as_ref().map(|c| c.0.clone());
     let resume_after_id = snapshot_after.as_ref().and_then(|c| c.1.clone());
+    // A capped entity's backward walk resumes before this id.
+    let resume_before: Option<String> = snapshot_after_parsed
+        .as_ref()
+        .and_then(|v| v.get("b").and_then(|s| s.as_str()).map(str::to_string));
     // Rows already emitted for the entity we're resuming INTO. `sync_limit` is
     // a per-client-per-entity ceiling, and a snapshot spans however many
     // requests the page row limit forces — so a counter that reset each
@@ -457,131 +463,140 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
             0
         };
 
-        // A capped entity takes the tail of the table in ONE read instead of
-        // walking it from the beginning.
+        // A capped entity takes the tail of the table, walking BACKWARDS from
+        // the newest row, instead of walking it from the beginning: the cap
+        // is aimed at time-series tables, and an id-ascending walk truncated
+        // to `cap` would hand the replica the OLDEST rows.
         //
-        // Two things wrong with walking it: the cap is aimed at time-series
-        // tables and every scan here is id-ASCENDING, so truncating handed the
-        // replica the OLDEST rows — useless for a dashboard showing the last
-        // 30 days; and it read the whole table to throw most of it away.
-        //
-        // Caps are small by definition, so the tail fits in one page and this
-        // entity never needs snapshot pagination. Rows dropped by the policy
-        // below just mean fewer than `cap` arrive, which the contract allows —
+        // The walk is paged across requests like the ascending one: a
+        // continuation carries the backward position (`b`) and the rows
+        // emitted so far (`n`). It stops at `cap` visible rows or at the start
+        // of the table. Pre-fix it stopped at the per-request scan budget and
+        // emitted what it had with no continuation, so after a bulk import of
+        // rows another caller sees, every in-scope row older than 50,000 of
+        // them never reached the replica: a rep with ~7,400 in-scope
+        // properties synced 70, with no error. Rows dropped by the policy
+        // just mean fewer than `cap` arrive, which the contract allows:
         // `sync_limit` is a ceiling, not a quota.
         if let Some(cap) = entity.sync_limit {
-            // Walk BACKWARDS from the newest row until we have `cap` rows this
-            // caller can actually see, or the table / scan budget runs out.
-            //
             // Paged rather than one `list_last(cap)` fetch: the cap counts
             // VISIBLE rows, and visibility is decided per row by the read
             // policy. A single fetch would take the newest `cap` rows across
             // every tenant and then filter, so on a busy multi-tenant table a
             // quiet tenant could receive nothing at all.
-            let mut visible: Vec<serde_json::Value> = Vec::new();
-            let mut before: Option<String> = None;
+            let mut before: Option<String> = if resuming_this_entity {
+                resume_before.clone()
+            } else {
+                None
+            };
             let mut supported = true;
-            while visible.len() < cap {
-                let page =
-                    match ctx
-                        .store
-                        .list_last(&entity.name, before.as_deref(), RAW_FETCH_CHUNK)
-                    {
-                        Ok(Some(rows)) => rows,
-                        // Store can't scan backwards — fall through to the
-                        // ascending walk rather than failing the snapshot.
-                        Ok(None) => {
-                            supported = false;
-                            break;
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                entity = %entity.name,
-                                error = ?e,
-                                "sync_limit tail read failed; falling back to an ascending scan"
-                            );
-                            supported = false;
-                            break;
-                        }
-                    };
-                if page.is_empty() {
-                    break;
-                }
-                for row in page.iter() {
-                    let Some(row_id) = row.get("id").and_then(|v| v.as_str()) else {
-                        continue;
-                    };
-                    before = Some(row_id.to_string());
-                    scanned += 1;
-                    if !matches!(
-                        ctx.policy_engine
-                            .check_sync_scope(&entity.name, ctx.auth_ctx, Some(row)),
-                        pylon_policy::PolicyResult::Allowed
-                    ) {
-                        continue;
-                    }
-                    if !matches!(
-                        ctx.policy_engine
-                            .check_entity_read(&entity.name, ctx.auth_ctx, Some(row)),
-                        pylon_policy::PolicyResult::Allowed
-                    ) {
-                        continue;
-                    }
-                    visible.push(row.clone());
-                    if visible.len() >= cap {
+            // This request's rows of the entity, newest first. Emitted
+            // oldest-first below, like every other snapshot page.
+            let mut batch: Vec<ChangeEvent> = Vec::new();
+            // Where the walk paused, when it did: the continuation.
+            let mut paused = false;
+            'tail: while emitted_for_entity + batch.len() < cap {
+                let rows = match ctx.store.list_last(
+                    &entity.name,
+                    before.as_deref(),
+                    RAW_FETCH_CHUNK,
+                ) {
+                    Ok(Some(rows)) => rows,
+                    // Store can't scan backwards — fall through to the
+                    // ascending walk rather than failing the snapshot.
+                    Ok(None) if batch.is_empty() && before.is_none() => {
+                        supported = false;
                         break;
                     }
+                    Ok(None) => break,
+                    Err(e) => {
+                        tracing::error!(
+                            entity = %entity.name,
+                            error = ?e,
+                            "sync_limit tail read failed; returning 503 for client retry"
+                        );
+                        let resume_payload = serde_json::json!({
+                            "e": entity.name.clone(),
+                            "a": serde_json::Value::Null,
+                            "b": before.clone(),
+                            "s": snapshot_seq,
+                            "n": emitted_for_entity,
+                        })
+                        .to_string();
+                        let body = serde_json::json!({
+                                "error": {
+                                    "code": "SNAPSHOT_PAGE_FAILED",
+                                    "hint": "transient storage error mid-snapshot — retry with the same snapshot_after",
+                                    "message": format!("snapshot tail read failed for entity `{}` before id={:?}", entity.name, before),
+                                    "snapshot_after": url_encode(&resume_payload),
+                                }
+                            })
+                            .to_string();
+                        return (503, body);
+                    }
+                };
+                if rows.is_empty() {
+                    break;
                 }
-                // Same budget the ascending path honours, so a sparse policy
-                // over a huge table can't walk it all in one request.
-                if scanned >= raw_scan_budget {
+                let chunk_len = rows.len();
+                for row in rows {
+                    let Some(row_id) = row.get("id").and_then(|v| v.as_str()).map(str::to_string)
+                    else {
+                        continue;
+                    };
+                    before = Some(row_id.clone());
+                    scanned += 1;
+                    let visible = matches!(
+                        ctx.policy_engine
+                            .check_sync_scope(&entity.name, ctx.auth_ctx, Some(&row)),
+                        pylon_policy::PolicyResult::Allowed
+                    ) && matches!(
+                        ctx.policy_engine
+                            .check_entity_read(&entity.name, ctx.auth_ctx, Some(&row)),
+                        pylon_policy::PolicyResult::Allowed
+                    );
+                    if visible {
+                        let event = ChangeEvent {
+                            seq: snapshot_seq,
+                            entity: entity.name.clone(),
+                            row_id,
+                            kind: ChangeKind::Insert,
+                            data: Some(crate::project_row_for_replication(
+                                manifest,
+                                auth_user,
+                                &entity.name,
+                                row,
+                            )),
+                            prev_data: None,
+                            timestamp: String::new(),
+                        };
+                        page.add(&event);
+                        batch.push(event);
+                        if emitted_for_entity + batch.len() >= cap {
+                            break 'tail;
+                        }
+                        if page.full(changes.len() + batch.len()) {
+                            paused = true;
+                            break 'tail;
+                        }
+                    }
+                    // Bound rows TOUCHED per request, as the ascending path
+                    // does: pause with a continuation instead of stopping.
+                    if scanned >= raw_scan_budget {
+                        paused = true;
+                        break 'tail;
+                    }
+                }
+                if chunk_len < RAW_FETCH_CHUNK {
                     break;
                 }
             }
             if supported {
-                // Collected newest-first; emit oldest-first like every other
-                // snapshot path so client-side ordering assumptions hold.
-                visible.reverse();
-                // Resume support: a capped tail wider than one batch spans
-                // multiple requests. Prior pages already emitted
-                // `resume_emitted` rows of this tail — skip them here, and
-                // carry the RUNNING count forward in the continuation.
-                //
-                // Pre-fix, the overflow token was rebuilt from the original
-                // resume marker with `n: 0`, i.e. byte-identical to the token
-                // the client had just sent — so any capped entity whose
-                // visible tail exceeded the page row limit re-served page 1
-                // forever. The client re-requested the same snapshot_after in
-                // a tight loop, bootstrap never converged, and every pull()
-                // awaiting the snapshot hung (found live on reelbear.app once
-                // membership-scoped reads pushed a capped tail past 1000
-                // visible rows).
-                for row in visible.into_iter().skip(emitted_for_entity) {
-                    let row_id = row
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    changes.push(ChangeEvent {
-                        seq: snapshot_seq,
-                        entity: entity.name.clone(),
-                        row_id,
-                        kind: ChangeKind::Insert,
-                        data: Some(crate::project_row_for_replication(
-                            manifest,
-                            auth_user,
-                            &entity.name,
-                            row,
-                        )),
-                        prev_data: None,
-                        timestamp: String::new(),
-                    });
-                    page.add(changes.last().expect("just pushed"));
-                    emitted_for_entity += 1;
-                    if page.full(changes.len()) {
-                        next_after = Some((entity.name.clone(), None, emitted_for_entity));
-                        break 'outer;
-                    }
+                emitted_for_entity += batch.len();
+                changes.extend(batch.into_iter().rev());
+                if paused && emitted_for_entity < cap {
+                    next_after = Some((entity.name.clone(), None, emitted_for_entity, before));
+                    break 'outer;
                 }
                 continue;
             }
@@ -706,6 +721,7 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
                             entity.name.clone(),
                             entity_after.clone(),
                             emitted_for_entity,
+                            None,
                         ));
                         break 'outer;
                     }
@@ -719,6 +735,7 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
                         entity.name.clone(),
                         entity_after.clone(),
                         emitted_for_entity,
+                        None,
                     ));
                     break 'outer;
                 }
@@ -736,10 +753,15 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
     // right "as of" point.
     let has_more = next_after.is_some();
     let cursor_seq = if has_more { 0 } else { snapshot_seq };
-    let next_after_str = next_after.map(|(e, a, n)| {
+    let next_after_str = next_after.map(|(e, a, n, b)| {
         // `n` carries per-entity emitted count so `sync_limit` survives
-        // pagination — see resume_emitted.
-        let payload = serde_json::json!({"e": e, "a": a, "s": snapshot_seq, "n": n}).to_string();
+        // pagination — see resume_emitted. `b` is a capped entity's backward
+        // position.
+        let mut payload = serde_json::json!({"e": e, "a": a, "s": snapshot_seq, "n": n});
+        if let Some(b) = b {
+            payload["b"] = serde_json::json!(b);
+        }
+        let payload = payload.to_string();
         url_encode(&payload)
     });
     let mut resp = serde_json::json!({

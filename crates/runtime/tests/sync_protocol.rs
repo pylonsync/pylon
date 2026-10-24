@@ -995,6 +995,63 @@ fn snapshot_pull_bounds_rows_scanned_for_sparse_policy() {
         "snapshot must converge once the table is fully scanned: {b2}"
     );
 
+    // A CAPPED entity pages across the budget too. Pre-fix its backward tail
+    // walk stopped at the budget and returned what it had with no
+    // continuation: after a bulk import of rows another caller sees, every
+    // in-scope row older than `budget` of them was silently left out (a
+    // Veritas rep with ~7,400 in-scope properties synced 70).
+    let capped =
+        Arc::new(Runtime::in_memory(scoped_manifest("data.body == \"mine\"", Some(100))).unwrap());
+    for i in 0..30 {
+        capped
+            .insert(
+                "Note",
+                &serde_json::json!({ "title": format!("m{i}"), "body": "mine" }),
+            )
+            .expect("seed mine");
+    }
+    // 120 newer rows outside the scope: more than the 50-row budget.
+    for i in 0..120 {
+        capped
+            .insert(
+                "Note",
+                &serde_json::json!({ "title": format!("t{i}"), "body": "theirs" }),
+            )
+            .expect("seed theirs");
+    }
+    let capped_port = start_server(capped);
+    let capped_token = mint_guest(capped_port);
+    let mut mine: Vec<String> = Vec::new();
+    let mut pages = 0;
+    let mut query = "since=0".to_string();
+    loop {
+        let (status, body) = http(
+            capped_port,
+            "GET",
+            &format!("/api/sync/pull?{query}"),
+            Some(&capped_token),
+            None,
+        );
+        assert_eq!(status, 200, "capped page {pages}: {body}");
+        let r: Value = serde_json::from_str(&body).unwrap();
+        pages += 1;
+        assert!(pages < 20, "capped snapshot did not converge: {body}");
+        for c in r["changes"].as_array().unwrap() {
+            if c["entity"] == "Note" {
+                mine.push(c["data"]["title"].as_str().unwrap().to_string());
+            }
+        }
+        match r["snapshot_after"].as_str() {
+            Some(next) => query = format!("since=0&snapshot_after={next}"),
+            None => break,
+        }
+    }
+    mine.sort();
+    let mut expected: Vec<String> = (0..30).map(|i| format!("m{i}")).collect();
+    expected.sort();
+    assert_eq!(mine, expected, "every in-scope row, once each");
+    assert!(pages > 1, "the walk paged across the budget");
+
     // Default restored: a leaked 50-row budget would truncate the snapshot in
     // the test that seeds 1,500 rows.
     pylon_router::set_snapshot_scan_budget(0);
@@ -1212,10 +1269,10 @@ fn a_cap_counts_rows_THIS_CALLER_can_see() {
         assert!(status == 200 || status == 201, "insert failed: {body}");
     }
 
-    let (_, resp) = pull(port, &token, 0);
-    let titles: Vec<&str> = resp["changes"]
-        .as_array()
-        .unwrap()
+    // Follow continuations: another test can lower the scan budget while
+    // this one runs, and the capped walk then pages.
+    let changes = snapshot_changes(port, &token);
+    let titles: Vec<&str> = changes
         .iter()
         .filter(|c| c["entity"] == "Note")
         .map(|c| c["data"]["title"].as_str().unwrap())
@@ -1223,8 +1280,31 @@ fn a_cap_counts_rows_THIS_CALLER_can_see() {
     assert_eq!(
         titles,
         vec!["m0", "m1"],
-        "the cap counted rows the caller cannot see, starving them: {resp}"
+        "the cap counted rows the caller cannot see, starving them: {changes:?}"
     );
+}
+
+/// Every change of a full snapshot from 0, following `snapshot_after`.
+fn snapshot_changes(port: u16, token: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut query = "since=0".to_string();
+    for _ in 0..50 {
+        let (status, body) = http(
+            port,
+            "GET",
+            &format!("/api/sync/pull?{query}"),
+            Some(token),
+            None,
+        );
+        assert_eq!(status, 200, "{body}");
+        let r: Value = serde_json::from_str(&body).unwrap();
+        out.extend(r["changes"].as_array().unwrap().iter().cloned());
+        match r["snapshot_after"].as_str() {
+            Some(next) => query = format!("since=0&snapshot_after={next}"),
+            None => return out,
+        }
+    }
+    panic!("snapshot did not converge");
 }
 
 #[test]
