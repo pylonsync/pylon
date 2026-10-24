@@ -96,8 +96,10 @@ pub struct SearchQuery {
     pub page: usize,
 
     /// Page size. Default 20, hard-cap at 100 to keep result payloads
-    /// predictable for subscriptions.
-    #[serde(default = "default_page_size")]
+    /// predictable for subscriptions. `pageSize` (the `ctx.db.search` TS
+    /// spelling) is accepted too; without it a TS caller's page size was
+    /// silently ignored.
+    #[serde(default = "default_page_size", alias = "pageSize")]
     pub page_size: usize,
 }
 
@@ -201,6 +203,35 @@ pub fn create_fts_table_sql(entity: &str, config: &SearchConfig) -> Option<Strin
           tokenize = 'unicode61 remove_diacritics 2'\
          );"
     ))
+}
+
+/// The search config an entity's index was last built for, as stored in
+/// `_pylon_search_index_state`. A row whose fingerprint differs from the
+/// manifest's (or a missing row) means the index must be rebuilt from the
+/// entity's rows: the `search:` block was added to a table that already had
+/// rows, or its text / facet / sortable lists changed.
+pub fn config_fingerprint(config: &SearchConfig) -> String {
+    serde_json::to_string(config).unwrap_or_default()
+}
+
+/// `_pylon_search_index_state`: one row per searchable entity. Same DDL on SQLite
+/// and Postgres.
+pub fn create_index_state_table_sql() -> &'static str {
+    "CREATE TABLE IF NOT EXISTS \"_pylon_search_index_state\" (\
+       entity      TEXT PRIMARY KEY,\
+       fingerprint TEXT NOT NULL\
+     )"
+}
+
+/// Forget the config an entity's index was built for, so the runtime
+/// rebuilds the index from the entity's rows on its next open. Schema
+/// apply runs this for `CreateSearchIndex` and `RemoveSearchIndex`. Same
+/// SQL on SQLite and Postgres; run `create_index_state_table_sql` first.
+pub fn clear_index_state_sql(entity: &str) -> String {
+    format!(
+        "DELETE FROM \"_pylon_search_index_state\" WHERE entity = '{}'",
+        entity.replace('\'', "''")
+    )
 }
 
 /// One-time table for all facet bitmaps across all entities. Shared so

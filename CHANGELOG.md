@@ -40,6 +40,8 @@
 
 ### Bug Fixes
 
+* **search:** adding a `search:` block to an entity that already has rows now indexes those rows. The runtime records the search config each index was built for (`_pylon_search_index_state`) and, on open, rebuilds an index whose recorded config is missing or differs from the manifest, reading the rows 1,000 at a time in one transaction: FTS rows and facet bitmaps on SQLite, the `tsvector` table on Postgres. A change to the `text`, `facets` or `sortable` list also rebuilds. Indexes from earlier versions have no record and are rebuilt once on the first open, which fixes facet counts that held only rows written after the block was added.
+* **search:** `SearchQuery` accepts `pageSize`, the spelling in the `ctx.db.search` TypeScript types, as well as `page_size`. Before, `pageSize` was ignored and every page had 20 hits.
 * **connections:** a callback whose path names a different connection than its state is refused.
 * **auth:** `/api/auth/email/send-verification` now uses the `EMAIL_VERIFY` email template overrides, like the post-registration email.
 

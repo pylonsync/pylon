@@ -130,6 +130,120 @@ pub fn apply_delete(
 }
 
 // ---------------------------------------------------------------------------
+// Rebuild — index rows that were written before the index existed
+// ---------------------------------------------------------------------------
+
+/// Builds an entity's search index from its existing rows. The insert /
+/// update / delete hooks above only see rows written after the `search:`
+/// block existed, so adding it to a table with rows (or changing its text
+/// or facet lists) needs this pass. Usage: `reset`, then `add` every row,
+/// then `finish`, all on one connection inside one transaction.
+pub struct IndexRebuild {
+    bitmaps: std::collections::HashMap<(String, String), RoaringBitmap>,
+    rows: usize,
+}
+
+impl IndexRebuild {
+    /// Drop the entity's FTS rows and facet bitmaps and recreate the FTS
+    /// table for the config's current text fields.
+    pub fn reset(
+        conn: &Connection,
+        entity: &str,
+        config: &SearchConfig,
+    ) -> Result<Self, StorageError> {
+        let exec = |sql: &str| {
+            conn.execute_batch(sql)
+                .map_err(|e| StorageError::new("SEARCH_REBUILD_FAILED", &format!("{sql}: {e}")))
+        };
+        exec(crate::search::create_facet_table_sql())?;
+        exec(crate::search::create_index_state_table_sql())?;
+        exec(&format!("DROP TABLE IF EXISTS \"_fts_{entity}\""))?;
+        if let Some(sql) = crate::search::create_fts_table_sql(entity, config) {
+            exec(&sql)?;
+        }
+        conn.execute("DELETE FROM \"_facet_bitmap\" WHERE entity = ?1", [entity])
+            .map_err(|e| StorageError::new("SEARCH_REBUILD_FAILED", &e.to_string()))?;
+        for field in &config.sortable {
+            exec(&format!(
+                "CREATE INDEX IF NOT EXISTS \"{entity}_sort_{field}\" ON \"{entity}\" (\"{field}\")"
+            ))?;
+        }
+        Ok(Self {
+            bitmaps: std::collections::HashMap::new(),
+            rows: 0,
+        })
+    }
+
+    /// Index one row: its FTS row now, its facet bits at `finish`. `data`
+    /// is the row as the write path sees it (bools as JSON booleans).
+    pub fn add(
+        &mut self,
+        conn: &Connection,
+        entity: &str,
+        rowid: u32,
+        data: &Value,
+        config: &SearchConfig,
+    ) -> Result<(), StorageError> {
+        write_fts_row(conn, entity, rowid, data, config)?;
+        for facet in &config.facets {
+            if let Some(v) = data.get(facet).and_then(stringify_facet) {
+                self.bitmaps
+                    .entry((facet.clone(), v))
+                    .or_default()
+                    .insert(rowid);
+            }
+        }
+        self.rows += 1;
+        Ok(())
+    }
+
+    /// Write the facet bitmaps and record the config the index now holds.
+    /// Returns the number of rows indexed.
+    pub fn finish(
+        self,
+        conn: &Connection,
+        entity: &str,
+        config: &SearchConfig,
+    ) -> Result<usize, StorageError> {
+        for ((facet, value), bitmap) in &self.bitmaps {
+            let bytes = serialize_bitmap(bitmap)?;
+            conn.execute(
+                "INSERT INTO \"_facet_bitmap\" (entity, facet, value, bitmap, row_count) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![entity, facet, value, bytes, bitmap.len() as i64],
+            )
+            .map_err(|e| StorageError::new("BITMAP_WRITE_FAILED", &e.to_string()))?;
+        }
+        write_index_fingerprint(conn, entity, config)?;
+        Ok(self.rows)
+    }
+}
+
+/// The config fingerprint the entity's index was built for, if recorded.
+pub fn read_index_fingerprint(conn: &Connection, entity: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT fingerprint FROM \"_pylon_search_index_state\" WHERE entity = ?1",
+        [entity],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+}
+
+fn write_index_fingerprint(
+    conn: &Connection,
+    entity: &str,
+    config: &SearchConfig,
+) -> Result<(), StorageError> {
+    conn.execute(
+        "INSERT INTO \"_pylon_search_index_state\" (entity, fingerprint) VALUES (?1, ?2) \
+         ON CONFLICT(entity) DO UPDATE SET fingerprint = excluded.fingerprint",
+        [entity, &crate::search::config_fingerprint(config)],
+    )
+    .map(|_| ())
+    .map_err(|e| StorageError::new("SEARCH_STATE_WRITE_FAILED", &e.to_string()))
+}
+
+// ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------
 

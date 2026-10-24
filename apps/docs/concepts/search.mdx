@@ -36,7 +36,7 @@ const Product = entity(
 );
 ```
 
-On schema push, Pylon creates an FTS5 shadow table and a roaring-bitmap facet index. Every insert, update, and delete maintains both inside the same transaction as the row write, so the index does not lag behind the row.
+On schema push, Pylon creates an FTS5 shadow table and a roaring-bitmap facet index. Every insert, update, and delete maintains both inside the same transaction as the row write, so the index does not lag behind the row. When you add a `search:` block to an entity that already has rows, or change its `text`, `facets`, or `sortable` list, the server builds the index from the existing rows the next time it starts.
 
 ## Searching from the client
 

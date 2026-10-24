@@ -419,6 +419,8 @@ pub fn plan_to_sql(plan: &SchemaPlan) -> Result<Vec<String>, StorageError> {
                 {
                     statements.extend(crate::pg_search::create_search_index_sql(entity, config));
                 }
+                statements.push(crate::search::create_index_state_table_sql().to_string());
+                statements.push(crate::search::clear_index_state_sql(entity));
                 #[cfg(not(feature = "postgres-live"))]
                 {
                     let _ = (entity, config);
@@ -429,6 +431,8 @@ pub fn plan_to_sql(plan: &SchemaPlan) -> Result<Vec<String>, StorageError> {
                 }
             }
             SchemaOperation::RemoveSearchIndex { entity } => {
+                statements.push(crate::search::create_index_state_table_sql().to_string());
+                statements.push(crate::search::clear_index_state_sql(entity));
                 // Without the original config we don't know which
                 // facet/sort indexes were created. Drop the FTS table
                 // and the GIN index by their fixed names; per-field

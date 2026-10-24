@@ -1180,8 +1180,8 @@ fn crdt_apply_update_reprojects_to_postgres_row() {
 // FTS integration — exercises pg_search create + maintenance + run_search
 // ---------------------------------------------------------------------------
 
-fn fts_runtime(url: &str) -> Runtime {
-    let manifest = AppManifest {
+fn fts_manifest() -> AppManifest {
+    AppManifest {
         entities: vec![ManifestEntity {
             name: "Product".into(),
             fields: vec![
@@ -1241,7 +1241,11 @@ fn fts_runtime(url: &str) -> Runtime {
             ..Default::default()
         }],
         ..empty_manifest()
-    };
+    }
+}
+
+fn fts_runtime(url: &str) -> Runtime {
+    let manifest = fts_manifest();
     let mut adapter = pylon_storage::postgres::live::LivePostgresAdapter::connect(url)
         .expect("connect to test postgres");
     let _ = adapter.exec_raw("DROP TABLE IF EXISTS \"_fts_Product\" CASCADE");
@@ -1607,6 +1611,53 @@ fn fts_insert_failure_rolls_back_shadow_row() {
         count, 0,
         "failed entity insert must roll back the FTS shadow row too"
     );
+}
+
+/// Rows written before the `search:` block existed are in the FTS index
+/// after the schema adds it and the runtime opens.
+#[test]
+fn fts_backfills_rows_written_before_search_was_added_on_postgres() {
+    let Some(url) = pg_url() else {
+        return;
+    };
+    use pylon_http::DataStore;
+    let with_search = {
+        let mut m = fts_manifest();
+        m.entities[0].name = "Listing".into();
+        m
+    };
+    let without_search = {
+        let mut m = with_search.clone();
+        m.entities[0].search = None;
+        m
+    };
+    let mut adapter = pylon_storage::postgres::live::LivePostgresAdapter::connect(&url)
+        .expect("connect to test postgres");
+    let _ = adapter.exec_raw("DROP TABLE IF EXISTS \"_fts_Listing\" CASCADE");
+    let _ = adapter.exec_raw("DROP TABLE IF EXISTS \"Listing\" CASCADE");
+    let plan = adapter.plan_from_live(&without_search).unwrap();
+    adapter.apply_plan(&plan).unwrap();
+    let rt = Runtime::open_postgres(&url, without_search).unwrap();
+    for (name, description) in [
+        ("Atlas runner", "lightweight trail shoe"),
+        ("Summit jacket", "waterproof hiking shell"),
+        ("Ridge pack", "trail daypack"),
+    ] {
+        rt.insert(
+            "Listing",
+            &serde_json::json!({ "name": name, "description": description, "brand": "Atlas" }),
+        )
+        .unwrap();
+    }
+    drop(rt);
+
+    let plan = adapter.plan_from_live(&with_search).unwrap();
+    adapter.apply_plan(&plan).unwrap();
+    let rt = Runtime::open_postgres(&url, with_search).unwrap();
+    let result =
+        DataStore::search(&rt, "Listing", &serde_json::json!({ "query": "trail" })).unwrap();
+    assert_eq!(result["total"], 2);
+    assert!(rt.reconcile_search_indexes().unwrap().is_empty());
 }
 
 #[test]

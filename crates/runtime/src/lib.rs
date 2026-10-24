@@ -34,6 +34,7 @@ pub mod llm;
 pub mod log;
 pub mod log_ring;
 pub mod retention;
+mod search_reconcile;
 
 /// What [`Runtime::prune_crdt_snapshots`] removed, per entity.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -1310,7 +1311,7 @@ impl Runtime {
         let encryption_key = load_encryption_key()?;
         validate_connection_encryption_present(&manifest, &encryption_key)?;
         let crdt_private_entities = crdt_privacy::postgres(&store, &manifest)?;
-        Ok(Self {
+        let rt = Self {
             backend: RuntimeBackend::Postgres(PgBackend {
                 store,
                 crdt: std::sync::Arc::new(crate::pg_loro_store::PgLoroStore::new()),
@@ -1325,7 +1326,9 @@ impl Runtime {
             encryption_key,
             encrypted_fields,
             connection_manager: std::sync::OnceLock::new(),
-        })
+        };
+        rt.reconcile_search_indexes_on_open();
+        Ok(rt)
     }
 
     /// Returns true if this runtime is backed by an in-memory SQLite DB.
@@ -2360,6 +2363,7 @@ impl Runtime {
             encrypted_fields,
             connection_manager: std::sync::OnceLock::new(),
         };
+        rt.reconcile_search_indexes_on_open();
         Ok(rt)
     }
 
@@ -3099,50 +3103,13 @@ impl Runtime {
         }
     }
 
-    /// Create the search index tables (`_facet_bitmap`, per-entity
-    /// `_fts_<Entity>`, and a covering index for each declared
-    /// sortable field) for every searchable entity in the manifest.
-    ///
-    /// Production deployments do this via the storage adapter's
-    /// `apply_schema` / migration plan; that path also handles
-    /// adding/removing the tables when a `search:` block is added or
-    /// removed across deploys. This method is a quick path for tests
-    /// and benchmarks that build a `Runtime::in_memory(...)` directly
-    /// without going through the schema-plan pipeline.
+    /// Build the search index (`_facet_bitmap` rows, `_fts_<Entity>`, and
+    /// an index for each sortable field) for every searchable entity whose
+    /// index is missing or was built for a different `search:` config,
+    /// from the rows already in its table. Opening a runtime does this;
+    /// call it again after writing rows outside the runtime.
     pub fn ensure_search_indexes(&self) -> Result<(), RuntimeError> {
-        // Postgres: schema (FTS, facets) is owned by the storage adapter's
-        // migration plan. Tests / benchmarks against Postgres must apply
-        // the plan separately; this fast-path is a SQLite-only convenience.
-        if matches!(self.backend, RuntimeBackend::Postgres(_)) {
-            return Ok(());
-        }
-        let conn = self.lock_write_conn()?;
-        conn.execute(pylon_storage::search::create_facet_table_sql(), [])
-            .map_err(|e| RuntimeError {
-                code: "FACET_TABLE_FAILED".into(),
-                message: format!("create _facet_bitmap: {e}"),
-            })?;
-        for entity in &self.manifest.entities {
-            if let Some(cfg) = &entity.search {
-                if let Some(sql) = pylon_storage::search::create_fts_table_sql(&entity.name, cfg) {
-                    conn.execute(&sql, []).map_err(|e| RuntimeError {
-                        code: "FTS_TABLE_FAILED".into(),
-                        message: format!("create FTS table for {}: {e}", entity.name),
-                    })?;
-                }
-                for field in &cfg.sortable {
-                    let idx_sql = format!(
-                        "CREATE INDEX IF NOT EXISTS \"{}_sort_{field}\" ON \"{}\" (\"{field}\")",
-                        entity.name, entity.name,
-                    );
-                    conn.execute(&idx_sql, []).map_err(|e| RuntimeError {
-                        code: "SORT_INDEX_FAILED".into(),
-                        message: format!("create sort index for {}.{field}: {e}", entity.name),
-                    })?;
-                }
-            }
-        }
-        Ok(())
+        self.reconcile_search_indexes().map(|_| ())
     }
 
     /// Return a reference to the app manifest.

@@ -336,6 +336,19 @@ impl SqliteAdapter {
         let snapshot = self.read_schema()?;
         Ok(crate::plan_from_snapshot(&snapshot, target))
     }
+
+    fn clear_pylon_search_index_state(&self, entity: &str) -> Result<(), StorageError> {
+        self.conn
+            .execute_batch(&format!(
+                "{}; {}",
+                crate::search::create_index_state_table_sql(),
+                crate::search::clear_index_state_sql(entity)
+            ))
+            .map_err(|e| StorageError {
+                code: "SQLITE_EXEC_FAILED".into(),
+                message: format!("clear search index state for {entity} failed: {e}"),
+            })
+    }
 }
 
 impl StorageAdapter for SqliteAdapter {
@@ -670,6 +683,9 @@ impl SqliteAdapter {
                     })?;
                 }
                 SchemaOperation::CreateSearchIndex { entity, config } => {
+                    // The runtime builds the index from the existing rows on
+                    // its next open (`search_reconcile`).
+                    self.clear_pylon_search_index_state(entity)?;
                     // Ensure the shared facet table exists. Single
                     // `_facet_bitmap` table holds all entities' bitmaps
                     // keyed by (entity, facet, value); idempotent.
@@ -710,6 +726,7 @@ impl SqliteAdapter {
                     }
                 }
                 SchemaOperation::RemoveSearchIndex { entity } => {
+                    self.clear_pylon_search_index_state(entity)?;
                     self.conn
                         .execute(&format!("DROP TABLE IF EXISTS \"_fts_{entity}\""), [])
                         .map_err(|e| StorageError {

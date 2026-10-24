@@ -118,6 +118,90 @@ pub fn create_search_index_sql(entity: &str, config: &SearchConfig) -> Vec<Strin
     stmts
 }
 
+/// Statements that rebuild an entity's search index from its existing
+/// rows: recreate the FTS table for the current text fields, fill it from
+/// the entity table, ensure the facet and sort indexes, and record the
+/// config in `_pylon_search_index_state`. Facets need no backfill on Postgres:
+/// they are B-tree indexes on the entity's own columns. Run inside one
+/// transaction.
+pub fn rebuild_search_index_sql(entity: &str, config: &SearchConfig) -> Vec<String> {
+    let mut stmts = vec![
+        crate::search::create_index_state_table_sql().to_string(),
+        format!("DROP TABLE IF EXISTS {} CASCADE", fts_table_name(entity)),
+    ];
+    stmts.extend(create_search_index_sql(entity, config));
+    if !config.text.is_empty() {
+        // Same text the write path builds (`collect_text`): the declared
+        // fields joined by a space, a missing value as "".
+        let text = config
+            .text
+            .iter()
+            .map(|f| format!("coalesce({}::text, '')", quote_ident(f)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        stmts.push(format!(
+            "INSERT INTO {fts} (entity_id, tsv) \
+             SELECT id, to_tsvector({lang}, concat_ws(' ', {text})) FROM {entity_quoted}",
+            fts = fts_table_name(entity),
+            lang = lang_literal(config),
+            entity_quoted = quote_ident(entity),
+        ));
+    }
+    let fingerprint = crate::search::config_fingerprint(config).replace('\'', "''");
+    let entity_lit = entity.replace('\'', "''");
+    stmts.push(format!(
+        "INSERT INTO \"_pylon_search_index_state\" (entity, fingerprint) VALUES ('{entity_lit}', '{fingerprint}') \
+         ON CONFLICT (entity) DO UPDATE SET fingerprint = EXCLUDED.fingerprint"
+    ));
+    stmts
+}
+
+/// Rebuild the entity's search index if it was built for a different
+/// config (or never recorded one). Returns whether it rebuilt. Skips an
+/// entity whose table does not exist yet.
+pub fn reconcile_search_index(
+    client: &mut postgres::Client,
+    entity: &str,
+    config: &SearchConfig,
+) -> Result<bool, StorageError> {
+    let pg_err = |e: postgres::Error| StorageError::new("SEARCH_REBUILD_FAILED", &e.to_string());
+    let table_exists: bool = client
+        .query_one(
+            "SELECT to_regclass($1) IS NOT NULL",
+            &[&quote_ident(entity)],
+        )
+        .map_err(pg_err)?
+        .get(0);
+    if !table_exists {
+        return Ok(false);
+    }
+    let state_exists: bool = client
+        .query_one(
+            "SELECT to_regclass('\"_pylon_search_index_state\"') IS NOT NULL",
+            &[],
+        )
+        .map_err(pg_err)?
+        .get(0);
+    if state_exists {
+        let stored: Option<String> = client
+            .query_opt(
+                "SELECT fingerprint FROM \"_pylon_search_index_state\" WHERE entity = $1",
+                &[&entity],
+            )
+            .map_err(pg_err)?
+            .map(|r| r.get(0));
+        if stored.as_deref() == Some(crate::search::config_fingerprint(config).as_str()) {
+            return Ok(false);
+        }
+    }
+    let mut tx = client.transaction().map_err(pg_err)?;
+    for sql in rebuild_search_index_sql(entity, config) {
+        tx.batch_execute(&sql).map_err(pg_err)?;
+    }
+    tx.commit().map_err(pg_err)?;
+    Ok(true)
+}
+
 /// All DDL needed to remove an entity's search shadow tables. Used
 /// when `search:` is dropped from the manifest. The CASCADE on the
 /// FTS table's FK takes care of orphaned rows during entity removal,
