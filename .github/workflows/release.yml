@@ -93,7 +93,7 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - id: v
         shell: bash
         run: |
@@ -137,7 +137,7 @@ jobs:
       contents: read
       id-token: write        # required for npm provenance
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
         with:
           # Pin to the same version the repo declares in package.json's
@@ -146,7 +146,7 @@ jobs:
           # failing with "missing authentication" even though
           # NODE_AUTH_TOKEN was set. Pin tracks `packageManager`.
           bun-version: "1.4.4"
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           package-manager-cache: false
           node-version: 22
@@ -401,7 +401,7 @@ jobs:
           - folder: packages/create-pylon/templates
             repo: pylonsync/pylon-templates
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Copy ${{ matrix.folder }} to ${{ matrix.repo }}
         env:
           TOKEN: ${{ secrets.MIRROR_REPOS_TOKEN || secrets.RELEASES_REPO_TOKEN }}
@@ -435,7 +435,7 @@ jobs:
     runs-on: ubuntu-24.04
     environment: Production
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec  # stable
         with:
           targets: wasm32-unknown-unknown
@@ -510,7 +510,7 @@ jobs:
           # the target ABI is msvc. A SAML-disabled Windows variant was
           # never on the table.
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec  # stable
         if: runner.os != 'Linux'
         with:
@@ -670,7 +670,7 @@ jobs:
           "$hash  $asset" | Out-File -FilePath "$asset.sha256" -Encoding ascii -NoNewline
       # Publish to the private source repo (so internal tooling, the
       # release-please flow, and crates/npm jobs all observe the same tag).
-      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
         with:
           files: |
             pylon-${{ github.ref_name }}-${{ matrix.target }}.*
@@ -679,7 +679,7 @@ jobs:
       # binaries reachable while the source repo is still private. Append-only
       # against an existing release tag (idempotent across matrix jobs).
       - name: Publish to public release repo
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
         with:
           repository: pylonsync/pylon-releases
           token: ${{ secrets.RELEASES_REPO_TOKEN }}
@@ -693,7 +693,7 @@ jobs:
       # @pylonsync/cli-* package directly.
       - name: Upload raw binary artifact
         if: matrix.archive == 'tar.gz'
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: pylon-bin-${{ matrix.target }}
           # lib/ only exists for macOS (the vendored libxmlsec1 closure) and
@@ -710,7 +710,7 @@ jobs:
       # `publish-cli-npm` maps over.
       - name: Upload raw binary artifact (windows)
         if: matrix.archive == 'zip'
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: pylon-bin-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/pylon.exe
@@ -729,18 +729,18 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
         with:
           bun-version: "1.4.4"
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           package-manager-cache: false
           node-version: 22
           registry-url: https://registry.npmjs.org
       # Pull every binary artifact uploaded by the binaries matrix.
       # Each lands at artifacts/<artifact-name>/pylon.
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           path: artifacts
           pattern: pylon-bin-*
@@ -883,9 +883,9 @@ jobs:
     needs: verify
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -942,7 +942,7 @@ jobs:
           check pylon-builder builder
           check pylon-dev     dev
 
-      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051  # v5
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
         id: meta
         with:
           images: ghcr.io/${{ github.repository_owner }}/pylon
@@ -950,7 +950,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
         if: steps.immutable.outputs.pylon != 'true'
         with:
           context: .
@@ -977,7 +977,7 @@ jobs:
       # pushed plus the coding agent's browser and web search
       # (docker/dev.Dockerfile). Customer apps never boot it, so Chromium
       # stays out of the runtime image.
-      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051  # v5
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
         id: meta-dev
         with:
           images: ghcr.io/${{ github.repository_owner }}/pylon-dev
@@ -985,7 +985,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
         if: steps.immutable.outputs.dev != 'true'
         with:
           context: .
@@ -1002,7 +1002,7 @@ jobs:
       # pylon-builder: the ephemeral image the Cloud build-artifact pipeline
       # runs on a throwaway Fly machine (builder/Dockerfile). Tiny + fast to
       # build (Bun base + one script), so it rides the same release.
-      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051  # v5
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
         id: meta-builder
         with:
           images: ghcr.io/${{ github.repository_owner }}/pylon-builder
@@ -1010,7 +1010,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
         if: steps.immutable.outputs.builder != 'true'
         with:
           context: .
