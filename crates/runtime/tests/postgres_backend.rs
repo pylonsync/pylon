@@ -1658,6 +1658,31 @@ fn fts_backfills_rows_written_before_search_was_added_on_postgres() {
         DataStore::search(&rt, "Listing", &serde_json::json!({ "query": "trail" })).unwrap();
     assert_eq!(result["total"], 2);
     assert!(rt.reconcile_search_indexes().unwrap().is_empty());
+
+    // An update after the backfill re-indexes the row's text.
+    let hits = DataStore::search(
+        &rt,
+        "Listing",
+        &serde_json::json!({ "query": "waterproof" }),
+    )
+    .unwrap();
+    let id = hits["hits"][0]["id"].as_str().unwrap().to_string();
+    rt.update(
+        "Listing",
+        &id,
+        &serde_json::json!({ "description": "trail rain shell" }),
+    )
+    .unwrap();
+    let result =
+        DataStore::search(&rt, "Listing", &serde_json::json!({ "query": "trail" })).unwrap();
+    assert_eq!(result["total"], 3);
+    let result = DataStore::search(
+        &rt,
+        "Listing",
+        &serde_json::json!({ "query": "waterproof" }),
+    )
+    .unwrap();
+    assert_eq!(result["total"], 0);
 }
 
 #[test]

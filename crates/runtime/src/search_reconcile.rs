@@ -192,19 +192,21 @@ mod tests {
         DataStore::search(rt, "Property", &query).expect("search")
     }
 
-    fn seed(rt: &Runtime, n: usize) {
-        for i in 0..n {
-            rt.insert(
-                "Property",
-                &json!({
-                    "address": format!("{i} Main Street"),
-                    "status": if i % 3 == 0 { "sold" } else { "open" },
-                    "market": if i % 2 == 0 { "north" } else { "south" },
-                    "active": i % 2 == 0,
-                }),
-            )
-            .expect("insert");
-        }
+    fn seed(rt: &Runtime, n: usize) -> Vec<String> {
+        (0..n)
+            .map(|i| {
+                rt.insert(
+                    "Property",
+                    &json!({
+                        "address": format!("{i} Main Street"),
+                        "status": if i % 3 == 0 { "sold" } else { "open" },
+                        "market": if i % 2 == 0 { "north" } else { "south" },
+                        "active": i % 2 == 0,
+                    }),
+                )
+                .expect("insert")
+            })
+            .collect()
     }
 
     /// Rows written before the `search:` block existed are in the facet
@@ -215,7 +217,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("app.db");
         let path = path.to_str().unwrap();
-        seed(&Runtime::open(path, manifest(None)).unwrap(), 2500);
+        let ids = seed(&Runtime::open(path, manifest(None)).unwrap(), 2500);
 
         let rt = Runtime::open(path, manifest(Some(config(&["status", "active"])))).unwrap();
         let out = search(&rt, json!({ "facets": ["status", "active"] }));
@@ -226,6 +228,25 @@ mod tests {
         let out = search(&rt, json!({ "query": "1234 main" }));
         assert_eq!(out["total"], 1);
         assert_eq!(out["hits"][0]["address"], "1234 Main Street");
+
+        // An update after the rebuild moves the row's facet bit and text.
+        // Row 0 was "sold" and "0 Main Street".
+        rt.update(
+            "Property",
+            &ids[0],
+            &json!({ "status": "open", "address": "9 Harbor Road" }),
+        )
+        .unwrap();
+        let out = search(&rt, json!({ "facets": ["status", "active"] }));
+        assert_eq!(out["facetCounts"]["status"]["sold"], 833);
+        assert_eq!(out["facetCounts"]["status"]["open"], 1667);
+        assert_eq!(out["facetCounts"]["active"]["true"], 1250);
+        assert_eq!(search(&rt, json!({ "query": "harbor" }))["total"], 1);
+        let out = search(
+            &rt,
+            json!({ "filters": { "status": "sold" }, "query": "main" }),
+        );
+        assert_eq!(out["total"], 833);
 
         // Rows written after the rebuild keep the index current, and the
         // next open does not rebuild again.
