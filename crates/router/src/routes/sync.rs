@@ -68,23 +68,11 @@ const DEFAULT_PAGE_ROWS: usize = 1000;
 /// The most rows one pull page may carry, whatever the client asks.
 pub const MAX_PAGE_ROWS: usize = 10_000;
 
-/// Test override for [`page_byte_budget`]. 0 = default.
-static PAGE_BYTE_BUDGET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// Override the per-page byte budget. 0 restores the default.
-pub fn set_page_byte_budget(bytes: usize) {
-    PAGE_BYTE_BUDGET.store(bytes, std::sync::atomic::Ordering::Relaxed);
-}
-
 /// Approximate JSON bytes one pull page may carry. Pages end at the row
 /// limit or at this size, whichever comes first, so a client that asks for
 /// large pages of wide rows does not get a response of tens of megabytes.
 /// `PYLON_SYNC_PAGE_BYTES` overrides the default of 4 MiB.
 fn page_byte_budget() -> usize {
-    let overridden = PAGE_BYTE_BUDGET.load(std::sync::atomic::Ordering::Relaxed);
-    if overridden > 0 {
-        return overridden;
-    }
     std::env::var("PYLON_SYNC_PAGE_BYTES")
         .ok()
         .and_then(|v| v.parse().ok())
