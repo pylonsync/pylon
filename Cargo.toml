@@ -91,7 +91,7 @@ roaring = "0.10"
 # secp256k1 + keccak256 for SIWE (Sign-In With Ethereum, EIP-4361).
 # k256 is the pure-Rust ECDSA on secp256k1 used by every Ethereum
 # tool. sha3 provides Keccak-256 (Ethereum's variant, NOT SHA-3).
-k256 = { version = "0.13", features = ["ecdsa", "sha256"] }
+k256 = { version = "0.14", features = ["ecdsa", "sha256"] }
 sha3 = "0.10"
 # DEFLATE (raw, no zlib wrapper) for the SAML 2.0 HTTP-Redirect binding —
 # OASIS SAML 2.0 Bindings §3.4.4 mandates deflate compression of the

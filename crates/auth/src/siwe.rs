@@ -449,7 +449,7 @@ pub fn recover_address(message: &SiweMessage, signature_hex: &str) -> Result<Str
         .map_err(|_| SiweError::BadSignature)?;
     // Public key in uncompressed SEC1 (65 bytes: 0x04 || X || Y).
     // Ethereum address = last 20 bytes of keccak256(X||Y).
-    let pubkey_point = vk.to_encoded_point(false);
+    let pubkey_point = vk.to_sec1_point(false);
     let pubkey_xy = &pubkey_point.as_bytes()[1..]; // strip 0x04 prefix
     let h = keccak256(pubkey_xy);
     let mut addr = [0u8; 20];
@@ -566,6 +566,37 @@ mod tests {
         assert_eq!(store.take("0xabc").as_deref(), Some(n.as_str()));
         // Single-use.
         assert!(store.take("0xabc").is_none());
+    }
+
+    #[test]
+    fn recover_address_matches_an_independent_signer() {
+        // Signed with ethers 6.13.4 (noble-secp256k1, not k256) using the
+        // web3.js docs key 0x4c08…2318, whose address is 0x2c75…5c23. Pins
+        // recovery across k256 upgrades, which the sign-then-recover tests
+        // below cannot: they use the same library on both sides.
+        let raw = "example.com wants you to sign in with your Ethereum account:\n\
+                   0x2c7536E3605D9C16a7a3D7b1898e529396a65c23\n\
+                   \n\
+                   I accept the ToS\n\
+                   \n\
+                   URI: https://example.com\n\
+                   Version: 1\n\
+                   Chain ID: 1\n\
+                   Nonce: abc123\n\
+                   Issued At: 2026-01-01T00:00:00Z";
+        let sig = "0x566752c49f86e72e989509ef78ca128b09afaf1f19650904923990dabbe9ab9d39c32c0052ad8be4f5002b60d63389988ce6089b17a5fe7641600e1f1f015f4a1c";
+        let m = parse_message(raw).expect("parse");
+        assert_eq!(serialize_for_signing(&m), raw, "the signed bytes must be the message as written");
+        assert_eq!(
+            recover_address(&m, sig).expect("recover"),
+            "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23"
+        );
+        let mut tampered = m.clone();
+        tampered.nonce = "abc124".into();
+        assert_ne!(
+            recover_address(&tampered, sig).ok().as_deref(),
+            Some("0x2c7536e3605d9c16a7a3d7b1898e529396a65c23")
+        );
     }
 
     #[test]
@@ -760,7 +791,7 @@ mod tests {
         rand::thread_rng().fill_bytes(&mut rng_bytes);
         let signing_key = SigningKey::from_slice(&rng_bytes).expect("valid scalar");
         let verifying = signing_key.verifying_key();
-        let pk_point = verifying.to_encoded_point(false);
+        let pk_point = verifying.to_sec1_point(false);
         let pk_xy = &pk_point.as_bytes()[1..];
         let mut h = Keccak256::new();
         h.update(pk_xy);
