@@ -976,6 +976,9 @@ pub struct Runtime {
     /// CSRF state token minted in /auth-url is observable from
     /// /callback. Per-call construction breaks the flow.
     connection_manager: std::sync::OnceLock<Option<std::sync::Arc<connections::ConnectionManager>>>,
+    /// Entities whose search index is being built in the background (see
+    /// `search_reconcile`). Search on them answers `SEARCH_INDEX_BUILDING`.
+    search_builds: Mutex<std::collections::HashSet<String>>,
 }
 
 /// Backend storage for entity CRUD. SQLite variant owns the connection
@@ -1326,6 +1329,7 @@ impl Runtime {
             encryption_key,
             encrypted_fields,
             connection_manager: std::sync::OnceLock::new(),
+            search_builds: Mutex::new(std::collections::HashSet::new()),
         };
         rt.reconcile_search_indexes_on_open();
         Ok(rt)
@@ -2362,6 +2366,7 @@ impl Runtime {
             encryption_key,
             encrypted_fields,
             connection_manager: std::sync::OnceLock::new(),
+            search_builds: Mutex::new(std::collections::HashSet::new()),
         };
         rt.reconcile_search_indexes_on_open();
         Ok(rt)
@@ -4557,6 +4562,13 @@ impl Runtime {
         entity: &str,
         filter: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, RuntimeError> {
+        // `$search` reads the FTS index; while it is being built it would
+        // miss rows.
+        if filter.get("$search").is_some() {
+            if let Some(e) = self.search_index_building(entity) {
+                return Err(data_err_to_runtime(e));
+            }
+        }
         if let Some(pg) = self.pg_backend() {
             let mut rows = pylon_http::DataStore::query_filtered(&pg.store, entity, filter)
                 .map_err(data_err_to_runtime)?;

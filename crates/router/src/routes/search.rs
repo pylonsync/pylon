@@ -96,6 +96,7 @@ pub(crate) fn handle(
             let status = match e.code.as_str() {
                 "ENTITY_NOT_FOUND" => 404,
                 "SEARCH_NOT_CONFIGURED" | "INVALID_QUERY" => 400,
+                "SEARCH_INDEX_BUILDING" => 503,
                 _ => 500,
             };
             (status, json_error(&e.code, &e.message))

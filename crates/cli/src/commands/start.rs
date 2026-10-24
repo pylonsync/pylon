@@ -545,6 +545,10 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         }
     }
 
+    // Search indexes too large to build during open are built from here,
+    // while the server answers requests.
+    runtime.spawn_search_index_builds();
+
     // Hand the runtime the paths to studio artefacts (if present) so
     // /studio renders against the user's config and /studio/extensions.js
     // can serve the bundled custom components.

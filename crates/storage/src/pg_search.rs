@@ -118,18 +118,103 @@ pub fn create_search_index_sql(entity: &str, config: &SearchConfig) -> Vec<Strin
     stmts
 }
 
-/// Statements that rebuild an entity's search index from its existing
-/// rows: recreate the FTS table for the current text fields, fill it from
-/// the entity table, ensure the facet and sort indexes, and record the
-/// config in `_pylon_search_index_state`. Facets need no backfill on Postgres:
-/// they are B-tree indexes on the entity's own columns. Run inside one
-/// transaction.
-pub fn rebuild_search_index_sql(entity: &str, config: &SearchConfig) -> Vec<String> {
-    let mut stmts = vec![
-        crate::search::create_index_state_table_sql().to_string(),
-        format!("DROP TABLE IF EXISTS {} CASCADE", fts_table_name(entity)),
-    ];
-    stmts.extend(create_search_index_sql(entity, config));
+// Building an index from existing rows. `start_index_build` makes sure the
+// FTS table and indexes exist for the current config and records a build at
+// cursor '' (before every id); `index_build_page` then upserts the tsvector
+// of the next page of rows by id, each page in its own transaction. The page
+// reads its rows `FOR SHARE`, so a concurrent update either commits first
+// (and the page indexes the new text) or waits for the page. Every step is
+// idempotent, so replicas that open at the same time share one build: each
+// page locks the state row and continues from its cursor. Facets need no
+// build on Postgres: they are B-tree indexes on the entity's own columns.
+
+fn state_err(e: postgres::Error) -> StorageError {
+    StorageError::new("SEARCH_BUILD_FAILED", &e.to_string())
+}
+
+/// What the entity's index needs. `Current` when the entity has no table.
+pub fn index_build_state(
+    client: &mut postgres::Client,
+    entity: &str,
+    config: &SearchConfig,
+) -> Result<crate::search::IndexBuild, StorageError> {
+    let table_exists: bool = client
+        .query_one(
+            "SELECT to_regclass($1) IS NOT NULL",
+            &[&quote_ident(entity)],
+        )
+        .map_err(state_err)?
+        .get(0);
+    if !table_exists {
+        return Ok(crate::search::IndexBuild::Current);
+    }
+    client
+        .batch_execute(crate::search::create_index_state_table_sql())
+        .map_err(state_err)?;
+    let state = client
+        .query_opt(
+            "SELECT fingerprint, cursor FROM \"_pylon_search_index_state\" WHERE entity = $1",
+            &[&entity],
+        )
+        .map_err(state_err)?
+        .map(|r| (r.get::<_, String>(0), r.get::<_, Option<String>>(1)));
+    Ok(crate::search::IndexBuild::from_state(state, config))
+}
+
+/// Create the FTS table and indexes for `config` (dropping the FTS table
+/// when the config has no text fields) and record a build at cursor ''.
+pub fn start_index_build(
+    client: &mut postgres::Client,
+    entity: &str,
+    config: &SearchConfig,
+) -> Result<(), StorageError> {
+    let mut tx = client.transaction().map_err(state_err)?;
+    tx.batch_execute(crate::search::create_index_state_table_sql())
+        .map_err(state_err)?;
+    if config.text.is_empty() {
+        tx.batch_execute(&format!(
+            "DROP TABLE IF EXISTS {} CASCADE",
+            fts_table_name(entity)
+        ))
+        .map_err(state_err)?;
+    }
+    for sql in create_search_index_sql(entity, config) {
+        tx.batch_execute(&sql).map_err(state_err)?;
+    }
+    tx.execute(
+        "INSERT INTO \"_pylon_search_index_state\" (entity, fingerprint, cursor) VALUES ($1, $2, '') \
+         ON CONFLICT (entity) DO UPDATE SET fingerprint = EXCLUDED.fingerprint, cursor = EXCLUDED.cursor",
+        &[&entity, &crate::search::config_fingerprint(config)],
+    )
+    .map_err(state_err)?;
+    tx.commit().map_err(state_err)
+}
+
+/// Index the next `limit` rows of the build and move its cursor. Returns
+/// the number of rows indexed, or `None` when the build is complete (by
+/// this call or by another replica).
+pub fn index_build_page(
+    client: &mut postgres::Client,
+    entity: &str,
+    config: &SearchConfig,
+    limit: i64,
+) -> Result<Option<usize>, StorageError> {
+    let mut tx = client.transaction().map_err(state_err)?;
+    let cursor: Option<String> = match tx
+        .query_opt(
+            "SELECT cursor FROM \"_pylon_search_index_state\" WHERE entity = $1 FOR UPDATE",
+            &[&entity],
+        )
+        .map_err(state_err)?
+    {
+        Some(row) => row.get(0),
+        None => None,
+    };
+    let Some(after) = cursor else {
+        return Ok(None);
+    };
+    let mut done = 0usize;
+    let mut next: Option<String> = None;
     if !config.text.is_empty() {
         // Same text the write path builds (`collect_text`): the declared
         // fields joined by a space, a missing value as "".
@@ -139,67 +224,56 @@ pub fn rebuild_search_index_sql(entity: &str, config: &SearchConfig) -> Vec<Stri
             .map(|f| format!("coalesce({}::text, '')", quote_ident(f)))
             .collect::<Vec<_>>()
             .join(", ");
-        stmts.push(format!(
-            "INSERT INTO {fts} (entity_id, tsv) \
-             SELECT id, to_tsvector({lang}, concat_ws(' ', {text})) FROM {entity_quoted}",
+        let sql = format!(
+            "WITH page AS ( \
+               SELECT id, concat_ws(' ', {text}) AS doc FROM {entity_quoted} \
+               WHERE id > $1 ORDER BY id LIMIT $2 FOR SHARE \
+             ) \
+             INSERT INTO {fts} (entity_id, tsv) \
+             SELECT id, to_tsvector({lang}, doc) FROM page \
+             ON CONFLICT (entity_id) DO UPDATE SET tsv = EXCLUDED.tsv \
+             RETURNING entity_id",
+            entity_quoted = quote_ident(entity),
             fts = fts_table_name(entity),
             lang = lang_literal(config),
-            entity_quoted = quote_ident(entity),
-        ));
+        );
+        let rows = tx.query(&sql, &[&after, &limit]).map_err(state_err)?;
+        done = rows.len();
+        next = rows.iter().map(|r| r.get::<_, String>(0)).max();
     }
-    let fingerprint = crate::search::config_fingerprint(config).replace('\'', "''");
-    let entity_lit = entity.replace('\'', "''");
-    stmts.push(format!(
-        "INSERT INTO \"_pylon_search_index_state\" (entity, fingerprint) VALUES ('{entity_lit}', '{fingerprint}') \
-         ON CONFLICT (entity) DO UPDATE SET fingerprint = EXCLUDED.fingerprint"
-    ));
-    stmts
+    // A short page is the last one.
+    let cursor = if (done as i64) < limit { None } else { next };
+    tx.execute(
+        "UPDATE \"_pylon_search_index_state\" SET cursor = $2 WHERE entity = $1",
+        &[&entity, &cursor],
+    )
+    .map_err(state_err)?;
+    tx.commit().map_err(state_err)?;
+    Ok(Some(done))
 }
 
-/// Rebuild the entity's search index if it was built for a different
-/// config (or never recorded one). Returns whether it rebuilt. Skips an
-/// entity whose table does not exist yet.
-pub fn reconcile_search_index(
+/// Rows the build has still to index.
+pub fn index_build_remaining(
     client: &mut postgres::Client,
     entity: &str,
-    config: &SearchConfig,
-) -> Result<bool, StorageError> {
-    let pg_err = |e: postgres::Error| StorageError::new("SEARCH_REBUILD_FAILED", &e.to_string());
-    let table_exists: bool = client
-        .query_one(
-            "SELECT to_regclass($1) IS NOT NULL",
-            &[&quote_ident(entity)],
+) -> Result<i64, StorageError> {
+    let cursor: Option<String> = client
+        .query_opt(
+            "SELECT cursor FROM \"_pylon_search_index_state\" WHERE entity = $1",
+            &[&entity],
         )
-        .map_err(pg_err)?
-        .get(0);
-    if !table_exists {
-        return Ok(false);
-    }
-    let state_exists: bool = client
+        .map_err(state_err)?
+        .and_then(|r| r.get(0));
+    let Some(after) = cursor else {
+        return Ok(0);
+    };
+    Ok(client
         .query_one(
-            "SELECT to_regclass('\"_pylon_search_index_state\"') IS NOT NULL",
-            &[],
+            &format!("SELECT count(*) FROM {} WHERE id > $1", quote_ident(entity)),
+            &[&after],
         )
-        .map_err(pg_err)?
-        .get(0);
-    if state_exists {
-        let stored: Option<String> = client
-            .query_opt(
-                "SELECT fingerprint FROM \"_pylon_search_index_state\" WHERE entity = $1",
-                &[&entity],
-            )
-            .map_err(pg_err)?
-            .map(|r| r.get(0));
-        if stored.as_deref() == Some(crate::search::config_fingerprint(config).as_str()) {
-            return Ok(false);
-        }
-    }
-    let mut tx = client.transaction().map_err(pg_err)?;
-    for sql in rebuild_search_index_sql(entity, config) {
-        tx.batch_execute(&sql).map_err(pg_err)?;
-    }
-    tx.commit().map_err(pg_err)?;
-    Ok(true)
+        .map_err(state_err)?
+        .get(0))
 }
 
 /// All DDL needed to remove an entity's search shadow tables. Used

@@ -830,6 +830,9 @@ impl DataStore for Runtime {
             code: "SEARCH_NOT_CONFIGURED".into(),
             message: format!("Entity {entity} has no `search:` config"),
         })?;
+        if let Some(e) = self.search_index_building(entity) {
+            return Err(e);
+        }
         let parsed: pylon_storage::search::SearchQuery = serde_json::from_value(query.clone())
             .map_err(|e| DataError {
                 code: "INVALID_QUERY".into(),
@@ -3939,6 +3942,9 @@ impl<'a> DataStore for TxStore<'a> {
             code: "SEARCH_NOT_CONFIGURED".into(),
             message: format!("Entity {entity} has no `search:` config"),
         })?;
+        if let Some(e) = self.runtime.search_index_building(entity) {
+            return Err(e);
+        }
         let parsed: pylon_storage::search::SearchQuery = serde_json::from_value(query.clone())
             .map_err(|e| DataError {
                 code: "INVALID_QUERY".into(),

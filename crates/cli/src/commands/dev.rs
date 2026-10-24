@@ -536,6 +536,7 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
             }
         };
         dev_timing(boot_kind, "runtime_open", t_rt.elapsed());
+        runtime.spawn_search_index_builds();
 
         // Point /studio at the studio artefacts inside .pylon/. The
         // runtime re-reads the config file on every render so dev

@@ -150,13 +150,21 @@ pub fn merge_row(old_row: &serde_json::Value, patch: &serde_json::Value) -> serd
 
 /// Coerce a JSON value into the canonical string used as a facet
 /// bitmap key (SQLite) or facet equality value (Postgres). Numbers
-/// drop trailing zeros so `4.50` and `4.5` map to the same value;
-/// nulls + complex types become `None` so they don't get a bucket.
+/// drop trailing zeros so `4.50` and `4.5` map to the same value, and a
+/// whole float is written as an integer: a `float` column hands back
+/// `3.0` for a row written as `3`, and Postgres renders `3.0::float8` as
+/// `3`. Nulls and complex types become `None` so they don't get a bucket.
 pub fn stringify_facet(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::Null => None,
         serde_json::Value::Bool(b) => Some(b.to_string()),
-        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Number(n) => Some(match n.as_f64() {
+            // Below 2^53 every whole f64 is an exact integer.
+            Some(f) if n.is_f64() && f.fract() == 0.0 && f.abs() < 9_007_199_254_740_992.0 => {
+                format!("{}", f as i64)
+            }
+            _ => n.to_string(),
+        }),
         serde_json::Value::String(s) => Some(s.clone()),
         serde_json::Value::Array(_) | serde_json::Value::Object(_) => None,
     }
@@ -205,33 +213,70 @@ pub fn create_fts_table_sql(entity: &str, config: &SearchConfig) -> Option<Strin
     ))
 }
 
-/// The search config an entity's index was last built for, as stored in
-/// `_pylon_search_index_state`. A row whose fingerprint differs from the
-/// manifest's (or a missing row) means the index must be rebuilt from the
-/// entity's rows: the `search:` block was added to a table that already had
-/// rows, or its text / facet / sortable lists changed.
+/// The search config an entity's index was built for, as stored in
+/// `_pylon_search_index_state`. A fingerprint that differs from the
+/// manifest's (or a missing row) means the index must be built from the
+/// entity's rows: the `search:` block was added to a table that already
+/// had rows, or its text / facet / sortable lists changed.
 pub fn config_fingerprint(config: &SearchConfig) -> String {
-    serde_json::to_string(config).unwrap_or_default()
+    format!(
+        "{INDEX_FORMAT}:{}",
+        serde_json::to_string(config).unwrap_or_default()
+    )
 }
 
-/// `_pylon_search_index_state`: one row per searchable entity. Same DDL on SQLite
-/// and Postgres.
+/// Bump when the index contents change for the same config (for example a
+/// new `stringify_facet` form), so every index is built again once.
+const INDEX_FORMAT: u32 = 1;
+
+/// `_pylon_search_index_state`: one row per searchable entity. `cursor` is
+/// NULL when the index is complete for `fingerprint`; otherwise a build is
+/// in progress and every row after `cursor` (SQLite: a rowid, Postgres: an
+/// id, in text) is still to be indexed. Same DDL on SQLite and Postgres.
 pub fn create_index_state_table_sql() -> &'static str {
     "CREATE TABLE IF NOT EXISTS \"_pylon_search_index_state\" (\
        entity      TEXT PRIMARY KEY,\
-       fingerprint TEXT NOT NULL\
+       fingerprint TEXT NOT NULL,\
+       cursor      TEXT\
      )"
 }
 
 /// Forget the config an entity's index was built for, so the runtime
-/// rebuilds the index from the entity's rows on its next open. Schema
-/// apply runs this for `CreateSearchIndex` and `RemoveSearchIndex`. Same
-/// SQL on SQLite and Postgres; run `create_index_state_table_sql` first.
+/// builds the index from the entity's rows on its next open. Schema apply
+/// runs this for `CreateSearchIndex` and `RemoveSearchIndex`. Same SQL on
+/// SQLite and Postgres; run `create_index_state_table_sql` first.
 pub fn clear_index_state_sql(entity: &str) -> String {
     format!(
         "DELETE FROM \"_pylon_search_index_state\" WHERE entity = '{}'",
         entity.replace('\'', "''")
     )
+}
+
+/// What an entity's search index needs, from `_pylon_search_index_state`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexBuild {
+    /// Complete for the current config, or the entity has no table yet.
+    Current,
+    /// Built for another config, or never recorded: start a build.
+    Start,
+    /// A build for the current config stopped part way: continue it.
+    Resume,
+}
+
+impl IndexBuild {
+    /// Classify a state row (`fingerprint`, `cursor`) against `config`.
+    pub fn from_state(state: Option<(String, Option<String>)>, config: &SearchConfig) -> Self {
+        match state {
+            Some((fp, cursor)) if fp == config_fingerprint(config) => {
+                if cursor.is_some() {
+                    Self::Resume
+                } else {
+                    Self::Current
+                }
+            }
+            _ => Self::Start,
+        }
+    }
 }
 
 /// One-time table for all facet bitmaps across all entities. Shared so
@@ -255,6 +300,16 @@ pub fn create_facet_table_sql() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_whole_float_facet_is_written_as_an_integer() {
+        let key = |v: serde_json::Value| stringify_facet(&v).unwrap();
+        assert_eq!(key(serde_json::json!(3)), "3");
+        assert_eq!(key(serde_json::json!(3.0)), "3");
+        assert_eq!(key(serde_json::json!(-2.0)), "-2");
+        assert_eq!(key(serde_json::json!(4.5)), "4.5");
+        assert_eq!(key(serde_json::json!(1e20)), "1e+20");
+    }
 
     #[test]
     fn bitmap_roundtrip() {

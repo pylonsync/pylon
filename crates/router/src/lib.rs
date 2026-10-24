@@ -1937,6 +1937,8 @@ pub(crate) fn handle_list(ctx: &RouterContext, entity: &str, url: &str) -> (u16,
                     Ok(r) => r,
                     Err(e) => return (400, json_error(&e.code, &e.message)),
                 }
+            } else if e.code == "SEARCH_INDEX_BUILDING" {
+                return (503, json_error(&e.code, &e.message));
             } else {
                 return (400, json_error(&e.code, &e.message));
             }
