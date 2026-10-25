@@ -311,11 +311,18 @@ pub struct EntityAuditPlugin {
     entities: HashSet<String>,
 }
 
+/// Updates in flight one thread remembers the field names of; past this,
+/// all of them are forgotten (see `before_update`).
+const MAX_PENDING_UPDATES: usize = 100_000;
+
 thread_local! {
-    /// Field names of the update in flight on this thread, captured in
-    /// `before_update` (which sees the caller's patch) for the matching
-    /// `after_update` (which may see the whole row).
-    static UPDATE_FIELDS: RefCell<Option<(String, String, String)>> = const { RefCell::new(None) };
+    /// Field names of the updates in flight on this thread, by entity and
+    /// row id, captured in `before_update` (which sees the caller's patch)
+    /// for the matching `after_update` (which may see the whole row). A
+    /// many-row update runs every `before_update` before any
+    /// `after_update`.
+    static UPDATE_FIELDS: RefCell<HashMap<(String, String), String>> =
+        RefCell::new(HashMap::new());
 }
 
 fn field_names(data: &serde_json::Value) -> Option<String> {
@@ -393,19 +400,22 @@ impl pylon_plugin::Plugin for EntityAuditPlugin {
     ) -> Result<(), pylon_plugin::PluginError> {
         if self.entities.contains(entity) {
             let names = field_names(data).unwrap_or_default();
-            UPDATE_FIELDS.with(|c| *c.borrow_mut() = Some((entity.into(), id.into(), names)));
+            UPDATE_FIELDS.with(|c| {
+                let mut pending = c.borrow_mut();
+                // An update of a missing row never reaches `after_update`;
+                // its entry is dropped here, before the map can grow far.
+                if pending.len() >= MAX_PENDING_UPDATES {
+                    pending.clear();
+                }
+                pending.insert((entity.into(), id.into()), names)
+            });
         }
         Ok(())
     }
 
     fn after_update(&self, entity: &str, id: &str, data: &serde_json::Value, auth: &AuthContext) {
-        let captured = UPDATE_FIELDS.with(|c| {
-            let mut slot = c.borrow_mut();
-            match slot.as_ref() {
-                Some((e, i, _)) if e == entity && i == id => slot.take().map(|(_, _, f)| f),
-                _ => None,
-            }
-        });
+        let captured =
+            UPDATE_FIELDS.with(|c| c.borrow_mut().remove(&(entity.to_string(), id.to_string())));
         let fields = captured.or_else(|| field_names(data));
         self.record("entity.update", entity, id, fields, auth);
     }

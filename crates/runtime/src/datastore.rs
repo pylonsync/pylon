@@ -4203,6 +4203,68 @@ impl<'a> DataStore for HookEnforcingDataStore<'a> {
         Ok(updated)
     }
 
+    /// The plugin chain runs for each row as for `insert`; the rows are
+    /// written together.
+    fn insert_many(
+        &self,
+        entity: &str,
+        rows: &[serde_json::Value],
+    ) -> Result<Vec<String>, DataError> {
+        let auth = self.effective_auth();
+        let has_defaults = crate::entity_has_any_default(self.manifest(), entity);
+        let mut prepared = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut data = row.clone();
+            self.plugins
+                .run_before_insert(entity, &mut data, &auth)
+                .map_err(|e| DataError {
+                    code: e.code,
+                    message: e.message,
+                })?;
+            if has_defaults {
+                data = crate::apply_field_defaults(self.manifest(), entity, &data);
+            }
+            prepared.push(data);
+        }
+        let ids = self.inner.insert_many(entity, &prepared)?;
+        for (id, data) in ids.iter().zip(&prepared) {
+            self.plugins.run_after_insert(entity, id, data, &auth);
+        }
+        Ok(ids)
+    }
+
+    /// The plugin chain runs for each row as for `update`; the rows are
+    /// written together.
+    fn update_many(
+        &self,
+        entity: &str,
+        rows: &[pylon_http::RowUpdate],
+    ) -> Result<Vec<bool>, DataError> {
+        let auth = self.effective_auth();
+        let mut prepared = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut data = row.data.clone();
+            self.plugins
+                .run_before_update(entity, &row.id, &mut data, &auth)
+                .map_err(|e| DataError {
+                    code: e.code,
+                    message: e.message,
+                })?;
+            prepared.push(pylon_http::RowUpdate {
+                id: row.id.clone(),
+                data,
+            });
+        }
+        let updated = self.inner.update_many(entity, &prepared)?;
+        for (row, updated) in prepared.iter().zip(&updated) {
+            if *updated {
+                self.plugins
+                    .run_after_update(entity, &row.id, &row.data, &auth);
+            }
+        }
+        Ok(updated)
+    }
+
     fn delete(&self, entity: &str, id: &str) -> Result<bool, DataError> {
         self.plugins
             .run_before_delete(entity, id, &self.effective_auth())
@@ -4526,6 +4588,60 @@ impl<'a> PgBufferedTxStore<'a> {
         }
     }
 
+    /// Buffer the change event of an insert. `row` is the row as stored,
+    /// returned by the insert (server-stamped fields included), so the
+    /// broadcast carries it without a re-read. See the equivalent comment
+    /// on TxStore::insert.
+    fn record_inserted(&self, entity: &str, id: &str, row: Option<serde_json::Value>) {
+        let Some(mut payload) = row else {
+            tracing::warn!(
+                "[PgBufferedTxStore] the insert of {entity}/{id} returned no row; skipping broadcast"
+            );
+            return;
+        };
+        self.normalize(entity, &mut payload);
+        self.record(entity, id, pylon_sync::ChangeKind::Insert, Some(&payload));
+    }
+
+    /// Buffer the change event of an update; returns whether the row
+    /// existed. The row before the write (read under its lock) goes on the
+    /// event as `prev_data` for the visibility-transition tombstone
+    /// (matches the SQLite TxStore::update fix); the row after it, full,
+    /// is the broadcast.
+    fn record_updated(
+        &self,
+        entity: &str,
+        id: &str,
+        written: Option<pylon_http::UpdatedRow>,
+    ) -> bool {
+        let Some(written) = written else {
+            return false;
+        };
+        let mut pre_row = written.before;
+        if let Some(r) = pre_row.as_mut() {
+            self.normalize(entity, r);
+        }
+        let Some(mut payload) = written.after else {
+            tracing::warn!(
+                "[PgBufferedTxStore] the update of {entity}/{id} returned no row; skipping broadcast"
+            );
+            return true;
+        };
+        self.normalize(entity, &mut payload);
+        // No-op suppression — an identical row has nothing to
+        // replicate (see pylon_router::update_is_noop).
+        if !pylon_router::update_is_noop(self.manifest(), entity, pre_row.as_ref(), &payload) {
+            self.record_with_prev(
+                entity,
+                id,
+                pylon_sync::ChangeKind::Update,
+                Some(&payload),
+                pre_row.as_ref(),
+            );
+        }
+        true
+    }
+
     pub(crate) fn take_pending(self) -> Vec<pylon_sync::ChangeEvent> {
         self.pending.into_inner().unwrap_or_default()
     }
@@ -4607,19 +4723,29 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
     fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, DataError> {
         self.validate_write(entity, data)?;
         let data = self.encrypt_for_write(entity, data, true)?;
-        // The insert returns the full materialized row (server-stamped
-        // fields included), so the broadcast carries it without a
-        // re-read. See the equivalent comment on TxStore::insert.
         let (id, row) = self.inner.insert_returning(entity, &data)?;
-        let Some(mut payload) = row else {
-            tracing::warn!(
-                "[PgBufferedTxStore] the insert of {entity}/{id} returned no row; skipping broadcast"
-            );
-            return Ok(id);
-        };
-        self.normalize(entity, &mut payload);
-        self.record(entity, &id, pylon_sync::ChangeKind::Insert, Some(&payload));
+        self.record_inserted(entity, &id, row);
         Ok(id)
+    }
+
+    fn insert_many(
+        &self,
+        entity: &str,
+        rows: &[serde_json::Value],
+    ) -> Result<Vec<String>, DataError> {
+        let mut prepared = Vec::with_capacity(rows.len());
+        for row in rows {
+            self.validate_write(entity, row)?;
+            prepared.push(self.encrypt_for_write(entity, row, true)?.into_owned());
+        }
+        let inserted = self.inner.insert_many_returning(entity, &prepared)?;
+        Ok(inserted
+            .into_iter()
+            .map(|(id, row)| {
+                self.record_inserted(entity, &id, row);
+                id
+            })
+            .collect())
     }
 
     fn get_by_id(&self, entity: &str, id: &str) -> Result<Option<serde_json::Value>, DataError> {
@@ -4654,37 +4780,31 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
     fn update(&self, entity: &str, id: &str, data: &serde_json::Value) -> Result<bool, DataError> {
         self.validate_write(entity, data)?;
         let data = self.encrypt_for_write(entity, data, false)?;
-        // The row before the write (under its lock) so the buffered event
-        // carries `prev_data` for the visibility-transition tombstone
-        // (matches the SQLite TxStore::update fix), and the row after it,
-        // full, for the broadcast.
-        let Some(written) = self.inner.update_returning(entity, id, &data)? else {
-            return Ok(false);
-        };
-        let mut pre_row = written.before;
-        if let Some(r) = pre_row.as_mut() {
-            self.normalize(entity, r);
+        let written = self.inner.update_returning(entity, id, &data)?;
+        Ok(self.record_updated(entity, id, written))
+    }
+
+    fn update_many(
+        &self,
+        entity: &str,
+        rows: &[pylon_http::RowUpdate],
+    ) -> Result<Vec<bool>, DataError> {
+        let mut prepared = Vec::with_capacity(rows.len());
+        for row in rows {
+            self.validate_write(entity, &row.data)?;
+            prepared.push(pylon_http::RowUpdate {
+                id: row.id.clone(),
+                data: self
+                    .encrypt_for_write(entity, &row.data, false)?
+                    .into_owned(),
+            });
         }
-        let Some(mut payload) = written.after else {
-            tracing::warn!(
-                "[PgBufferedTxStore] the update of {entity}/{id} returned no row; skipping broadcast"
-            );
-            return Ok(true);
-        };
-        self.normalize(entity, &mut payload);
-        // No-op suppression — an identical row has nothing to
-        // replicate (see pylon_router::update_is_noop).
-        if pylon_router::update_is_noop(self.manifest(), entity, pre_row.as_ref(), &payload) {
-            return Ok(true);
-        }
-        self.record_with_prev(
-            entity,
-            id,
-            pylon_sync::ChangeKind::Update,
-            Some(&payload),
-            pre_row.as_ref(),
-        );
-        Ok(true)
+        let written = self.inner.update_many_returning(entity, &prepared)?;
+        Ok(prepared
+            .iter()
+            .zip(written)
+            .map(|(row, written)| self.record_updated(entity, &row.id, written))
+            .collect())
     }
 
     fn delete(&self, entity: &str, id: &str) -> Result<bool, DataError> {

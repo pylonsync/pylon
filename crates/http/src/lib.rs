@@ -102,6 +102,13 @@ pub struct UpdatedRow {
     pub after: Option<serde_json::Value>,
 }
 
+/// One row's patch in [`DataStore::update_many`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct RowUpdate {
+    pub id: String,
+    pub data: serde_json::Value,
+}
+
 /// Platform-agnostic data store trait.
 ///
 /// Implemented by `Runtime` (SQLite, self-hosted) and `D1DataStore` (Workers).
@@ -196,6 +203,50 @@ pub trait DataStore: Send + Sync {
         }
         let after = self.get_by_id(entity, id).ok().flatten();
         Ok(Some(UpdatedRow { before, after }))
+    }
+
+    /// Insert rows of one entity, in order; returns their ids. The
+    /// default inserts them one at a time; a store that can write them in
+    /// fewer statements overrides this.
+    fn insert_many(
+        &self,
+        entity: &str,
+        rows: &[serde_json::Value],
+    ) -> Result<Vec<String>, DataError> {
+        rows.iter().map(|row| self.insert(entity, row)).collect()
+    }
+
+    /// [`DataStore::insert_many`], returning each row as stored, as
+    /// [`DataStore::insert_returning`] does.
+    fn insert_many_returning(
+        &self,
+        entity: &str,
+        rows: &[serde_json::Value],
+    ) -> Result<Vec<(String, Option<serde_json::Value>)>, DataError> {
+        rows.iter()
+            .map(|row| self.insert_returning(entity, row))
+            .collect()
+    }
+
+    /// Update rows of one entity, in order; returns, per row, whether it
+    /// existed. The default updates them one at a time; a store that can
+    /// write them in fewer statements overrides this.
+    fn update_many(&self, entity: &str, rows: &[RowUpdate]) -> Result<Vec<bool>, DataError> {
+        rows.iter()
+            .map(|row| self.update(entity, &row.id, &row.data))
+            .collect()
+    }
+
+    /// [`DataStore::update_many`], returning each row before and after,
+    /// as [`DataStore::update_returning`] does.
+    fn update_many_returning(
+        &self,
+        entity: &str,
+        rows: &[RowUpdate],
+    ) -> Result<Vec<Option<UpdatedRow>>, DataError> {
+        rows.iter()
+            .map(|row| self.update_returning(entity, &row.id, &row.data))
+            .collect()
     }
 
     fn delete(&self, entity: &str, id: &str) -> Result<bool, DataError>;

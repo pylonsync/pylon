@@ -412,6 +412,53 @@ pub fn apply_update<C: PgConn>(
         .map_err(|e| StorageError::new("PG_FTS_UPDATE_FAILED", &e.to_string()))
 }
 
+/// The FTS text of a row an insert just landed (`data` with its id), or
+/// `None` when `config` declares no text fields. See [`apply_insert`].
+pub fn insert_text(data: &Value, config: &SearchConfig) -> Option<String> {
+    (!config.text.is_empty()).then(|| collect_text(data, config))
+}
+
+/// The FTS text of a row after an update, or `None` when the patch
+/// touches no text field (nothing to rewrite). See [`apply_update`].
+pub fn update_text(old_row: &Value, patch: &Value, config: &SearchConfig) -> Option<String> {
+    let touches_text = config.text.iter().any(|f| patch.get(f).is_some());
+    touches_text.then(|| collect_text(&merge_row(old_row, patch), config))
+}
+
+/// Write the FTS shadow rows of many entity rows in one statement:
+/// `rows` are `(id, text)` from [`insert_text`] / [`update_text`]. A
+/// later pair for the same id wins, as it would written one at a time.
+pub fn upsert_texts<C: PgConn>(
+    conn: &mut C,
+    entity: &str,
+    rows: &[(String, String)],
+    config: &SearchConfig,
+) -> Result<(), StorageError> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    // ON CONFLICT cannot touch one row twice in a statement: keep the
+    // last text per id.
+    let mut last: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    let mut order: Vec<&str> = Vec::new();
+    for (id, text) in rows {
+        if last.insert(id, text).is_none() {
+            order.push(id);
+        }
+    }
+    let texts: Vec<&str> = order.iter().map(|id| last[id]).collect();
+    let lang = lang_literal(config);
+    let sql = format!(
+        "INSERT INTO {fts} (entity_id, tsv) \
+         SELECT u.id, to_tsvector({lang}, u.text) FROM unnest($1::text[], $2::text[]) AS u(id, text) \
+         ON CONFLICT (entity_id) DO UPDATE SET tsv = EXCLUDED.tsv",
+        fts = fts_table_name(entity),
+    );
+    conn.execute(&sql, &[&order, &texts])
+        .map(|_| ())
+        .map_err(|e| StorageError::new("PG_FTS_UPDATE_FAILED", &e.to_string()))
+}
+
 /// Delete the FTS shadow row when the underlying entity row is going
 /// away. The FK CASCADE handles this automatically when the entity
 /// row is DELETEd, but we call it explicitly so the maintenance

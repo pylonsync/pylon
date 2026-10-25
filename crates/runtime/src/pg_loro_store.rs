@@ -584,6 +584,156 @@ impl PgLoroStore {
         Ok(project_doc_to_json(&doc, fields))
     }
 
+    /// [`Self::apply_patch_locked`] for many rows of one entity, with one
+    /// read of their docs and at most two statements to store them. The
+    /// caller holds every row's CRDT lock. Per item: the row id, the row
+    /// as the doc holds it (`None` for a row being inserted: nothing to
+    /// seed from), and the patch. Ids must be distinct. Returns the
+    /// projected JSON per item, in order.
+    pub fn apply_patches_locked<C: PgConn>(
+        &self,
+        conn: &mut C,
+        entity: &str,
+        fields: &[CrdtField],
+        items: &[(&str, Option<&Value>, &Value)],
+    ) -> Result<Vec<Value>, LoroStoreError> {
+        let ids: Vec<&str> = items.iter().map(|(id, _, _)| *id).collect();
+        let mut stored = self.hydrate_many_locked(conn, entity, &ids)?;
+        let mut docs = Vec::with_capacity(items.len());
+        let mut projected = Vec::with_capacity(items.len());
+        for (id, row, patch) in items {
+            let (doc, head) = stored
+                .remove(*id)
+                .ok_or_else(|| LoroStoreError::Storage(format!("read pg snapshot {id}: no row")))?;
+            if let Some(row) = row {
+                let held = crate::loro_store::held_keys(&doc, fields);
+                if head.is_none() || held.len() < fields.len() {
+                    let values = crate::missing_values(fields, &held, row);
+                    let failed = seed_doc(
+                        &mut PgSide(conn),
+                        &doc,
+                        &self.peers,
+                        entity,
+                        id,
+                        fields,
+                        values,
+                    )?;
+                    for (field, why) in failed {
+                        tracing::warn!(entity, row_id = %id, field = %field, "seed a CRDT doc from its row: {why}");
+                    }
+                }
+            }
+            patch_doc(&mut PgSide(conn), &doc, entity, id, fields, patch)?;
+            projected.push(project_doc_to_json(&doc, fields));
+            docs.push((*id, doc, head));
+        }
+        Self::persist_many(conn, entity, &docs)?;
+        Ok(projected)
+    }
+
+    /// [`Self::hydrate_locked`] for many rows, in one statement.
+    fn hydrate_many_locked<C: PgConn>(
+        &self,
+        conn: &mut C,
+        entity: &str,
+        ids: &[&str],
+    ) -> Result<std::collections::HashMap<String, (LoroDoc, Option<StoredHead>)>, LoroStoreError>
+    {
+        let rows = conn
+            .query(
+                "SELECT r.row_id, s.snapshot, s.log_count, s.log_bytes, s.vv, \
+                        extract(epoch FROM pg_postmaster_start_time())::float8, \
+                        CASE WHEN s.snapshot IS NOT NULL THEN \
+                            (SELECT array_agg(u.delta ORDER BY u.seq) FROM _pylon_crdt_updates u \
+                             WHERE u.entity = $1 AND u.row_id = r.row_id) END \
+                 FROM unnest($2::text[]) AS r(row_id) LEFT JOIN _pylon_crdt_snapshots s \
+                   ON s.entity = $1 AND s.row_id = r.row_id",
+                &[&entity, &ids],
+            )
+            .map_err(|e| pg_err("read pg snapshots", e))?;
+        if let Some(row) = rows.first() {
+            self.note_server_start(row.get(5));
+        }
+        let mut docs = std::collections::HashMap::with_capacity(rows.len());
+        for row in rows {
+            let snapshot: Option<Vec<u8>> = row.get(1);
+            let head = snapshot.as_ref().map(|snap| {
+                StoredHead::from_columns(snap.len() as i64, row.get(2), row.get(3), row.get(4))
+            });
+            let log: Vec<Vec<u8>> = row.get::<_, Option<Vec<Vec<u8>>>>(6).unwrap_or_default();
+            let doc = doc_from_stored(snapshot.as_deref(), &log, &self.peers)?;
+            docs.insert(row.get::<_, String>(0), (doc, head));
+        }
+        Ok(docs)
+    }
+
+    /// [`Self::persist_snapshot`] for many rows of one entity: one
+    /// statement for the rows whose ops append to their log, one for the
+    /// rows that get a new snapshot. Ids must be distinct.
+    fn persist_many<C: PgConn>(
+        conn: &mut C,
+        entity: &str,
+        docs: &[(&str, LoroDoc, Option<StoredHead>)],
+    ) -> Result<(), LoroStoreError> {
+        let (mut append_ids, mut seqs, mut deltas, mut lens, mut append_vvs) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut snapshot_ids, mut snapshots, mut snapshot_vvs) =
+            (Vec::new(), Vec::new(), Vec::new());
+        for (id, doc, head) in docs {
+            let vv = doc.oplog_vv().encode();
+            match plan_persist(head.as_ref(), doc) {
+                Persist::Unchanged => {}
+                Persist::Snapshot => {
+                    snapshot_ids.push(*id);
+                    snapshots.push(encode_snapshot(doc));
+                    snapshot_vvs.push(vv);
+                }
+                Persist::Append(delta) => {
+                    let head = head.as_ref().expect("an append has a stored head");
+                    append_ids.push(*id);
+                    seqs.push(head.log_count + 1);
+                    lens.push(delta.len() as i64);
+                    deltas.push(delta);
+                    append_vvs.push(vv);
+                }
+            }
+        }
+        if !append_ids.is_empty() {
+            conn.execute(
+                "WITH appended AS ( \
+                     INSERT INTO _pylon_crdt_updates (entity, row_id, seq, delta) \
+                     SELECT $1, u.row_id, u.seq, u.delta \
+                     FROM unnest($2::text[], $3::bigint[], $4::bytea[]) AS u(row_id, seq, delta) \
+                 ) \
+                 UPDATE _pylon_crdt_snapshots AS s \
+                 SET log_count = s.log_count + 1, log_bytes = s.log_bytes + u.len, vv = u.vv, \
+                     updated_at = clock_timestamp() \
+                 FROM unnest($2::text[], $5::bigint[], $6::bytea[]) AS u(row_id, len, vv) \
+                 WHERE s.entity = $1 AND s.row_id = u.row_id",
+                &[&entity, &append_ids, &seqs, &deltas, &lens, &append_vvs],
+            )
+            .map_err(|e| pg_err("append to the pg update logs", e))?;
+        }
+        if !snapshot_ids.is_empty() {
+            conn.execute(
+                "WITH cleared AS ( \
+                     DELETE FROM _pylon_crdt_updates AS d USING unnest($2::text[]) AS c(row_id) \
+                     WHERE d.entity = $1 AND d.row_id = c.row_id \
+                 ) \
+                 INSERT INTO _pylon_crdt_snapshots \
+                    (entity, row_id, snapshot, updated_at, log_count, log_bytes, vv) \
+                 SELECT $1, u.row_id, u.snapshot, clock_timestamp(), 0, 0, u.vv \
+                 FROM unnest($2::text[], $3::bytea[], $4::bytea[]) AS u(row_id, snapshot, vv) \
+                 ON CONFLICT (entity, row_id) DO UPDATE \
+                 SET snapshot = EXCLUDED.snapshot, updated_at = EXCLUDED.updated_at, \
+                     log_count = 0, log_bytes = 0, vv = EXCLUDED.vv",
+                &[&entity, &snapshot_ids, &snapshots, &snapshot_vvs],
+            )
+            .map_err(|e| pg_err("persist pg snapshots", e))?;
+        }
+        Ok(())
+    }
+
     /// Apply a binary update from a peer. Returns the projected JSON
     /// for re-materialization on the entity row. Same locking shape
     /// as `apply_patch`.
@@ -872,6 +1022,19 @@ pub struct PgCrdtHookImpl {
     pub manifest: std::sync::Arc<AppManifest>,
 }
 
+impl PgCrdtHookImpl {
+    fn entity(&self, entity: &str) -> Result<&pylon_kernel::ManifestEntity, pylon_http::DataError> {
+        self.manifest
+            .entities
+            .iter()
+            .find(|e| e.name == entity)
+            .ok_or_else(|| pylon_http::DataError {
+                code: "ENTITY_NOT_FOUND".into(),
+                message: format!("Unknown entity: {entity}"),
+            })
+    }
+}
+
 impl PgCrdtHook for PgCrdtHookImpl {
     fn before_insert(
         &self,
@@ -946,6 +1109,85 @@ impl PgCrdtHook for PgCrdtHookImpl {
             crate::crdt_container_corrections(&crdt_fields, data, &projected)
                 .map(|c| crate::serialize_json_fields_for_storage(ent, &c).unwrap_or(c)),
         )
+    }
+
+    fn before_insert_many(
+        &self,
+        tx: &mut pylon_storage::pg_exec::CachedTransaction<'_>,
+        entity: &str,
+        rows: &[serde_json::Value],
+    ) -> Result<Vec<serde_json::Value>, pylon_http::DataError> {
+        let ent = self.entity(entity)?;
+        let crdt_fields = crdt_fields_for(ent)?;
+        // Each row with its id set, as `before_insert` does.
+        let rows: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|data| {
+                let id = data
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(crate::generate_id);
+                let mut row = data.clone();
+                if let Some(obj) = row.as_object_mut() {
+                    obj.insert("id".into(), serde_json::Value::String(id));
+                }
+                row
+            })
+            .collect();
+        let ids: Vec<&str> = rows
+            .iter()
+            .map(|row| row["id"].as_str().expect("id set above"))
+            .collect();
+        let crdt_err = |e: LoroStoreError| pylon_http::DataError {
+            code: "CRDT_APPLY_FAILED".into(),
+            message: format!("crdt write {entity}: {e}"),
+        };
+        pylon_storage::pg_tx_store::lock_crdt_rows(tx, entity, &ids)
+            .map_err(|e| crdt_err(pg_err("crdt advisory locks", e)))?;
+        let items: Vec<(&str, Option<&serde_json::Value>, &serde_json::Value)> = ids
+            .iter()
+            .zip(&rows)
+            .map(|(id, row)| (*id, None, row))
+            .collect();
+        self.crdt
+            .apply_patches_locked(tx, entity, &crdt_fields, &items)
+            .map_err(crdt_err)?;
+        Ok(rows)
+    }
+
+    fn before_update_many(
+        &self,
+        tx: &mut pylon_storage::pg_exec::CachedTransaction<'_>,
+        entity: &str,
+        rows: &[pylon_storage::pg_tx_store::LockedUpdate<'_>],
+    ) -> Result<Vec<Option<serde_json::Value>>, pylon_http::DataError> {
+        let ent = self.entity(entity)?;
+        let crdt_fields = crdt_fields_for(ent)?;
+        let held: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|row| crate::pg_row_as_doc_holds(ent, &crdt_fields, row.before.clone()))
+            .collect();
+        let items: Vec<(&str, Option<&serde_json::Value>, &serde_json::Value)> = rows
+            .iter()
+            .zip(&held)
+            .map(|(row, held)| (row.id, Some(held), row.data))
+            .collect();
+        let projected = self
+            .crdt
+            .apply_patches_locked(tx, entity, &crdt_fields, &items)
+            .map_err(|e| pylon_http::DataError {
+                code: "CRDT_APPLY_FAILED".into(),
+                message: format!("crdt update {entity}: {e}"),
+            })?;
+        Ok(rows
+            .iter()
+            .zip(&projected)
+            .map(|(row, projected)| {
+                crate::crdt_container_corrections(&crdt_fields, row.data, projected)
+                    .map(|c| crate::serialize_json_fields_for_storage(ent, &c).unwrap_or(c))
+            })
+            .collect())
     }
 
     fn before_delete(

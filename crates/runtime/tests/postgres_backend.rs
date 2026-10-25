@@ -2173,3 +2173,168 @@ fn encryption_key_rotation_reencrypts_postgres_rows() {
         "123-45-6789"
     );
 }
+
+/// The `title` a row's CRDT doc holds.
+fn doc_title(rt: &Runtime, id: &str) -> String {
+    use pylon_http::DataStore;
+    let doc = pylon_crdt::loro::LoroDoc::new();
+    pylon_crdt::apply_update(&doc, &rt.crdt_snapshot("Note", id).unwrap().unwrap()).unwrap();
+    match pylon_crdt::root_map(&doc).get("title") {
+        Some(pylon_crdt::loro::ValueOrContainer::Value(v)) => {
+            v.as_string().map(|s| s.to_string()).unwrap_or_default()
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn many_row_writes_in_a_mutation_match_one_at_a_time_on_postgres() {
+    let Some(url) = pg_url() else {
+        return;
+    };
+    use pylon_http::RowUpdate;
+    let rt = crdt_runtime(&url);
+    let note = |title: &str| serde_json::json!({ "title": title, "body": "b" });
+    let patch = |id: &str, title: &str| RowUpdate {
+        id: id.to_string(),
+        data: serde_json::json!({ "title": title }),
+    };
+
+    let ids = rt
+        .run_in_pg_mutation_tx_for_tests::<_, _, pylon_http::DataError>(|store| {
+            let inserted =
+                store.insert_many_returning("Note", &[note("a"), note("b"), note("c")])?;
+            for (id, row) in &inserted {
+                let row = row.as_ref().expect("the insert returns the row");
+                assert_eq!(&row["id"], id);
+            }
+            Ok(inserted.into_iter().map(|(id, _)| id).collect::<Vec<_>>())
+        })
+        .unwrap();
+    for (id, title) in ids.iter().zip(["a", "b", "c"]) {
+        assert_eq!(rt.get_by_id("Note", id).unwrap().unwrap()["title"], title);
+        assert_eq!(doc_title(&rt, id), title);
+    }
+
+    // Before and after per row; the docs take the patch.
+    let written = rt
+        .run_in_pg_mutation_tx_for_tests::<_, _, pylon_http::DataError>(|store| {
+            store.update_many_returning("Note", &[patch(&ids[0], "a2"), patch(&ids[2], "c2")])
+        })
+        .unwrap();
+    let first = written[0].as_ref().expect("a exists");
+    assert_eq!(first.before.as_ref().unwrap()["title"], "a");
+    assert_eq!(first.after.as_ref().unwrap()["title"], "a2");
+    assert_eq!(
+        written[1].as_ref().unwrap().after.as_ref().unwrap()["title"],
+        "c2"
+    );
+    assert_eq!(doc_title(&rt, &ids[0]), "a2");
+    assert_eq!(doc_title(&rt, &ids[1]), "b");
+    assert_eq!(doc_title(&rt, &ids[2]), "c2");
+
+    // The same row twice: the later patch wins, as one at a time.
+    rt.run_in_pg_mutation_tx_for_tests::<_, _, pylon_http::DataError>(|store| {
+        store.update_many("Note", &[patch(&ids[1], "b2"), patch(&ids[1], "b3")])
+    })
+    .unwrap();
+    assert_eq!(
+        rt.get_by_id("Note", &ids[1]).unwrap().unwrap()["title"],
+        "b3"
+    );
+    assert_eq!(doc_title(&rt, &ids[1]), "b3");
+
+    // A missing row of a CRDT entity fails the call, as one update does,
+    // and the other rows' docs are not written.
+    let err = rt
+        .run_in_pg_mutation_tx_for_tests::<_, _, pylon_http::DataError>(|store| {
+            store.update_many("Note", &[patch(&ids[0], "a3"), patch("no-such-note", "x")])
+        })
+        .unwrap_err();
+    assert_eq!(err.code, "ENTITY_NOT_FOUND", "{err}");
+    assert_eq!(doc_title(&rt, &ids[0]), "a2");
+    let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    let orphans: i64 = client
+        .query_one(
+            "SELECT count(*) FROM _pylon_crdt_snapshots WHERE entity = 'Note' AND row_id = 'no-such-note'",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(orphans, 0);
+}
+
+#[test]
+fn many_row_updates_answer_false_for_a_missing_row_on_postgres() {
+    let Some(url) = pg_url() else {
+        return;
+    };
+    use pylon_http::RowUpdate;
+    let rt = fresh_runtime(&url);
+    let ids = rt
+        .run_in_pg_mutation_tx_for_tests::<_, _, pylon_http::DataError>(|store| {
+            store.insert_many(
+                "User",
+                &[
+                    serde_json::json!({ "email": "a@x.test", "name": "A" }),
+                    serde_json::json!({ "email": "b@x.test" }),
+                ],
+            )
+        })
+        .unwrap();
+    let updated = rt
+        .run_in_pg_mutation_tx_for_tests::<_, _, pylon_http::DataError>(|store| {
+            store.update_many(
+                "User",
+                &[
+                    RowUpdate {
+                        id: ids[0].clone(),
+                        data: serde_json::json!({ "name": "A2" }),
+                    },
+                    RowUpdate {
+                        id: "no-such-user".into(),
+                        data: serde_json::json!({ "name": "X" }),
+                    },
+                    RowUpdate {
+                        id: ids[1].clone(),
+                        data: serde_json::json!({ "name": "B2", "email": "b2@x.test" }),
+                    },
+                ],
+            )
+        })
+        .unwrap();
+    assert_eq!(updated, vec![true, false, true]);
+    let a = rt.get_by_id("User", &ids[0]).unwrap().unwrap();
+    assert_eq!(
+        (&a["email"], &a["name"]),
+        (&"a@x.test".into(), &"A2".into())
+    );
+    let b = rt.get_by_id("User", &ids[1]).unwrap().unwrap();
+    assert_eq!(
+        (&b["email"], &b["name"]),
+        (&"b2@x.test".into(), &"B2".into())
+    );
+
+    // A unique-constraint violation fails the batch as it fails one insert.
+    let err = rt
+        .run_in_pg_mutation_tx_for_tests::<_, _, pylon_http::DataError>(|store| {
+            store.insert_many(
+                "User",
+                &[
+                    serde_json::json!({ "email": "c@x.test" }),
+                    serde_json::json!({ "email": "a@x.test" }),
+                ],
+            )
+        })
+        .unwrap_err();
+    assert_eq!(err.code, "PG_REJECTED", "{err}");
+    let c: i64 = postgres::Client::connect(&url, postgres::NoTls)
+        .unwrap()
+        .query_one(
+            "SELECT count(*) FROM \"User\" WHERE email = 'c@x.test'",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(c, 0, "the batch rolled back");
+}

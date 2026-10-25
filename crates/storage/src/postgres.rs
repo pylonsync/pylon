@@ -869,6 +869,22 @@ pub fn build_insert_sql(
     entity: &str,
     data: &serde_json::Value,
 ) -> Result<(String, Vec<JsonParam>), StorageError> {
+    let (columns, values) = insert_columns(data)?;
+    let placeholders: Vec<String> = (1..=values.len()).map(|n| format!("${n}")).collect();
+    let sql = format!(
+        "INSERT INTO {} ({}) VALUES ({})",
+        quote_ident(entity),
+        columns.join(", "),
+        placeholders.join(", ")
+    );
+    Ok((sql, values))
+}
+
+/// The quoted columns and typed values of an insert, `id` first (as
+/// `JsonParam::Text`). See [`build_insert_sql`].
+pub fn insert_columns(
+    data: &serde_json::Value,
+) -> Result<(Vec<String>, Vec<JsonParam>), StorageError> {
     let obj = data.as_object().ok_or_else(|| StorageError {
         code: "PG_INVALID_DATA".into(),
         message: "Insert data must be a JSON object".into(),
@@ -895,11 +911,8 @@ pub fn build_insert_sql(
         }
     };
 
-    let mut col_names = vec!["id".to_string()];
-    let mut placeholders = vec!["$1".to_string()];
+    let mut columns = vec!["id".to_string()];
     let mut values: Vec<JsonParam> = vec![JsonParam::Text(id)];
-
-    let mut i = 0usize;
     for (key, val) in obj {
         if key == "id" {
             // Already emitted via the synthetic first column; skipping
@@ -907,20 +920,10 @@ pub fn build_insert_sql(
             // rejects with `duplicate key value`.
             continue;
         }
-        col_names.push(quote_ident(key));
-        placeholders.push(format!("${}", i + 2));
+        columns.push(quote_ident(key));
         values.push(JsonParam::from_json(val));
-        i += 1;
     }
-
-    let sql = format!(
-        "INSERT INTO {} ({}) VALUES ({})",
-        quote_ident(entity),
-        col_names.join(", "),
-        placeholders.join(", ")
-    );
-
-    Ok((sql, values))
+    Ok((columns, values))
 }
 
 /// Build an UPDATE SQL statement and collect typed parameter values.
@@ -930,6 +933,26 @@ pub fn build_update_sql(
     id: &str,
     data: &serde_json::Value,
 ) -> Result<(String, Vec<JsonParam>), StorageError> {
+    let columns = update_columns(data)?;
+    let set_clauses: Vec<String> = columns
+        .iter()
+        .enumerate()
+        .map(|(i, (key, _))| format!("{} = ${}", quote_ident(key), i + 2))
+        .collect();
+    let mut values: Vec<JsonParam> = vec![JsonParam::Text(id.to_string())];
+    values.extend(columns.into_iter().map(|(_, value)| value));
+    let sql = format!(
+        "UPDATE {} SET {} WHERE id = $1",
+        quote_ident(entity),
+        set_clauses.join(", ")
+    );
+    Ok((sql, values))
+}
+
+/// The fields of an update patch with their typed values, in the patch's
+/// order. Refuses a patch that is not an object, is empty, or sets `id`.
+/// See [`build_update_sql`].
+pub fn update_columns(data: &serde_json::Value) -> Result<Vec<(String, JsonParam)>, StorageError> {
     let obj = data.as_object().ok_or_else(|| StorageError {
         code: "PG_INVALID_DATA".into(),
         message: "Update data must be a JSON object".into(),
@@ -942,10 +965,7 @@ pub fn build_update_sql(
         });
     }
 
-    let mut set_clauses = Vec::new();
-    let mut values: Vec<JsonParam> = vec![JsonParam::Text(id.to_string())];
-
-    let mut i = 0usize;
+    let mut columns = Vec::with_capacity(obj.len());
     for (key, val) in obj {
         if key == "id" {
             // Reject primary-key mutation. Letting `id` into the SET
@@ -961,25 +981,9 @@ pub fn build_update_sql(
                     .into(),
             });
         }
-        set_clauses.push(format!("{} = ${}", quote_ident(key), i + 2));
-        values.push(JsonParam::from_json(val));
-        i += 1;
+        columns.push((key.clone(), JsonParam::from_json(val)));
     }
-
-    if set_clauses.is_empty() {
-        return Err(StorageError {
-            code: "PG_INVALID_DATA".into(),
-            message: "Update data must contain at least one non-id field".into(),
-        });
-    }
-
-    let sql = format!(
-        "UPDATE {} SET {} WHERE id = $1",
-        quote_ident(entity),
-        set_clauses.join(", ")
-    );
-
-    Ok((sql, values))
+    Ok(columns)
 }
 
 /// Helper for the existing `Vec<JsonParam>` → `&[&dyn ToSql + Sync]` lift

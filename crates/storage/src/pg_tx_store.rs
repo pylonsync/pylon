@@ -20,7 +20,7 @@
 
 use std::sync::Mutex;
 
-use pylon_http::{DataError, DataStore, UpdatedRow};
+use pylon_http::{DataError, DataStore, RowUpdate, UpdatedRow};
 use pylon_kernel::AppManifest;
 
 use crate::pg_exec::{CachedTransaction, PgConn};
@@ -182,6 +182,12 @@ pub fn tx_update_locked<C: PgConn>(
     Ok(Some(crate::postgres::row_to_json_pub(&row)))
 }
 
+/// Whether an id appears twice.
+fn has_repeated_ids<'i>(ids: impl Iterator<Item = &'i str>) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    ids.into_iter().any(|id| !seen.insert(id))
+}
+
 /// Take a row's CRDT advisory lock for the rest of the transaction.
 /// Every CRDT write, and a delete, takes it before any row lock, so they
 /// queue on it instead of locking the snapshot, side, and entity rows in
@@ -273,6 +279,329 @@ pub fn record_after_edit<C: PgConn>(
     )
     .map(|_| ())
     .map_err(pg_err_to_data)
+}
+
+/// [`record_after_edit`] for many rows of one entity, in one statement.
+pub fn record_after_edits<C: PgConn>(
+    conn: &mut C,
+    manifest: &AppManifest,
+    entity: &str,
+    ids: &[&str],
+) -> Result<(), DataError> {
+    let Some(hook) = manifest
+        .entities
+        .iter()
+        .find(|e| e.name == entity)
+        .and_then(|e| e.after_edit.as_ref())
+    else {
+        return Ok(());
+    };
+    // ON CONFLICT cannot touch one row twice in a statement.
+    let mut unique: Vec<&str> = ids.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    if unique.is_empty() {
+        return Ok(());
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let due = hook.due_at(now) as i64;
+    let gens: Vec<i64> = unique.iter().map(|_| rand::random::<i64>()).collect();
+    conn.execute(
+        &format!(
+            // Same row shape and conflict rule as `record_after_edit`.
+            "INSERT INTO {} (entity, row_id, due_at, gen) \
+             SELECT $1, u.row_id, $2, u.gen FROM unnest($3::text[], $4::bigint[]) AS u(row_id, gen) \
+             ON CONFLICT (entity, row_id, due_at) DO UPDATE SET due_at = EXCLUDED.due_at",
+            pylon_kernel::AFTER_EDIT_TABLE
+        ),
+        &[&entity, &due, &unique, &gens],
+    )
+    .map(|_| ())
+    .map_err(pg_err_to_data)
+}
+
+/// Rows per batched statement. Also kept under Postgres' 65,535
+/// parameters by [`rows_per_statement`].
+const BATCH_ROWS: usize = 500;
+
+/// Rows of `params_per_row` parameters each that fit one statement.
+fn rows_per_statement(params_per_row: usize) -> usize {
+    (u16::MAX as usize / params_per_row.max(1)).clamp(1, BATCH_ROWS)
+}
+
+/// Take the CRDT advisory locks of many rows (see [`lock_crdt_row`]) in
+/// one statement. The keys are taken in sorted order, the same in every
+/// batch, so two batches over the same rows wait instead of deadlocking.
+pub fn lock_crdt_rows<C: PgConn>(
+    conn: &mut C,
+    entity: &str,
+    ids: &[&str],
+) -> Result<(), postgres::Error> {
+    let entity_key = crdt_lock_key(entity);
+    let mut keys: Vec<i32> = ids.iter().map(|id| crdt_lock_key(id)).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    // unnest keeps the array's order, and the locks are taken row by row
+    // in it.
+    conn.query(
+        "SELECT count(pg_advisory_xact_lock($1::int, k)) FROM unnest($2::int[]) AS u(k)",
+        &[&entity_key, &keys],
+    )
+    .map(|_| ())
+}
+
+/// Lock rows for the rest of the transaction and read them, in id order
+/// (two batches over the same rows wait instead of deadlocking). A row
+/// that does not exist is not in the map.
+pub fn tx_lock_rows<C: PgConn>(
+    conn: &mut C,
+    entity: &str,
+    ids: &[&str],
+) -> Result<std::collections::HashMap<String, serde_json::Value>, DataError> {
+    let sql = format!(
+        "SELECT * FROM {} WHERE id = ANY($1) ORDER BY id FOR UPDATE",
+        quote_ident_pub(entity)
+    );
+    let mut sorted = ids.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut rows = std::collections::HashMap::with_capacity(ids.len());
+    for chunk in sorted.chunks(BATCH_ROWS) {
+        conn.query_each(&sql, &[&chunk], &mut |row| {
+            let row = crate::postgres::row_to_json_pub(&row);
+            if let Some(id) = row.get("id").and_then(|v| v.as_str()) {
+                rows.insert(id.to_string(), row.clone());
+            }
+        })
+        .map_err(pg_err_to_data)?;
+    }
+    Ok(rows)
+}
+
+/// [`tx_insert_returning`] for many rows of one entity: one multi-row
+/// INSERT per set of columns. Returns `(id, row)` in the order of `rows`.
+pub fn tx_insert_many_returning<C: PgConn>(
+    conn: &mut C,
+    manifest: &AppManifest,
+    entity: &str,
+    rows: &[serde_json::Value],
+) -> Result<Vec<(String, Option<serde_json::Value>)>, DataError> {
+    let mut prepared = Vec::with_capacity(rows.len());
+    for data in rows {
+        prepared.push(
+            crate::postgres::insert_columns(data).map_err(|e| DataError {
+                code: e.code,
+                message: e.message,
+            })?,
+        );
+    }
+    let id_of = |values: &[JsonParam]| match &values[0] {
+        JsonParam::Text(id) => id.clone(),
+        _ => unreachable!("insert_columns puts the id first, as text"),
+    };
+    // Rows with the same columns share a statement.
+    let mut groups: Vec<(&[String], Vec<usize>)> = Vec::new();
+    for (i, (columns, _)) in prepared.iter().enumerate() {
+        match groups.iter_mut().find(|(c, _)| *c == columns.as_slice()) {
+            Some((_, members)) => members.push(i),
+            None => groups.push((columns, vec![i])),
+        }
+    }
+    let mut stored: std::collections::HashMap<String, serde_json::Value> =
+        std::collections::HashMap::with_capacity(rows.len());
+    for (columns, members) in groups {
+        for chunk in members.chunks(rows_per_statement(columns.len())) {
+            let mut tuples = Vec::with_capacity(chunk.len());
+            let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> =
+                Vec::with_capacity(chunk.len() * columns.len());
+            for &i in chunk {
+                let base = params.len();
+                let placeholders: Vec<String> = (1..=columns.len())
+                    .map(|n| format!("${}", base + n))
+                    .collect();
+                tuples.push(format!("({})", placeholders.join(", ")));
+                params.extend(as_pg_params(&prepared[i].1));
+            }
+            let sql = format!(
+                "INSERT INTO {} ({}) VALUES {} RETURNING *",
+                quote_ident_pub(entity),
+                columns.join(", "),
+                tuples.join(", ")
+            );
+            conn.query_each(&sql, &params, &mut |row| {
+                let row = crate::postgres::row_to_json_pub(&row);
+                if let Some(id) = row.get("id").and_then(|v| v.as_str()) {
+                    stored.insert(id.to_string(), row.clone());
+                }
+            })
+            .map_err(pg_err_to_data)?;
+        }
+    }
+    let ids: Vec<String> = prepared.iter().map(|(_, values)| id_of(values)).collect();
+    if let Some(cfg) = search_config_for(manifest, entity) {
+        let texts: Vec<(String, String)> = rows
+            .iter()
+            .zip(&ids)
+            .filter_map(|(data, id)| {
+                // The payload with the resolved id, as `tx_insert` builds it.
+                let mut row_with_id = data.clone();
+                if let Some(obj) = row_with_id.as_object_mut() {
+                    obj.insert("id".into(), serde_json::Value::String(id.clone()));
+                }
+                pg_search::insert_text(&row_with_id, &cfg).map(|text| (id.clone(), text))
+            })
+            .collect();
+        pg_search::upsert_texts(conn, entity, &texts, &cfg).map_err(search_err_to_data)?;
+    }
+    let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+    record_after_edits(conn, manifest, entity, &id_refs)?;
+    Ok(ids
+        .into_iter()
+        .map(|id| {
+            let row = stored.remove(&id);
+            (id, row)
+        })
+        .collect())
+}
+
+/// Column types as Postgres spells them (`format_type`), for the casts
+/// a batched UPDATE needs: a value in a VALUES list has no column to
+/// take its type from.
+fn column_types<C: PgConn>(
+    conn: &mut C,
+    entity: &str,
+) -> Result<std::collections::HashMap<String, String>, DataError> {
+    let rows = conn
+        .query(
+            "SELECT a.attname::text, format_type(a.atttypid, a.atttypmod) FROM pg_attribute a \
+             WHERE a.attrelid = $1::text::regclass AND a.attnum > 0 AND NOT a.attisdropped",
+            &[&quote_ident_pub(entity)],
+        )
+        .map_err(pg_err_to_data)?;
+    Ok(rows
+        .iter()
+        .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
+        .collect())
+}
+
+/// One row of [`tx_update_many_locked`]: its id, the patch, and the row
+/// as read under its lock.
+pub struct LockedUpdate<'r> {
+    pub id: &'r str,
+    pub data: &'r serde_json::Value,
+    pub before: &'r serde_json::Value,
+}
+
+/// [`tx_update_locked`] for many rows of one entity this transaction
+/// locked with [`tx_lock_rows`]; ids must be distinct. One `UPDATE ...
+/// FROM (VALUES ...) RETURNING *` per set of patched fields. Returns the
+/// rows after, in the order of `rows`.
+pub fn tx_update_many_locked<C: PgConn>(
+    conn: &mut C,
+    manifest: &AppManifest,
+    entity: &str,
+    rows: &[LockedUpdate<'_>],
+) -> Result<Vec<Option<serde_json::Value>>, DataError> {
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut patches = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut columns = crate::postgres::update_columns(row.data).map_err(|e| DataError {
+            code: e.code,
+            message: e.message,
+        })?;
+        columns.sort_by(|a, b| a.0.cmp(&b.0));
+        patches.push(columns);
+    }
+    let types = column_types(conn, entity)?;
+    // Rows that set the same fields share a statement.
+    let mut groups: Vec<(Vec<&str>, Vec<usize>)> = Vec::new();
+    for (i, columns) in patches.iter().enumerate() {
+        let keys: Vec<&str> = columns.iter().map(|(key, _)| key.as_str()).collect();
+        match groups.iter_mut().find(|(k, _)| *k == keys) {
+            Some((_, members)) => members.push(i),
+            None => groups.push((keys, vec![i])),
+        }
+    }
+    let table = quote_ident_pub(entity);
+    let mut stored: std::collections::HashMap<String, serde_json::Value> =
+        std::collections::HashMap::with_capacity(rows.len());
+    for (keys, members) in groups {
+        let mut casts = Vec::with_capacity(keys.len());
+        for key in &keys {
+            let ty = types.get(*key).ok_or_else(|| DataError {
+                code: "PG_REJECTED".into(),
+                message: format!("column \"{key}\" of relation \"{entity}\" does not exist"),
+            })?;
+            casts.push(ty.as_str());
+        }
+        let set: Vec<String> = keys
+            .iter()
+            .map(|key| format!("{0} = v.{0}", quote_ident_pub(key)))
+            .collect();
+        let value_columns: Vec<String> = keys.iter().map(|key| quote_ident_pub(key)).collect();
+        for chunk in members.chunks(rows_per_statement(keys.len() + 1)) {
+            let mut tuples = Vec::with_capacity(chunk.len());
+            let mut ids: Vec<JsonParam> = Vec::with_capacity(chunk.len());
+            for &i in chunk {
+                ids.push(JsonParam::Text(rows[i].id.to_string()));
+            }
+            let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> =
+                Vec::with_capacity(chunk.len() * (keys.len() + 1));
+            for (n, &i) in chunk.iter().enumerate() {
+                let base = params.len();
+                let mut placeholders = vec![format!("${}::text", base + 1)];
+                placeholders.extend(
+                    casts
+                        .iter()
+                        .enumerate()
+                        .map(|(c, ty)| format!("${}::{ty}", base + c + 2)),
+                );
+                tuples.push(format!("({})", placeholders.join(", ")));
+                params.push(&ids[n]);
+                params.extend(
+                    patches[i]
+                        .iter()
+                        .map(|(_, value)| value as &(dyn postgres::types::ToSql + Sync)),
+                );
+            }
+            let sql = format!(
+                "UPDATE {table} AS t SET {} FROM (VALUES {}) AS v(id, {}) \
+                 WHERE t.id = v.id RETURNING t.*",
+                set.join(", "),
+                tuples.join(", "),
+                value_columns.join(", ")
+            );
+            conn.query_each(&sql, &params, &mut |row| {
+                let row = crate::postgres::row_to_json_pub(&row);
+                if let Some(id) = row.get("id").and_then(|v| v.as_str()) {
+                    stored.insert(id.to_string(), row.clone());
+                }
+            })
+            .map_err(pg_err_to_data)?;
+        }
+    }
+    let written: Vec<&LockedUpdate<'_>> = rows
+        .iter()
+        .filter(|row| stored.contains_key(row.id))
+        .collect();
+    if let Some(cfg) = search_config_for(manifest, entity) {
+        let texts: Vec<(String, String)> = written
+            .iter()
+            .filter_map(|row| {
+                pg_search::update_text(row.before, row.data, &cfg)
+                    .map(|text| (row.id.to_string(), text))
+            })
+            .collect();
+        pg_search::upsert_texts(conn, entity, &texts, &cfg).map_err(search_err_to_data)?;
+    }
+    let ids: Vec<&str> = written.iter().map(|row| row.id).collect();
+    record_after_edits(conn, manifest, entity, &ids)?;
+    Ok(rows.iter().map(|row| stored.remove(row.id)).collect())
 }
 
 /// Read one row by id. Free function so the runtime layer can read
@@ -408,6 +737,27 @@ pub trait PgCrdtHook: Send + Sync {
         row: &serde_json::Value,
         data: &serde_json::Value,
     ) -> Result<Option<serde_json::Value>, DataError>;
+
+    /// [`Self::before_insert`] for many rows of one entity, with their
+    /// docs read and stored in a few statements. Returns each row with
+    /// its id set, to insert.
+    fn before_insert_many(
+        &self,
+        tx: &mut CachedTransaction<'_>,
+        entity: &str,
+        rows: &[serde_json::Value],
+    ) -> Result<Vec<serde_json::Value>, DataError>;
+
+    /// [`Self::before_update`] for many rows of one entity, with their
+    /// docs read and stored in a few statements. Called with every row's
+    /// CRDT lock and row lock held; ids are distinct. Returns each row's
+    /// corrections, in order.
+    fn before_update_many(
+        &self,
+        tx: &mut CachedTransaction<'_>,
+        entity: &str,
+        rows: &[LockedUpdate<'_>],
+    ) -> Result<Vec<Option<serde_json::Value>>, DataError>;
 
     fn before_delete(
         &self,
@@ -787,6 +1137,147 @@ impl<'a> DataStore for PgTxStore<'a> {
         })?;
         self.record_crdt_touched(entity, id);
         Ok(Some(updated))
+    }
+
+    fn insert_many(
+        &self,
+        entity: &str,
+        rows: &[serde_json::Value],
+    ) -> Result<Vec<String>, DataError> {
+        Ok(self
+            .insert_many_returning(entity, rows)?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect())
+    }
+
+    /// One multi-row INSERT per set of columns; for a CRDT entity the
+    /// rows' docs are written in a few statements too.
+    fn insert_many_returning(
+        &self,
+        entity: &str,
+        rows: &[serde_json::Value],
+    ) -> Result<Vec<(String, Option<serde_json::Value>)>, DataError> {
+        if rows.len() < 2 || has_repeated_ids(rows.iter().filter_map(|r| r.get("id")?.as_str())) {
+            // One at a time: a repeated id fails as it would alone.
+            return rows
+                .iter()
+                .map(|row| self.insert_returning(entity, row))
+                .collect();
+        }
+        let manifest = self.manifest;
+        let Some(hook) = self
+            .crdt_hook
+            .clone()
+            .filter(|_| self.entity_is_crdt(entity))
+        else {
+            return self.with_tx(|tx| tx_insert_many_returning(tx, manifest, entity, rows));
+        };
+        let inserted = self.with_tx(|tx| {
+            let projected = hook.before_insert_many(tx, entity, rows)?;
+            tx_insert_many_returning(tx, manifest, entity, &projected)
+        })?;
+        for (id, _) in &inserted {
+            self.record_crdt_touched(entity, id);
+        }
+        Ok(inserted)
+    }
+
+    fn update_many(&self, entity: &str, rows: &[RowUpdate]) -> Result<Vec<bool>, DataError> {
+        Ok(self
+            .update_many_returning(entity, rows)?
+            .iter()
+            .map(Option::is_some)
+            .collect())
+    }
+
+    /// Locks and reads the rows in one statement and writes them with one
+    /// UPDATE per set of patched fields; for a CRDT entity the rows' docs
+    /// are locked, read and written in a few statements too.
+    fn update_many_returning(
+        &self,
+        entity: &str,
+        rows: &[RowUpdate],
+    ) -> Result<Vec<Option<UpdatedRow>>, DataError> {
+        if rows.len() < 2 || has_repeated_ids(rows.iter().map(|row| row.id.as_str())) {
+            // One at a time: a later patch of the same row sees the
+            // earlier one.
+            return rows
+                .iter()
+                .map(|row| self.update_returning(entity, &row.id, &row.data))
+                .collect();
+        }
+        let manifest = self.manifest;
+        let crdt = self
+            .crdt_hook
+            .clone()
+            .filter(|_| self.entity_is_crdt(entity));
+        let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+        let written = self.with_tx(|tx| -> Result<Vec<Option<UpdatedRow>>, DataError> {
+            if crdt.is_some() {
+                // The docs' locks before the rows', as every CRDT write
+                // takes them.
+                lock_crdt_rows(tx, entity, &ids).map_err(pg_err_to_data)?;
+            }
+            let before = tx_lock_rows(tx, entity, &ids)?;
+            let found: Vec<LockedUpdate<'_>> = rows
+                .iter()
+                .filter_map(|row| {
+                    Some(LockedUpdate {
+                        id: &row.id,
+                        data: &row.data,
+                        before: before.get(&row.id)?,
+                    })
+                })
+                .collect();
+            let corrections = match &crdt {
+                Some(hook) => {
+                    if found.len() < rows.len() {
+                        // Same orphan guard as one update: no doc is
+                        // written for a row that doesn't exist.
+                        let missing = rows.iter().find(|row| !before.contains_key(&row.id));
+                        return Err(DataError {
+                            code: "ENTITY_NOT_FOUND".into(),
+                            message: format!(
+                                "Update on {entity}/{} found no row — refusing to commit a \
+                                 CRDT snapshot that would orphan.",
+                                missing.map(|row| row.id.as_str()).unwrap_or_default()
+                            ),
+                        });
+                    }
+                    hook.before_update_many(tx, entity, &found)?
+                }
+                None => vec![None; found.len()],
+            };
+            let after = tx_update_many_locked(tx, manifest, entity, &found)?;
+            let mut by_id: std::collections::HashMap<&str, UpdatedRow> =
+                std::collections::HashMap::with_capacity(found.len());
+            for ((row, after), corrections) in found.iter().zip(after).zip(corrections) {
+                let after = match (corrections, after) {
+                    (Some(corrections), Some(written)) => {
+                        tx_update_locked(tx, manifest, entity, row.id, &corrections, &written)?
+                    }
+                    (_, after) => after,
+                };
+                by_id.insert(
+                    row.id,
+                    UpdatedRow {
+                        before: Some(row.before.clone()),
+                        after,
+                    },
+                );
+            }
+            Ok(rows
+                .iter()
+                .map(|row| by_id.remove(row.id.as_str()))
+                .collect())
+        })?;
+        if crdt.is_some() {
+            for row in rows {
+                self.record_crdt_touched(entity, &row.id);
+            }
+        }
+        Ok(written)
     }
 
     fn delete(&self, entity: &str, id: &str) -> Result<bool, DataError> {
