@@ -2311,15 +2311,20 @@ pub(crate) fn build_persistent_change_log(runtime: &Arc<Runtime>) -> Arc<ChangeL
             let initial = runtime.current_global_change_seq().unwrap_or(0);
             let local_fallback = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(initial));
             let local_for_provider = std::sync::Arc::clone(&local_fallback);
-            let provider: pylon_sync::SeqProvider = std::sync::Arc::new(move || {
+            let provider: pylon_sync::SeqProvider = std::sync::Arc::new(move |n| {
                 // Try Postgres first; on transient failure fall back
                 // to a local atomic incremented from the last known PG
                 // value. Single-instance behavior under outage; the
                 // next successful PG call resyncs via the max() guard
                 // inside ChangeLog::append.
-                rt_for_provider.next_global_change_seq().unwrap_or_else(|| {
-                    local_for_provider.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
-                })
+                rt_for_provider
+                    .next_global_change_seqs(n)
+                    .unwrap_or_else(|| {
+                        let first = local_for_provider
+                            .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed)
+                            + 1;
+                        (first..first + n as u64).collect()
+                    })
             });
             change_log_builder = change_log_builder
                 .with_seq(provider)
@@ -2365,8 +2370,9 @@ pub(crate) fn build_persistent_change_log(runtime: &Arc<Runtime>) -> Arc<ChangeL
                     // unaffected.)
                     let initial = allocator.floor_seq();
                     let alloc_for_provider = std::sync::Arc::clone(&allocator);
-                    let provider: pylon_sync::SeqProvider =
-                        std::sync::Arc::new(move || alloc_for_provider.next());
+                    let provider: pylon_sync::SeqProvider = std::sync::Arc::new(move |n| {
+                        (0..n).map(|_| alloc_for_provider.next()).collect()
+                    });
                     change_log_builder = change_log_builder
                         .with_seq(provider)
                         .with_initial_seq(initial);

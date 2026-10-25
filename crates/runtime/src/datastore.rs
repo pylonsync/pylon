@@ -5379,6 +5379,25 @@ impl FnOpsImpl {
         let _ = self.audit.set(store);
     }
 
+    /// Append a committed transaction's change events to the change log,
+    /// minting their seqs in one call, then broadcast each. Append first
+    /// so /api/sync/pull callers that race the broadcast see the rows in
+    /// the tail.
+    fn publish_committed(&self, pending: Vec<pylon_sync::ChangeEvent>) {
+        for ev in self.change_log.append_all(pending) {
+            pylon_router::broadcast_change_with_crdt(
+                self.notifier.as_ref(),
+                self.runtime.as_ref(),
+                ev.seq,
+                &ev.entity,
+                &ev.row_id,
+                ev.kind.clone(),
+                ev.data.as_ref(),
+                ev.prev_data.as_ref(),
+            );
+        }
+    }
+
     /// Send the `ctx.shards.send` inputs a committed mutation buffered.
     /// Delivery is at most once: a failure is logged.
     fn flush_shard_sends(&self, sends: Vec<(String, serde_json::Value)>) {
@@ -5601,40 +5620,14 @@ impl FnOpsImpl {
 
                     return match tx_result {
                         Ok((value, trace, pending)) => {
-                            // Append to the change log first (so
-                            // /api/sync/pull tail callers see the rows),
-                            // then route through `broadcast_change_with_crdt`
-                            // so CRDT subscribers get binary Loro frames
-                            // alongside the JSON event.
-                            //
                             // Documented exception to the "typed
                             // `ChangeRecord` only" invariant: the pending
                             // events are buffered by `PgBufferedTxStore`,
                             // which has already enforced the shape contract
                             // (full row on insert/update, pre-delete
-                            // snapshot on delete). We unpack the
-                            // (kind, data) tuple here to assign seq via
-                            // raw `append` because the events arrive
-                            // pre-shaped, not as a `ChangeRecord` enum.
-                            for ev in pending {
-                                let stored = self.change_log.append_with_prev(
-                                    &ev.entity,
-                                    &ev.row_id,
-                                    ev.kind.clone(),
-                                    ev.data.clone(),
-                                    ev.prev_data.clone(),
-                                );
-                                pylon_router::broadcast_change_with_crdt(
-                                    self.notifier.as_ref(),
-                                    self.runtime.as_ref(),
-                                    stored.seq,
-                                    &ev.entity,
-                                    &ev.row_id,
-                                    ev.kind.clone(),
-                                    ev.data.as_ref(),
-                                    ev.prev_data.as_ref(),
-                                );
-                            }
+                            // snapshot on delete), so they are appended
+                            // as they are.
+                            self.publish_committed(pending);
                             // Flush scheduled jobs after the commit lands.
                             // On rollback the early `Err(e)` arm below
                             // skips this and the buffer is dropped.
@@ -5814,25 +5807,7 @@ impl FnOpsImpl {
                 // append assigns the real seq.
                 match committed {
                     Ok((value, pending)) => {
-                        for ev in pending {
-                            let stored = self.change_log.append_with_prev(
-                                &ev.entity,
-                                &ev.row_id,
-                                ev.kind.clone(),
-                                ev.data.clone(),
-                                ev.prev_data.clone(),
-                            );
-                            pylon_router::broadcast_change_with_crdt(
-                                self.notifier.as_ref(),
-                                self.runtime.as_ref(),
-                                stored.seq,
-                                &ev.entity,
-                                &ev.row_id,
-                                ev.kind.clone(),
-                                ev.data.as_ref(),
-                                ev.prev_data.as_ref(),
-                            );
-                        }
+                        self.publish_committed(pending);
                         // Durable commit landed — flush deferred runAfter jobs.
                         // Their schedule-row inserts need write_conn, now free.
                         self.flush_pending_schedules(sched_guard.take());
@@ -8379,30 +8354,7 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>, runner: &Arc<FnRunner>) {
                         });
                         return match tx_result {
                             Ok((value, pending)) => {
-                                for ev in pending {
-                                    let stored = ops.change_log.append_with_prev(
-                                        &ev.entity,
-                                        &ev.row_id,
-                                        ev.kind.clone(),
-                                        ev.data.clone(),
-                                        ev.prev_data.clone(),
-                                    );
-                                    // Route through `broadcast_change_with_crdt`
-                                    // so nested-mutation writes get binary
-                                    // Loro frames alongside JSON events,
-                                    // matching the top-level flush + router
-                                    // pipeline invariant.
-                                    pylon_router::broadcast_change_with_crdt(
-                                        ops.notifier.as_ref(),
-                                        ops.runtime.as_ref(),
-                                        stored.seq,
-                                        &ev.entity,
-                                        &ev.row_id,
-                                        ev.kind.clone(),
-                                        ev.data.as_ref(),
-                                        ev.prev_data.as_ref(),
-                                    );
-                                }
+                                ops.publish_committed(pending);
                                 ops.flush_pending_schedules(sched_guard.take());
                                 ops.flush_shard_sends(sched_guard.take_sends());
                                 ops.flush_audits(sched_guard.take_audits());
@@ -8491,25 +8443,7 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>, runner: &Arc<FnRunner>) {
                     // stay invisible until the next top-level mutation lands.
                     match committed {
                         Ok((value, pending)) => {
-                            for ev in pending {
-                                let stored = ops.change_log.append_with_prev(
-                                    &ev.entity,
-                                    &ev.row_id,
-                                    ev.kind.clone(),
-                                    ev.data.clone(),
-                                    ev.prev_data.clone(),
-                                );
-                                pylon_router::broadcast_change_with_crdt(
-                                    ops.notifier.as_ref(),
-                                    ops.runtime.as_ref(),
-                                    stored.seq,
-                                    &ev.entity,
-                                    &ev.row_id,
-                                    ev.kind.clone(),
-                                    ev.data.as_ref(),
-                                    ev.prev_data.as_ref(),
-                                );
-                            }
+                            ops.publish_committed(pending);
                             ops.flush_pending_schedules(sched_guard.take());
                                 ops.flush_shard_sends(sched_guard.take_sends());
                                 ops.flush_audits(sched_guard.take_audits());

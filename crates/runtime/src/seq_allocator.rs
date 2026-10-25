@@ -419,7 +419,8 @@ mod tests {
         let allocator = Arc::new(SqliteSeqAllocator::new_with_chunk(rt.clone(), 100).unwrap());
 
         let alloc_for_provider = Arc::clone(&allocator);
-        let provider: SeqProvider = Arc::new(move || alloc_for_provider.next());
+        let provider: SeqProvider =
+            Arc::new(move |n| (0..n).map(|_| alloc_for_provider.next()).collect());
         let log = ChangeLog::new()
             .with_seq(provider)
             .with_initial_seq(allocator.floor_seq());

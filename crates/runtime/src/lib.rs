@@ -1378,23 +1378,27 @@ impl Runtime {
             .map_err(data_err_to_runtime)
     }
 
-    /// Mint the next global change-log seq. Postgres-only — SQLite
-    /// returns `None` and callers should fall back to the local
-    /// atomic counter.
-    pub fn next_global_change_seq(&self) -> Option<u64> {
+    /// Mint the next `n` global change-log seqs, ascending, in one
+    /// statement. Postgres-only — SQLite returns `None` and callers
+    /// should fall back to the local atomic counter.
+    pub fn next_global_change_seqs(&self, n: usize) -> Option<Vec<u64>> {
         let RuntimeBackend::Postgres(pg) = &self.backend else {
             return None;
         };
         pg.store
             .with_client(|c| {
-                let row = c
-                    .query_one("SELECT nextval('pylon_change_seq')", &[])
+                let rows = c
+                    .query(
+                        "SELECT nextval('pylon_change_seq') FROM generate_series(1, $1::bigint)",
+                        &[&(n as i64)],
+                    )
                     .map_err(|e| pylon_http::DataError {
                         code: "PG_SEQUENCE_NEXTVAL_FAILED".into(),
                         message: e.to_string(),
                     })?;
-                let v: i64 = row.get(0);
-                Ok::<u64, pylon_http::DataError>(v as u64)
+                let mut seqs: Vec<u64> = rows.iter().map(|r| r.get::<_, i64>(0) as u64).collect();
+                seqs.sort_unstable();
+                Ok::<Vec<u64>, pylon_http::DataError>(seqs)
             })
             .ok()
     }

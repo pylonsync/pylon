@@ -197,13 +197,14 @@ pub struct ClientChange {
 /// counter still increments monotonically; clients pulling with an old
 /// cursor will see only what remains in memory (or should issue a full
 /// re-sync if their cursor falls off the back).
-/// Closure called by `ChangeLog::append` to mint a new sequence number.
-/// Wired by the runtime to Postgres' `nextval('pylon_change_seq')` in
-/// cluster mode — that gives globally-monotonic seqs across every
+/// Closure called by `ChangeLog::append` to mint `n` new sequence
+/// numbers, ascending, in one call (a transaction's events are appended
+/// together). Wired by the runtime to Postgres' `nextval('pylon_change_seq')`
+/// in cluster mode — that gives globally-monotonic seqs across every
 /// instance writing to the same database. SQLite / single-instance
 /// deployments leave this `None` and the in-memory atomic counter
 /// generates seqs locally.
-pub type SeqProvider = std::sync::Arc<dyn Fn() -> u64 + Send + Sync>;
+pub type SeqProvider = std::sync::Arc<dyn Fn(usize) -> Vec<u64> + Send + Sync>;
 
 /// Persistence layer for the change log. Single-process / SQLite
 /// deployments hydrate the in-memory ring buffer from this on boot
@@ -697,33 +698,65 @@ impl ChangeLog {
         data: Option<serde_json::Value>,
         prev_data: Option<serde_json::Value>,
     ) -> ChangeEvent {
-        let mut events = self.events.lock().unwrap();
-        let mut seq = self.seq.lock().unwrap();
-        // External provider (typically Postgres SEQUENCE for cluster
-        // mode) gives globally-monotonic seqs across instances.
-        let new_seq = if let Some(provider) = self.seq_provider.as_ref() {
-            let s = provider();
-            if s > *seq {
-                *seq = s;
-            }
-            s
-        } else {
-            *seq += 1;
-            *seq
-        };
         let event = ChangeEvent {
-            seq: new_seq,
+            seq: 0,
             entity: entity.to_string(),
             row_id: row_id.to_string(),
             kind,
             data,
             prev_data,
-            timestamp: now_iso8601(),
+            timestamp: String::new(),
         };
-        let returned = event.clone();
-        self.held_bytes
-            .fetch_add(event_bytes(&event), std::sync::atomic::Ordering::Relaxed);
-        events.push_back(event);
+        self.append_all(vec![event])
+            .pop()
+            .expect("append_all returns one event per event")
+    }
+
+    /// Append events committed together, in order, minting their seqs in
+    /// one call to the seq provider. Each event's `seq` and `timestamp`
+    /// are assigned here. Returns the events as appended.
+    ///
+    /// Lock order is `events` → `seq` (matches `pull()`'s order so
+    /// concurrent append + pull don't deadlock).
+    pub fn append_all(&self, pending: Vec<ChangeEvent>) -> Vec<ChangeEvent> {
+        if pending.is_empty() {
+            return Vec::new();
+        }
+        let mut events = self.events.lock().unwrap();
+        let mut seq = self.seq.lock().unwrap();
+        // External provider (typically Postgres SEQUENCE for cluster
+        // mode) gives globally-monotonic seqs across instances.
+        let minted = self
+            .seq_provider
+            .as_ref()
+            .map(|provider| provider(pending.len()))
+            .filter(|minted| minted.len() == pending.len());
+        let seqs = match minted {
+            Some(minted) => {
+                if let Some(&last) = minted.iter().max() {
+                    if last > *seq {
+                        *seq = last;
+                    }
+                }
+                minted
+            }
+            None => (0..pending.len())
+                .map(|_| {
+                    *seq += 1;
+                    *seq
+                })
+                .collect(),
+        };
+        let timestamp = now_iso8601();
+        let mut appended = Vec::with_capacity(pending.len());
+        for (mut event, new_seq) in pending.into_iter().zip(seqs) {
+            event.seq = new_seq;
+            event.timestamp = timestamp.clone();
+            self.held_bytes
+                .fetch_add(event_bytes(&event), std::sync::atomic::Ordering::Relaxed);
+            events.push_back(event.clone());
+            appended.push(event);
+        }
         self.evict(&mut events);
         // Persist AFTER in-memory push so a slow / failing store
         // never blocks the live broadcast. The mutation hot path
@@ -733,13 +766,15 @@ impl ChangeLog {
         // store but not propagated — the in-memory state is still
         // correct, and the next restart will just miss this event
         // (same behavior as non-persistent deployments today).
-        if let Some(store) = self.store.as_ref() {
-            store.append(&returned);
+        for event in &appended {
+            if let Some(store) = self.store.as_ref() {
+                store.append(event);
+            }
+            for sink in &self.sinks {
+                sink.push(event);
+            }
         }
-        for sink in &self.sinks {
-            sink.push(&returned);
-        }
-        returned
+        appended
     }
 
     /// Append a change event RECEIVED FROM A PEER over the cluster bus,
