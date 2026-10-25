@@ -586,7 +586,11 @@ mod tests {
                    Issued At: 2026-01-01T00:00:00Z";
         let sig = "0x566752c49f86e72e989509ef78ca128b09afaf1f19650904923990dabbe9ab9d39c32c0052ad8be4f5002b60d63389988ce6089b17a5fe7641600e1f1f015f4a1c";
         let m = parse_message(raw).expect("parse");
-        assert_eq!(serialize_for_signing(&m), raw, "the signed bytes must be the message as written");
+        assert_eq!(
+            serialize_for_signing(&m),
+            raw,
+            "the signed bytes must be the message as written"
+        );
         assert_eq!(
             recover_address(&m, sig).expect("recover"),
             "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23"
