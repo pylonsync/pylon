@@ -886,6 +886,28 @@ function buildWriterOps(callId: string, unsafeOp: boolean): Omit<DbWriter, "unsa
       })) as { updated: boolean };
       return r.updated;
     },
+    async insertMany(entity, rows) {
+      if (rows.length === 0) return [];
+      const r = (await rpcDb(callId, {
+        type: "db",
+        op: "insert_many",
+        entity,
+        data: rows,
+        unsafe_op: unsafeOp,
+      })) as { ids: string[] };
+      return r.ids;
+    },
+    async updateMany(entity, rows) {
+      if (rows.length === 0) return [];
+      const r = (await rpcDb(callId, {
+        type: "db",
+        op: "update_many",
+        entity,
+        data: rows,
+        unsafe_op: unsafeOp,
+      })) as { updated: boolean[] };
+      return r.updated;
+    },
     async delete(entity, id) {
       const r = (await rpcDb(callId, {
         type: "db",

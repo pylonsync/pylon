@@ -3,10 +3,12 @@
 //! the count, not the work, sets how long an import takes.
 //!
 //! An action calls a mutation (`ctx.runMutation`) that writes rows of an
-//! entity with `audit: true`, a `search:` block with facets, and CRDT on
-//! (the default): the shape of an importer. The test runs it for a few
-//! rows and for more rows, and checks the cost of each extra row and that
-//! no statement is parsed again per row.
+//! entity with `audit: true`, a `search:` block with a text field and
+//! facets, and CRDT on (the default): the shape of an importer. The test
+//! writes a few rows and more rows, one at a time and with
+//! `insertMany` / `updateMany`, and checks the cost of each extra row, that
+//! no statement is parsed again per row, and that both ways store the same
+//! rows, docs, audit events, search text, and change events.
 //!
 //! Skipped unless `PYLON_TEST_PG_URL` is set and `bun` is on PATH. Shares
 //! the database with the other Postgres tests: run with --test-threads=1.
@@ -21,6 +23,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use pg_wire::{Counts, WireCounter};
+use pylon_http::DataStore;
 use pylon_kernel::*;
 use pylon_runtime::Runtime;
 
@@ -59,10 +62,12 @@ fn functions_dir() -> PathBuf {
             r#"export default mutation({
   auth: "public",
   handler: async (ctx, args) => {
+    const rows = Array.from({ length: args.count }, (_, i) => ({
+      name: `${args.prefix} ${i}`, stage: "new", visits: 0, teamId: "t1",
+    }));
+    if (args.many) return { ids: await ctx.db.insertMany("Lead", rows) };
     const ids = [];
-    for (let i = 0; i < args.count; i++) {
-      ids.push(await ctx.db.insert("Lead", { name: `lead ${i}`, stage: "new", visits: 0, teamId: "t1" }));
-    }
+    for (const row of rows) ids.push(await ctx.db.insert("Lead", row));
     return { ids };
   },
 });"#,
@@ -73,10 +78,17 @@ fn functions_dir() -> PathBuf {
   internal: true,
   handler: async (ctx, args) => {
     const rows = await ctx.db.query("Lead", { id: { $in: args.ids } });
-    for (const row of rows) {
-      await ctx.db.update("Lead", row.id, { stage: args.stage, visits: row.visits + 1 });
+    const patches = rows.map((row) => ({
+      id: row.id,
+      data: { stage: args.stage, visits: row.visits + 1, name: `${row.name}!` },
+    }));
+    if (args.many) {
+      const updated = await ctx.db.updateMany("Lead", patches);
+      return { updated: updated.filter(Boolean).length };
     }
-    return { updated: rows.length };
+    let updated = 0;
+    for (const { id, data } of patches) if (await ctx.db.update("Lead", id, data)) updated++;
+    return { updated };
   },
 });"#,
         ),
@@ -124,6 +136,7 @@ fn manifest() -> AppManifest {
             sync: true,
             audit: true,
             search: Some(ManifestSearchConfig {
+                text: vec!["name".into()],
                 facets: vec!["stage".into(), "teamId".into()],
                 sortable: vec!["visits".into()],
                 ..Default::default()
@@ -190,9 +203,11 @@ fn call(port: u16, function: &str, body: &str) -> serde_json::Value {
 }
 
 /// SQL that marks a statement as part of a `Lead` write: the entity's
-/// table, the CRDT sidecar and lock, the change-log seq, and the audit log.
-const WRITE_STATEMENTS: [&str; 5] = [
+/// table and search text, the CRDT sidecar and lock, the change-log seq,
+/// and the audit log.
+const WRITE_STATEMENTS: [&str; 6] = [
     "\"Lead\"",
+    "\"_fts_Lead\"",
     "_pylon_crdt_",
     "pg_advisory_xact_lock",
     "pylon_change_seq",
@@ -228,10 +243,12 @@ fn a_write_costs_a_fixed_number_of_statements_per_row() {
     admin
         .batch_execute(
             "DROP TABLE IF EXISTS \"Lead\" CASCADE;
-             DROP TABLE IF EXISTS _fts_Lead CASCADE;
+             DROP TABLE IF EXISTS \"_fts_Lead\" CASCADE;
              DROP TABLE IF EXISTS _pylon_crdt_snapshots CASCADE;
              DROP TABLE IF EXISTS _pylon_crdt_updates CASCADE;
-             DROP TABLE IF EXISTS _pylon_audit_events CASCADE;",
+             DROP TABLE IF EXISTS _pylon_audit_events CASCADE;
+             DROP TABLE IF EXISTS pylon_change_log CASCADE;
+             DROP SEQUENCE IF EXISTS pylon_change_seq;",
         )
         .unwrap();
     let mut adapter = pylon_storage::postgres::live::LivePostgresAdapter::connect(&url).unwrap();
@@ -262,10 +279,11 @@ fn a_write_costs_a_fixed_number_of_statements_per_row() {
         std::thread::sleep(Duration::from_millis(200));
     }
 
-    // Inserts: 10 rows, then 30.
-    let seed = |count: usize| -> (Vec<String>, Counts) {
+    let seed = |count: usize, many: bool| -> (Vec<String>, Counts) {
         wire.reset();
-        let result = call(port, "seed", &format!(r#"{{"count":{count}}}"#));
+        let prefix = if many { "many" } else { "one" };
+        let body = format!(r#"{{"count":{count},"many":{many},"prefix":"{prefix}"}}"#);
+        let result = call(port, "seed", &body);
         let ids = result["ids"]
             .as_array()
             .unwrap()
@@ -274,86 +292,153 @@ fn a_write_costs_a_fixed_number_of_statements_per_row() {
             .collect();
         (ids, wire.counts())
     };
-    let (few_ids, few) = seed(10);
-    let (more_ids, more) = seed(30);
-    // Per row: the CRDT lock, the doc read, the doc write, the INSERT.
+    // Updates through action -> runMutation, as an importer runs them.
+    let update = |ids: &[String], many: bool| -> Counts {
+        wire.reset();
+        let body = serde_json::json!({ "ids": ids, "stage": "contacted", "many": many });
+        let result = call(port, "importPage", &body.to_string());
+        assert_eq!(result["updated"], ids.len(), "{result}");
+        wire.counts()
+    };
+    let once_per_mutation = |counts: &Counts| {
+        // The change-log seqs and the audit rows.
+        assert_eq!(counts.run_matching("pylon_change_seq"), 1, "{counts:#?}");
+        assert_eq!(
+            counts.run_matching("INSERT INTO _pylon_audit_events"),
+            1,
+            "{counts:#?}"
+        );
+        // No client subscribes to a row: no CRDT frame is read after commit.
+        assert_eq!(counts.run_matching("s.stamp"), 0, "{counts:#?}");
+    };
+
+    // One at a time: 10 rows, then 30.
+    let (few_ids, few) = seed(10, false);
+    let (one_ids, more) = seed(30, false);
+    // Per row: the CRDT lock, the doc read, the doc write, the INSERT, the
+    // search text.
     let per_insert = (write_runs(&more) - write_runs(&few)) as f64 / 20.0;
     assert!(
-        per_insert <= 4.0,
-        "an insert runs {per_insert} statements; expected at most 4\n{more:#?}"
+        per_insert <= 5.0,
+        "an insert runs {per_insert} statements; expected at most 5\n{more:#?}"
     );
     assert_eq!(
         write_parses(&more),
         write_parses(&few),
         "a statement is parsed again per inserted row\n{more:#?}"
     );
-
-    // Updates through action -> runMutation, as an importer runs them.
-    let update = |ids: &[String], stage: &str| -> Counts {
-        wire.reset();
-        let body = serde_json::json!({ "ids": ids, "stage": stage }).to_string();
-        let result = call(port, "importPage", &body);
-        assert_eq!(result["updated"], ids.len(), "{result}");
-        wire.counts()
-    };
-    let few = update(&few_ids, "contacted");
-    let more = update(&more_ids, "contacted");
+    let few = update(&few_ids, false);
+    let more = update(&one_ids, false);
     // Per row: the CRDT lock, the row lock and read, the doc read, the doc
-    // write, the UPDATE ... RETURNING.
+    // write, the UPDATE ... RETURNING, the search text.
     let per_update = (write_runs(&more) - write_runs(&few)) as f64 / 20.0;
-    eprintln!(
-        "statements per row: insert {per_insert}, update {per_update}; \
-         statements parsed per mutation: {}",
-        write_parses(&more)
-    );
     assert!(
-        per_update <= 5.0,
-        "an update runs {per_update} statements; expected at most 5\n{more:#?}"
+        per_update <= 6.0,
+        "an update runs {per_update} statements; expected at most 6\n{more:#?}"
     );
     assert_eq!(
         write_parses(&more),
         write_parses(&few),
         "a statement is parsed again per updated row\n{more:#?}"
     );
-    // Once per mutation, not per row: the change-log seqs and the audit rows.
-    assert_eq!(more.run_matching("pylon_change_seq"), 1, "{more:#?}");
-    assert_eq!(
-        more.run_matching("INSERT INTO _pylon_audit_events"),
-        1,
-        "{more:#?}"
-    );
-    // No client subscribes to a row: no CRDT frame is read after commit.
-    assert_eq!(more.run_matching("s.stamp"), 0, "{more:#?}");
+    once_per_mutation(&more);
 
-    // The writes landed with their side effects.
-    for id in &more_ids {
-        let row = rt.get_by_id("Lead", id).unwrap().expect("row");
-        assert_eq!(row["stage"], "contacted", "{row}");
-        assert_eq!(row["visits"], 1, "{row}");
+    // insertMany / updateMany: the same statements for 10 rows as for 30.
+    let (few_ids, few) = seed(10, true);
+    let (many_ids, more) = seed(30, true);
+    assert_eq!(
+        write_runs(&more),
+        write_runs(&few),
+        "insertMany runs more statements for more rows\n{more:#?}"
+    );
+    let few = update(&few_ids, true);
+    let more = update(&many_ids, true);
+    assert_eq!(
+        write_runs(&more),
+        write_runs(&few),
+        "updateMany runs more statements for more rows\n{more:#?}"
+    );
+    once_per_mutation(&more);
+    eprintln!(
+        "statements per row one at a time: insert {per_insert}, update {per_update}; \
+         per updateMany: {}",
+        write_runs(&more)
+    );
+
+    // Both ways store the same thing.
+    for (one, many) in one_ids.iter().zip(&many_ids) {
+        let one_row = rt.get_by_id("Lead", one).unwrap().expect("row");
+        let many_row = rt.get_by_id("Lead", many).unwrap().expect("row");
+        for row in [&one_row, &many_row] {
+            assert_eq!(row["stage"], "contacted", "{row}");
+            assert_eq!(row["visits"], 1, "{row}");
+            assert!(row["name"].as_str().unwrap().ends_with('!'), "{row}");
+        }
+        // The CRDT doc holds the row's values.
+        for (id, row) in [(one, &one_row), (many, &many_row)] {
+            let doc = pylon_crdt::loro::LoroDoc::new();
+            pylon_crdt::apply_update(&doc, &rt.crdt_snapshot("Lead", id).unwrap().unwrap())
+                .unwrap();
+            let held = pylon_crdt::root_map(&doc).get_deep_value();
+            let held = format!("{held:?}");
+            for field in ["stage", "name"] {
+                let value = row[field].as_str().unwrap();
+                assert!(held.contains(value), "{id}: {field} {value} not in {held}");
+            }
+        }
     }
-    let audited: i64 = admin
-        .query_one(
-            "SELECT count(*) FROM _pylon_audit_events \
-             WHERE entity = 'Lead' AND action = 'entity.update'",
-            &[],
-        )
-        .unwrap()
-        .get(0);
-    assert_eq!(audited, 40);
-    let docs: i64 = admin
-        .query_one(
-            "SELECT count(*) FROM _pylon_crdt_snapshots WHERE entity = 'Lead'",
-            &[],
-        )
-        .unwrap()
-        .get(0);
-    assert_eq!(docs, 40);
+    let count = |admin: &mut postgres::Client, sql: &str, ids: &[String]| -> i64 {
+        admin.query_one(sql, &[&ids]).unwrap().get(0)
+    };
+    for ids in [&one_ids, &many_ids] {
+        // One audit event per update, naming the fields the patch set.
+        assert_eq!(
+            count(
+                &mut admin,
+                "SELECT count(*) FROM _pylon_audit_events WHERE entity = 'Lead' \
+                 AND action = 'entity.update' AND entity_id = ANY($1) \
+                 AND metadata_json LIKE '%name,stage,visits%'",
+                ids,
+            ),
+            30
+        );
+        // The search text is the updated name.
+        assert_eq!(
+            count(
+                &mut admin,
+                "SELECT count(*) FROM \"_fts_Lead\" f JOIN \"Lead\" l ON l.id = f.entity_id \
+                 WHERE l.id = ANY($1) AND f.tsv = to_tsvector('english', l.name)",
+                ids,
+            ),
+            30
+        );
+        // Each row has an insert and an update event with the row before.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let events = count(
+                &mut admin,
+                "SELECT count(*) FROM pylon_change_log WHERE entity = 'Lead' \
+                 AND row_id = ANY($1) AND (kind = 'insert' \
+                 OR (kind = 'update' AND prev_data->>'stage' = 'new' \
+                     AND data->>'stage' = 'contacted'))",
+                ids,
+            );
+            if events == 60 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{events} change events, expected 60"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
 }
 
 /// The functions pool loads after the server listens: wait for a call.
 fn functions_ready(port: u16) -> bool {
     let req = format!(
-        "POST /api/fn/seed HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{{\"count\":0}}"
+        "POST /api/fn/seed HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: 36\r\nConnection: close\r\n\r\n{{\"count\":0,\"many\":false,\"prefix\":\"\"}}"
     );
     let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) else {
         return false;

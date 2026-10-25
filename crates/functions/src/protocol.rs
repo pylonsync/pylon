@@ -840,6 +840,12 @@ pub enum DbOp {
     Paginate,
     Insert,
     Update,
+    /// Insert many rows of one entity: `data` is an array of rows.
+    /// Response shape: `{ ids: string[] }`, in order.
+    InsertMany,
+    /// Update many rows of one entity: `data` is an array of
+    /// `{ id, data }`. Response shape: `{ updated: boolean[] }`, in order.
+    UpdateMany,
     Delete,
     Lookup,
     Query,

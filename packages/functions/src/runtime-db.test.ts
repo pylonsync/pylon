@@ -42,6 +42,11 @@ reader.get("Todo", "r1").catch(() => {});
 reader.unsafe.get("Todo", "r2").catch(() => {});
 writer.update("Todo", "w1", { a: 1 }).catch(() => {});
 writer.unsafe.update("Todo", "w2", { a: 2 }).catch(() => {});
+writer.insertMany("Many", [{ a: 3 }, { a: 4 }]).catch(() => {});
+writer.unsafe.updateMany("Many", [{ id: "m1", data: { a: 5 } }]).catch(() => {});
+// An empty batch sends nothing.
+writer.insertMany("Empty", []).catch(() => {});
+writer.updateMany("Empty", []).catch(() => {});
 
 setTimeout(() => process.exit(0), 300);
 `;
@@ -83,4 +88,11 @@ test("db builders: required unsafe surface, no chaining, unsafe_op flag routing"
   expect(byId("r2")).toMatchObject({ op: "get", unsafe_op: true });
   expect(byId("w1")).toMatchObject({ op: "update", unsafe_op: false });
   expect(byId("w2")).toMatchObject({ op: "update", unsafe_op: true });
+
+  const many = frames.filter((f) => f.entity === "Many");
+  expect(many).toEqual([
+    expect.objectContaining({ op: "insert_many", data: [{ a: 3 }, { a: 4 }], unsafe_op: false }),
+    expect.objectContaining({ op: "update_many", data: [{ id: "m1", data: { a: 5 } }], unsafe_op: true }),
+  ]);
+  expect(frames.some((f) => f.entity === "Empty")).toBe(false);
 });

@@ -565,6 +565,8 @@ ctx.db.paginate(entity, { cursor, numItems })
 // ---- mutation ctx — ctx.db ALSO has writes (transactional); + error, scheduler, llm, rooms, stream, connections ----
 ctx.db.insert(entity, data)            // => id (string)
 ctx.db.update(entity, id, patch)       // => boolean (true if the row existed)
+ctx.db.insertMany(entity, rows)        // => ids, in order. Same as insert per row, few round trips: use in imports and loops
+ctx.db.updateMany(entity, [{ id, data }])  // => boolean[] per row. Same as update per row, few round trips
 ctx.db.delete(entity, id)              // => boolean
 ctx.db.link(entity, id, relation, targetId) / ctx.db.unlink(entity, id, relation)
 ctx.db.advisoryLock(key)               // serialize a TOCTOU-prone quota/uniqueness check

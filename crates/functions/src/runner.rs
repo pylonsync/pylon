@@ -3107,10 +3107,96 @@ fn policy_op_for(op: DbOp) -> Option<PolicyOp> {
         | DbOp::Query
         | DbOp::Search
         | DbOp::VectorSearch => Some(PolicyOp::Read),
-        DbOp::Insert => Some(PolicyOp::Insert),
-        DbOp::Update | DbOp::Link | DbOp::Unlink => Some(PolicyOp::Update),
+        DbOp::Insert | DbOp::InsertMany => Some(PolicyOp::Insert),
+        DbOp::Update | DbOp::UpdateMany | DbOp::Link | DbOp::Unlink => Some(PolicyOp::Update),
         DbOp::Delete => Some(PolicyOp::Delete),
         DbOp::QueryGraph | DbOp::AdvisoryLock => None,
+    }
+}
+
+/// The rows of an `insert_many` or `update_many` op.
+enum ManyRows {
+    Insert(Vec<serde_json::Value>),
+    Update(Vec<pylon_http::RowUpdate>),
+}
+
+fn bad_many(message: &str) -> pylon_http::DataError {
+    pylon_http::DataError {
+        code: "INVALID_ARGS".into(),
+        message: message.into(),
+    }
+}
+
+/// `data` of an `insert_many` op: an array of row objects.
+fn parse_insert_many(msg: &DbOpMessage) -> Result<ManyRows, pylon_http::DataError> {
+    let rows = msg
+        .data
+        .as_ref()
+        .and_then(|d| d.as_array())
+        .ok_or_else(|| bad_many("insertMany takes an array of rows"))?;
+    if rows.iter().any(|row| !row.is_object()) {
+        return Err(bad_many("insertMany takes an array of row objects"));
+    }
+    Ok(ManyRows::Insert(rows.clone()))
+}
+
+/// `data` of an `update_many` op: an array of `{ id, data }`.
+fn parse_update_many(
+    msg: &DbOpMessage,
+) -> Result<Vec<pylon_http::RowUpdate>, pylon_http::DataError> {
+    let rows = msg
+        .data
+        .as_ref()
+        .and_then(|d| d.as_array())
+        .ok_or_else(|| bad_many("updateMany takes an array of { id, data }"))?;
+    rows.iter()
+        .map(
+            |row| match (row.get("id").and_then(|v| v.as_str()), row.get("data")) {
+                (Some(id), Some(data)) if data.is_object() => Ok(pylon_http::RowUpdate {
+                    id: id.to_string(),
+                    data: data.clone(),
+                }),
+                _ => Err(bad_many(
+                    "updateMany takes an array of { id: string, data: object }",
+                )),
+            },
+        )
+        .collect()
+}
+
+/// The strict policy gate for a many-row write: each row as the one-row
+/// write checks it, the stored rows read in one query.
+fn check_many(
+    gate: &dyn PolicyGate,
+    store: &dyn DataStore,
+    entity: &str,
+    auth: &AuthInfo,
+    many: &ManyRows,
+) -> Result<(), pylon_http::DataError> {
+    let denied = |(code, message): (String, String)| pylon_http::DataError { code, message };
+    match many {
+        ManyRows::Insert(rows) => rows.iter().try_for_each(|row| {
+            gate.check_op(PolicyOp::Insert, entity, auth, None, Some(row))
+                .map_err(denied)
+        }),
+        ManyRows::Update(rows) => {
+            let mut stored = Vec::with_capacity(rows.len());
+            for chunk in rows.chunks(500) {
+                let ids: Vec<&str> = chunk.iter().map(|row| row.id.as_str()).collect();
+                stored.extend(
+                    store.query_filtered(entity, &serde_json::json!({ "id": { "$in": ids } }))?,
+                );
+            }
+            let by_id: std::collections::HashMap<&str, &serde_json::Value> = stored
+                .iter()
+                .filter_map(|row| Some((row.get("id")?.as_str()?, row)))
+                .collect();
+            rows.iter().try_for_each(|row| {
+                let existing = by_id.get(row.id.as_str()).copied();
+                gate.check_op(PolicyOp::Update, entity, auth, existing, Some(&row.data))
+                    .map_err(denied)
+            })
+        }
     }
 }
 
@@ -3138,7 +3224,22 @@ fn execute_db_op(
     } else {
         None
     };
-    if let Some(gate) = strict_gate {
+    // The many-row writes check each row as the one-row write would.
+    let many = match msg.op {
+        DbOp::InsertMany => Some(parse_insert_many(msg)),
+        DbOp::UpdateMany => Some(parse_update_many(msg).map(ManyRows::Update)),
+        _ => None,
+    };
+    let many = match many.transpose() {
+        Ok(many) => many,
+        Err(e) => return (Err(e), None),
+    };
+    if let (Some(gate), Some(many)) = (strict_gate, &many) {
+        if let Err(e) = check_many(gate, store, &msg.entity, auth, many) {
+            return (Err(e), None);
+        }
+    }
+    if let Some(gate) = strict_gate.filter(|_| many.is_none()) {
         if let Some(op) = policy_op_for(msg.op) {
             if op == PolicyOp::Read {
                 let access = if matches!(msg.op, DbOp::Search | DbOp::VectorSearch) {
@@ -3269,6 +3370,23 @@ fn execute_db_op(
                 Err(e) => (Err(e), None),
             }
         }
+        DbOp::InsertMany | DbOp::UpdateMany => match many {
+            Some(ManyRows::Insert(rows)) => match store.insert_many(&msg.entity, &rows) {
+                Ok(ids) => {
+                    let count = ids.len();
+                    (Ok(serde_json::json!({ "ids": ids })), Some(count))
+                }
+                Err(e) => (Err(e), None),
+            },
+            Some(ManyRows::Update(rows)) => match store.update_many(&msg.entity, &rows) {
+                Ok(updated) => {
+                    let count = updated.iter().filter(|u| **u).count();
+                    (Ok(serde_json::json!({ "updated": updated })), Some(count))
+                }
+                Err(e) => (Err(e), None),
+            },
+            None => unreachable!("many-row ops are parsed above"),
+        },
         DbOp::Delete => {
             let id = msg.id.as_deref().unwrap_or("");
             match store.delete(&msg.entity, id) {
@@ -4112,10 +4230,16 @@ mod tests {
         }
         fn query_filtered(
             &self,
-            _: &str,
-            _: &serde_json::Value,
+            entity: &str,
+            filter: &serde_json::Value,
         ) -> Result<Vec<serde_json::Value>, DataError> {
-            Ok(vec![])
+            // `{ id: { $in: [...] } }` finds the stored row too.
+            let ids = filter["id"]["$in"].as_array().cloned().unwrap_or_default();
+            let mut rows = Vec::new();
+            for id in ids.iter().filter_map(|id| id.as_str()) {
+                rows.extend(self.get_by_id(entity, id)?);
+            }
+            Ok(rows)
         }
         fn query_graph(&self, _: &serde_json::Value) -> Result<serde_json::Value, DataError> {
             Ok(serde_json::json!({}))
@@ -4318,6 +4442,76 @@ mod tests {
             (PolicyOp::Update, Some(stored.clone()), Some(patch))
         );
         assert_eq!(seen[1], (PolicyOp::Delete, Some(stored), None));
+    }
+
+    #[test]
+    fn many_row_writes_check_each_row_as_one_row_writes_do() {
+        let store = AlwaysOkStore;
+        let gate = RecordingGate::default();
+        let mut insert = db_msg(DbOp::InsertMany, "Project", false);
+        insert.data = Some(serde_json::json!([{"orgId": "org-a"}, {"orgId": "org-b"}]));
+        let (result, _) = execute_db_op(&store, &insert, Some(&gate), &user_auth(), true);
+        assert_eq!(
+            result.unwrap(),
+            serde_json::json!({"ids": ["stub-id", "stub-id"]})
+        );
+
+        let mut update = db_msg(DbOp::UpdateMany, "Project", false);
+        update.data = Some(serde_json::json!([
+            {"id": "stored-1", "data": {"orgId": "org-b"}},
+            {"id": "missing", "data": {"orgId": "org-c"}},
+        ]));
+        let (result, _) = execute_db_op(&store, &update, Some(&gate), &user_auth(), true);
+        assert_eq!(
+            result.unwrap(),
+            serde_json::json!({"updated": [true, true]})
+        );
+
+        let seen = gate.seen.lock().unwrap();
+        let stored = serde_json::json!({"id": "stored-1", "orgId": "org-a"});
+        assert_eq!(
+            *seen,
+            vec![
+                (
+                    PolicyOp::Insert,
+                    None,
+                    Some(serde_json::json!({"orgId": "org-a"}))
+                ),
+                (
+                    PolicyOp::Insert,
+                    None,
+                    Some(serde_json::json!({"orgId": "org-b"}))
+                ),
+                (
+                    PolicyOp::Update,
+                    Some(stored),
+                    Some(serde_json::json!({"orgId": "org-b"}))
+                ),
+                (
+                    PolicyOp::Update,
+                    None,
+                    Some(serde_json::json!({"orgId": "org-c"}))
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn many_row_writes_refuse_malformed_rows() {
+        for (op, data) in [
+            (DbOp::InsertMany, serde_json::json!({"not": "an array"})),
+            (DbOp::InsertMany, serde_json::json!([1])),
+            (DbOp::UpdateMany, serde_json::json!([{"data": {}}])),
+            (
+                DbOp::UpdateMany,
+                serde_json::json!([{"id": "x", "data": 3}]),
+            ),
+        ] {
+            let mut msg = db_msg(op, "Project", false);
+            msg.data = Some(data.clone());
+            let (result, _) = execute_db_op(&AlwaysOkStore, &msg, None, &user_auth(), false);
+            assert_eq!(result.unwrap_err().code, "INVALID_ARGS", "{op:?} {data}");
+        }
     }
 
     struct RowGate;
@@ -4919,6 +5113,8 @@ mod tests {
         assert_eq!(policy_op_for(DbOp::VectorSearch), Some(PolicyOp::Read));
         assert_eq!(policy_op_for(DbOp::Insert), Some(PolicyOp::Insert));
         assert_eq!(policy_op_for(DbOp::Update), Some(PolicyOp::Update));
+        assert_eq!(policy_op_for(DbOp::InsertMany), Some(PolicyOp::Insert));
+        assert_eq!(policy_op_for(DbOp::UpdateMany), Some(PolicyOp::Update));
         assert_eq!(policy_op_for(DbOp::Delete), Some(PolicyOp::Delete));
         // Unmapped ops — relations + advisory locks fall through
         // to the existing store call without a gate check.
@@ -4951,6 +5147,8 @@ mod tests {
         for op in [
             DbOp::Insert,
             DbOp::Update,
+            DbOp::InsertMany,
+            DbOp::UpdateMany,
             DbOp::Delete,
             DbOp::QueryGraph,
             DbOp::Link,

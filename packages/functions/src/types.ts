@@ -284,6 +284,26 @@ export interface DbWriter extends DbReader {
     data: Record<string, unknown>
   ): Promise<boolean>;
 
+  /**
+   * Insert many rows of one entity. Returns their IDs, in order. Same
+   * result as calling `insert` per row, with fewer database round trips:
+   * use it for imports and other loops that write many rows. When a row
+   * fails, the call throws; let the error end the mutation so it rolls
+   * back.
+   */
+  insertMany(entity: string, rows: Record<string, unknown>[]): Promise<string[]>;
+
+  /**
+   * Update many rows of one entity. Returns, per row and in order, true if
+   * the row existed. Same result as calling `update` per row, with fewer
+   * database round trips. When a row fails, the call throws; let the error
+   * end the mutation so it rolls back.
+   */
+  updateMany(
+    entity: string,
+    rows: { id: string; data: Record<string, unknown> }[]
+  ): Promise<boolean[]>;
+
   /** Delete a row by ID. Returns true if the row existed. */
   delete(entity: string, id: string): Promise<boolean>;
 
