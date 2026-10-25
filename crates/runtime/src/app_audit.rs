@@ -58,6 +58,11 @@ pub(crate) fn flush_committed(store: Option<&AuditStore>, events: Vec<AuditEvent
     let Some(store) = store else {
         return;
     };
+    if events.is_empty() || store.try_log_all(&events).is_ok() {
+        return;
+    }
+    // One at a time, so one event that cannot be stored does not take
+    // the others with it.
     for event in events {
         if let Err(e) = store.try_log(&event) {
             tracing::error!(

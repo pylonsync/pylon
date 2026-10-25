@@ -17,6 +17,10 @@ use rusqlite::Connection;
 const SQLITE_TABLE: &str = "_pylon_audit_events";
 const PG_TABLE: &str = "_pylon_audit_events";
 
+/// Events per multi-row INSERT in the Postgres backend's `try_append_all`:
+/// 13 parameters each, well under Postgres' 65,535.
+const PG_APPEND_CHUNK: usize = 500;
+
 // ---------------------------------------------------------------------------
 // SQLite
 // ---------------------------------------------------------------------------
@@ -329,6 +333,50 @@ mod pg {
         }
     }
 
+    /// Insert `events` with one multi-row INSERT.
+    fn insert_events(
+        conn: &mut impl postgres::GenericClient,
+        events: &[AuditEvent],
+    ) -> Result<(), postgres::Error> {
+        let created: Vec<i64> = events.iter().map(|e| e.created_at as i64).collect();
+        let actions: Vec<&str> = events.iter().map(|e| e.action.as_str()).collect();
+        let metadata: Vec<String> = events
+            .iter()
+            .map(|e| serde_json::to_string(&e.metadata).unwrap_or_else(|_| "{}".into()))
+            .collect();
+        let mut values = Vec::with_capacity(events.len());
+        let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> =
+            Vec::with_capacity(events.len() * 13);
+        for (i, e) in events.iter().enumerate() {
+            let base = i * 13;
+            let placeholders: Vec<String> = (1..=13).map(|n| format!("${}", base + n)).collect();
+            values.push(format!("({})", placeholders.join(", ")));
+            params.extend_from_slice(&[
+                &e.id,
+                &created[i],
+                &actions[i],
+                &e.user_id,
+                &e.actor_id,
+                &e.tenant_id,
+                &e.ip,
+                &e.user_agent,
+                &e.success,
+                &e.reason,
+                &metadata[i],
+                &e.entity,
+                &e.entity_id,
+            ]);
+        }
+        conn.execute(
+            &format!(
+                "INSERT INTO {PG_TABLE} ({COLUMNS}) VALUES {}",
+                values.join(", ")
+            ),
+            &params,
+        )
+        .map(|_| ())
+    }
+
     impl AuditBackend for PostgresAuditBackend {
         fn try_append(&self, e: &AuditEvent) -> Result<(), String> {
             let metadata_json = serde_json::to_string(&e.metadata).unwrap_or_else(|_| "{}".into());
@@ -357,6 +405,26 @@ mod pg {
                     )
                 })
                 .map(|_| ())
+                .map_err(|e| format!("audit insert failed: {e}"))
+        }
+
+        /// One multi-row INSERT per [`PG_APPEND_CHUNK`] events; more than
+        /// one chunk runs in a transaction.
+        fn try_append_all(&self, events: &[AuditEvent]) -> Result<(), String> {
+            if events.len() < 2 {
+                return events.iter().try_for_each(|e| self.try_append(e));
+            }
+            self.conn
+                .with_client(|c| {
+                    if events.len() <= PG_APPEND_CHUNK {
+                        return insert_events(c, events);
+                    }
+                    let mut tx = c.transaction()?;
+                    for chunk in events.chunks(PG_APPEND_CHUNK) {
+                        insert_events(&mut tx, chunk)?;
+                    }
+                    tx.commit()
+                })
                 .map_err(|e| format!("audit insert failed: {e}"))
         }
 

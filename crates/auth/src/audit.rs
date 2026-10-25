@@ -276,6 +276,12 @@ impl AuditEventBuilder {
 pub trait AuditBackend: Send + Sync {
     /// Write one event. Errors when it could not be stored.
     fn try_append(&self, event: &AuditEvent) -> Result<(), String>;
+    /// Write events in order: all of them, or none when it errors. The
+    /// default writes them one at a time and stops at the first error; a
+    /// backend that can write them in one statement overrides this.
+    fn try_append_all(&self, events: &[AuditEvent]) -> Result<(), String> {
+        events.iter().try_for_each(|event| self.try_append(event))
+    }
     /// Write one event, logging a failure instead of returning it. Auth
     /// flows use this so a broken audit sink never blocks sign-in.
     fn append(&self, event: &AuditEvent) {
@@ -390,6 +396,12 @@ impl AuditStore {
     /// than an error.
     pub fn try_log(&self, event: &AuditEvent) -> Result<(), String> {
         self.backend.try_append(event)
+    }
+
+    /// Write events in order, in as few statements as the backend can.
+    /// See [`AuditBackend::try_append_all`].
+    pub fn try_log_all(&self, events: &[AuditEvent]) -> Result<(), String> {
+        self.backend.try_append_all(events)
     }
 
     pub fn find(&self, query: &AuditQuery) -> Result<Vec<AuditEvent>, String> {
