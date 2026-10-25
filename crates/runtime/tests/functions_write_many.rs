@@ -23,11 +23,16 @@ fn bun_available() -> bool {
         .unwrap_or(false)
 }
 
+/// The repo root without Windows' `\\?\` prefix, which Bun cannot read in an import path.
 fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+    let p = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
-        .unwrap()
+        .unwrap();
+    match p.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        Some(rest) => PathBuf::from(rest),
+        None => p,
+    }
 }
 
 fn functions_dir() -> PathBuf {
