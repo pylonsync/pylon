@@ -99,17 +99,11 @@ pub(crate) fn pg_err(what: &str, e: postgres::Error) -> LoroStoreError {
     }
 }
 
-/// Take the row's CRDT advisory lock for the rest of the transaction.
-/// Every CRDT write, and a delete, takes it before any row lock, so they
-/// queue on it instead of locking the snapshot, side, and entity rows in
-/// different orders.
+/// Take the row's CRDT advisory lock for the rest of the transaction (see
+/// [`pylon_storage::pg_tx_store::lock_crdt_row`]).
 fn lock_doc<C: PgConn>(conn: &mut C, entity: &str, row_id: &str) -> Result<(), LoroStoreError> {
-    conn.execute(
-        "SELECT pg_advisory_xact_lock($1::int, $2::int)",
-        &[&pg_advisory_key(entity), &pg_advisory_key(row_id)],
-    )
-    .map(|_| ())
-    .map_err(|e| pg_err("crdt advisory lock", e))
+    pylon_storage::pg_tx_store::lock_crdt_row(conn, entity, row_id)
+        .map_err(|e| pg_err("crdt advisory lock", e))
 }
 
 /// Delete a row's snapshot and side records, in the caller's transaction,
@@ -342,10 +336,25 @@ impl PgLoroStore {
         row_id: &str,
     ) -> Result<(LoroDoc, Option<StoredHead>), LoroStoreError> {
         lock_doc(conn, entity, row_id)?;
+        self.hydrate_locked(conn, entity, row_id)
+    }
+
+    /// [`Self::hydrate_for_write`] for a caller that holds the row's lock
+    /// already. The snapshot and its update log are read in one statement,
+    /// so they match.
+    fn hydrate_locked<C: PgConn>(
+        &self,
+        conn: &mut C,
+        entity: &str,
+        row_id: &str,
+    ) -> Result<(LoroDoc, Option<StoredHead>), LoroStoreError> {
         let row = conn
             .query_opt(
                 "SELECT s.snapshot, s.log_count, s.log_bytes, s.vv, \
-                        extract(epoch FROM pg_postmaster_start_time())::float8 \
+                        extract(epoch FROM pg_postmaster_start_time())::float8, \
+                        CASE WHEN s.snapshot IS NOT NULL THEN \
+                            (SELECT array_agg(u.delta ORDER BY u.seq) FROM _pylon_crdt_updates u \
+                             WHERE u.entity = $1 AND u.row_id = $2) END \
                  FROM (SELECT 1) AS one LEFT JOIN _pylon_crdt_snapshots s \
                    ON s.entity = $1 AND s.row_id = $2",
                 &[&entity, &row_id],
@@ -358,29 +367,10 @@ impl PgLoroStore {
         let head = snapshot.as_ref().map(|snap| {
             StoredHead::from_columns(snap.len() as i64, row.get(1), row.get(2), row.get(3))
         });
-        let log = match head {
-            Some(_) => read_log_pg(conn, entity, row_id)?,
-            None => Vec::new(),
-        };
+        let log: Vec<Vec<u8>> = row.get::<_, Option<Vec<Vec<u8>>>>(5).unwrap_or_default();
         let doc = doc_from_stored(snapshot.as_deref(), &log, &self.peers)?;
         Ok((doc, head))
     }
-}
-
-/// Hash a string into an i32 suitable for `pg_advisory_xact_lock`.
-/// PG's two-key advisory lock form takes int4 args; we use SipHash
-/// (the std hasher) and truncate to 32 bits. Collisions are
-/// possible but the worst outcome is two unrelated rows blocking
-/// each other briefly — never correctness loss.
-fn pg_advisory_key(s: &str) -> i32 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    s.hash(&mut hasher);
-    let h = hasher.finish();
-    // Take the low 32 bits and reinterpret as i32 — PG accepts the
-    // full int4 range. Using `as i32` would panic-truncate; `as u32
-    // as i32` round-trips through the bit pattern.
-    (h as u32) as i32
 }
 
 /// A row's update log, in order.
@@ -499,7 +489,10 @@ impl PgLoroStore {
             Persist::Snapshot => {
                 let snap = encode_snapshot(doc);
                 conn.execute(
-                    "INSERT INTO _pylon_crdt_snapshots \
+                    "WITH cleared AS ( \
+                         DELETE FROM _pylon_crdt_updates WHERE entity = $1 AND row_id = $2 \
+                     ) \
+                     INSERT INTO _pylon_crdt_snapshots \
                         (entity, row_id, snapshot, updated_at, log_count, log_bytes, vv) \
                      VALUES ($1, $2, $3, clock_timestamp(), 0, 0, $4) \
                      ON CONFLICT (entity, row_id) DO UPDATE \
@@ -507,33 +500,26 @@ impl PgLoroStore {
                          log_count = 0, log_bytes = 0, vv = EXCLUDED.vv",
                     &[&entity, &row_id, &snap, &vv],
                 )
-                .map_err(|e| pg_err("persist pg snapshot", e))?;
-                conn.execute(
-                    "DELETE FROM _pylon_crdt_updates WHERE entity = $1 AND row_id = $2",
-                    &[&entity, &row_id],
-                )
                 .map(|_| ())
-                .map_err(|e| pg_err("clear the pg update log", e))
+                .map_err(|e| pg_err("persist pg snapshot", e))
             }
             Persist::Append(delta) => {
                 let head = head.expect("an append has a stored head");
                 let seq = head.log_count + 1;
                 let len = delta.len() as i64;
                 conn.execute(
-                    "INSERT INTO _pylon_crdt_updates (entity, row_id, seq, delta) \
-                     VALUES ($1, $2, $3, $4)",
-                    &[&entity, &row_id, &seq, &delta],
-                )
-                .map_err(|e| pg_err("append to the pg update log", e))?;
-                conn.execute(
-                    "UPDATE _pylon_crdt_snapshots \
-                     SET log_count = log_count + 1, log_bytes = log_bytes + $3, vv = $4, \
+                    "WITH appended AS ( \
+                         INSERT INTO _pylon_crdt_updates (entity, row_id, seq, delta) \
+                         VALUES ($1, $2, $3, $4) \
+                     ) \
+                     UPDATE _pylon_crdt_snapshots \
+                     SET log_count = log_count + 1, log_bytes = log_bytes + $5, vv = $6, \
                          updated_at = clock_timestamp() \
                      WHERE entity = $1 AND row_id = $2",
-                    &[&entity, &row_id, &len, &vv],
+                    &[&entity, &row_id, &seq, &delta, &len, &vv],
                 )
                 .map(|_| ())
-                .map_err(|e| pg_err("record the pg update log", e))
+                .map_err(|e| pg_err("append to the pg update log", e))
             }
         }
     }
@@ -557,6 +543,42 @@ impl PgLoroStore {
         patch: &Value,
     ) -> Result<Value, LoroStoreError> {
         let (doc, head) = self.hydrate_for_write(conn, entity, row_id)?;
+        patch_doc(&mut PgSide(conn), &doc, entity, row_id, fields, patch)?;
+        Self::persist_snapshot(conn, entity, row_id, &doc, head.as_ref())?;
+        Ok(project_doc_to_json(&doc, fields))
+    }
+
+    /// A server write by a caller that holds the row's CRDT lock and has
+    /// read the row under its row lock (`row`, as the doc holds it): the
+    /// doc takes the row's values it lacks, as [`Self::seed_missing_fields`]
+    /// would, then `patch`. One read of the doc and one store. Returns the
+    /// projected JSON.
+    pub fn apply_patch_locked<C: PgConn>(
+        &self,
+        conn: &mut C,
+        entity: &str,
+        row_id: &str,
+        fields: &[CrdtField],
+        row: &Value,
+        patch: &Value,
+    ) -> Result<Value, LoroStoreError> {
+        let (doc, head) = self.hydrate_locked(conn, entity, row_id)?;
+        let held = crate::loro_store::held_keys(&doc, fields);
+        if head.is_none() || held.len() < fields.len() {
+            let values = crate::missing_values(fields, &held, row);
+            let failed = seed_doc(
+                &mut PgSide(conn),
+                &doc,
+                &self.peers,
+                entity,
+                row_id,
+                fields,
+                values,
+            )?;
+            for (field, why) in failed {
+                tracing::warn!(entity, row_id, field = %field, "seed a CRDT doc from its row: {why}");
+            }
+        }
         patch_doc(&mut PgSide(conn), &doc, entity, row_id, fields, patch)?;
         Self::persist_snapshot(conn, entity, row_id, &doc, head.as_ref())?;
         Ok(project_doc_to_json(&doc, fields))
@@ -853,7 +875,7 @@ pub struct PgCrdtHookImpl {
 impl PgCrdtHook for PgCrdtHookImpl {
     fn before_insert(
         &self,
-        tx: &mut postgres::Transaction<'_>,
+        tx: &mut pylon_storage::pg_exec::CachedTransaction<'_>,
         entity: &str,
         data: &serde_json::Value,
     ) -> Result<Option<serde_json::Value>, pylon_http::DataError> {
@@ -896,9 +918,10 @@ impl PgCrdtHook for PgCrdtHookImpl {
 
     fn before_update(
         &self,
-        tx: &mut postgres::Transaction<'_>,
+        tx: &mut pylon_storage::pg_exec::CachedTransaction<'_>,
         entity: &str,
         id: &str,
+        row: &serde_json::Value,
         data: &serde_json::Value,
     ) -> Result<Option<serde_json::Value>, pylon_http::DataError> {
         let ent = self
@@ -911,12 +934,13 @@ impl PgCrdtHook for PgCrdtHookImpl {
                 message: format!("Unknown entity: {entity}"),
             })?;
         let crdt_fields = crdt_fields_for(ent)?;
-        let projected =
-            crate::pg_crdt_patch(&self.crdt, tx, ent, &crdt_fields, id, data).map_err(|e| {
-                pylon_http::DataError {
-                    code: "CRDT_APPLY_FAILED".into(),
-                    message: format!("crdt update {entity}/{id}: {e}"),
-                }
+        let row = crate::pg_row_as_doc_holds(ent, &crdt_fields, row.clone());
+        let projected = self
+            .crdt
+            .apply_patch_locked(tx, entity, id, &crdt_fields, &row, data)
+            .map_err(|e| pylon_http::DataError {
+                code: "CRDT_APPLY_FAILED".into(),
+                message: format!("crdt update {entity}/{id}: {e}"),
             })?;
         Ok(
             crate::crdt_container_corrections(&crdt_fields, data, &projected)
@@ -926,7 +950,7 @@ impl PgCrdtHook for PgCrdtHookImpl {
 
     fn before_delete(
         &self,
-        tx: &mut postgres::Transaction<'_>,
+        tx: &mut pylon_storage::pg_exec::CachedTransaction<'_>,
         entity: &str,
         id: &str,
     ) -> Result<(), pylon_http::DataError> {

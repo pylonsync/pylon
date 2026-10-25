@@ -4591,26 +4591,15 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
     fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, DataError> {
         self.validate_write(entity, data)?;
         let data = self.encrypt_for_write(entity, data, true)?;
-        let id = self.inner.insert(entity, &data)?;
-        // Re-read inside the same PG tx so the broadcast carries the
-        // full materialized row (server-stamped fields included). See
-        // the equivalent comment on TxStore::insert. Re-read errors
-        // don't bubble — same rollback-avoidance rationale.
-        let mut payload = match self.inner.get_by_id(entity, &id) {
-            Ok(Some(full)) => full,
-            Ok(None) => {
-                tracing::warn!(
-                    "[PgBufferedTxStore] post-insert re-read returned None for {entity}/{id} — likely deleted by trigger; skipping broadcast"
-                );
-                return Ok(id);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "[PgBufferedTxStore] post-insert re-read failed for {entity}/{id} ({}): skipping broadcast",
-                    e.message
-                );
-                return Ok(id);
-            }
+        // The insert returns the full materialized row (server-stamped
+        // fields included), so the broadcast carries it without a
+        // re-read. See the equivalent comment on TxStore::insert.
+        let (id, row) = self.inner.insert_returning(entity, &data)?;
+        let Some(mut payload) = row else {
+            tracing::warn!(
+                "[PgBufferedTxStore] the insert of {entity}/{id} returned no row; skipping broadcast"
+            );
+            return Ok(id);
         };
         self.normalize(entity, &mut payload);
         self.record(entity, &id, pylon_sync::ChangeKind::Insert, Some(&payload));
@@ -4648,47 +4637,38 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
 
     fn update(&self, entity: &str, id: &str, data: &serde_json::Value) -> Result<bool, DataError> {
         self.validate_write(entity, data)?;
-        // Snapshot pre-update so the buffered event carries
-        // `prev_data` for the visibility-transition tombstone.
-        // Matches the SQLite TxStore::update fix.
-        let mut pre_row = self.inner.get_by_id(entity, id).ok().flatten();
+        let data = self.encrypt_for_write(entity, data, false)?;
+        // The row before the write (under its lock) so the buffered event
+        // carries `prev_data` for the visibility-transition tombstone
+        // (matches the SQLite TxStore::update fix), and the row after it,
+        // full, for the broadcast.
+        let Some(written) = self.inner.update_returning(entity, id, &data)? else {
+            return Ok(false);
+        };
+        let mut pre_row = written.before;
         if let Some(r) = pre_row.as_mut() {
             self.normalize(entity, r);
         }
-        let data = self.encrypt_for_write(entity, data, false)?;
-        let updated = self.inner.update(entity, id, &data)?;
-        if updated {
-            let mut payload = match self.inner.get_by_id(entity, id) {
-                Ok(Some(full)) => full,
-                Ok(None) => {
-                    tracing::warn!(
-                        "[PgBufferedTxStore] post-update re-read returned None for {entity}/{id} — likely deleted by trigger; skipping broadcast"
-                    );
-                    return Ok(updated);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "[PgBufferedTxStore] post-update re-read failed for {entity}/{id} ({}): skipping broadcast",
-                        e.message
-                    );
-                    return Ok(updated);
-                }
-            };
-            self.normalize(entity, &mut payload);
-            // No-op suppression — an identical row has nothing to
-            // replicate (see pylon_router::update_is_noop).
-            if pylon_router::update_is_noop(self.manifest(), entity, pre_row.as_ref(), &payload) {
-                return Ok(updated);
-            }
-            self.record_with_prev(
-                entity,
-                id,
-                pylon_sync::ChangeKind::Update,
-                Some(&payload),
-                pre_row.as_ref(),
+        let Some(mut payload) = written.after else {
+            tracing::warn!(
+                "[PgBufferedTxStore] the update of {entity}/{id} returned no row; skipping broadcast"
             );
+            return Ok(true);
+        };
+        self.normalize(entity, &mut payload);
+        // No-op suppression — an identical row has nothing to
+        // replicate (see pylon_router::update_is_noop).
+        if pylon_router::update_is_noop(self.manifest(), entity, pre_row.as_ref(), &payload) {
+            return Ok(true);
         }
-        Ok(updated)
+        self.record_with_prev(
+            entity,
+            id,
+            pylon_sync::ChangeKind::Update,
+            Some(&payload),
+            pre_row.as_ref(),
+        );
+        Ok(true)
     }
 
     fn delete(&self, entity: &str, id: &str) -> Result<bool, DataError> {

@@ -20,10 +20,10 @@
 
 use std::sync::Mutex;
 
-use pylon_http::{DataError, DataStore};
+use pylon_http::{DataError, DataStore, UpdatedRow};
 use pylon_kernel::AppManifest;
 
-use crate::pg_exec::PgConn;
+use crate::pg_exec::{CachedTransaction, PgConn};
 use crate::pg_search;
 use crate::postgres::{
     aggregate_rows_to_json_pub, build_aggregate_sql_pub, build_insert_sql,
@@ -54,7 +54,28 @@ pub fn tx_insert<C: PgConn>(
     entity: &str,
     data: &serde_json::Value,
 ) -> Result<String, DataError> {
-    let (sql, values) = build_insert_sql(entity, data).map_err(|e| DataError {
+    insert_row(conn, manifest, entity, data, false).map(|(id, _)| id)
+}
+
+/// [`tx_insert`], also returning the row as stored (`RETURNING *`), so a
+/// caller that needs the row does not read it back.
+pub fn tx_insert_returning<C: PgConn>(
+    conn: &mut C,
+    manifest: &AppManifest,
+    entity: &str,
+    data: &serde_json::Value,
+) -> Result<(String, Option<serde_json::Value>), DataError> {
+    insert_row(conn, manifest, entity, data, true)
+}
+
+fn insert_row<C: PgConn>(
+    conn: &mut C,
+    manifest: &AppManifest,
+    entity: &str,
+    data: &serde_json::Value,
+    returning: bool,
+) -> Result<(String, Option<serde_json::Value>), DataError> {
+    let (mut sql, values) = build_insert_sql(entity, data).map_err(|e| DataError {
         code: e.code,
         message: e.message,
     })?;
@@ -68,7 +89,15 @@ pub fn tx_insert<C: PgConn>(
         }
     };
     let params = as_pg_params(&values);
-    conn.execute(&sql, &params).map_err(pg_err_to_data)?;
+    let row = if returning {
+        sql.push_str(" RETURNING *");
+        conn.query_opt(&sql, &params)
+            .map_err(pg_err_to_data)?
+            .map(|row| crate::postgres::row_to_json_pub(&row))
+    } else {
+        conn.execute(&sql, &params).map_err(pg_err_to_data)?;
+        None
+    };
     if let Some(cfg) = search_config_for(manifest, entity) {
         // Build the FTS payload from the data the caller passed +
         // the resolved id, so text-field projection sees the
@@ -81,7 +110,7 @@ pub fn tx_insert<C: PgConn>(
             .map_err(search_err_to_data)?;
     }
     record_after_edit(conn, manifest, entity, &id)?;
-    Ok(id)
+    Ok((id, row))
 }
 
 /// Update one entity row + maintain its FTS shadow.
@@ -95,10 +124,8 @@ pub fn tx_insert<C: PgConn>(
 /// Then any concurrent `tx_update` blocks until we commit, after
 /// which it reads the new post-update state for its own merge.
 ///
-/// The lock is no-op when the row doesn't exist (UPDATE finds 0 rows
-/// and returns false anyway). When the row exists and search isn't
-/// configured we still take the lock — cheap and keeps the update
-/// path's locking shape uniform.
+/// Returns false when the row doesn't exist: there is nothing to lock
+/// and nothing is written.
 pub fn tx_update<C: PgConn>(
     conn: &mut C,
     manifest: &AppManifest,
@@ -106,42 +133,85 @@ pub fn tx_update<C: PgConn>(
     id: &str,
     data: &serde_json::Value,
 ) -> Result<bool, DataError> {
-    let (sql, values) = build_update_sql(entity, id, data).map_err(|e| DataError {
+    let Some(before) = tx_lock_row(conn, entity, id)? else {
+        return Ok(false);
+    };
+    Ok(tx_update_locked(conn, manifest, entity, id, data, &before)?.is_some())
+}
+
+/// Lock a row for the rest of the transaction and read it (`SELECT * ...
+/// FOR UPDATE`). `None` when no row has `id`.
+pub fn tx_lock_row<C: PgConn>(
+    conn: &mut C,
+    entity: &str,
+    id: &str,
+) -> Result<Option<serde_json::Value>, DataError> {
+    let sql = format!(
+        "SELECT * FROM {} WHERE id = $1 FOR UPDATE",
+        quote_ident_pub(entity)
+    );
+    let row = conn.query_opt(&sql, &[&id]).map_err(pg_err_to_data)?;
+    Ok(row.map(|r| crate::postgres::row_to_json_pub(&r)))
+}
+
+/// Update a row this transaction locked with [`tx_lock_row`]; `before` is
+/// the row it read. Maintains the FTS shadow and the afterEdit outbox, and
+/// returns the row as stored after the write (`RETURNING *`).
+pub fn tx_update_locked<C: PgConn>(
+    conn: &mut C,
+    manifest: &AppManifest,
+    entity: &str,
+    id: &str,
+    data: &serde_json::Value,
+    before: &serde_json::Value,
+) -> Result<Option<serde_json::Value>, DataError> {
+    let (mut sql, values) = build_update_sql(entity, id, data).map_err(|e| DataError {
         code: e.code,
         message: e.message,
     })?;
-    let search_cfg = search_config_for(manifest, entity);
-
-    // Take a row lock for the rest of the tx so the FTS rebuild and
-    // the actual UPDATE see a consistent view. Skip when the row
-    // doesn't exist — there's nothing to lock and the UPDATE below
-    // will return Ok(false).
-    let lock_sql = format!(
-        "SELECT 1 FROM {} WHERE id = $1 FOR UPDATE",
-        quote_ident_pub(entity)
-    );
-    let locked = conn.query_opt(&lock_sql, &[&id]).map_err(pg_err_to_data)?;
-    if locked.is_none() {
-        return Ok(false);
-    }
-
-    // Read the OLD row only after the lock so concurrent updates
-    // can't slip in between read and UPDATE.
-    let old_row = if search_cfg.is_some() {
-        tx_get_by_id(conn, entity, id)?.unwrap_or(serde_json::Value::Null)
-    } else {
-        serde_json::Value::Null
-    };
+    sql.push_str(" RETURNING *");
     let params = as_pg_params(&values);
-    let n = conn.execute(&sql, &params).map_err(pg_err_to_data)?;
-    if n > 0 {
-        if let Some(cfg) = &search_cfg {
-            pg_search::apply_update(conn, entity, id, &old_row, data, cfg)
-                .map_err(search_err_to_data)?;
-        }
-        record_after_edit(conn, manifest, entity, id)?;
+    let Some(row) = conn.query_opt(&sql, &params).map_err(pg_err_to_data)? else {
+        return Ok(None);
+    };
+    if let Some(cfg) = search_config_for(manifest, entity) {
+        pg_search::apply_update(conn, entity, id, before, data, &cfg)
+            .map_err(search_err_to_data)?;
     }
-    Ok(n > 0)
+    record_after_edit(conn, manifest, entity, id)?;
+    Ok(Some(crate::postgres::row_to_json_pub(&row)))
+}
+
+/// Take a row's CRDT advisory lock for the rest of the transaction.
+/// Every CRDT write, and a delete, takes it before any row lock, so they
+/// queue on it instead of locking the snapshot, side, and entity rows in
+/// different orders.
+pub fn lock_crdt_row<C: PgConn>(
+    conn: &mut C,
+    entity: &str,
+    row_id: &str,
+) -> Result<(), postgres::Error> {
+    conn.execute(
+        "SELECT pg_advisory_xact_lock($1::int, $2::int)",
+        &[&crdt_lock_key(entity), &crdt_lock_key(row_id)],
+    )
+    .map(|_| ())
+}
+
+/// Hash a string into an i32 suitable for `pg_advisory_xact_lock`.
+/// PG's two-key advisory lock form takes int4 args; we use SipHash
+/// (the std hasher) and truncate to 32 bits. Collisions are
+/// possible but the worst outcome is two unrelated rows blocking
+/// each other briefly — never correctness loss.
+fn crdt_lock_key(s: &str) -> i32 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut hasher);
+    let h = hasher.finish();
+    // Take the low 32 bits and reinterpret as i32 — PG accepts the
+    // full int4 range. Using `as i32` would panic-truncate; `as u32
+    // as i32` round-trips through the bit pattern.
+    (h as u32) as i32
 }
 
 /// Delete one entity row + clear its FTS shadow. The FK CASCADE on
@@ -319,25 +389,29 @@ pub fn search_err_to_data(e: crate::StorageError) -> DataError {
 pub trait PgCrdtHook: Send + Sync {
     fn before_insert(
         &self,
-        tx: &mut postgres::Transaction<'_>,
+        tx: &mut CachedTransaction<'_>,
         entity: &str,
         data: &serde_json::Value,
     ) -> Result<Option<serde_json::Value>, DataError>;
 
+    /// Called with the row's CRDT lock ([`lock_crdt_row`]) and its row
+    /// lock held; `row` is the row as stored, read under that lock.
+    ///
     /// Returns the column values to write after the update: the CRDT
     /// doc's values for fields whose stored form is not the patch (a
     /// counter's patch is an increment; the row stores the total).
     fn before_update(
         &self,
-        tx: &mut postgres::Transaction<'_>,
+        tx: &mut CachedTransaction<'_>,
         entity: &str,
         id: &str,
+        row: &serde_json::Value,
         data: &serde_json::Value,
     ) -> Result<Option<serde_json::Value>, DataError>;
 
     fn before_delete(
         &self,
-        tx: &mut postgres::Transaction<'_>,
+        tx: &mut CachedTransaction<'_>,
         entity: &str,
         id: &str,
     ) -> Result<(), DataError>;
@@ -363,7 +437,7 @@ pub struct PgTxStore<'a> {
     /// nil — `PostgresDataStore::with_transaction` already holds the
     /// outer connection mutex for the closure's lifetime, so this
     /// inner lock is uncontended every call.
-    tx: Mutex<Option<postgres::Transaction<'a>>>,
+    tx: Mutex<Option<CachedTransaction<'a>>>,
     manifest: &'a AppManifest,
     /// Optional runtime-supplied CRDT hook. When present, insert/
     /// update/delete on entities with `crdt: true` route through it
@@ -379,7 +453,7 @@ pub struct PgTxStore<'a> {
 impl<'a> PgTxStore<'a> {
     pub fn new(tx: postgres::Transaction<'a>, manifest: &'a AppManifest) -> Self {
         Self {
-            tx: Mutex::new(Some(tx)),
+            tx: Mutex::new(Some(CachedTransaction::new(tx))),
             manifest,
             crdt_hook: None,
             crdt_touched: Mutex::new(Vec::new()),
@@ -397,7 +471,7 @@ impl<'a> PgTxStore<'a> {
         crdt_hook: std::sync::Arc<dyn PgCrdtHook>,
     ) -> Self {
         Self {
-            tx: Mutex::new(Some(tx)),
+            tx: Mutex::new(Some(CachedTransaction::new(tx))),
             manifest,
             crdt_hook: Some(crdt_hook),
             crdt_touched: Mutex::new(Vec::new()),
@@ -485,11 +559,37 @@ impl<'a> Drop for PgTxStore<'a> {
 }
 
 impl<'a> PgTxStore<'a> {
+    /// Insert through the CRDT hook for a CRDT entity; `returning` also
+    /// returns the row as stored.
+    fn insert_row(
+        &self,
+        entity: &str,
+        data: &serde_json::Value,
+        returning: bool,
+    ) -> Result<(String, Option<serde_json::Value>), DataError> {
+        let manifest = self.manifest;
+        if !self.entity_is_crdt(entity) {
+            return self.with_tx(|tx| insert_row(tx, manifest, entity, data, returning));
+        }
+        let hook = self
+            .crdt_hook
+            .as_ref()
+            .expect("entity_is_crdt implies hook present")
+            .clone();
+        let inserted = self.with_tx(|tx| {
+            let projected_data = hook.before_insert(tx, entity, data)?;
+            let row = projected_data.as_ref().unwrap_or(data);
+            insert_row(tx, manifest, entity, row, returning)
+        })?;
+        self.record_crdt_touched(entity, &inserted.0);
+        Ok(inserted)
+    }
+
     /// Run `body` against the held transaction. Centralizes the
     /// "lock the mutex, check we still hold a tx" preamble.
     fn with_tx<F, T>(&self, body: F) -> Result<T, DataError>
     where
-        F: FnOnce(&mut postgres::Transaction<'a>) -> Result<T, DataError>,
+        F: FnOnce(&mut CachedTransaction<'a>) -> Result<T, DataError>,
     {
         let mut guard = self.tx.lock().map_err(|_| DataError {
             code: "TX_LOCK_POISONED".into(),
@@ -524,23 +624,15 @@ impl<'a> DataStore for PgTxStore<'a> {
     }
 
     fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, DataError> {
-        let manifest = self.manifest;
-        if self.entity_is_crdt(entity) {
-            let hook = self
-                .crdt_hook
-                .as_ref()
-                .expect("entity_is_crdt implies hook present")
-                .clone();
-            let id = self.with_tx(|tx| -> Result<String, DataError> {
-                let projected_data = hook.before_insert(tx, entity, data)?;
-                let row = projected_data.as_ref().unwrap_or(data);
-                tx_insert(tx, manifest, entity, row)
-            })?;
-            self.record_crdt_touched(entity, &id);
-            Ok(id)
-        } else {
-            self.with_tx(|tx| tx_insert(tx, manifest, entity, data))
-        }
+        self.insert_row(entity, data, false).map(|(id, _)| id)
+    }
+
+    fn insert_returning(
+        &self,
+        entity: &str,
+        data: &serde_json::Value,
+    ) -> Result<(String, Option<serde_json::Value>), DataError> {
+        self.insert_row(entity, data, true)
     }
 
     fn get_by_id(&self, entity: &str, id: &str) -> Result<Option<serde_json::Value>, DataError> {
@@ -639,38 +731,62 @@ impl<'a> DataStore for PgTxStore<'a> {
     }
 
     fn update(&self, entity: &str, id: &str, data: &serde_json::Value) -> Result<bool, DataError> {
+        self.update_returning(entity, id, data)
+            .map(|updated| updated.is_some())
+    }
+
+    /// Locks and reads the row once, and takes the row after the write
+    /// from the UPDATE itself (`RETURNING *`).
+    fn update_returning(
+        &self,
+        entity: &str,
+        id: &str,
+        data: &serde_json::Value,
+    ) -> Result<Option<UpdatedRow>, DataError> {
         let manifest = self.manifest;
-        if self.entity_is_crdt(entity) {
-            let hook = self
-                .crdt_hook
-                .as_ref()
-                .expect("entity_is_crdt implies hook present")
-                .clone();
-            let updated = self.with_tx(|tx| -> Result<bool, DataError> {
-                let corrections = hook.before_update(tx, entity, id, data)?;
-                let updated = tx_update(tx, manifest, entity, id, data)?;
-                if let (true, Some(corrections)) = (updated, &corrections) {
-                    tx_update(tx, manifest, entity, id, corrections)?;
-                }
-                if !updated {
-                    // Same orphan guard as Runtime::update — refuse
-                    // to commit a snapshot for a row that doesn't
-                    // exist. Rolls back via Err propagation.
-                    return Err(DataError {
-                        code: "ENTITY_NOT_FOUND".into(),
-                        message: format!(
-                            "Update on {entity}/{id} found no row — refusing to commit a CRDT \
-                             snapshot that would orphan."
-                        ),
-                    });
-                }
-                Ok(updated)
-            })?;
-            self.record_crdt_touched(entity, id);
-            Ok(updated)
-        } else {
-            self.with_tx(|tx| tx_update(tx, manifest, entity, id, data))
+        if !self.entity_is_crdt(entity) {
+            return self.with_tx(|tx| {
+                let Some(before) = tx_lock_row(tx, entity, id)? else {
+                    return Ok(None);
+                };
+                let after = tx_update_locked(tx, manifest, entity, id, data, &before)?;
+                Ok(Some(UpdatedRow {
+                    before: Some(before),
+                    after,
+                }))
+            });
         }
+        let hook = self
+            .crdt_hook
+            .as_ref()
+            .expect("entity_is_crdt implies hook present")
+            .clone();
+        let updated = self.with_tx(|tx| -> Result<UpdatedRow, DataError> {
+            // The doc's lock before the row's, as every CRDT write takes them.
+            lock_crdt_row(tx, entity, id).map_err(pg_err_to_data)?;
+            let Some(before) = tx_lock_row(tx, entity, id)? else {
+                // Same orphan guard as Runtime::update — refuse to
+                // commit a snapshot for a row that doesn't exist.
+                return Err(DataError {
+                    code: "ENTITY_NOT_FOUND".into(),
+                    message: format!(
+                        "Update on {entity}/{id} found no row — refusing to commit a CRDT \
+                         snapshot that would orphan."
+                    ),
+                });
+            };
+            let corrections = hook.before_update(tx, entity, id, &before, data)?;
+            let mut after = tx_update_locked(tx, manifest, entity, id, data, &before)?;
+            if let (Some(corrections), Some(written)) = (&corrections, &after) {
+                after = tx_update_locked(tx, manifest, entity, id, corrections, written)?;
+            }
+            Ok(UpdatedRow {
+                before: Some(before),
+                after,
+            })
+        })?;
+        self.record_crdt_touched(entity, id);
+        Ok(Some(updated))
     }
 
     fn delete(&self, entity: &str, id: &str) -> Result<bool, DataError> {

@@ -4114,72 +4114,62 @@ impl Runtime {
                 // snapshot landed in autocommit and the row write in
                 // a separate one — a mid-write crash desynced them.
                 //
-                // The closure also FAILS the tx if `tx_update` returns
-                // false (no row matched). Without that, the snapshot
-                // would commit alone — orphaned state pointing at a
-                // row that doesn't exist. Codex flagged this. On
-                // rollback the runtime evicts the cached LoroDoc so
-                // the next read re-hydrates from the (unchanged)
-                // sidecar.
+                // The row is locked and read before the doc is written,
+                // so a missing row writes nothing: no snapshot can
+                // commit against a row that doesn't exist. On rollback
+                // the runtime evicts the cached LoroDoc so the next read
+                // re-hydrates from the (unchanged) sidecar.
                 let crdt_fields = self.crdt_fields_for(ent)?;
                 let result = pg
                     .store
                     .with_transaction_raw(|tx| -> Result<bool, RuntimeError> {
-                        let projected = pg_crdt_patch(&pg.crdt, tx, ent, &crdt_fields, id, data)
+                        // The doc's lock before the row's, as every CRDT
+                        // write takes them.
+                        pylon_storage::pg_tx_store::lock_crdt_row(tx, entity, id)
+                            .map_err(pylon_storage::pg_tx_store::pg_err_to_data)
+                            .map_err(data_err_to_runtime)?;
+                        let Some(before) = pylon_storage::pg_tx_store::tx_lock_row(tx, entity, id)
+                            .map_err(data_err_to_runtime)?
+                        else {
+                            return Ok(false);
+                        };
+                        let row = pg_row_as_doc_holds(ent, crdt_fields, before.clone());
+                        let projected = pg
+                            .crdt
+                            .apply_patch_locked(tx, entity, id, crdt_fields, &row, data)
                             .map_err(|e| RuntimeError {
                                 code: "CRDT_APPLY_FAILED".into(),
                                 message: format!("crdt update {entity}/{id}: {e}"),
                             })?;
-                        let updated = pylon_storage::pg_tx_store::tx_update(
+                        let written = pylon_storage::pg_tx_store::tx_update_locked(
                             tx,
                             &self.manifest,
                             entity,
                             id,
                             pg_data,
+                            &before,
                         )
                         .map_err(data_err_to_runtime)?;
-                        if let (true, Some(corrections)) = (
-                            updated,
-                            crdt_container_corrections(&crdt_fields, data, &projected),
+                        if let (Some(written), Some(corrections)) = (
+                            written,
+                            crdt_container_corrections(crdt_fields, data, &projected),
                         ) {
                             let stored = serialize_json_fields_for_storage(ent, &corrections)
                                 .unwrap_or(corrections);
-                            pylon_storage::pg_tx_store::tx_update(
+                            pylon_storage::pg_tx_store::tx_update_locked(
                                 tx,
                                 &self.manifest,
                                 entity,
                                 id,
                                 &stored,
+                                &written,
                             )
                             .map_err(data_err_to_runtime)?;
                         }
-                        if !updated {
-                            // Roll back via Err so the snapshot doesn't
-                            // commit against a missing row.
-                            return Err(RuntimeError {
-                                code: "ENTITY_NOT_FOUND".into(),
-                                message: format!(
-                                    "Update on {entity}/{id} found no row — refusing to commit \
-                                 a CRDT snapshot that would orphan."
-                                ),
-                            });
-                        }
-                        Ok(updated)
+                        Ok(true)
                     });
                 // The next read hydrates from what committed.
                 pg.crdt.evict(entity, id);
-                if result.is_err() {
-                    // ENTITY_NOT_FOUND from the inner closure is the
-                    // intended return for "no such row" — translate
-                    // into Ok(false) so callers see the same shape
-                    // the SQLite path returns. Real errors (CRDT
-                    // apply failed, BEGIN/COMMIT failed) propagate.
-                    if let Err(ref e) = result {
-                        if e.code == "ENTITY_NOT_FOUND" {
-                            return Ok(false);
-                        }
-                    }
-                }
                 return result;
             }
             return pylon_http::DataStore::update(&pg.store, entity, id, pg_data)
@@ -6406,14 +6396,24 @@ pub(crate) fn pg_row_for_doc<C: pylon_storage::pg_exec::PgConn>(
     if locked.is_none() {
         return Ok(None);
     }
-    let Some(mut row) = pylon_storage::pg_tx_store::tx_get_by_id(conn, &ent.name, id)
+    let Some(row) = pylon_storage::pg_tx_store::tx_get_by_id(conn, &ent.name, id)
         .map_err(|e| loro_store::LoroStoreError::Storage(format!("[{}] {}", e.code, e.message)))?
     else {
         return Ok(None);
     };
+    Ok(Some(pg_row_as_doc_holds(ent, fields, row)))
+}
+
+/// A Postgres row as its CRDT doc holds it: `json` fields and the stored
+/// text of CRDT containers parsed.
+pub(crate) fn pg_row_as_doc_holds(
+    ent: &ManifestEntity,
+    fields: &[pylon_crdt::CrdtField],
+    mut row: serde_json::Value,
+) -> serde_json::Value {
     parse_json_fields_in_row(ent, &mut row);
     parse_crdt_containers_in_row(fields, &mut row);
-    Ok(Some(row))
+    row
 }
 
 /// A server write of a Postgres CRDT row: the doc takes the row's values it

@@ -235,16 +235,17 @@ impl PostgresDataStore {
     /// directly.
     pub fn with_transaction_raw<F, T, E>(&self, body: F) -> Result<T, E>
     where
-        F: FnOnce(&mut postgres::Transaction<'_>) -> Result<T, E>,
+        F: FnOnce(&mut crate::pg_exec::CachedTransaction<'_>) -> Result<T, E>,
         E: From<DataError>,
     {
         let mut conn = self.checkout().map_err(E::from)?;
-        let mut tx = conn.client_mut().transaction().map_err(|e| {
+        let tx = conn.client_mut().transaction().map_err(|e| {
             E::from(DataError {
                 code: "PG_BEGIN_FAILED".into(),
                 message: format!("BEGIN failed: {e}"),
             })
         })?;
+        let mut tx = crate::pg_exec::CachedTransaction::new(tx);
         match body(&mut tx) {
             Ok(value) => {
                 tx.commit().map_err(|e| {

@@ -93,6 +93,15 @@ pub struct StoredCall {
     pub args_hash: String,
 }
 
+/// A row as stored before and after an update (see
+/// [`DataStore::update_returning`]). Either is `None` when it could not be
+/// read.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UpdatedRow {
+    pub before: Option<serde_json::Value>,
+    pub after: Option<serde_json::Value>,
+}
+
 /// Platform-agnostic data store trait.
 ///
 /// Implemented by `Runtime` (SQLite, self-hosted) and `D1DataStore` (Workers).
@@ -156,6 +165,38 @@ pub trait DataStore: Send + Sync {
     }
 
     fn update(&self, entity: &str, id: &str, data: &serde_json::Value) -> Result<bool, DataError>;
+
+    /// Insert a row; returns its id and the row as stored (`None` when it
+    /// could not be read back). The default reads the row after the
+    /// insert; a store that can return it from the insert itself overrides
+    /// this.
+    fn insert_returning(
+        &self,
+        entity: &str,
+        data: &serde_json::Value,
+    ) -> Result<(String, Option<serde_json::Value>), DataError> {
+        let id = self.insert(entity, data)?;
+        let row = self.get_by_id(entity, &id).ok().flatten();
+        Ok((id, row))
+    }
+
+    /// Update a row; returns the row as stored before and after the write,
+    /// or `None` when no row has `id`. The default reads the row before and
+    /// after the update; a store that can lock and read the row once and
+    /// return it from the update itself overrides this.
+    fn update_returning(
+        &self,
+        entity: &str,
+        id: &str,
+        data: &serde_json::Value,
+    ) -> Result<Option<UpdatedRow>, DataError> {
+        let before = self.get_by_id(entity, id).ok().flatten();
+        if !self.update(entity, id, data)? {
+            return Ok(None);
+        }
+        let after = self.get_by_id(entity, id).ok().flatten();
+        Ok(Some(UpdatedRow { before, after }))
+    }
 
     fn delete(&self, entity: &str, id: &str) -> Result<bool, DataError>;
 
