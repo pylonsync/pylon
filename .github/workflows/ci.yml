@@ -719,6 +719,7 @@ jobs:
           # One thread: these tests share one database and recreate tables.
           cargo test -p pylon-runtime --test postgres_backend -- --test-threads=1
           cargo test -p pylon-runtime --test crdt_parity -- --test-threads=1
+          cargo test -p pylon-runtime --test postgres_write_round_trips -- --test-threads=1
           cargo test -p pylon-runtime --test postgres_auth_backends -- --test-threads=1
           cargo test -p pylon-runtime --test filtered_count -- --test-threads=1
           cargo test -p pylon-runtime --test postgres_change_log -- --test-threads=1
