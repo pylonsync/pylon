@@ -78,6 +78,13 @@ pub trait ChangeNotifier: Send + Sync {
     ) {
     }
 
+    /// Whether `notify_crdt` for this row could reach anyone. When it
+    /// returns false, the broadcast does not read the row's CRDT bytes
+    /// from the store. The default says yes.
+    fn wants_crdt_frame(&self, _entity: &str, _row_id: &str) -> bool {
+        true
+    }
+
     /// Push a `session-changed` envelope to every connected WS client
     /// whose authenticated user_id matches. Fires when the server
     /// mutates a session (select-org, clear-org, revoke). The SDK's
@@ -2325,6 +2332,7 @@ pub fn broadcast_change_with_crdt(
     let manifest = store.manifest();
     if matches!(kind, ChangeKind::Delete)
         || !supports_crdt_replication(manifest, &manifest.auth.user, entity)
+        || !notifier.wants_crdt_frame(entity, row_id)
         || store.has_private_crdt_history(entity)
     {
         return;

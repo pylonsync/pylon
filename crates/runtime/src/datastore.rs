@@ -1684,6 +1684,22 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
         }
     }
 
+    /// A frame reaches another machine over the cluster bus, or a local
+    /// subscriber of the row; see `notify_crdt` for the entities that never
+    /// get one.
+    fn wants_crdt_frame(&self, entity: &str, row_id: &str) -> bool {
+        // The in-memory checks first: `supports_crdt_replication` asks the
+        // database whether the entity's history is private.
+        entity != self.auth_user.entity
+            && (self.cluster_bus.is_active()
+                || !self
+                    .ws
+                    .subscriptions()
+                    .subscribers(entity, row_id)
+                    .is_empty())
+            && self.ws.supports_crdt_replication(entity)
+    }
+
     /// Encode a CRDT broadcast frame (1-byte type + length-prefixed
     /// entity + length-prefixed row_id + Loro snapshot bytes) and ship
     /// it to clients SUBSCRIBED to this row. SSE is text-only so it
