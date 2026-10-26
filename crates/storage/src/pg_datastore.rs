@@ -31,6 +31,14 @@ const DEFAULT_POOL_SIZE: usize = 8;
 /// How long `checkout` waits for a free connection before returning a
 /// `PG_POOL_TIMEOUT` error, when `PYLON_PG_CHECKOUT_TIMEOUT_MS` is unset.
 const DEFAULT_CHECKOUT_TIMEOUT_MS: u64 = 10_000;
+/// Longest one statement may run on a pooled connection, when
+/// `PYLON_PG_STATEMENT_TIMEOUT_MS` is unset. Schema changes do not use the
+/// pool: `pylon start` and `pylon schema push` open their own connection.
+const DEFAULT_STATEMENT_TIMEOUT_MS: u64 = 60_000;
+/// Longest a pooled connection may sit inside an open transaction doing
+/// nothing, when `PYLON_PG_IDLE_IN_TX_TIMEOUT_MS` is unset. Postgres ends
+/// the session after that, which frees its locks and its pool slot.
+const DEFAULT_IDLE_IN_TX_TIMEOUT_MS: u64 = 60_000;
 
 fn map_storage_err(e: crate::StorageError) -> DataError {
     DataError {
@@ -70,10 +78,10 @@ impl PgPool {
         checkout_timeout: Duration,
     ) -> Result<Arc<Self>, DataError> {
         let pool = ConnectionPool::new(size);
-        let first = LivePostgresAdapter::connect(url).map_err(map_storage_err)?;
+        let first = open_pooled(url)?;
         pool.add(first);
         for i in 1..size {
-            match LivePostgresAdapter::connect(url) {
+            match open_pooled(url) {
                 Ok(conn) => pool.add(conn),
                 Err(e) => {
                     eprintln!(
@@ -107,7 +115,7 @@ impl PgPool {
                 message: e.to_string(),
             })?;
         if conn.is_closed() {
-            *conn = LivePostgresAdapter::connect(&self.url).map_err(map_storage_err)?;
+            *conn = open_pooled(&self.url)?;
         }
         Ok(conn)
     }
@@ -129,7 +137,7 @@ impl PgPool {
             Ok(v) => Ok(v),
             Err(first_err) => {
                 if conn.is_closed() {
-                    *conn = LivePostgresAdapter::connect(&self.url).map_err(|e| e.message)?;
+                    *conn = open_pooled(&self.url).map_err(|e| e.message)?;
                     op(conn.client_mut()).map_err(|e| format!("PG statement failed: {e}"))
                 } else {
                     Err(format!("PG statement failed: {first_err}"))
@@ -147,6 +155,25 @@ impl PgPool {
     ) -> Result<T, String> {
         let mut conn = self.checkout().map_err(|e| e.message)?;
         op(conn.client_mut()).map_err(|e| format!("PG statement failed: {e}"))
+    }
+
+    /// Check that the pool can hand out a working connection: wait up to
+    /// `timeout` for a free slot, then run `SELECT 1`. For the deep health
+    /// check, so a full pool or an unreachable database shows as unhealthy.
+    pub fn health_probe(&self, timeout: Duration) -> Result<(), String> {
+        let mut conn = self.pool.get(timeout).map_err(|_| {
+            format!(
+                "no free database connection within {}ms",
+                timeout.as_millis()
+            )
+        })?;
+        if conn.is_closed() {
+            *conn = open_pooled(&self.url).map_err(|e| e.message)?;
+        }
+        conn.client_mut()
+            .simple_query("SELECT 1")
+            .map(|_| ())
+            .map_err(|e| format!("database query failed: {e}"))
     }
 
     /// Idle connections currently in the pool (for diagnostics/tests).
@@ -871,6 +898,48 @@ impl DataStore for PostgresDataStore {
     }
 }
 
+/// Open one pooled connection with the session limits applied, so a stuck
+/// statement or an abandoned transaction cannot keep a pool slot forever.
+fn open_pooled(url: &str) -> Result<LivePostgresAdapter, DataError> {
+    let mut conn = LivePostgresAdapter::connect(url).map_err(map_storage_err)?;
+    let limits = session_limits_sql(
+        env_ms(
+            "PYLON_PG_STATEMENT_TIMEOUT_MS",
+            DEFAULT_STATEMENT_TIMEOUT_MS,
+        ),
+        env_ms(
+            "PYLON_PG_IDLE_IN_TX_TIMEOUT_MS",
+            DEFAULT_IDLE_IN_TX_TIMEOUT_MS,
+        ),
+    );
+    conn.client_mut()
+        .batch_execute(&limits)
+        .map_err(|e| DataError {
+            code: "PG_CONNECT_FAILED".into(),
+            message: format!("set the session limits: {e}"),
+        })?;
+    Ok(conn)
+}
+
+/// The `SET` statements for the pooled-session limits. 0 turns a limit off.
+fn session_limits_sql(statement_ms: u64, idle_in_tx_ms: u64) -> String {
+    format!(
+        "SET statement_timeout = {statement_ms}; \
+         SET idle_in_transaction_session_timeout = {idle_in_tx_ms};"
+    )
+}
+
+/// Milliseconds from `name`. Unset or unparseable falls back to `default`;
+/// an explicit 0 is kept (it turns the limit off).
+fn env_ms(name: &str, default: u64) -> u64 {
+    parse_ms(std::env::var(name).ok().as_deref(), default)
+}
+
+fn parse_ms(raw: Option<&str>, default: u64) -> u64 {
+    raw.and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
 /// Pool size from `PYLON_PG_POOL_SIZE`, clamped to at least 1 (the pool
 /// rejects a zero capacity). Falls back to [`DEFAULT_POOL_SIZE`].
 fn pool_size_from_env() -> usize {
@@ -910,6 +979,49 @@ fn parse_checkout_timeout(raw: Option<&str>) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pooled connections carry the session limits, and the health probe
+    /// fails when no slot frees up in time. Env-gated: PYLON_TEST_PG_URL.
+    #[test]
+    fn pooled_sessions_have_limits_and_probe_reports_a_full_pool() {
+        let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
+            eprintln!("skipping: PYLON_TEST_PG_URL not set");
+            return;
+        };
+        let pool = PgPool::connect(&url, 1, Duration::from_secs(1)).expect("pool");
+        pool.health_probe(Duration::from_millis(500))
+            .expect("a free pool is healthy");
+        {
+            let mut conn = pool.checkout().expect("checkout");
+            let row = conn
+                .client_mut()
+                .query_one(
+                    "SELECT current_setting('statement_timeout'), \
+                            current_setting('idle_in_transaction_session_timeout')",
+                    &[],
+                )
+                .unwrap();
+            assert_eq!(row.get::<_, String>(0), "1min");
+            assert_eq!(row.get::<_, String>(1), "1min");
+            // The only slot is in use, so the probe cannot get one.
+            let err = pool
+                .health_probe(Duration::from_millis(100))
+                .expect_err("a full pool is unhealthy");
+            assert!(err.contains("no free database connection"), "{err}");
+        }
+    }
+
+    #[test]
+    fn session_limits_default_and_allow_off() {
+        assert_eq!(parse_ms(None, 60_000), 60_000);
+        assert_eq!(parse_ms(Some("garbage"), 60_000), 60_000);
+        assert_eq!(parse_ms(Some(" 5000 "), 60_000), 5_000);
+        assert_eq!(parse_ms(Some("0"), 60_000), 0);
+        assert_eq!(
+            session_limits_sql(30_000, 0),
+            "SET statement_timeout = 30000; SET idle_in_transaction_session_timeout = 0;"
+        );
+    }
 
     #[test]
     fn parse_pool_size_defaults_when_absent_or_garbage() {

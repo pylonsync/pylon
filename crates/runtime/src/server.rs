@@ -5087,7 +5087,8 @@ fn start_server(
         }
 
         // --- Deep health: shallow /health + a 500ms responsive-
-        // ness probe on the bun function runtime. Distinct route so
+        // ness probe on the bun function runtime and, on Postgres, a
+        // 2s database probe (a free pool slot + SELECT 1). Distinct route so
         // operators can choose: /health for "is the listener up?"
         // (Fly's default — fast, never blocks on app state), or
         // /health/deep for "is the runtime responsive enough to
@@ -5124,7 +5125,15 @@ fn start_server(
             let probe = match fn_ops_ref.as_deref() {
                 Some(ops) => ops.pool.health_probe(std::time::Duration::from_millis(500)),
                 None => Ok(()), // no runtime configured = nothing to probe
-            };
+            }
+            // The database too: a pool that cannot hand out a connection
+            // fails every request while the listener still answers /health.
+            .and_then(|()| match rt.pg_shared_pool() {
+                Some(pool) => pool
+                    .health_probe(std::time::Duration::from_secs(2))
+                    .map_err(|e| format!("database: {e}")),
+                None => Ok(()),
+            });
             let (status, runtime_status, reason) = match probe {
                 Ok(()) => (200u16, "ok", String::new()),
                 Err(msg) => (503u16, "degraded", msg),

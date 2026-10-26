@@ -1023,6 +1023,15 @@ pub mod live {
     /// (or absent) still uses the OS trust store via rustls-native-certs.
     pub fn connect_pg(url: &str) -> Result<postgres::Client, String> {
         let (cleaned, ssl) = parse_pg_url_ssl(url);
+        let mut config: postgres::Config = cleaned
+            .parse()
+            .map_err(|e| format!("PG connect: {}", error_chain(&e)))?;
+        // Without a connect timeout, a database host that drops packets
+        // leaves the connect blocked on the OS TCP timeout (minutes), and a
+        // booting server sits there without listening or logging.
+        if config.get_connect_timeout().is_none() {
+            config.connect_timeout(connect_timeout_from_env());
+        }
         if ssl.use_tls {
             let mut roots = rustls::RootCertStore::empty();
             if let Some(path) = ssl.ca_path.as_deref() {
@@ -1065,15 +1074,57 @@ pub mod live {
                     );
                 }
             }
-            let config = rustls::ClientConfig::builder()
+            let tls_config = rustls::ClientConfig::builder()
                 .with_root_certificates(roots)
                 .with_no_client_auth();
-            let tls = tokio_postgres_rustls::MakeRustlsConnect::new(config);
-            postgres::Client::connect(&cleaned, tls).map_err(|e| format!("PG connect: {e}"))
+            let tls = tokio_postgres_rustls::MakeRustlsConnect::new(tls_config);
+            config
+                .connect(tls)
+                .map_err(|e| format!("PG connect: {}", error_chain(&e)))
         } else {
-            postgres::Client::connect(&cleaned, postgres::NoTls)
-                .map_err(|e| format!("PG connect: {e}"))
+            config
+                .connect(postgres::NoTls)
+                .map_err(|e| format!("PG connect: {}", error_chain(&e)))
         }
+    }
+
+    /// The error and every cause under it, joined with ": ". The postgres
+    /// crate's own message for a failed connect is only "error connecting to
+    /// server"; the cause (refused, timed out, TLS, DNS) is in the source.
+    pub fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
+        let mut out = e.to_string();
+        let mut source = e.source();
+        while let Some(cause) = source {
+            let text = cause.to_string();
+            if !out.ends_with(&text) {
+                out.push_str(": ");
+                out.push_str(&text);
+            }
+            source = cause.source();
+        }
+        out
+    }
+
+    /// Default for how long one connect attempt waits, when the URL has no
+    /// `connect_timeout` and `PYLON_PG_CONNECT_TIMEOUT_SECS` is unset.
+    const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 10;
+
+    fn connect_timeout_from_env() -> std::time::Duration {
+        parse_connect_timeout(
+            std::env::var("PYLON_PG_CONNECT_TIMEOUT_SECS")
+                .ok()
+                .as_deref(),
+        )
+    }
+
+    /// Zero or an unparseable value falls back to the default: zero would
+    /// mean "wait forever", which is the problem this setting removes.
+    pub(crate) fn parse_connect_timeout(raw: Option<&str>) -> std::time::Duration {
+        let secs = raw
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_CONNECT_TIMEOUT_SECS);
+        std::time::Duration::from_secs(secs)
     }
 
     /// A single Postgres connection that heals itself when the server
@@ -1254,6 +1305,47 @@ pub mod live {
             format!("{}?{}", base, kept.join("&"))
         };
         (cleaned, PgUrlSsl { use_tls, ca_path })
+    }
+
+    #[cfg(test)]
+    mod connect_tests {
+        use super::{connect_pg, error_chain, parse_connect_timeout};
+        use std::time::{Duration, Instant};
+
+        #[test]
+        fn connect_timeout_defaults_and_parses() {
+            assert_eq!(parse_connect_timeout(None), Duration::from_secs(10));
+            assert_eq!(parse_connect_timeout(Some("0")), Duration::from_secs(10));
+            assert_eq!(parse_connect_timeout(Some("nope")), Duration::from_secs(10));
+            assert_eq!(parse_connect_timeout(Some(" 3 ")), Duration::from_secs(3));
+        }
+
+        #[test]
+        fn error_chain_includes_the_cause() {
+            let inner = std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out");
+            let outer = std::io::Error::other(inner);
+            // io::Error::other wraps: the outer message is the inner one,
+            // so the chain must not repeat it.
+            assert_eq!(error_chain(&outer), "timed out");
+        }
+
+        /// A host that drops packets fails within the connect timeout
+        /// instead of blocking on the OS TCP timeout. 10.255.255.1 is a
+        /// non-routable address; no Postgres is needed.
+        #[test]
+        fn connect_to_a_silent_host_gives_up_within_the_timeout() {
+            let started = Instant::now();
+            let Err(err) = connect_pg("postgres://u:p@10.255.255.1:5432/db?connect_timeout=1")
+            else {
+                panic!("nothing listens there");
+            };
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "took {:?}",
+                started.elapsed()
+            );
+            assert!(err.starts_with("PG connect: "), "{err}");
+        }
     }
 
     #[cfg(test)]
