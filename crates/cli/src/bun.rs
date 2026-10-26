@@ -245,19 +245,8 @@ fn enclosing_bun_workspace(pkg_dir: &Path) -> Option<PathBuf> {
     let pkg_dir = pkg_dir.canonicalize().ok()?;
     let mut ancestor = pkg_dir.clone();
     while ancestor.pop() {
-        let Ok(text) = std::fs::read_to_string(ancestor.join("package.json")) else {
+        let Some(patterns) = workspace_patterns(&ancestor) else {
             continue;
-        };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
-            continue;
-        };
-        let patterns = match value.get("workspaces") {
-            Some(serde_json::Value::Array(list)) => list.clone(),
-            Some(serde_json::Value::Object(obj)) => match obj.get("packages") {
-                Some(serde_json::Value::Array(list)) => list.clone(),
-                _ => continue,
-            },
-            _ => continue,
         };
         let Ok(rel) = pkg_dir.strip_prefix(&ancestor) else {
             continue;
@@ -280,6 +269,21 @@ fn enclosing_bun_workspace(pkg_dir: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// The `workspaces` globs of the package.json in `dir`: an array, or the
+/// `packages` array of an object. `None` when `dir` is not a workspace root.
+fn workspace_patterns(dir: &Path) -> Option<Vec<serde_json::Value>> {
+    let text = std::fs::read_to_string(dir.join("package.json")).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&text).ok()?;
+    match value.get("workspaces")? {
+        serde_json::Value::Array(list) => Some(list.clone()),
+        serde_json::Value::Object(obj) => match obj.get("packages")? {
+            serde_json::Value::Array(list) => Some(list.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// Whether a `workspaces` glob matches a member's path segments. `*`
@@ -465,8 +469,12 @@ fn bun_install_in_dir_with_source(
     // itself, so they stay in package.json. Stripping them there is
     // harmful: Bun 1.4's isolated linker removes the node_modules links of
     // dependencies package.json no longer declares, and the eval then
-    // fails with "Cannot find module '@pylonsync/sdk'".
-    let workspace_root = enclosing_bun_workspace(pkg_dir);
+    // fails with "Cannot find module '@pylonsync/sdk'". The app can be a
+    // member of a workspace above it, or the workspace root itself, as in
+    // an image that copies its workspace packages under the app (Stack0
+    // Cloud's /app/packages/suite).
+    let workspace_root = enclosing_bun_workspace(pkg_dir)
+        .or_else(|| workspace_patterns(pkg_dir).map(|_| pkg_dir.to_path_buf()));
     // pkg_json_backup_path declared at the top for the crash-recovery
     // block; the strip path below reuses the same binding.
     let restore_after = if workspace_root.is_none()
@@ -1113,6 +1121,57 @@ mod tests {
         let resolve = std::process::Command::new("bun")
             .args(["-e", "await import('lib')"])
             .current_dir(&app)
+            .output()
+            .unwrap();
+        assert!(resolve.status.success(), "{resolve:?}");
+    }
+
+    /// An app that is itself the workspace root keeps its workspace:* deps
+    /// through the install. Stack0 Cloud's image lays out /app/package.json
+    /// with `workspaces: ["packages/*"]` and its suite under
+    /// /app/packages/suite; on Bun 1.4.4 the strip made `pylon codegen`
+    /// unlink @stack0/suite and every function importing it failed to load.
+    #[test]
+    fn a_workspace_root_app_installs_without_stripping_workspace_deps() {
+        if std::process::Command::new("bun")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipped: bun is not on PATH");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let app = tmp.path();
+        let app_pkg = r#"{"name": "app", "private": true, "workspaces": ["packages/*"], "dependencies": {"suite": "workspace:*"}}"#;
+        write(&app.join("package.json"), app_pkg);
+        write(
+            &app.join("packages/suite/package.json"),
+            r#"{"name": "suite", "version": "1.0.0", "main": "index.ts"}"#,
+        );
+        write(
+            &app.join("packages/suite/index.ts"),
+            "export const x = 1;\n",
+        );
+        write(&app.join("app.ts"), "");
+        let install = std::process::Command::new("bun")
+            .arg("install")
+            .current_dir(app)
+            .output()
+            .unwrap();
+        assert!(install.status.success(), "{install:?}");
+        assert!(app.join("node_modules/suite/package.json").is_file());
+
+        ensure_npm_deps_installed(app.join("app.ts").to_str().unwrap(), true).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(app.join("package.json")).unwrap(),
+            app_pkg
+        );
+        assert!(app.join("node_modules/suite/package.json").is_file());
+        let resolve = std::process::Command::new("bun")
+            .args(["-e", "await import('suite')"])
+            .current_dir(app)
             .output()
             .unwrap();
         assert!(resolve.status.success(), "{resolve:?}");
