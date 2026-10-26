@@ -7,6 +7,8 @@ pub mod pg_exec;
 #[cfg(feature = "postgres-live")]
 mod pg_graph;
 #[cfg(feature = "postgres-live")]
+pub mod pg_row_filter;
+#[cfg(feature = "postgres-live")]
 pub mod pg_search;
 #[cfg(feature = "postgres-live")]
 pub mod pg_tx_store;

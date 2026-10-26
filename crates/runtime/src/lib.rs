@@ -89,6 +89,7 @@ pub mod shard_tickets;
 pub mod shard_wasm;
 pub mod shard_ws;
 pub mod shard_wt;
+mod sqlite_row_filter;
 pub mod sse;
 pub mod ssr_cache;
 pub mod stream_hub;
@@ -3950,57 +3951,19 @@ impl Runtime {
         after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<serde_json::Value>, RuntimeError> {
-        if let Some(pg) = self.pg_backend() {
-            let mut rows = pylon_http::DataStore::list_after(&pg.store, entity, after, limit)
-                .map_err(data_err_to_runtime)?;
-            for r in rows.iter_mut() {
-                self.normalize_row_on_read(entity, r);
-            }
-            return Ok(rows);
-        }
-        let ent = self.require_entity(entity)?;
-        let conn = self.lock_read_conn()?;
+        self.scan(entity, after, limit, None, false)
+    }
 
-        let fields = ent.fields.as_slice();
-        let table = quote_ident(entity);
-
-        let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match after {
-            Some(cursor) => (
-                format!(
-                    "SELECT * FROM {} WHERE \"id\" > ?1 ORDER BY \"id\" LIMIT ?2",
-                    table
-                ),
-                vec![Box::new(cursor.to_string()), Box::new(limit as i64)],
-            ),
-            None => (
-                format!("SELECT * FROM {} ORDER BY \"id\" LIMIT ?1", table),
-                vec![Box::new(limit as i64)],
-            ),
-        };
-
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-            params.iter().map(|v| v.as_ref()).collect();
-
-        let mut stmt = conn.prepare_cached(&sql).map_err(|e| RuntimeError {
-            code: "QUERY_FAILED".into(),
-            message: format!("Failed to prepare query: {e}"),
-        })?;
-
-        let rows = stmt
-            .query_map(param_refs.as_slice(), |row| Ok(row_to_json(row, fields)))
-            .map_err(|e| RuntimeError {
-                code: "QUERY_FAILED".into(),
-                message: format!("Query failed: {e}"),
-            })?;
-
-        let mut result = Vec::new();
-        for row in rows {
-            if let Ok(mut val) = row {
-                self.normalize_row_on_read(entity, &mut val);
-                result.push(val);
-            }
-        }
-        Ok(result)
+    /// [`Runtime::list_after`], reading only rows that can pass `filter`
+    /// (see [`pylon_http::DataStore::list_after_filtered`]).
+    pub fn list_after_filtered(
+        &self,
+        entity: &str,
+        after: Option<&str>,
+        limit: usize,
+        filter: &pylon_kernel::row_filter::RowFilter,
+    ) -> Result<Vec<serde_json::Value>, RuntimeError> {
+        self.scan(entity, after, limit, Some(filter), false)
     }
 
     /// Rows in DESCENDING id order (newest first), starting strictly below
@@ -4017,10 +3980,45 @@ impl Runtime {
         before: Option<&str>,
         limit: usize,
     ) -> Result<Vec<serde_json::Value>, RuntimeError> {
+        self.scan(entity, before, limit, None, true)
+    }
+
+    /// [`Runtime::list_last`], reading only rows that can pass `filter`.
+    pub fn list_last_filtered(
+        &self,
+        entity: &str,
+        before: Option<&str>,
+        limit: usize,
+        filter: &pylon_kernel::row_filter::RowFilter,
+    ) -> Result<Vec<serde_json::Value>, RuntimeError> {
+        self.scan(entity, before, limit, Some(filter), true)
+    }
+
+    /// Up to `limit` rows in id order (`descending` or not) past the `from`
+    /// id, keeping only rows that can pass `filter` when one is given.
+    fn scan(
+        &self,
+        entity: &str,
+        from: Option<&str>,
+        limit: usize,
+        filter: Option<&pylon_kernel::row_filter::RowFilter>,
+        descending: bool,
+    ) -> Result<Vec<serde_json::Value>, RuntimeError> {
         if let Some(pg) = self.pg_backend() {
-            let mut rows = pylon_http::DataStore::list_last(&pg.store, entity, before, limit)
-                .map_err(data_err_to_runtime)?
-                .unwrap_or_default();
+            use pylon_http::DataStore as _;
+            let mut rows = match (filter, descending) {
+                (None, false) => pg.store.list_after(entity, from, limit),
+                (Some(filter), false) => pg.store.list_after_filtered(entity, from, limit, filter),
+                (None, true) => pg
+                    .store
+                    .list_last(entity, from, limit)
+                    .map(Option::unwrap_or_default),
+                (Some(filter), true) => pg
+                    .store
+                    .list_last_filtered(entity, from, limit, filter)
+                    .map(Option::unwrap_or_default),
+            }
+            .map_err(data_err_to_runtime)?;
             for r in rows.iter_mut() {
                 self.normalize_row_on_read(entity, r);
             }
@@ -4031,28 +4029,47 @@ impl Runtime {
         let fields = ent.fields.as_slice();
         let table = quote_ident(entity);
 
-        let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match before {
-            Some(cursor) => (
-                format!(
-                    "SELECT * FROM {} WHERE \"id\" < ?1 ORDER BY \"id\" DESC LIMIT ?2",
-                    table
-                ),
-                vec![Box::new(cursor.to_string()), Box::new(limit as i64)],
-            ),
-            None => (
-                format!("SELECT * FROM {} ORDER BY \"id\" DESC LIMIT ?1", table),
-                vec![Box::new(limit as i64)],
-            ),
+        let mut params: Vec<rusqlite::types::Value> = Vec::new();
+        let mut clauses = Vec::new();
+        if let Some(cursor) = from {
+            params.push(cursor.to_string().into());
+            let op = if descending { "<" } else { ">" };
+            clauses.push(format!("t.\"id\" {op} ?1"));
+        }
+        params.push((limit as i64).into());
+        let limit_param = params.len();
+        if let Some(filter) = filter {
+            let mut values = Vec::new();
+            let rendered = sqlite_row_filter::render(
+                entity,
+                filter,
+                &self.entities,
+                params.len() + 1,
+                &mut values,
+            );
+            params.extend(values);
+            if rendered.sql != "TRUE" {
+                clauses.push(rendered.sql);
+            }
+        }
+        let where_clause = if clauses.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", clauses.join(" AND "))
         };
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-            params.iter().map(|v| v.as_ref()).collect();
+        let direction = if descending { "DESC" } else { "ASC" };
+        let sql = format!(
+            "SELECT * FROM {table} t{where_clause} ORDER BY t.\"id\" {direction} LIMIT ?{limit_param}"
+        );
 
         let mut stmt = conn.prepare_cached(&sql).map_err(|e| RuntimeError {
             code: "QUERY_FAILED".into(),
             message: format!("Failed to prepare query: {e}"),
         })?;
         let rows = stmt
-            .query_map(param_refs.as_slice(), |row| Ok(row_to_json(row, fields)))
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                Ok(row_to_json(row, fields))
+            })
             .map_err(|e| RuntimeError {
                 code: "QUERY_FAILED".into(),
                 message: format!("Query failed: {e}"),

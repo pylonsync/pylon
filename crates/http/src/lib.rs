@@ -145,6 +145,21 @@ pub trait DataStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<serde_json::Value>, DataError>;
 
+    /// [`DataStore::list_after`], reading only rows that can pass `filter`
+    /// (a scan's own row check comes after: the filter may keep rows that
+    /// check drops, never the other way round). The default ignores the
+    /// filter and reads every row; a store that can run it in its query
+    /// overrides this.
+    fn list_after_filtered(
+        &self,
+        entity: &str,
+        after: Option<&str>,
+        limit: usize,
+        _filter: &pylon_kernel::row_filter::RowFilter,
+    ) -> Result<Vec<serde_json::Value>, DataError> {
+        self.list_after(entity, after, limit)
+    }
+
     /// Rows in DESCENDING id order — newest first — starting strictly below
     /// `before` when given. The mirror of [`DataStore::list_after`].
     ///
@@ -169,6 +184,18 @@ pub trait DataStore: Send + Sync {
         _limit: usize,
     ) -> Result<Option<Vec<serde_json::Value>>, DataError> {
         Ok(None)
+    }
+
+    /// [`DataStore::list_last`], reading only rows that can pass `filter`,
+    /// as [`DataStore::list_after_filtered`] does.
+    fn list_last_filtered(
+        &self,
+        entity: &str,
+        before: Option<&str>,
+        limit: usize,
+        _filter: &pylon_kernel::row_filter::RowFilter,
+    ) -> Result<Option<Vec<serde_json::Value>>, DataError> {
+        self.list_last(entity, before, limit)
     }
 
     fn update(&self, entity: &str, id: &str, data: &serde_json::Value) -> Result<bool, DataError>;

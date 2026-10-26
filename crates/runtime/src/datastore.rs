@@ -589,6 +589,16 @@ impl DataStore for Runtime {
         Runtime::list_after(self, entity, after, limit).map_err(into_data_error)
     }
 
+    fn list_after_filtered(
+        &self,
+        entity: &str,
+        after: Option<&str>,
+        limit: usize,
+        filter: &pylon_kernel::row_filter::RowFilter,
+    ) -> Result<Vec<serde_json::Value>, DataError> {
+        Runtime::list_after_filtered(self, entity, after, limit, filter).map_err(into_data_error)
+    }
+
     fn list_last(
         &self,
         entity: &str,
@@ -596,6 +606,18 @@ impl DataStore for Runtime {
         limit: usize,
     ) -> Result<Option<Vec<serde_json::Value>>, DataError> {
         Runtime::list_last(self, entity, before, limit)
+            .map(Some)
+            .map_err(into_data_error)
+    }
+
+    fn list_last_filtered(
+        &self,
+        entity: &str,
+        before: Option<&str>,
+        limit: usize,
+        filter: &pylon_kernel::row_filter::RowFilter,
+    ) -> Result<Option<Vec<serde_json::Value>>, DataError> {
+        Runtime::list_last_filtered(self, entity, before, limit, filter)
             .map(Some)
             .map_err(into_data_error)
     }

@@ -173,18 +173,137 @@ impl PgPool {
 pub struct PostgresDataStore {
     pool: Arc<PgPool>,
     manifest: AppManifest,
+    /// Column types per table, for [`DataStore::list_after_filtered`].
+    column_types: std::sync::Mutex<crate::pg_row_filter::ColumnTypes>,
+}
+
+/// Which way [`PostgresDataStore::scan_filtered`] walks ids.
+#[derive(Clone, Copy)]
+enum ScanOrder {
+    Ascending,
+    Descending,
 }
 
 impl PostgresDataStore {
     pub fn connect(url: &str, manifest: AppManifest) -> Result<Self, DataError> {
         let pool = PgPool::connect(url, pool_size_from_env(), checkout_timeout_from_env())?;
-        Ok(Self { pool, manifest })
+        Ok(Self {
+            pool,
+            manifest,
+            column_types: Default::default(),
+        })
     }
 
     /// Hand out an `Arc` to the underlying connection pool so the auxiliary
     /// auth backends share it instead of each opening a dedicated connection.
     pub fn shared_pool(&self) -> Arc<PgPool> {
         Arc::clone(&self.pool)
+    }
+
+    /// The column types of `tables`, from the cache unless `fresh` or a
+    /// table is not in it yet.
+    fn column_types(
+        &self,
+        client: &mut postgres::Client,
+        tables: &[&str],
+        fresh: bool,
+    ) -> Result<crate::pg_row_filter::ColumnTypes, DataError> {
+        let cached = {
+            let cache = self.column_types.lock().unwrap_or_else(|e| e.into_inner());
+            tables
+                .iter()
+                .map(|t| Some((t.to_string(), cache.get(*t)?.clone())))
+                .collect::<Option<crate::pg_row_filter::ColumnTypes>>()
+        };
+        if let Some(types) = cached.filter(|_| !fresh) {
+            return Ok(types);
+        }
+        let mut read = crate::pg_row_filter::column_types(client, tables)
+            .map_err(pg_tx_store::pg_err_to_data)?;
+        for table in tables {
+            read.entry(table.to_string()).or_default();
+        }
+        let mut cache = self.column_types.lock().unwrap_or_else(|e| e.into_inner());
+        for (table, types) in &read {
+            cache.insert(table.clone(), types.clone());
+        }
+        Ok(read)
+    }
+
+    /// Up to `limit` rows past the `from` id in `order` that can pass
+    /// `filter` (every row when `None`). The filter runs in the query; a
+    /// part of it on a column the table lacks, or holds as another type,
+    /// keeps more rows (see [`crate::pg_row_filter::render`]).
+    fn scan_filtered(
+        &self,
+        entity: &str,
+        from: Option<&str>,
+        limit: usize,
+        filter: Option<&pylon_kernel::row_filter::RowFilter>,
+        order: ScanOrder,
+    ) -> Result<Vec<serde_json::Value>, DataError> {
+        use crate::pg_row_filter;
+        let mut conn = self.checkout()?;
+        let first_param = if from.is_some() { 3 } else { 2 };
+        let mut tables = Vec::new();
+        if let Some(filter) = filter {
+            pg_row_filter::tables(entity, filter, &mut tables);
+        }
+        let (cursor_op, direction) = match order {
+            ScanOrder::Ascending => (">", "ASC"),
+            ScanOrder::Descending => ("<", "DESC"),
+        };
+        let table = crate::postgres::quote_ident_pub(entity);
+        let capped: i64 = limit.min(10_000) as i64;
+        // Cached column types first. A column the cache lacks (added
+        // since), or a statement the cached types got wrong (a column
+        // dropped or changed since), reads them again once.
+        let mut fresh = false;
+        loop {
+            let mut params: Vec<crate::postgres::JsonParam> = Vec::new();
+            let condition = match filter {
+                Some(filter) => {
+                    let types = self.column_types(conn.client_mut(), &tables, fresh)?;
+                    let rendered =
+                        pg_row_filter::render(entity, filter, &types, first_param, &mut params);
+                    if !rendered.exact && !fresh {
+                        fresh = true;
+                        continue;
+                    }
+                    rendered.sql
+                }
+                None => "TRUE".to_string(),
+            };
+            let mut bound: Vec<&(dyn postgres::types::ToSql + Sync)> = Vec::new();
+            let mut clauses = Vec::new();
+            if let Some(cursor) = &from {
+                bound.push(cursor);
+                clauses.push(format!("t.id {cursor_op} $1"));
+            }
+            if condition != "TRUE" {
+                clauses.push(condition);
+            }
+            bound.push(&capped);
+            bound.extend(
+                params
+                    .iter()
+                    .map(|p| p as &(dyn postgres::types::ToSql + Sync)),
+            );
+            let where_clause = if clauses.is_empty() {
+                String::new()
+            } else {
+                format!(" WHERE {}", clauses.join(" AND "))
+            };
+            let limit_param = first_param - 1;
+            let sql = format!(
+                "SELECT * FROM {table} t{where_clause} ORDER BY t.id {direction} LIMIT ${limit_param}"
+            );
+            match conn.client_mut().query(sql.as_str(), &bound) {
+                Ok(rows) => return Ok(rows.iter().map(crate::postgres::row_to_json_pub).collect()),
+                Err(_) if filter.is_some() && !fresh => fresh = true,
+                Err(e) => return Err(pg_tx_store::pg_err_to_data(e)),
+            }
+        }
     }
 
     /// Acquire a live connection from the shared pool. See [`PgPool::checkout`].
@@ -419,6 +538,38 @@ impl DataStore for PostgresDataStore {
     ) -> Result<Vec<serde_json::Value>, DataError> {
         let mut conn = self.checkout()?;
         conn.list_after(entity, after, limit).map_err(Self::map_err)
+    }
+
+    /// Runs the filter in the query: `WHERE id > $1 AND (<filter>)`.
+    fn list_after_filtered(
+        &self,
+        entity: &str,
+        after: Option<&str>,
+        limit: usize,
+        filter: &pylon_kernel::row_filter::RowFilter,
+    ) -> Result<Vec<serde_json::Value>, DataError> {
+        self.scan_filtered(entity, after, limit, Some(filter), ScanOrder::Ascending)
+    }
+
+    fn list_last(
+        &self,
+        entity: &str,
+        before: Option<&str>,
+        limit: usize,
+    ) -> Result<Option<Vec<serde_json::Value>>, DataError> {
+        self.scan_filtered(entity, before, limit, None, ScanOrder::Descending)
+            .map(Some)
+    }
+
+    fn list_last_filtered(
+        &self,
+        entity: &str,
+        before: Option<&str>,
+        limit: usize,
+        filter: &pylon_kernel::row_filter::RowFilter,
+    ) -> Result<Option<Vec<serde_json::Value>>, DataError> {
+        self.scan_filtered(entity, before, limit, Some(filter), ScanOrder::Descending)
+            .map(Some)
     }
 
     fn update(&self, entity: &str, id: &str, data: &serde_json::Value) -> Result<bool, DataError> {
