@@ -308,6 +308,7 @@ fn handle_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
 /// frame even if writes land mid-pagination.
 fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
     const RAW_FETCH_CHUNK: usize = 200;
+    const FILTERED_FETCH_CHUNK: usize = 1000;
     let mut page = PageBudget::new(requested_page_rows(url));
 
     let snapshot_after_raw: Option<String> = url
@@ -466,6 +467,12 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
         // properties synced 70, with no error. Rows dropped by the policy
         // just mean fewer than `cap` arrive, which the contract allows:
         // `sync_limit` is a ceiling, not a quota.
+        // Read only the rows the caller's scope can keep (the store runs
+        // the scope in its query where it can); the checks below still
+        // decide each row.
+        let scope_filter = ctx
+            .policy_engine
+            .sync_scope_filter(&entity.name, ctx.auth_ctx);
         if let Some(cap) = entity.sync_limit {
             // Paged rather than one `list_last(cap)` fetch: the cap counts
             // VISIBLE rows, and visibility is decided per row by the read
@@ -484,11 +491,18 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
             // Where the walk paused, when it did: the continuation.
             let mut paused = false;
             'tail: while emitted_for_entity + batch.len() < cap {
-                let rows = match ctx.store.list_last(
-                    &entity.name,
-                    before.as_deref(),
-                    RAW_FETCH_CHUNK,
-                ) {
+                let read = match &scope_filter {
+                    Some(filter) => ctx.store.list_last_filtered(
+                        &entity.name,
+                        before.as_deref(),
+                        RAW_FETCH_CHUNK,
+                        filter,
+                    ),
+                    None => ctx
+                        .store
+                        .list_last(&entity.name, before.as_deref(), RAW_FETCH_CHUNK),
+                };
+                let rows = match read {
                     Ok(Some(rows)) => rows,
                     // Store can't scan backwards — fall through to the
                     // ascending walk rather than failing the snapshot.
@@ -590,12 +604,25 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
             }
         }
 
+        // Rows that come through a scope mostly pass: read them in larger
+        // chunks.
+        let chunk = match scope_filter {
+            Some(_) => FILTERED_FETCH_CHUNK,
+            None => RAW_FETCH_CHUNK,
+        };
         loop {
-            let raw = match ctx.store.list_after(
-                &entity.name,
-                entity_after.as_deref(),
-                RAW_FETCH_CHUNK,
-            ) {
+            let read = match &scope_filter {
+                Some(filter) => ctx.store.list_after_filtered(
+                    &entity.name,
+                    entity_after.as_deref(),
+                    chunk,
+                    filter,
+                ),
+                None => ctx
+                    .store
+                    .list_after(&entity.name, entity_after.as_deref(), chunk),
+            };
+            let raw = match read {
                 Ok(r) => r,
                 Err(e) => {
                     // Mid-snapshot read failure. The original code
@@ -728,7 +755,7 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
                     break 'outer;
                 }
             }
-            if raw_len < RAW_FETCH_CHUNK {
+            if raw_len < chunk {
                 break;
             }
         }

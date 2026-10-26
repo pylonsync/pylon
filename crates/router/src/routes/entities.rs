@@ -127,6 +127,20 @@ pub(crate) fn handle(
                 // `next_cursor` returned to the client is the last
                 // visible id (the contract callers depend on).
                 const RAW_BATCH: usize = 200;
+                // A replication fetch reads only the rows its scope can keep
+                // (the store runs the scope in its query where it can); the
+                // checks below still decide each row. Those rows mostly pass,
+                // so they come in larger batches.
+                let scope_filter = replication_fetch
+                    .then(|| {
+                        ctx.policy_engine
+                            .sync_scope_filter(entity_name, ctx.auth_ctx)
+                    })
+                    .flatten();
+                let raw_batch = match scope_filter {
+                    Some(_) => (limit + 1).clamp(RAW_BATCH, 1000),
+                    None => RAW_BATCH,
+                };
                 let manifest = ctx.store.manifest();
                 let auth_user = &manifest.auth.user;
                 let mut visible: Vec<serde_json::Value> = Vec::new();
@@ -134,18 +148,26 @@ pub(crate) fn handle(
                 let mut source_exhausted = false;
                 let mut fetch_error: Option<pylon_http::DataError> = None;
                 while visible.len() <= limit && !source_exhausted {
-                    let raw =
-                        match ctx
-                            .store
-                            .list_after(entity_name, current_after.as_deref(), RAW_BATCH)
-                        {
-                            Ok(r) => r,
-                            Err(e) => {
-                                fetch_error = Some(e);
-                                break;
-                            }
-                        };
-                    if raw.len() < RAW_BATCH {
+                    let read = match &scope_filter {
+                        Some(filter) => ctx.store.list_after_filtered(
+                            entity_name,
+                            current_after.as_deref(),
+                            raw_batch,
+                            filter,
+                        ),
+                        None => {
+                            ctx.store
+                                .list_after(entity_name, current_after.as_deref(), raw_batch)
+                        }
+                    };
+                    let raw = match read {
+                        Ok(r) => r,
+                        Err(e) => {
+                            fetch_error = Some(e);
+                            break;
+                        }
+                    };
+                    if raw.len() < raw_batch {
                         source_exhausted = true;
                     }
                     for row in raw {

@@ -999,9 +999,11 @@ fn snapshot_pull_bounds_rows_scanned_for_sparse_policy() {
     // walk stopped at the budget and returned what it had with no
     // continuation: after a bulk import of rows another caller sees, every
     // in-scope row older than `budget` of them was silently left out (a
-    // Veritas rep with ~7,400 in-scope properties synced 70).
+    // Veritas rep with ~7,400 in-scope properties synced 70). The scope is
+    // one the store cannot run in its query (`len`), so the walk reads the
+    // out-of-scope rows too.
     let capped =
-        Arc::new(Runtime::in_memory(scoped_manifest("data.body == \"mine\"", Some(100))).unwrap());
+        Arc::new(Runtime::in_memory(scoped_manifest("len(data.body) == 4", Some(100))).unwrap());
     for i in 0..30 {
         capped
             .insert(

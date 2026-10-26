@@ -723,6 +723,7 @@ jobs:
           cargo test -p pylon-runtime --test postgres_auth_backends -- --test-threads=1
           cargo test -p pylon-runtime --test filtered_count -- --test-threads=1
           cargo test -p pylon-runtime --test postgres_change_log -- --test-threads=1
+          cargo test -p pylon-runtime --test sync_scope_scan --test sync_scope_filter_parity -- --test-threads=1
           cargo test -p pylon-runtime --lib pg_workflow_store -- --test-threads=1
           cargo test -p pylon-runtime --lib search_reconcile::tests::pg -- --test-threads=1
           cargo test -p pylon-storage --features postgres-live --test postgres_performance --test postgres_live -- --test-threads=1
