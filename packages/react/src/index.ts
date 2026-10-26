@@ -212,8 +212,14 @@ export { useAppUpdate } from "./useAppUpdate";
 export type { UseAppUpdateReturn } from "./useAppUpdate";
 export { AppUpdateBar } from "./AppUpdateBar";
 export type { AppUpdateBarProps } from "./AppUpdateBar";
-export { createAppUpdate, AppUpdater } from "./appUpdate";
-export type { AppBuild, AppUpdateState, AppUpdateEnv } from "./appUpdate";
+export { createAppUpdate, AppUpdater, moveToLatestBuild } from "./appUpdate";
+export type {
+  AppBuild,
+  AppUpdateState,
+  AppUpdateEnv,
+  BuildMove,
+  MoveOptions,
+} from "./appUpdate";
 
 // One-liner API
 export { db, init, getSync, setSessionToken } from "./db";

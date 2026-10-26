@@ -26,6 +26,7 @@ import React, {
   useState,
   type ComponentType,
 } from "react";
+import { appUpdate } from "./appUpdate";
 
 export interface DynamicOptions {
   /** Rendered while the chunk loads (and, when `ssr` is false, on the server). */
@@ -47,6 +48,21 @@ export interface DynamicOptions {
 type Loader<P> = () => Promise<{ default: ComponentType<P> } | ComponentType<P>>;
 
 /** A module namespace or the component itself — accept both, like Next. */
+/**
+ * A chunk failed to load. After a deploy the server no longer has this
+ * build's chunks: move the page to the new build (an app with `offline`
+ * only; see `moveToLatestBuild`). Resolves true when the page is about to
+ * load the new build. Offline, or with the server on this build, the page
+ * stays as it is.
+ */
+async function movedAfterChunkError(): Promise<boolean> {
+  try {
+    return (await appUpdate.moveToLatestBuild({ recheck: true })) === "moving";
+  } catch {
+    return false;
+  }
+}
+
 function resolveComponent<P>(
   mod: { default: ComponentType<P> } | ComponentType<P>,
 ): ComponentType<P> {
@@ -78,7 +94,15 @@ export function dynamic<P extends object>(
     // saving — the component is in the tree the server rendered — so this is
     // for splitting code, not weight.
     const Lazy = lazy(async () => {
-      const mod = await loader();
+      let mod: Awaited<ReturnType<Loader<P>>>;
+      try {
+        mod = await loader();
+      } catch (err) {
+        // The page is loading the new build: keep the fallback up until it
+        // unloads, rather than handing the error to an error boundary.
+        if (await movedAfterChunkError()) return new Promise<never>(() => {});
+        throw err;
+      }
       return { default: resolveComponent<P>(mod) as ComponentType<any> };
     });
     const WithSuspense = (props: P) => (
@@ -95,9 +119,17 @@ export function dynamic<P extends object>(
   // real component swaps in from an effect, which never runs during SSR.
   //
   // The promise is cached on first use so remounts don't refetch, and so two
-  // instances of the same dynamic component share one request.
+  // instances of the same dynamic component share one request. A failed load
+  // is not kept: the next mount tries again (offline, then back online).
   let cached: Promise<ComponentType<P>> | null = null;
-  const load = () => (cached ??= Promise.resolve(loader()).then(resolveComponent<P>));
+  const load = () =>
+    (cached ??= Promise.resolve()
+      .then(loader)
+      .then(resolveComponent<P>)
+      .catch((err) => {
+        cached = null;
+        throw err;
+      }));
 
   const ClientOnly = (props: P) => {
     const [Loaded, setLoaded] = useState<ComponentType<P> | null>(null);
@@ -110,9 +142,12 @@ export function dynamic<P extends object>(
           if (alive) setLoaded(() => C);
         },
         (err) => {
-          // A chunk that fails to load (deploy mid-session, offline) leaves
-          // the fallback up rather than blanking the subtree.
-          console.error("[pylon] dynamic() failed to load a component:", err);
+          // A chunk that fails to load leaves the fallback up rather than
+          // blanking the subtree. After a deploy the page moves to the new
+          // build; offline it keeps the fallback.
+          void movedAfterChunkError().then((moving) => {
+            if (!moving) console.error("[pylon] dynamic() failed to load a component:", err);
+          });
         },
       );
       return () => {

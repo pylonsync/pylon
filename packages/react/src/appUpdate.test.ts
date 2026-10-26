@@ -99,6 +99,7 @@ function makeEnv(opts: {
   const fetches: string[] = [];
   const warnings: string[] = [];
   let reloads = 0;
+  const reloadUrls: Array<string | undefined> = [];
   const doc = {
     visibilityState: "visible",
     addEventListener: (_t: string, l: () => void) => docListeners.add(l),
@@ -138,8 +139,9 @@ function makeEnv(opts: {
       if (i >= 0) timers.splice(i, 1);
     },
     now: () => now,
-    reload: () => {
+    reload: (url) => {
       reloads++;
+      reloadUrls.push(url);
     },
     sessionStorage: opts.session ?? new MemoryStorage(),
     localStorage: opts.local ?? new MemoryStorage(),
@@ -163,6 +165,7 @@ function makeEnv(opts: {
     warnings,
     intervals,
     reloads: () => reloads,
+    reloadUrls,
     setLatest: (l: typeof latest) => {
       latest = l;
     },
@@ -458,4 +461,112 @@ test("the first check does not record a newer build's install identity", async (
   await u.check();
   expect(local.map.size).toBe(0);
   expect(u.getSnapshot().reinstallRecommended).toBe(false);
+});
+
+// ---------------------------------------------------------------------------
+// moveToLatestBuild: the client runtime moves an open page to a new deploy.
+// Veritas, after a deploy: the new worker waited for every tab to close, and
+// each click in an open tab became a full page load of the old build.
+// ---------------------------------------------------------------------------
+
+test("after a deploy, a click moves the page once: the waiting worker takes over and the link loads", async () => {
+  const reg = new FakeRegistration();
+  reg.waiting = new FakeWorker("v2");
+  const f = makeEnv({ latest: { version: "v2" }, registration: reg, pending: 0 });
+  const u = createAppUpdate({ build: BUILD, production: true, env: f.env });
+  await u.check();
+
+  const move = u.moveToLatestBuild({ url: "/leads", skipIfPendingWrites: true });
+  await settle();
+  expect(reg.waiting!.messages).toEqual([{ type: "pylon:skip-waiting" }]);
+  f.fireControllerChange();
+  expect(await move).toBe("moving");
+  expect(f.reloadUrls).toEqual(["/leads"]);
+
+  // More clicks before the page unloads: no second load.
+  expect(await u.moveToLatestBuild({ url: "/map" })).toBe("moving");
+  expect(f.reloads()).toBe(1);
+});
+
+test("a page that a move left on the old build does not move again", async () => {
+  const session = new MemoryStorage();
+  const first = makeEnv({ latest: { version: "v2" }, registration: null, session });
+  const u1 = createAppUpdate({ build: BUILD, production: true, env: first.env });
+  expect(await u1.moveToLatestBuild({ url: "/leads", recheck: true })).toBe("moving");
+
+  // The load came back on v1 (the server answered with the old build). The
+  // next click must not load again: that is the reload per click.
+  const second = makeEnv({ latest: { version: "v2" }, registration: null, session });
+  const u2 = createAppUpdate({ build: BUILD, production: true, env: second.env });
+  expect(await u2.moveToLatestBuild({ url: "/map", recheck: true })).toBe("blocked");
+  expect(await u2.moveToLatestBuild({ url: "/map", recheck: true })).toBe("blocked");
+  expect(second.reloads()).toBe(0);
+});
+
+test("a click with unsent writes does not wait for them; a failed file load does", async () => {
+  const reg = new FakeRegistration();
+  reg.waiting = new FakeWorker("v2");
+  const f = makeEnv({ latest: { version: "v2" }, registration: reg, pending: 1 });
+  const u = createAppUpdate({ build: BUILD, production: true, env: f.env });
+  await u.check();
+
+  expect(await u.moveToLatestBuild({ url: "/leads", skipIfPendingWrites: true })).toBe(
+    "pending-writes",
+  );
+  expect(reg.waiting!.messages).toEqual([]);
+
+  // The old build cannot show the next screen: wait for the writes, then move.
+  const move = u.moveToLatestBuild({ url: "/map", recheck: true });
+  await settle();
+  expect(u.getSnapshot().waitingForSync).toBe(true);
+  expect(reg.waiting!.messages).toEqual([]);
+  f.setPending(0);
+  await settle();
+  expect(reg.waiting!.messages).toEqual([{ type: "pylon:skip-waiting" }]);
+  f.fireControllerChange();
+  expect(await move).toBe("moving");
+  expect(f.reloadUrls).toEqual(["/map"]);
+});
+
+test("a failed file load while offline keeps the page", async () => {
+  const reg = new FakeRegistration();
+  const f = makeEnv({ latest: { version: "v2" }, registration: reg });
+  const u = createAppUpdate({ build: BUILD, production: true, env: f.env });
+  await u.check();
+  f.setLatest("offline");
+  expect(await u.moveToLatestBuild({ recheck: true })).toBe("offline");
+  expect(f.reloads()).toBe(0);
+});
+
+test("a page of the new build under the old worker lets its own worker take over", async () => {
+  // The tab loaded build v2 from the network, but the v1 worker still
+  // controls it and answers the build manifest from its cache.
+  const reg = new FakeRegistration();
+  reg.waiting = new FakeWorker("v2");
+  const f = makeEnv({ latest: { version: "v2" }, registration: reg });
+  const u = createAppUpdate({
+    build: { version: "v2", builtAt: null },
+    production: true,
+    env: f.env,
+  });
+  const move = u.moveToLatestBuild({ url: "/leads", recheck: true });
+  await settle();
+  expect(reg.waiting!.messages).toEqual([{ type: "pylon:skip-waiting" }]);
+  f.fireControllerChange();
+  expect(await move).toBe("moving");
+  expect(f.reloadUrls).toEqual(["/leads"]);
+});
+
+test("a failed file load with the server on this build does not move", async () => {
+  const f = makeEnv({ latest: { version: "v1" }, registration: new FakeRegistration() });
+  const u = createAppUpdate({ build: BUILD, production: true, env: f.env });
+  expect(await u.moveToLatestBuild({ recheck: true })).toBe("current");
+  expect(f.reloads()).toBe(0);
+});
+
+test("an app without offline does not move", async () => {
+  const f = makeEnv({ latest: { version: "v2" }, registration: null });
+  const u = createAppUpdate({ build: BUILD, production: false, env: f.env });
+  expect(await u.moveToLatestBuild({ recheck: true })).toBe("inert");
+  expect(f.fetches).toHaveLength(0);
 });

@@ -15,6 +15,25 @@ const { renderToStaticMarkup } = require("react-dom/server") as {
 };
 import React from "react";
 import { dynamic } from "./dynamic";
+import { appUpdate, type BuildMove, type MoveOptions } from "./appUpdate";
+
+/** Answer the page's build check with `result`; records each call. */
+function stubMove(result: BuildMove) {
+  const calls: MoveOptions[] = [];
+  const original = appUpdate.moveToLatestBuild;
+  appUpdate.moveToLatestBuild = async (options: MoveOptions = {}) => {
+    calls.push(options);
+    return result;
+  };
+  return { calls, restore: () => (appUpdate.moveToLatestBuild = original) };
+}
+
+function quietErrors() {
+  const orig = console.error;
+  const seen: unknown[][] = [];
+  console.error = (...args: unknown[]) => seen.push(args);
+  return { seen, restore: () => (console.error = orig) };
+}
 
 // @testing-library auto-registers cleanup when it finds a global afterEach;
 // bun:test doesn't provide one, so mounted trees would accumulate across tests
@@ -92,6 +111,66 @@ describe("dynamic() with ssr:false", () => {
       expect(screen.getByTestId("skeleton")).toBeDefined();
     } finally {
       console.error = orig;
+    }
+  });
+});
+
+describe("dynamic() after a deploy", () => {
+  // Veritas: the map's chunk 404'd after a deploy, and the page went blank.
+  test("a chunk the deploy removed moves the page to the new build", async () => {
+    const move = stubMove("moving");
+    const errors = quietErrors();
+    try {
+      const D = dynamic(async () => {
+        throw new TypeError("Failed to fetch dynamically imported module: /_pylon/build/chunks/map-loader-jk6q22q6.js");
+      }, { loading: Skeleton });
+      render(<D />);
+      await waitFor(() => expect(move.calls).toEqual([{ recheck: true }]));
+      expect(screen.getByTestId("skeleton")).toBeDefined();
+      // The page is loading the new build: nothing to report.
+      expect(errors.seen).toEqual([]);
+    } finally {
+      move.restore();
+      errors.restore();
+    }
+  });
+
+  test("offline, the fallback stays and the next mount tries again", async () => {
+    const move = stubMove("offline");
+    const errors = quietErrors();
+    try {
+      let online = false;
+      const D = dynamic(async () => {
+        if (!online) throw new TypeError("Failed to fetch");
+        return { default: Heavy };
+      }, { loading: Skeleton });
+      const first = render(<D />);
+      await waitFor(() => expect(errors.seen).toHaveLength(1));
+      expect(screen.getByTestId("skeleton")).toBeDefined();
+      first.unmount();
+      online = true;
+      render(<D />);
+      await waitFor(() => expect(screen.getByTestId("heavy")).toBeDefined());
+    } finally {
+      move.restore();
+      errors.restore();
+    }
+  });
+
+  test("with ssr:true, a removed chunk moves the page instead of throwing", async () => {
+    const move = stubMove("moving");
+    const errors = quietErrors();
+    try {
+      const D = dynamic(async () => {
+        throw new TypeError("Failed to fetch dynamically imported module");
+      }, { ssr: true, loading: Skeleton });
+      render(<D />);
+      await waitFor(() => expect(move.calls).toHaveLength(1));
+      await new Promise((r) => setTimeout(r, 20));
+      expect(screen.getByTestId("skeleton")).toBeDefined();
+    } finally {
+      move.restore();
+      errors.restore();
     }
   });
 });

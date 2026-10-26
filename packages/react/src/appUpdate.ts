@@ -19,6 +19,11 @@
 //   - `apply()` waits until the outbox has no pending writes, tells the
 //     waiting worker to take over (`pylon:skip-waiting`), and reloads once
 //     when it does.
+//   - `moveToLatestBuild()` is the same move, started by the client runtime
+//     instead of the app: on a navigation when the server already runs a
+//     newer build, and when a file of this page's build failed to load (a
+//     route entry or a `dynamic()` chunk the deploy removed). It loads the
+//     link's URL in the new build. A failure while offline does not move.
 //   - On an iOS home-screen app, a change to the manifest's name, icons,
 //     display mode or start URL sets `reinstallRecommended`: iOS reads those
 //     only when the app is added.
@@ -51,6 +56,31 @@ const RELOAD_KEY = "pylon:app-update:reload";
 
 /** localStorage: the install identity the home-screen app was added with. */
 const INSTALL_KEY = "pylon:app-update:install";
+
+/** What `moveToLatestBuild()` did. */
+export type BuildMove =
+  /** The page is loading the server's build. */
+  | "moving"
+  /** The server runs this page's build. */
+  | "current"
+  /** The server did not answer. */
+  | "offline"
+  /** Writes wait to be sent, and the caller asked not to wait for them. */
+  | "pending-writes"
+  /** The page reloaded from this build moments ago and still runs it. */
+  | "blocked"
+  /** No build to compare: `pylon dev`, SSR, or an app without `offline`. */
+  | "inert";
+
+export interface MoveOptions {
+  /** Load this URL in the new build. Default: reload the current URL. */
+  url?: string;
+  /** Ask the server for its build first, because a file failed to load.
+   *  Default: use what the last check found. */
+  recheck?: boolean;
+  /** Return `"pending-writes"` instead of waiting for pending writes. */
+  skipIfPendingWrites?: boolean;
+}
 
 /** One build of the app. */
 export interface AppBuild {
@@ -131,7 +161,8 @@ export interface AppUpdateEnv {
   setTimeout(fn: () => void, ms: number): unknown;
   clearTimeout(handle: unknown): void;
   now(): number;
-  reload(): void;
+  /** Reload the page, or load `url` when given. */
+  reload(url?: string): void;
   sessionStorage: StorageLike | null;
   localStorage: StorageLike | null;
   /** The page runs as an iOS home-screen app (`navigator.standalone`). */
@@ -200,7 +231,7 @@ export class AppUpdater {
   private running = false;
   private interval: unknown = null;
   private checking: Promise<void> | null = null;
-  private applyRun: Promise<void> | null = null;
+  private applyRun: Promise<boolean> | null = null;
   private reloading = false;
 
   constructor(envFactory: () => AppUpdateEnv | null) {
@@ -246,13 +277,44 @@ export class AppUpdater {
    * that did not change the build (so a page that calls `apply()` on its
    * own cannot reload in a loop).
    */
-  apply = (): Promise<void> => {
+  apply = (): Promise<void> => this.startApply().then(() => {});
+
+  /**
+   * Move to the server's build when it is not this page's: `apply()`, then
+   * load `url` (or reload). Resolves with what it did; on `"moving"` the
+   * page is about to unload. Never moves while the server cannot be reached,
+   * so an offline page keeps its screen.
+   */
+  moveToLatestBuild = async (options: MoveOptions = {}): Promise<BuildMove> => {
     const env = this.activeEnv();
-    if (!env) return Promise.resolve();
+    if (!env) return "inert";
+    if (this.reloading) return "moving";
+    if (options.recheck) {
+      this.latest = null;
+      await this.check();
+    }
+    const latest = this.latest?.version ?? null;
+    if (latest === null) return "offline";
+    // The server runs this page's build, but its worker still waits behind
+    // an older one, which answers with the older build's cached files (the
+    // build manifest among them, from a worker of an earlier Pylon). Let it take
+    // over.
+    const ownWorkerWaits = this.waitingVersion === this.build!.version;
+    if (latest === this.build!.version && !ownWorkerWaits) return "current";
+    if (options.skipIfPendingWrites && (env.pendingWrites()?.count() ?? 0) > 0) {
+      return "pending-writes";
+    }
+    return (await this.startApply(options.url)) ? "moving" : "blocked";
+  };
+
+  /** Run `apply()` once at a time; resolves with whether the page reloads. */
+  private startApply(url?: string): Promise<boolean> {
+    const env = this.activeEnv();
+    if (!env) return Promise.resolve(false);
     if (!this.applyRun) {
       this.applying = true;
       this.emit();
-      this.applyRun = this.runApply(env).finally(() => {
+      this.applyRun = this.runApply(env, url).finally(() => {
         this.applyRun = null;
         this.applying = false;
         this.waitingForSync = false;
@@ -415,7 +477,7 @@ export class AppUpdater {
     this.reinstall = stored.install !== latest.install;
   }
 
-  private async runApply(env: AppUpdateEnv): Promise<void> {
+  private async runApply(env: AppUpdateEnv, url?: string): Promise<boolean> {
     const from = this.build!.version;
     const last = readJson(env.sessionStorage, RELOAD_KEY);
     if (
@@ -428,7 +490,7 @@ export class AppUpdater {
         `[pylon] apply() reloaded ${Math.round((env.now() - last.at) / 1000)}s ago ` +
           `and the page still runs build ${from}. Not reloading again.`,
       );
-      return;
+      return false;
     }
 
     await this.drainOutbox(env);
@@ -468,13 +530,14 @@ export class AppUpdater {
     } else if (waiting) {
       waiting.postMessage({ type: "pylon:skip-waiting" });
     }
-    this.reload(env);
+    this.reload(env, url);
+    return true;
   }
 
-  private reload(env: AppUpdateEnv): void {
+  private reload(env: AppUpdateEnv, url?: string): void {
     if (this.reloading) return;
     this.reloading = true;
-    env.reload();
+    env.reload(url);
   }
 
   private drainOutbox(env: AppUpdateEnv): Promise<void> {
@@ -545,7 +608,7 @@ export function browserEnv(): AppUpdateEnv | null {
     setTimeout: (fn, ms) => setTimeout(fn, ms),
     clearTimeout: (h) => clearTimeout(h as any),
     now: () => Date.now(),
-    reload: () => window.location.reload(),
+    reload: (url) => (url ? window.location.assign(url) : window.location.reload()),
     sessionStorage: safeStorage(() => window.sessionStorage),
     localStorage: safeStorage(() => window.localStorage),
     iosStandalone: nav.standalone === true,
@@ -587,6 +650,16 @@ export const appUpdate = new AppUpdater(browserEnv);
  */
 export function configureAppUpdate(build: AppBuild | null, production: boolean): void {
   appUpdate.configure(build, production);
+}
+
+/**
+ * Move this page to the server's build when it runs another one. The SSR
+ * client runtime calls it on navigation and when a route entry fails to
+ * load; `dynamic()` calls it when a chunk fails to load. See
+ * `AppUpdater.moveToLatestBuild`.
+ */
+export function moveToLatestBuild(options?: MoveOptions): Promise<BuildMove> {
+  return appUpdate.moveToLatestBuild(options);
 }
 
 /** An updater with its own environment, for tests and for apps that
