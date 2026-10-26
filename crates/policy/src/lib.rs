@@ -231,6 +231,11 @@ pub struct PolicyEngine {
     /// Entity name → its `sync_scope` predicate, for entities that declare
     /// one. Replication-only: see [`PolicyEngine::check_sync_scope`].
     sync_scopes: HashMap<String, String>,
+    /// Entity name → field name → declared field type (encrypted fields
+    /// left out), for turning a scope
+    /// into a row filter a store can run (see
+    /// [`PolicyEngine::sync_scope_filter`]).
+    field_types: HashMap<String, HashMap<String, String>>,
     /// Set by the runtime after the row store comes up. None during
     /// boot + in unit tests that don't need `exists(...)` evaluation.
     /// `OnceLock` so set-once semantics are enforced (engine is shared
@@ -291,11 +296,29 @@ impl PolicyEngine {
             sync_scopes.insert(entity.name.clone(), expr.to_string());
         }
 
+        let field_types = manifest
+            .entities
+            .iter()
+            .map(|entity| {
+                // Encrypted fields are stored as ciphertext: a store cannot
+                // compare them, so they are left out.
+                let fields = entity
+                    .fields
+                    .iter()
+                    .filter(|f| !f.encrypted)
+                    .map(|f| (f.name.clone(), f.field_type.clone()))
+                    .chain(std::iter::once(("id".to_string(), "string".to_string())))
+                    .collect();
+                (entity.name.clone(), fields)
+            })
+            .collect();
+
         Self {
             entity_policies_by_name,
             action_policies,
             compiled,
             sync_scopes,
+            field_types,
             resolver: OnceLock::new(),
         }
     }
@@ -321,6 +344,38 @@ impl PolicyEngine {
             None => PolicyResult::Allowed,
             Some(expr) => self.eval_cached(expr, auth, row, None),
         }
+    }
+
+    /// The caller's replication scope for `entity_name` as a filter a store
+    /// can run in its scan: it keeps every row [`Self::check_sync_scope`]
+    /// allows, and may keep more, so the caller still checks each row it
+    /// reads. The parts that do not depend on the row (`auth`, roles,
+    /// `exists` without `data`) are decided now. `None` when the entity
+    /// declares no scope.
+    pub fn sync_scope_filter(
+        &self,
+        entity_name: &str,
+        auth: &AuthContext,
+    ) -> Option<pylon_kernel::row_filter::RowFilter> {
+        let expr = self.sync_scopes.get(entity_name)?;
+        let Some(Ok(ast)) = self.compiled.get(expr.as_str()) else {
+            // A scope that does not parse denies every row.
+            return Some(pylon_kernel::row_filter::RowFilter::Nothing);
+        };
+        let env = EvalEnv {
+            auth,
+            data: None,
+            input: None,
+            resolver: self.resolver(),
+            now_epoch: pylon_kernel::util::now_epoch_secs(),
+            now: std::cell::OnceCell::new(),
+        };
+        let filter = ScopeFilter {
+            env: &env,
+            entity: entity_name,
+            field_types: &self.field_types,
+        };
+        Some(filter.build(ast, true))
     }
 
     /// Does `entity_name` declare a replication scope at all? Lets a caller
@@ -944,6 +999,202 @@ pub fn evaluate_update_expression(
             policy_name,
             reason: format!("{reason} (checked against the row after the update)"),
         },
+    }
+}
+
+/// How far a row filter widens a bound read from the clock (`ago(...)`,
+/// `now`). The filter is built once per page and the row check runs later
+/// with a later `now`; the filter must not drop a row the check keeps.
+const CLOCK_SLACK_SECS: i64 = 3600;
+
+/// Builds a [`pylon_kernel::row_filter::RowFilter`] from a scope: see
+/// [`PolicyEngine::sync_scope_filter`].
+struct ScopeFilter<'a> {
+    env: &'a EvalEnv<'a>,
+    entity: &'a str,
+    field_types: &'a HashMap<String, HashMap<String, String>>,
+}
+
+impl ScopeFilter<'_> {
+    /// A filter for `ast`. With `keep_more` it keeps at least every row
+    /// `ast` allows; without (under a `!`) it keeps at most those rows.
+    /// What cannot be expressed becomes "every row" or "no row" to match.
+    fn build(&self, ast: &Ast, keep_more: bool) -> pylon_kernel::row_filter::RowFilter {
+        use pylon_kernel::row_filter::RowFilter;
+        let unknown = || {
+            if keep_more {
+                RowFilter::All
+            } else {
+                RowFilter::Nothing
+            }
+        };
+        if !ast.uses_row() {
+            return match self.env.eval(ast) {
+                EvalResult::True => RowFilter::All,
+                EvalResult::False(_) => RowFilter::Nothing,
+            };
+        }
+        match ast {
+            Ast::Not(inner) => RowFilter::negate(self.build(inner, !keep_more)),
+            Ast::And(l, r) => RowFilter::and(self.build(l, keep_more), self.build(r, keep_more)),
+            Ast::Or(l, r) => RowFilter::or(self.build(l, keep_more), self.build(r, keep_more)),
+            Ast::Eq(l, r) => self.compare(l, r, Ordering::Equal, false, keep_more),
+            Ast::Neq(l, r) => {
+                RowFilter::negate(self.compare(l, r, Ordering::Equal, false, !keep_more))
+            }
+            Ast::Lt(l, r) => self.compare(l, r, Ordering::Less, false, keep_more),
+            Ast::Lte(l, r) => self.compare(l, r, Ordering::Less, true, keep_more),
+            Ast::Gt(l, r) => self.compare(l, r, Ordering::Greater, false, keep_more),
+            Ast::Gte(l, r) => self.compare(l, r, Ordering::Greater, true, keep_more),
+            Ast::Exists { entity, conditions } => {
+                self.exists(entity, conditions).unwrap_or_else(unknown)
+            }
+            _ => unknown(),
+        }
+    }
+
+    /// The scanned entity's column `data.<name>`, with its field type.
+    fn column<'b>(&self, ast: &'b Ast) -> Option<(&'b str, &str)> {
+        let Ast::Path(parts) = ast else { return None };
+        let [root, name] = parts.as_slice() else {
+            return None;
+        };
+        if root != "data" && root != "existing" {
+            return None;
+        }
+        let ty = self.field_types.get(self.entity)?.get(name)?;
+        Some((name.as_str(), ty.as_str()))
+    }
+
+    /// `l <ord> r` (or-equal with `or_equal`), one side a column and the
+    /// other a value known now.
+    fn compare(
+        &self,
+        l: &Ast,
+        r: &Ast,
+        ord: Ordering,
+        or_equal: bool,
+        keep_more: bool,
+    ) -> pylon_kernel::row_filter::RowFilter {
+        use pylon_kernel::row_filter::{CompareAs, CompareOp, RowFilter};
+        let unknown = if keep_more {
+            RowFilter::All
+        } else {
+            RowFilter::Nothing
+        };
+        // Column on the left: `value <op> column` is `column <flipped op> value`.
+        let (column, value_ast, ord) = match (self.column(l), self.column(r)) {
+            (Some(c), None) if !r.uses_row() => (c, r, ord),
+            (None, Some(c)) if !l.uses_row() => (c, l, ord.reverse()),
+            _ => return unknown,
+        };
+        let (name, field_type) = column;
+        let compare_as = match field_type {
+            "string" | "richtext" => CompareAs::Text,
+            t if t.starts_with("id(") => CompareAs::Text,
+            "int" | "float" => CompareAs::Number,
+            "bool" => CompareAs::Bool,
+            "datetime" => CompareAs::Time,
+            _ => return unknown,
+        };
+        let value = self.env.value_of(value_ast);
+        if ord == Ordering::Equal {
+            // `values_eq`: null equals only null; a string equals the same
+            // string; numbers compare by value; a bool equals the same bool.
+            let value = match (compare_as, value) {
+                (_, Value::Null) => return RowFilter::IsNull(name.to_string()),
+                (CompareAs::Text, Value::Str(s)) => serde_json::Value::String(s),
+                (CompareAs::Number, Value::Num(n)) => match serde_json::Number::from_f64(n) {
+                    Some(n) => serde_json::Value::Number(n),
+                    None => return unknown,
+                },
+                (CompareAs::Bool, Value::Bool(b)) => serde_json::Value::Bool(b),
+                _ => return unknown,
+            };
+            return RowFilter::Compare {
+                column: name.to_string(),
+                op: CompareOp::Eq,
+                value,
+                compare_as,
+            };
+        }
+        // `compare_values`: numbers by value, RFC 3339 strings by instant.
+        let value = match (compare_as, value) {
+            (CompareAs::Number, Value::Num(n)) => match serde_json::Number::from_f64(n) {
+                Some(n) => serde_json::Value::Number(n),
+                None => return unknown,
+            },
+            (CompareAs::Time, Value::Str(s)) => {
+                let Ok(at) = chrono::DateTime::parse_from_rfc3339(&s) else {
+                    return unknown;
+                };
+                // Widen the bound (narrow it under a `!`) so the row check
+                // agrees: it reads a stored time to the millisecond, and
+                // `ago(...)` and `now` move with the clock before it runs.
+                let reads_clock = match value_ast {
+                    Ast::Ago(_) => true,
+                    Ast::Path(parts) => parts.len() == 1 && parts[0] == "now",
+                    _ => false,
+                };
+                let slack = chrono::Duration::milliseconds(1)
+                    + chrono::Duration::seconds(if reads_clock { CLOCK_SLACK_SECS } else { 0 });
+                // A later bound keeps more rows of `<` and fewer of `>`.
+                let later = (ord == Ordering::Less) == keep_more;
+                let at = if later { at + slack } else { at - slack };
+                serde_json::Value::String(at.to_rfc3339())
+            }
+            _ => return unknown,
+        };
+        let op = match (ord, or_equal) {
+            (Ordering::Less, false) => CompareOp::Lt,
+            (Ordering::Less, true) => CompareOp::Lte,
+            (_, false) => CompareOp::Gt,
+            (_, true) => CompareOp::Gte,
+        };
+        RowFilter::Compare {
+            column: name.to_string(),
+            op,
+            value,
+            compare_as,
+        }
+    }
+
+    /// `exists(Entity where field == value [and ...])` with text fields
+    /// whose values are known now or are text columns of the row. `None`
+    /// when it cannot be expressed.
+    fn exists(
+        &self,
+        entity: &str,
+        conditions: &[(Vec<String>, Ast)],
+    ) -> Option<pylon_kernel::row_filter::RowFilter> {
+        use pylon_kernel::row_filter::{ExistsValue, RowFilter};
+        let is_text = |ty: &str| ty == "string" || ty.starts_with("id(");
+        let target = self.field_types.get(entity)?;
+        let mut out = Vec::with_capacity(conditions.len());
+        for (path, rhs) in conditions {
+            let [field] = path.as_slice() else {
+                return None;
+            };
+            if !is_text(target.get(field)?) {
+                return None;
+            }
+            let value = match self.column(rhs) {
+                Some((name, ty)) if is_text(ty) => ExistsValue::Column(name.to_string()),
+                Some(_) => return None,
+                None if rhs.uses_row() => return None,
+                None => match self.env.value_of(rhs) {
+                    // The resolver answers false for a null condition.
+                    Value::Null => return Some(RowFilter::Nothing),
+                    Value::Str(s) => ExistsValue::Value(serde_json::Value::String(s)),
+                    _ => return None,
+                },
+            };
+            out.push((field.clone(), value));
+        }
+        Some(RowFilter::Exists {
+            entity: entity.to_string(),
+            conditions: out,
+        })
     }
 }
 
@@ -4413,5 +4664,251 @@ mod sync_dependency_tests {
         // An insert or a delete always can.
         assert!(dep.affected_by(Some(&before), None));
         assert!(dep.affected_by(None, Some(&before)));
+    }
+
+    // -----------------------------------------------------------------------
+    // sync_scope_filter: the store-side filter keeps every row the scope does
+    // -----------------------------------------------------------------------
+
+    mod scope_filter {
+        use super::*;
+        use pylon_kernel::row_filter::{CompareAs, CompareOp, ExistsValue, RowFilter};
+        use pylon_kernel::{ManifestEntity, ManifestField};
+
+        /// Members: (userId, teamId).
+        struct Members(Vec<(&'static str, &'static str)>);
+        impl PolicyDataResolver for Members {
+            fn entity_exists(
+                &self,
+                entity: &str,
+                conditions: &[(Vec<String>, serde_json::Value)],
+            ) -> bool {
+                assert_eq!(entity, "Member");
+                if conditions.iter().any(|(_, v)| v.is_null()) {
+                    return false;
+                }
+                self.0.iter().any(|(user, team)| {
+                    conditions
+                        .iter()
+                        .all(|(path, value)| match path[0].as_str() {
+                            "userId" => value == user,
+                            "teamId" => value == team,
+                            "role" => value == "lead" && *user == "lead",
+                            _ => false,
+                        })
+                })
+            }
+        }
+
+        fn field(name: &str, field_type: &str) -> ManifestField {
+            ManifestField {
+                name: name.into(),
+                field_type: field_type.into(),
+                optional: true,
+                ..Default::default()
+            }
+        }
+
+        const SCOPE: &str = "(exists(Member where userId == auth.userId and role == \"lead\") \
+            && (data.seenAt >= ago(\"30d\") || data.stage == \"won\")) \
+            || data.ownerId == auth.userId \
+            || (exists(Member where userId == auth.userId and teamId == data.teamId) \
+                && !(data.visits > 3) && data.secret != \"x\" && data.archived != true) \
+            || data.lostAt <= ago(\"90d\")";
+
+        fn engine() -> PolicyEngine {
+            let manifest = AppManifest {
+                entities: vec![
+                    ManifestEntity {
+                        name: "Lead".into(),
+                        fields: vec![
+                            field("ownerId", "id(User)"),
+                            field("teamId", "string"),
+                            field("stage", "string"),
+                            field("seenAt", "datetime"),
+                            field("lostAt", "datetime"),
+                            field("visits", "int"),
+                            field("archived", "bool"),
+                            ManifestField {
+                                encrypted: true,
+                                ..field("secret", "string")
+                            },
+                        ],
+                        sync_scope: Some(SCOPE.into()),
+                        ..Default::default()
+                    },
+                    ManifestEntity {
+                        name: "Member".into(),
+                        fields: vec![
+                            field("userId", "id(User)"),
+                            field("teamId", "string"),
+                            field("role", "string"),
+                        ],
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            };
+            let engine = PolicyEngine::from_manifest(&manifest);
+            engine.set_resolver(Arc::new(Members(vec![
+                ("u1", "t1"),
+                ("u2", "t2"),
+                ("lead", "t1"),
+            ])));
+            engine
+        }
+
+        /// The filter on one row, as a store would run it.
+        fn keeps(filter: &RowFilter, row: &serde_json::Value, members: &Members) -> bool {
+            let text = |column: &str| row.get(column).and_then(|v| v.as_str());
+            match filter {
+                RowFilter::All => true,
+                RowFilter::Nothing => false,
+                RowFilter::And(parts) => parts.iter().all(|p| keeps(p, row, members)),
+                RowFilter::Or(parts) => parts.iter().any(|p| keeps(p, row, members)),
+                RowFilter::Not(inner) => !keeps(inner, row, members),
+                RowFilter::IsNull(column) => row.get(column).is_none_or(|v| v.is_null()),
+                RowFilter::Compare {
+                    column,
+                    op,
+                    value,
+                    compare_as,
+                } => {
+                    let Some(stored) = row.get(column).filter(|v| !v.is_null()) else {
+                        return false;
+                    };
+                    let ord = match compare_as {
+                        CompareAs::Text => stored
+                            .as_str()
+                            .unwrap()
+                            .partial_cmp(value.as_str().unwrap()),
+                        CompareAs::Number => stored
+                            .as_f64()
+                            .unwrap()
+                            .partial_cmp(&value.as_f64().unwrap()),
+                        CompareAs::Bool => stored
+                            .as_bool()
+                            .unwrap()
+                            .partial_cmp(&value.as_bool().unwrap()),
+                        CompareAs::Time => {
+                            let at = |v: &serde_json::Value| {
+                                chrono::DateTime::parse_from_rfc3339(v.as_str().unwrap()).unwrap()
+                            };
+                            at(stored).partial_cmp(&at(value))
+                        }
+                    }
+                    .unwrap();
+                    match op {
+                        CompareOp::Eq => ord == Ordering::Equal,
+                        CompareOp::Lt => ord == Ordering::Less,
+                        CompareOp::Lte => ord != Ordering::Greater,
+                        CompareOp::Gt => ord == Ordering::Greater,
+                        CompareOp::Gte => ord != Ordering::Less,
+                    }
+                }
+                RowFilter::Exists { entity, conditions } => {
+                    let mut packed = Vec::new();
+                    for (field, value) in conditions {
+                        let value = match value {
+                            ExistsValue::Value(v) => v.clone(),
+                            ExistsValue::Column(c) => match text(c) {
+                                Some(s) => serde_json::Value::String(s.into()),
+                                None => return false,
+                            },
+                        };
+                        packed.push((vec![field.clone()], value));
+                    }
+                    members.entity_exists(entity, &packed)
+                }
+            }
+        }
+
+        fn rows() -> Vec<serde_json::Value> {
+            let now = chrono::Utc::now();
+            let at = |days: i64| (now - chrono::Duration::days(days)).to_rfc3339();
+            let mut rows = Vec::new();
+            for (i, owner) in [None, Some("u1"), Some("u2"), Some("lead")]
+                .iter()
+                .enumerate()
+            {
+                for team in [None, Some("t1"), Some("t2"), Some("t3")] {
+                    for stage in [None, Some("won"), Some("new")] {
+                        for days in [None, Some(1), Some(29), Some(31), Some(89), Some(91)] {
+                            for visits in [None, Some(1), Some(3), Some(4)] {
+                                for archived in [None, Some(true), Some(false)] {
+                                    rows.push(serde_json::json!({
+                                        "id": format!("r{}", rows.len()),
+                                        "ownerId": owner,
+                                        "teamId": team,
+                                        "stage": stage,
+                                        "seenAt": days.map(at),
+                                        "lostAt": days.map(|d| at(d + i as i64)),
+                                        "visits": visits,
+                                        "archived": archived,
+                                        "secret": if i % 2 == 0 { "x" } else { "y" },
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            rows
+        }
+
+        #[test]
+        fn the_filter_keeps_every_row_the_scope_keeps() {
+            let engine = engine();
+            let members = Members(vec![("u1", "t1"), ("u2", "t2"), ("lead", "t1")]);
+            let rows = rows();
+            for user in ["u1", "u2", "lead", "stranger"] {
+                let auth = AuthContext::authenticated(user.into());
+                let filter = engine.sync_scope_filter("Lead", &auth).expect("scoped");
+                assert_ne!(filter, RowFilter::All, "{user}: nothing was pushed down");
+                let mut kept_by_scope = 0;
+                let mut dropped_by_filter = 0;
+                for row in &rows {
+                    let scope = engine
+                        .check_sync_scope("Lead", &auth, Some(row))
+                        .is_allowed();
+                    let kept = keeps(&filter, row, &members);
+                    assert!(
+                        !scope || kept,
+                        "{user}: the filter drops a row the scope keeps: {row}\n{filter:#?}"
+                    );
+                    kept_by_scope += scope as usize;
+                    dropped_by_filter += !kept as usize;
+                }
+                assert!(kept_by_scope > 0, "{user}");
+                assert!(dropped_by_filter > 0, "{user}: the filter keeps every row");
+            }
+        }
+
+        #[test]
+        fn caller_values_are_decided_before_the_store_runs_the_filter() {
+            let engine = engine();
+            // Not a lead: the lead branch is gone; the team branch remains,
+            // with the encrypted field left to the row check.
+            let filter = engine
+                .sync_scope_filter("Lead", &AuthContext::authenticated("u1".into()))
+                .unwrap();
+            let rendered = format!("{filter:?}");
+            assert!(!rendered.contains("\"won\""), "{rendered}");
+            assert!(rendered.contains("ownerId"), "{rendered}");
+            assert!(!rendered.contains("secret"), "{rendered}");
+            assert!(rendered.contains("Column(\"teamId\")"), "{rendered}");
+
+            // No user: `auth.userId` is null, so the team `exists` keeps
+            // nothing, and `data.ownerId == auth.userId` holds where the
+            // owner is null too (null equals null).
+            let guest = AuthContext::anonymous();
+            let filter = engine.sync_scope_filter("Lead", &guest).unwrap();
+            let rendered = format!("{filter:?}");
+            assert!(rendered.contains("IsNull(\"ownerId\")"), "{rendered}");
+            assert!(!rendered.contains("Exists"), "{rendered}");
+
+            // No scope: no filter.
+            assert!(engine.sync_scope_filter("Member", &guest).is_none());
+        }
     }
 }
