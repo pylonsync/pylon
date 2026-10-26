@@ -495,11 +495,11 @@ export function finalizeHeaders(
  * (static) or `export async function generateMetadata(props)` (dynamic,
  * e.g. param-derived titles). Kept flat — no deep nesting beyond og/twitter.
  *
- * React 19 hoists the resulting <title>/<meta>/<link> into <head>. A page
- * `title` overrides a layout's static `<title>` (both render; the browser
- * uses the last, which is the page's). React does NOT dedupe arbitrary
- * `<meta>`, so set `description`/OG in EITHER the layout OR page metadata,
- * not both, to avoid duplicate tags.
+ * A layout can export the same; the page's values win (`mergeMetadata`).
+ * The resulting <title>/<meta>/<link> are written into <head> by the server,
+ * whatever the layouts render. A tag from the metadata replaces a tag the
+ * root layout writes in its own <head> for the same title, `name`,
+ * `property` or canonical link (`dropReplacedHeadTags`).
  */
 /** A single OpenGraph image (for `openGraph.images` — multiple images). */
 export interface OgImage {
@@ -587,9 +587,9 @@ export interface SsrMetadata {
 
 /**
  * Build a React fragment of <title>/<meta>/<link> from a page's metadata.
- * React 19 auto-hoists these into <head> wherever they render, and the
- * host's </head> splice preserves them. React escapes all text/attrs, so
- * there's no manual XSS handling. Returns null when there's nothing to emit.
+ * The server renders it to HTML on its own and splices it in before
+ * </head>. React escapes all text/attrs, so there's no manual XSS
+ * handling. Returns null when there's nothing to emit.
  */
 export function renderMetadata(React: any, m: SsrMetadata | undefined): any {
   if (!m) return null;
@@ -731,6 +731,136 @@ export function renderJsonLdHead(m: SsrMetadata | undefined): string {
     html += `<script type="application/ld+json" data-pylon-meta>${safe}</script>`;
   }
   return html;
+}
+
+/**
+ * The metadata a route renders with: each layout's, root first, then the
+ * page's. A later value replaces an earlier one. `openGraph`, `twitter`,
+ * `icons` and `alternates` merge field by field. A new `openGraph.image` or
+ * `images` drops the earlier image fields, and a new `twitter.image` drops
+ * the earlier `twitter.imageAlt`: they describe the other image.
+ */
+export function mergeMetadata(
+  parent: SsrMetadata | undefined,
+  child: SsrMetadata | undefined,
+): SsrMetadata | undefined {
+  if (!parent) return child;
+  if (!child) return parent;
+  const out: SsrMetadata = { ...parent, ...child };
+  if (parent.openGraph && child.openGraph) {
+    const base: NonNullable<SsrMetadata["openGraph"]> = { ...parent.openGraph };
+    if (child.openGraph.image !== undefined || child.openGraph.images !== undefined) {
+      delete base.image;
+      delete base.imageSecureUrl;
+      delete base.imageType;
+      delete base.imageWidth;
+      delete base.imageHeight;
+      delete base.imageAlt;
+      delete base.images;
+    }
+    out.openGraph = { ...base, ...child.openGraph };
+  }
+  if (parent.twitter && child.twitter) {
+    const base: NonNullable<SsrMetadata["twitter"]> = { ...parent.twitter };
+    if (child.twitter.image !== undefined) delete base.imageAlt;
+    out.twitter = { ...base, ...child.twitter };
+  }
+  if (parent.icons && child.icons) out.icons = { ...parent.icons, ...child.icons };
+  if (parent.alternates && child.alternates) {
+    out.alternates = { ...parent.alternates, ...child.alternates };
+  }
+  return out;
+}
+
+/**
+ * The merged `metadata` / `generateMetadata` of a route's layouts, root
+ * first (see `mergeMetadata`). A layout module that fails to import is
+ * skipped here: the layout render reports that failure.
+ */
+async function resolveLayoutMetadata(
+  cwd: string,
+  layouts: string[] | undefined,
+  props: any,
+): Promise<SsrMetadata | undefined> {
+  let merged: SsrMetadata | undefined;
+  for (const layoutPath of layouts ?? []) {
+    let lMod: any;
+    try {
+      lMod = await importModule(cwd, layoutPath);
+    } catch {
+      continue;
+    }
+    const own: SsrMetadata | undefined =
+      typeof lMod.generateMetadata === "function"
+        ? await lMod.generateMetadata(props)
+        : lMod.metadata;
+    merged = mergeMetadata(merged, own);
+  }
+  return merged;
+}
+
+// One tag in a document head: a <script>/<style> block (matched so tags
+// written inside it are skipped), a <title> element, or a <meta>/<link> tag.
+// Quoted attribute values may hold `>`.
+const HEAD_TAG_RE =
+  /<(script|style)\b[\s\S]*?<\/\1\s*>|<title\b[^>]*>[\s\S]*?<\/title\s*>|<(?:meta|link)\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi;
+const HEAD_ATTR_RE = /\s([a-zA-Z_:][-a-zA-Z0-9_:.]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+)))?/g;
+
+/** What a head tag sets: `title`, `name:<name>`, `property:<property>` or
+ *  `canonical`. Null for a tag that page metadata never replaces. */
+function headTagKey(tag: string): string | null {
+  const start = tag.slice(0, 6).toLowerCase();
+  if (start.startsWith("<title")) return "title";
+  const isMeta = start.startsWith("<meta");
+  if (!isMeta && !start.startsWith("<link")) return null;
+  const attrs: Record<string, string> = {};
+  for (const m of tag.matchAll(HEAD_ATTR_RE)) {
+    attrs[m[1].toLowerCase()] = m[2] ?? m[3] ?? m[4] ?? "";
+  }
+  if (!isMeta) return attrs.rel?.toLowerCase() === "canonical" ? "canonical" : null;
+  if (attrs.property) return `property:${attrs.property.toLowerCase()}`;
+  if (attrs.name) return `name:${attrs.name.toLowerCase()}`;
+  return null;
+}
+
+/** The keys (see `headTagKey`) that the tags in `html` set. */
+export function headTagKeys(html: string): Set<string> {
+  const keys = new Set<string>();
+  for (const m of html.matchAll(HEAD_TAG_RE)) {
+    const key = headTagKey(m[0]);
+    if (key) keys.add(key);
+  }
+  return keys;
+}
+
+/**
+ * Remove from `head` (the document up to `</head>`) the tags that the page
+ * metadata replaces: a <title>, a <meta> with the same `name` or `property`,
+ * and a canonical link. A new `og:image` or `twitter:image` also removes the
+ * old image's `og:image:*` or `twitter:image:*` tags. So a layout can write
+ * default tags in its own <head>, and a page's metadata replaces them.
+ */
+export function dropReplacedHeadTags(head: string, replacing: Set<string>): string {
+  if (replacing.size === 0) return head;
+  const replaced = (key: string): boolean => {
+    if (replacing.has(key)) return true;
+    for (const image of ["property:og:image", "name:twitter:image"]) {
+      if (key.startsWith(`${image}:`) && replacing.has(image)) return true;
+    }
+    return false;
+  };
+  return head.replace(HEAD_TAG_RE, (tag) => {
+    const key = headTagKey(tag);
+    return key && replaced(key) ? "" : tag;
+  });
+}
+
+/** The first <title> element in `html`, or "". */
+export function firstTitleTag(html: string): string {
+  for (const m of html.matchAll(HEAD_TAG_RE)) {
+    if (headTagKey(m[0]) === "title") return m[0];
+  }
+  return "";
 }
 
 const MODULE_EXTS = [".tsx", ".ts", ".jsx", ".js"];
@@ -1509,12 +1639,16 @@ export async function streamWithHeadInjection(
   headBlob: string,
   sendChunk: (text: string) => void,
   bodyBlob = "",
+  rewriteHead?: (head: string) => string,
 ): Promise<void> {
   // Injections in document order, each consumed the first time its marker is
   // seen. Once the list empties the reader is a straight pass-through, which
-  // is every chunk after the <head> on a normal page.
-  const pending: Array<{ marker: string; blob: string }> = [];
-  if (headBlob.length > 0) pending.push({ marker: "</head>", blob: headBlob });
+  // is every chunk after the <head> on a normal page. With `rewriteHead`, the
+  // document up to `</head>` is held and passed through it before it is sent.
+  const pending: Array<{ marker: string; blob: string; rewrite?: (text: string) => string }> = [];
+  if (headBlob.length > 0 || rewriteHead) {
+    pending.push({ marker: "</head>", blob: headBlob, rewrite: rewriteHead });
+  }
   if (bodyBlob.length > 0) pending.push({ marker: "</body>", blob: bodyBlob });
   let carry = "";
   const decoder = new TextDecoder("utf-8");
@@ -1525,7 +1659,8 @@ export async function streamWithHeadInjection(
       const next = pending[0];
       const idx = buf.indexOf(next.marker);
       if (idx < 0) break;
-      sendChunk(buf.slice(0, idx));
+      const before = buf.slice(0, idx);
+      sendChunk(next.rewrite ? next.rewrite(before) : before);
       sendChunk(next.blob);
       sendChunk(next.marker);
       buf = buf.slice(idx + next.marker.length);
@@ -1533,6 +1668,10 @@ export async function streamWithHeadInjection(
     }
     if (pending.length === 0) {
       if (buf) sendChunk(buf);
+      return;
+    }
+    if (pending[0].rewrite) {
+      carry = buf;
       return;
     }
     // Withhold len(marker) − 1 so a marker straddling a chunk boundary is
@@ -2436,7 +2575,8 @@ async function renderBoundaryToClient(
   },
   // Design render: no hydration tail, inlined CSS, `<base href>`.
   design?: { headers: Record<string, string | undefined> },
-  // Page-metadata head HTML that is not React-rendered (JSON-LD).
+  // The boundary's metadata as head HTML (see `renderMetadata`). It
+  // replaces the layout's own tags for the same keys.
   metaHeadHtml = "",
 ): Promise<void> {
   const stream: ReadableStream<Uint8Array> = await renderToReadableStream(tree, {
@@ -2492,11 +2632,15 @@ async function renderBoundaryToClient(
       data: Buffer.from(text, "utf8").toString("base64"),
     });
   };
+  const replacedHeadTags = headTagKeys(metaHeadHtml);
   await streamWithHeadInjection(
     stream.getReader(),
     headBlob,
     sendChunk,
     design ? "" : buildCloudBadgeChunk(),
+    replacedHeadTags.size > 0
+      ? (head) => dropReplacedHeadTags(head, replacedHeadTags)
+      : undefined,
   );
   if (tail && manifestRoute && !design) {
     const tailHtml = buildHydrationTail({
@@ -2563,21 +2707,24 @@ async function tryRenderBoundary(
       };
       compProps = { ...props, error: errorForClient, reset: () => {} };
     }
-    // A boundary's own `metadata` / `generateMetadata`, same as a page's.
-    // Without this a not-found.tsx rendered no <title> at all — and because
-    // the framework's built-in 404 body supplies one, taking over the boundary
-    // silently LOST the title rather than replacing it, leaving the tab
-    // showing the raw URL. The fragment goes first so React hoists its
-    // <title>/<meta> into the <head> a layout renders.
+    // A boundary's own `metadata` / `generateMetadata`, same as a page's,
+    // over its layouts' metadata. Without this a not-found.tsx rendered no
+    // <title> at all — and because the framework's built-in 404 body
+    // supplies one, taking over the boundary silently LOST the title rather
+    // than replacing it, leaving the tab showing the raw URL.
     let boundaryMeta: SsrMetadata | undefined = mod.metadata;
-    if (typeof mod.generateMetadata === "function") {
-      try {
+    try {
+      if (typeof mod.generateMetadata === "function") {
         boundaryMeta = await mod.generateMetadata(compProps);
-      } catch {
-        // A boundary is already the failure path; don't fail it again over
-        // its title.
-        boundaryMeta = mod.metadata;
       }
+      boundaryMeta = mergeMetadata(
+        await resolveLayoutMetadata(cwd, boundaryLayouts, compProps),
+        boundaryMeta,
+      );
+    } catch {
+      // A boundary is already the failure path; don't fail it again over
+      // its title.
+      boundaryMeta = mod.metadata;
     }
     // The same file conventions a page gets, resolved against the BOUNDARY's
     // own directory: a colocated opengraph-image / icon next to not-found.tsx
@@ -2593,13 +2740,16 @@ async function tryRenderBoundary(
       true,
     );
     boundaryMeta = applyAutoIcons(rel, boundaryMeta);
-    const boundaryMetaFragment = renderMetadata(React, boundaryMeta);
+    // In <head>, outside the tree, as for a page (see handleRenderRoute).
+    const boundaryMetaHtml =
+      (await renderElementToString(renderToReadableStream, renderMetadata(React, boundaryMeta))) +
+      renderJsonLdHead(boundaryMeta);
     // The same metadata slot a page gets: the browser hydrates a boundary
     // with the page's tree shape (ssr-page-tree.ts).
     let tree = withMetaSlot(
       React.createElement,
       React.Fragment,
-      boundaryMetaFragment,
+      null,
       React.createElement(Comp, compProps),
     );
     tree = await buildLayoutTree(cwd, tree, boundaryLayouts, compProps, React);
@@ -2622,7 +2772,7 @@ async function tryRenderBoundary(
         errorForClient,
       },
       opts.design,
-      renderJsonLdHead(boundaryMeta),
+      boundaryMetaHtml,
     );
     return true;
   } catch (e) {
@@ -3574,13 +3724,15 @@ export async function handleRenderRoute(
       : null;
 
     // SEO metadata: static `export const metadata` or dynamic
-    // `export async function generateMetadata(props)`. Awaited before the
-    // first byte, so keep it to cheap derivations (params → title); heavy
-    // data belongs in the page body behind <Suspense>.
+    // `export async function generateMetadata(props)`, from each layout and
+    // then the page (page values win). Awaited before the first byte, so keep
+    // it to cheap derivations (params → title); heavy data belongs in the
+    // page body behind <Suspense>.
     let metadata: SsrMetadata | undefined = mod.metadata;
     if (typeof mod.generateMetadata === "function") {
       metadata = await mod.generateMetadata(props);
     }
+    metadata = mergeMetadata(await resolveLayoutMetadata(cwd, msg.layouts, props), metadata);
     // File conventions: auto-wire <meta og:image>/<twitter:image> from a
     // colocated opengraph-image.* / twitter-image.*, and <link rel="icon">
     // from icon.* / apple-icon.* / favicon.ico — unless the page set them.
@@ -3595,7 +3747,14 @@ export async function handleRenderRoute(
       componentIsBoundary,
     );
     metadata = applyAutoIcons(msg.component, metadata);
-    const metaFragment = renderMetadata(React, metadata);
+    // The metadata goes into <head> as HTML, outside the React tree. Inside
+    // the tree it rendered only when every layout rendered its children: a
+    // layout that shows a sign-in or loading screen on the server (an auth
+    // gate decided in the browser) dropped the page's tags.
+    const metaHeadHtml =
+      (await renderElementToString(renderToReadableStream, renderMetadata(React, metadata))) +
+      renderJsonLdHead(metadata);
+    const replacedHeadTags = headTagKeys(metaHeadHtml);
 
     // Client-side navigation: the browser already has the runtime, the layouts
     // and the styles, and re-renders the page from `__PYLON_DATA__`. Measured
@@ -3661,10 +3820,9 @@ export async function handleRenderRoute(
     // root: start with the page component as `tree`, then for each
     // layout (innermost first) wrap it as the new tree. Result is
     // the outermost layout containing all nested layouts down to
-    // the page. The metadata is the FIRST child so React hoists its
-    // <title>/<meta> into the <head> a layout renders; the browser renders
-    // the same slot empty (ssr-page-tree.ts), so useId values match.
-    let tree: any = withMetaSlot(React.createElement, React.Fragment, metaFragment, pageLeaf);
+    // the page. The page sits in the same metadata slot as in the browser
+    // (ssr-page-tree.ts), empty on both sides, so useId values match.
+    let tree: any = withMetaSlot(React.createElement, React.Fragment, null, pageLeaf);
     tree = await buildLayoutTree(cwd, tree, msg.layouts, props, React);
     const element = tree;
     // Tracks whether the HTTP head (response_start) has actually gone out. A
@@ -3985,7 +4143,7 @@ export async function handleRenderRoute(
       // 404 page is unstyled. Hydration stays disabled (handled below).
       headBlob += await collectBoundaryHeadBlob();
     }
-    headBlob += renderJsonLdHead(metadata);
+    headBlob += metaHeadHtml;
 
     // The host can dispatch a boundary module (`app/not-found` / `app/error`)
     // by name for an unmatched-URL 404. Boundaries render server-only — no
@@ -4009,18 +4167,31 @@ export async function handleRenderRoute(
       // Drain React's output and drop it. The render is what resolves the
       // serverData reads that fill `ssrData`; the markup it produces is the
       // part the client rebuilds for itself.
+      // The head is kept for the layout's own <title>.
       const reader = stream.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let head = "";
+      let headDone = false;
       for (;;) {
-        const { done } = await reader.read();
+        const { done, value } = await reader.read();
         if (done) break;
+        if (headDone || !value) continue;
+        head += decoder.decode(value, { stream: true });
+        const end = head.indexOf("</head>");
+        if (end >= 0) {
+          head = head.slice(0, end);
+          headDone = true;
+        }
       }
       // A minimal document, so the client's existing parse path works
       // unchanged: it reads document.title, copies [data-pylon-meta], and
-      // pulls __PYLON_DATA__ — all of which this carries.
+      // pulls __PYLON_DATA__ — all of which this carries. A page with no
+      // title of its own gets the layout's, as on a full page load.
+      const layoutTitle = replacedHeadTags.has("title") || !headDone ? "" : firstTitleTag(head);
       sendChunk(
         '<!DOCTYPE html><html><head><meta charset="utf-8">' +
-          (await renderElementToString(renderToReadableStream, metaFragment)) +
-          renderJsonLdHead(metadata) +
+          layoutTitle +
+          metaHeadHtml +
           "</head><body>",
       );
     } else {
@@ -4032,6 +4203,9 @@ export async function handleRenderRoute(
         headBlob,
         sendChunk,
         designRender ? "" : buildCloudBadgeChunk(),
+        replacedHeadTags.size > 0
+          ? (head) => dropReplacedHeadTags(head, replacedHeadTags)
+          : undefined,
       );
     }
 
