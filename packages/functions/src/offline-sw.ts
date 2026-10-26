@@ -20,7 +20,11 @@
 //     route's shell, else the start URL's shell. The client runtime renders
 //     the real URL from the local replica.
 //   - build files: cache first. They are content-hashed, so a cached copy
-//     is always correct.
+//     is always correct. The one exception is `/_pylon/build/manifest.json`,
+//     which has the same URL in every build: network first (with the
+//     navigation timeout), the cached copy only when the network fails. A
+//     cached copy from this worker's build, given to a page of a newer build,
+//     sends the page to route files that no longer exist.
 //   - everything else (API, auth, sync, dev endpoints): not intercepted, never
 //     cached. Data comes from the sync engine, not the HTTP cache.
 //   - activate: delete caches from other builds. A new deploy installs a new
@@ -60,6 +64,8 @@ export type RequestKind =
   | "navigate"
   /** A file of the client build: cache first. */
   | "build"
+  /** The build manifest: network first, the cached copy when offline. */
+  | "build-manifest"
   /** The web app manifest or an icon: cache first. */
   | "precached"
   /** Not intercepted, never cached. */
@@ -102,6 +108,7 @@ export function classifyRequest(
     }
     if (path === "/pylon-sw.js") return "network";
     if (request.mode === "navigate") return "navigate";
+    if (path === "/_pylon/build/manifest.json") return "build-manifest";
     if (path.startsWith("/_pylon/build/")) return "build";
   }
   if (!sameOrigin && config.buildPrefix && url.href.startsWith(config.buildPrefix)) {
@@ -277,6 +284,23 @@ export function pylonServiceWorker(
     return res;
   }
 
+  // The build manifest has one URL for every build: ask the server first, so
+  // a page gets the manifest of the build the server runs. The copy kept at
+  // install answers only when the network fails or is slow.
+  async function networkFirst(request: any): Promise<any> {
+    const cache = await sw.caches.open(ASSETS);
+    const network = sw.fetch(request);
+    try {
+      const res = await withTimeout<any>(network, config.navigationTimeoutMs);
+      if (res && res.ok) await cache.put(request, res.clone());
+      return res;
+    } catch (err) {
+      const hit = await cache.match(request);
+      if (hit) return hit;
+      return network;
+    }
+  }
+
   sw.addEventListener("install", (event: any) => {
     event.waitUntil(
       (async () => {
@@ -312,6 +336,7 @@ export function pylonServiceWorker(
     const request = event.request;
     const kind = classify(request, config, sw.location.origin);
     if (kind === "navigate") event.respondWith(handleNavigation(request));
+    else if (kind === "build-manifest") event.respondWith(networkFirst(request));
     else if (kind === "build" || kind === "precached") event.respondWith(cacheFirst(request));
   });
 

@@ -44,7 +44,9 @@ describe("classifyRequest", () => {
 
   test("build files are cache-first, same-origin or on the CDN", () => {
     expect(classifyRequest(req("/_pylon/build/chunks/a-123.js"), CONFIG, ORIGIN)).toBe("build");
-    expect(classifyRequest(req("/_pylon/build/manifest.json"), CONFIG, ORIGIN)).toBe("build");
+    expect(classifyRequest(req("/_pylon/build/manifest.json"), CONFIG, ORIGIN)).toBe(
+      "build-manifest",
+    );
     const cdn = { ...CONFIG, buildPrefix: "https://assets.example/b1/" };
     expect(classifyRequest(req("https://assets.example/b1/x-123.js"), cdn, ORIGIN)).toBe("build");
     expect(classifyRequest(req("https://assets.example/other.js"), cdn, ORIGIN)).toBe("network");
@@ -301,6 +303,39 @@ describe("build files and other requests", () => {
     await text(env.dispatch("fetch", { request: req(lazy) }));
     online = false;
     expect(await text(env.dispatch("fetch", { request: req(lazy) }))).toBe(`file ${lazy}`);
+  });
+
+  test("the build manifest comes from the server, so a newer build's page gets its own", async () => {
+    // This worker kept build 1's manifest at install. After a deploy, a page
+    // of build 2 loaded from the network asks for the manifest: it must get
+    // build 2's, not the kept copy, or every route entry it names is gone.
+    let manifest = "manifest build 1";
+    let online = true;
+    const env = makeScope(async (url, init) => {
+      if (!online) return offline();
+      if (new URL(url).pathname === "/_pylon/build/manifest.json") return new Response(manifest);
+      return onlineServer()(url, init);
+    });
+    await env.dispatch("install");
+    manifest = "manifest build 2";
+    const request = req("/_pylon/build/manifest.json");
+    expect(await text(env.dispatch("fetch", { request }))).toBe("manifest build 2");
+    // Offline: the last copy the network gave.
+    online = false;
+    expect(await text(env.dispatch("fetch", { request }))).toBe("manifest build 2");
+  });
+
+  test("a slow network gives way to the kept build manifest", async () => {
+    let slow = false;
+    const env = makeScope(async (url, init) => {
+      if (slow) return new Promise<Response>((r) => setTimeout(() => r(new Response("late")), 500));
+      return onlineServer()(url, init);
+    });
+    await env.dispatch("install");
+    slow = true;
+    expect(
+      await text(env.dispatch("fetch", { request: req("/_pylon/build/manifest.json") })),
+    ).toBe("file /_pylon/build/manifest.json");
   });
 
   test("API and sync requests are left to the network", async () => {
