@@ -12,7 +12,7 @@
     "@pylonsync/functions": "workspace:*",
     "@pylonsync/react": "workspace:*",
     "@pylonsync/sdk": "workspace:*",
-    "lucide-react": "^0.475.0",
+    "lucide-react": "^0.577.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
