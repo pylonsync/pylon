@@ -24,7 +24,7 @@ fn seed(runtime: &Runtime) {
 fn check_reads(runtime: &Runtime) {
     assert!(runtime.sqlite_change_log_has_entity("Item"));
     assert!(!runtime.sqlite_change_log_has_entity("Missing"));
-    let recent = runtime.sqlite_change_log_load_recent(2);
+    let recent = runtime.sqlite_change_log_load_recent(2, usize::MAX);
     assert_eq!(recent.iter().map(|e| e.seq).collect::<Vec<_>>(), [3, 4]);
     let replay = runtime.sqlite_change_log_pull_range(1, 2).unwrap();
     assert_eq!(replay.iter().map(|e| e.seq).collect::<Vec<_>>(), [2, 3]);

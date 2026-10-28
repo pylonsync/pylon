@@ -2300,6 +2300,23 @@ pub(crate) fn build_persistent_change_log(runtime: &Arc<Runtime>) -> Arc<ChangeL
         Some(mb) => ChangeLog::new().with_max_bytes(mb * 1024 * 1024),
         None => ChangeLog::new(),
     };
+    // An update keeps its pre-update row only when a reader needs it. The
+    // sync paths need it when the change can hide the row from someone
+    // (they send that reader a Delete). The hubs' dependency hints need it
+    // on every update of an entity another entity's read rules check
+    // through exists(): an update without it counts as one that may
+    // change access, as for a peer's event. See
+    // ChangeLog::with_prev_data_filter.
+    let visibility = PolicyEngine::from_manifest(runtime.manifest());
+    let dependency_sources: std::collections::HashSet<String> =
+        pylon_policy::sync_dependencies(runtime.manifest())
+            .into_keys()
+            .collect();
+    change_log_builder =
+        change_log_builder.with_prev_data_filter(Arc::new(move |entity, pre, post| {
+            dependency_sources.contains(entity)
+                || visibility.update_can_change_visibility(entity, pre, post)
+        }));
     if runtime.is_postgres() {
         if let Err(e) = runtime.bootstrap_global_change_seq() {
             tracing::warn!(
@@ -2429,7 +2446,7 @@ pub(crate) fn build_persistent_change_log(runtime: &Arc<Runtime>) -> Arc<ChangeL
             let store = std::sync::Arc::new(crate::change_log_store::PgChangeLogStore::new(
                 Arc::clone(runtime),
             ));
-            let hydrated_any = !store.load_recent(1).is_empty();
+            let hydrated_any = !store.load_recent(1, usize::MAX).is_empty();
             change_log_builder = change_log_builder.with_store(store);
             change_log_persistent = true;
             persisted_backend = PersistedBackend::Postgres;
@@ -2450,7 +2467,7 @@ pub(crate) fn build_persistent_change_log(runtime: &Arc<Runtime>) -> Arc<ChangeL
             let store = std::sync::Arc::new(crate::change_log_store::SqliteChangeLogStore::new(
                 Arc::clone(runtime),
             ));
-            let hydrated_any = !store.load_recent(1).is_empty();
+            let hydrated_any = !store.load_recent(1, usize::MAX).is_empty();
             change_log_builder = change_log_builder.with_store(store);
             change_log_persistent = true;
             persisted_backend = PersistedBackend::Sqlite;

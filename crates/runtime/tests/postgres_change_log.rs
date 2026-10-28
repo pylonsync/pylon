@@ -55,7 +55,7 @@ fn postgres_change_batches_preserve_payloads_deduplication_and_atomicity() {
     events.insert(10, duplicate.clone());
     events.push(duplicate);
     runtime.pg_change_log_persist_batch(&events).unwrap();
-    let loaded = runtime.pg_change_log_load_recent(1000);
+    let loaded = runtime.pg_change_log_load_recent(1000, usize::MAX);
     assert_eq!(loaded, (1..=600).map(event).collect::<Vec<_>>());
     let inserts: i64 = client
         .query_one("SELECT count(*) FROM change_batch_counts", &[])
@@ -79,7 +79,7 @@ fn postgres_change_batches_preserve_payloads_deduplication_and_atomicity() {
         inserts, 6,
         "large event payloads use separate INSERT buffers"
     );
-    assert_eq!(runtime.pg_change_log_load_recent(3), large);
+    assert_eq!(runtime.pg_change_log_load_recent(3, usize::MAX), large);
 
     client.batch_execute("ALTER TABLE pylon_change_log ADD CONSTRAINT reject_test_event CHECK (entity <> 'reject')").unwrap();
     let mut invalid: Vec<_> = (1000..=1300).map(event).collect();

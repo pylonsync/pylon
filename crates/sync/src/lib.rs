@@ -206,6 +206,11 @@ pub struct ClientChange {
 /// generates seqs locally.
 pub type SeqProvider = std::sync::Arc<dyn Fn(usize) -> Vec<u64> + Send + Sync>;
 
+/// `(entity, pre, post)` → whether an update keeps its pre-update row.
+/// See [`ChangeLog::with_prev_data_filter`].
+pub type PrevDataFilter =
+    std::sync::Arc<dyn Fn(&str, &serde_json::Value, &serde_json::Value) -> bool + Send + Sync>;
+
 /// Persistence layer for the change log. Single-process / SQLite
 /// deployments hydrate the in-memory ring buffer from this on boot
 /// and append every new event here as well, so clients that survive
@@ -230,10 +235,14 @@ pub trait ChangeLogStore: Send + Sync + std::fmt::Debug {
     /// non-persistent deployments today.
     fn append(&self, event: &ChangeEvent);
 
-    /// Read the most recent `limit` events from disk, oldest first.
-    /// Used at boot to seed the in-memory ring buffer so post-restart
-    /// pulls cover the same window as pre-restart pulls.
-    fn load_recent(&self, limit: usize) -> Vec<ChangeEvent>;
+    /// Read the most recent events from disk, oldest first: at most
+    /// `limit`, and only as many of the newest as fit `max_bytes` of
+    /// [`event_bytes`] (always the newest one). Used at boot to seed the
+    /// in-memory ring buffer so post-restart pulls cover the same window
+    /// as pre-restart pulls. Read newest first and stop at the budget
+    /// ([`newest_within`]): decoding `limit` large events and then
+    /// dropping most of them left the process at its peak heap.
+    fn load_recent(&self, limit: usize, max_bytes: usize) -> Vec<ChangeEvent>;
 
     /// Read events with `seq > since` ordered by seq, up to `limit`
     /// rows. Pull falls back to this when the in-memory ring no
@@ -287,6 +296,27 @@ pub fn event_bytes(e: &ChangeEvent) -> usize {
         + e.prev_data.as_ref().map_or(0, json_bytes)
 }
 
+/// The events from `newest_first` that fit `max_bytes` of
+/// [`event_bytes`], always the first one, oldest first. Stops reading at
+/// the first event over the budget, so a store can pass a lazy row
+/// iterator and decode no more than it keeps.
+pub fn newest_within(
+    newest_first: impl IntoIterator<Item = ChangeEvent>,
+    max_bytes: usize,
+) -> Vec<ChangeEvent> {
+    let mut kept = Vec::new();
+    let mut bytes = 0usize;
+    for event in newest_first {
+        bytes += event_bytes(&event);
+        if bytes > max_bytes && !kept.is_empty() {
+            break;
+        }
+        kept.push(event);
+    }
+    kept.reverse();
+    kept
+}
+
 fn json_bytes(v: &serde_json::Value) -> usize {
     match v {
         serde_json::Value::Null => 4,
@@ -319,6 +349,9 @@ pub struct ChangeLog {
     /// Approximate JSON size of `events`. Changed only while `events` is
     /// locked.
     held_bytes: std::sync::atomic::AtomicUsize,
+    /// Decides whether an update keeps its pre-update row (see
+    /// [`ChangeLog::with_prev_data_filter`]). `None` keeps every one.
+    prev_data_filter: Option<PrevDataFilter>,
     /// External seq mint. When set, `append` calls this for every new
     /// event's seq AND tracks max-seen in `seq` so `current_seq()` /
     /// `append_peer()` interop correctly with the global counter.
@@ -482,6 +515,7 @@ impl ChangeLog {
             capacity,
             max_bytes: DEFAULT_MAX_BYTES,
             held_bytes: std::sync::atomic::AtomicUsize::new(0),
+            prev_data_filter: None,
             seq_provider: None,
             store: None,
             op_tracker: Mutex::new(OpTracker::with_capacity(10_000)),
@@ -494,6 +528,18 @@ impl ChangeLog {
     /// the budget.
     pub fn with_max_bytes(mut self, max_bytes: usize) -> Self {
         self.max_bytes = max_bytes.max(1);
+        self
+    }
+
+    /// Keep an update's `prev_data` only when `filter(entity, pre, post)`
+    /// is true. Its readers are the visibility-flip Delete (the policy
+    /// engine's `update_can_change_visibility`) and the hubs' dependency
+    /// hints (`SyncDependency::affected_by`, which reads every update of
+    /// a source entity); the runtime's filter keeps it when either can use
+    /// it. Without one every update held a second
+    /// full copy of its row in memory and on disk.
+    pub fn with_prev_data_filter(mut self, filter: PrevDataFilter) -> Self {
+        self.prev_data_filter = Some(filter);
         self
     }
 
@@ -536,7 +582,7 @@ impl ChangeLog {
     /// of runtime construction). Builder-style to compose with
     /// `with_capacity` / `with_seq` / `with_initial_seq`.
     pub fn with_store(mut self, store: std::sync::Arc<dyn ChangeLogStore>) -> Self {
-        let loaded = store.load_recent(self.capacity);
+        let loaded = store.load_recent(self.capacity, self.max_bytes);
         if !loaded.is_empty() {
             let max_seq = loaded.iter().map(|e| e.seq).max().unwrap_or(0);
             {
@@ -752,6 +798,13 @@ impl ChangeLog {
         for (mut event, new_seq) in pending.into_iter().zip(seqs) {
             event.seq = new_seq;
             event.timestamp = timestamp.clone();
+            if let (Some(filter), Some(pre), Some(post)) =
+                (&self.prev_data_filter, &event.prev_data, &event.data)
+            {
+                if !filter(&event.entity, pre, post) {
+                    event.prev_data = None;
+                }
+            }
             self.held_bytes
                 .fetch_add(event_bytes(&event), std::sync::atomic::Ordering::Relaxed);
             events.push_back(event.clone());
@@ -1525,6 +1578,55 @@ mod tests {
     }
 
     #[test]
+    fn the_prev_data_filter_drops_rows_that_cannot_change_visibility() {
+        // Only an ownerId change can hide the row from a subscriber.
+        let log = ChangeLog::new().with_prev_data_filter(std::sync::Arc::new(
+            |_entity: &str, pre: &serde_json::Value, post: &serde_json::Value| {
+                pre["ownerId"] != post["ownerId"]
+            },
+        ));
+        let update = |owner: &str, title: &str| ChangeRecord::Update {
+            row: serde_json::json!({"id": "d1", "ownerId": owner, "title": title}),
+            prev: Some(serde_json::json!({"id": "d1", "ownerId": "u1", "title": "a"})),
+        };
+        let kept = log.record("Doc", "d1", update("u2", "a"));
+        let dropped = log.record("Doc", "d1", update("u1", "b"));
+        assert_eq!(kept.prev_data.unwrap()["ownerId"], "u1");
+        assert!(dropped.prev_data.is_none());
+        let resp = log.pull(&SyncCursor::beginning(), 100).unwrap();
+        assert!(resp.changes[0].prev_data.is_some());
+        assert!(
+            resp.changes[1].prev_data.is_none(),
+            "the ring holds what was appended"
+        );
+    }
+
+    #[test]
+    fn newest_within_keeps_the_newest_events_that_fit() {
+        let event = |seq: u64, text: &str| ChangeEvent {
+            seq,
+            entity: "Doc".into(),
+            row_id: "d1".into(),
+            kind: ChangeKind::Insert,
+            data: Some(serde_json::json!({"text": text})),
+            prev_data: None,
+            timestamp: String::new(),
+        };
+        let big = "x".repeat(1000);
+        let newest_first = vec![event(3, &big), event(2, &big), event(1, "small")];
+        let one = event_bytes(&newest_first[0]);
+        // Stops at the first event over the budget, even when an older one
+        // would fit, and returns oldest first.
+        let kept = newest_within(newest_first.clone(), one + one / 2);
+        assert_eq!(kept.iter().map(|e| e.seq).collect::<Vec<_>>(), [3]);
+        let kept = newest_within(newest_first.clone(), usize::MAX);
+        assert_eq!(kept.iter().map(|e| e.seq).collect::<Vec<_>>(), [1, 2, 3]);
+        // The newest event is kept even when it alone is over the budget.
+        let kept = newest_within(newest_first, 1);
+        assert_eq!(kept.iter().map(|e| e.seq).collect::<Vec<_>>(), [3]);
+    }
+
+    #[test]
     fn record_delete_with_none_snapshot_is_explicit() {
         // Permitted shape: a delete whose pre-snapshot was unrecoverable
         // (row was already gone, tenant purge, etc.). Compiles without
@@ -1689,10 +1791,9 @@ mod tests {
         fn append(&self, event: &ChangeEvent) {
             self.events.lock().unwrap().push(event.clone());
         }
-        fn load_recent(&self, limit: usize) -> Vec<ChangeEvent> {
+        fn load_recent(&self, limit: usize, max_bytes: usize) -> Vec<ChangeEvent> {
             let v = self.events.lock().unwrap();
-            let start = v.len().saturating_sub(limit);
-            v[start..].to_vec()
+            newest_within(v.iter().rev().take(limit).cloned(), max_bytes)
         }
         fn pull_range(&self, since: u64, limit: usize) -> Option<Vec<ChangeEvent>> {
             Some(
@@ -1794,8 +1895,8 @@ mod tests {
         fn append(&self, event: &ChangeEvent) {
             self.inner.append(event);
         }
-        fn load_recent(&self, limit: usize) -> Vec<ChangeEvent> {
-            self.inner.load_recent(limit)
+        fn load_recent(&self, limit: usize, max_bytes: usize) -> Vec<ChangeEvent> {
+            self.inner.load_recent(limit, max_bytes)
         }
         fn pull_range(&self, since: u64, limit: usize) -> Option<Vec<ChangeEvent>> {
             self.inner.pull_range(since, limit.min(self.max_page))
@@ -1851,7 +1952,7 @@ mod tests {
     struct PrunedStore;
     impl ChangeLogStore for PrunedStore {
         fn append(&self, _event: &ChangeEvent) {}
-        fn load_recent(&self, _limit: usize) -> Vec<ChangeEvent> {
+        fn load_recent(&self, _limit: usize, _max_bytes: usize) -> Vec<ChangeEvent> {
             Vec::new()
         }
         fn pull_range(&self, _since: u64, _limit: usize) -> Option<Vec<ChangeEvent>> {
@@ -1866,7 +1967,7 @@ mod tests {
     struct FailingStore;
     impl ChangeLogStore for FailingStore {
         fn append(&self, _event: &ChangeEvent) {}
-        fn load_recent(&self, _limit: usize) -> Vec<ChangeEvent> {
+        fn load_recent(&self, _limit: usize, _max_bytes: usize) -> Vec<ChangeEvent> {
             Vec::new()
         }
         fn pull_range(&self, _since: u64, _limit: usize) -> Option<Vec<ChangeEvent>> {
@@ -1947,10 +2048,9 @@ mod tests {
             }
             self.events.lock().unwrap().push(event.clone());
         }
-        fn load_recent(&self, limit: usize) -> Vec<ChangeEvent> {
+        fn load_recent(&self, limit: usize, max_bytes: usize) -> Vec<ChangeEvent> {
             let v = self.events.lock().unwrap();
-            let start = v.len().saturating_sub(limit);
-            v[start..].to_vec()
+            newest_within(v.iter().rev().take(limit).cloned(), max_bytes)
         }
         fn pull_range(&self, since: u64, limit: usize) -> Option<Vec<ChangeEvent>> {
             Some(

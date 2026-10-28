@@ -41,8 +41,8 @@ impl ChangeLogStore for SqliteChangeLogStore {
     fn append(&self, event: &ChangeEvent) {
         self.persister.enqueue(event.clone());
     }
-    fn load_recent(&self, limit: usize) -> Vec<ChangeEvent> {
-        self.runtime.sqlite_change_log_load_recent(limit)
+    fn load_recent(&self, limit: usize, max_bytes: usize) -> Vec<ChangeEvent> {
+        self.runtime.sqlite_change_log_load_recent(limit, max_bytes)
     }
     fn pull_range(&self, since: u64, limit: usize) -> Option<Vec<ChangeEvent>> {
         self.runtime.sqlite_change_log_pull_range(since, limit)
@@ -80,8 +80,8 @@ impl ChangeLogStore for PgChangeLogStore {
     fn append(&self, event: &ChangeEvent) {
         self.persister.enqueue(event.clone());
     }
-    fn load_recent(&self, limit: usize) -> Vec<ChangeEvent> {
-        self.runtime.pg_change_log_load_recent(limit)
+    fn load_recent(&self, limit: usize, max_bytes: usize) -> Vec<ChangeEvent> {
+        self.runtime.pg_change_log_load_recent(limit, max_bytes)
     }
     fn pull_range(&self, since: u64, limit: usize) -> Option<Vec<ChangeEvent>> {
         self.runtime.pg_change_log_pull_range(since, limit)

@@ -346,6 +346,43 @@ impl PolicyEngine {
         }
     }
 
+    /// Can an update of an `entity_name` row from `pre` to `post` change who
+    /// sees it? True when a row field that the entity's read rules or sync
+    /// scope read differs between the two, or a rule did not compile. When
+    /// false, every caller's read and scope checks give the same result on
+    /// both rows, so the sync paths never need `pre` to send a Delete to a
+    /// caller who could see the row before the update and cannot after it.
+    pub fn update_can_change_visibility(
+        &self,
+        entity_name: &str,
+        pre: &serde_json::Value,
+        post: &serde_json::Value,
+    ) -> bool {
+        let read_rules = self
+            .entity_policies_for(entity_name)
+            .iter()
+            .map(|policy| Self::expr_for(policy, EntityAction::Read));
+        let scope = self.sync_scopes.get(entity_name).map(String::as_str);
+        let mut paths = Vec::new();
+        for expr in read_rules.chain(scope) {
+            if expr.is_empty() {
+                continue;
+            }
+            let Some(Ok(ast)) = self.compiled.get(expr) else {
+                return true;
+            };
+            paths.clear();
+            ast.row_paths(&mut paths);
+            if paths
+                .iter()
+                .any(|path| row_value_at(pre, path) != row_value_at(post, path))
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     /// The caller's replication scope for `entity_name` as a filter a store
     /// can run in its scan: it keeps every row [`Self::check_sync_scope`]
     /// allows, and may keep more, so the caller still checks each row it
@@ -1674,6 +1711,67 @@ impl Ast {
             | Self::Bool(_) => false,
         }
     }
+
+    /// The row paths the expression reads: each `data.*` or `existing.*`
+    /// path without its root. An empty path is the whole row.
+    fn row_paths<'a>(&'a self, out: &mut Vec<&'a [String]>) {
+        match self {
+            Self::Path(path) | Self::Len(path) => {
+                if path
+                    .first()
+                    .is_some_and(|root| root == "data" || root == "existing")
+                {
+                    out.push(&path[1..]);
+                }
+            }
+            Self::Not(value) => value.row_paths(out),
+            Self::And(a, b)
+            | Self::Or(a, b)
+            | Self::Eq(a, b)
+            | Self::Neq(a, b)
+            | Self::Lt(a, b)
+            | Self::Lte(a, b)
+            | Self::Gt(a, b)
+            | Self::Gte(a, b) => {
+                a.row_paths(out);
+                b.row_paths(out);
+            }
+            Self::Exists { conditions, .. } => {
+                for (_, value) in conditions {
+                    value.row_paths(out);
+                }
+            }
+            Self::True
+            | Self::False
+            | Self::HasRole(_)
+            | Self::HasAnyRole(_)
+            | Self::Str(_)
+            | Self::Num(_)
+            | Self::Ago(_)
+            | Self::Null
+            | Self::Bool(_) => {}
+        }
+    }
+}
+
+/// The value at `path` in `row`, or the deepest value the path reaches when
+/// it runs into something that is not an object or array. Two rows with
+/// equal values here give the policy path the same value, however the
+/// evaluator resolves what lies below.
+fn row_value_at<'a>(row: &'a serde_json::Value, path: &[String]) -> &'a serde_json::Value {
+    let mut value = row;
+    for key in path {
+        let next = match value {
+            serde_json::Value::Object(map) => map.get(key),
+            serde_json::Value::Array(items) => key.parse::<usize>().ok().and_then(|i| items.get(i)),
+            _ => return value,
+        };
+        match next {
+            Some(next) => value = next,
+            None => return &serde_json::Value::Null,
+        }
+    }
+    value
 }
 
 /// Cap recursive descent so a pathological input like `((((...!x))))` can't
@@ -4910,5 +5008,105 @@ mod sync_dependency_tests {
             // No scope: no filter.
             assert!(engine.sync_scope_filter("Member", &guest).is_none());
         }
+    }
+}
+
+#[cfg(test)]
+mod visibility_change_tests {
+    //! Which updates can change who sees a row: the change log keeps the
+    //! pre-update row only for these.
+    use super::*;
+    use pylon_kernel::{AppManifest, ManifestEntity, ManifestPolicy};
+    use serde_json::json;
+
+    fn engine(read: &str, scope: Option<&str>) -> PolicyEngine {
+        PolicyEngine::from_manifest(&AppManifest {
+            entities: vec![ManifestEntity {
+                name: "Draft".into(),
+                sync: true,
+                sync_scope: scope.map(str::to_string),
+                ..Default::default()
+            }],
+            policies: vec![ManifestPolicy {
+                name: "drafts".into(),
+                entity: Some("Draft".into()),
+                allow_read: Some(read.into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn only_a_change_to_a_field_the_read_rule_reads_counts() {
+        let e = engine("auth.tenantId == data.orgId", None);
+        let pre = json!({ "orgId": "a", "plan": { "scenes": 1 } });
+        assert!(!e.update_can_change_visibility(
+            "Draft",
+            &pre,
+            &json!({ "orgId": "a", "plan": { "scenes": 2 } })
+        ));
+        assert!(e.update_can_change_visibility(
+            "Draft",
+            &pre,
+            &json!({ "orgId": "b", "plan": { "scenes": 1 } })
+        ));
+        // A field that appears or disappears changes the value the rule reads.
+        assert!(e.update_can_change_visibility("Draft", &pre, &json!({ "plan": { "scenes": 1 } })));
+    }
+
+    #[test]
+    fn existing_nested_paths_and_the_sync_scope_count() {
+        let e = engine(
+            "existing.owner.id == auth.userId",
+            Some("data.archived == false"),
+        );
+        let pre = json!({ "owner": { "id": "u1" }, "archived": false, "title": "x" });
+        assert!(!e.update_can_change_visibility(
+            "Draft",
+            &pre,
+            &json!({ "owner": { "id": "u1" }, "archived": false, "title": "y" })
+        ));
+        assert!(e.update_can_change_visibility(
+            "Draft",
+            &pre,
+            &json!({ "owner": { "id": "u2" }, "archived": false, "title": "x" })
+        ));
+        assert!(e.update_can_change_visibility(
+            "Draft",
+            &pre,
+            &json!({ "owner": { "id": "u1" }, "archived": true, "title": "x" })
+        ));
+    }
+
+    #[test]
+    fn a_path_through_a_non_object_compares_what_it_reaches() {
+        let e = engine("data.meta.orgId == auth.tenantId", None);
+        assert!(e.update_can_change_visibility(
+            "Draft",
+            &json!({ "meta": "{\"orgId\":\"a\"}" }),
+            &json!({ "meta": "{\"orgId\":\"b\"}" })
+        ));
+        assert!(!e.update_can_change_visibility(
+            "Draft",
+            &json!({ "meta": "same" }),
+            &json!({ "meta": "same" })
+        ));
+    }
+
+    #[test]
+    fn row_independent_missing_and_broken_rules() {
+        let pre = json!({ "orgId": "a" });
+        let post = json!({ "orgId": "b" });
+        assert!(
+            !engine("auth.userId != null", None).update_can_change_visibility("Draft", &pre, &post)
+        );
+        // No policy: only admins read it, whatever the row holds.
+        assert!(!engine("true", None).update_can_change_visibility("Other", &pre, &post));
+        // A rule that does not compile might read anything.
+        assert!(engine("data.orgId ==", None).update_can_change_visibility("Draft", &pre, &pre));
+        // A row field inside exists(...).
+        assert!(engine("exists(Member where org == data.orgId)", None)
+            .update_can_change_visibility("Draft", &pre, &post));
     }
 }

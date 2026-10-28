@@ -1548,33 +1548,50 @@ impl Runtime {
             .map_err(data_err_to_runtime)
     }
 
-    /// Read recent events from `pylon_change_log` ordered ASC. Used at
-    /// boot to hydrate the in-memory ring.
-    pub fn pg_change_log_load_recent(&self, limit: usize) -> Vec<pylon_sync::ChangeEvent> {
+    /// Read the newest events from `pylon_change_log` that fit
+    /// `max_bytes` (at most `limit`), ordered ASC. Used at boot to hydrate
+    /// the in-memory ring. Reads newest first in pages and stops at the
+    /// budget, so it never decodes the events the ring would drop.
+    pub fn pg_change_log_load_recent(
+        &self,
+        limit: usize,
+        max_bytes: usize,
+    ) -> Vec<pylon_sync::ChangeEvent> {
+        const PAGE: i64 = 256;
         let RuntimeBackend::Postgres(pg) = &self.backend else {
             return Vec::new();
         };
         let result: Result<Vec<pylon_sync::ChangeEvent>, pylon_http::DataError> =
             pg.store.with_client(|c| {
-                let rows = c
-                    .query(
-                        "SELECT seq, entity, row_id, kind, data, prev_data, ts \
-                         FROM (SELECT seq, entity, row_id, kind, data, prev_data, ts \
-                               FROM pylon_change_log ORDER BY seq DESC LIMIT $1) sub \
-                         ORDER BY seq ASC",
-                        &[&(limit as i64)],
-                    )
-                    .map_err(|e| pylon_http::DataError {
-                        code: "PG_CHANGE_LOG_LOAD_FAILED".into(),
-                        message: e.to_string(),
-                    })?;
-                let mut out = Vec::with_capacity(rows.len());
-                for r in rows {
-                    if let Some(ev) = pg_row_to_change_event(&r) {
-                        out.push(ev);
+                let mut newest_first = Vec::new();
+                let mut bytes = 0usize;
+                let mut before = i64::MAX;
+                'pages: while newest_first.len() < limit {
+                    let rows = c
+                        .query(
+                            "SELECT seq, entity, row_id, kind, data, prev_data, ts \
+                             FROM pylon_change_log WHERE seq < $1 ORDER BY seq DESC LIMIT $2",
+                            &[&before, &PAGE.min((limit - newest_first.len()) as i64)],
+                        )
+                        .map_err(|e| pylon_http::DataError {
+                            code: "PG_CHANGE_LOG_LOAD_FAILED".into(),
+                            message: e.to_string(),
+                        })?;
+                    let Some(last) = rows.last() else { break };
+                    before = last.try_get(0).unwrap_or(i64::MIN);
+                    for r in &rows {
+                        let Some(ev) = pg_row_to_change_event(r) else {
+                            continue;
+                        };
+                        bytes += pylon_sync::event_bytes(&ev);
+                        if bytes > max_bytes && !newest_first.is_empty() {
+                            break 'pages;
+                        }
+                        newest_first.push(ev);
                     }
                 }
-                Ok(out)
+                newest_first.reverse();
+                Ok(newest_first)
             });
         result.unwrap_or_default()
     }
@@ -1890,19 +1907,23 @@ impl Runtime {
         .is_ok()
     }
 
-    /// Read the most recent `limit` events from `_pylon_change_log`,
-    /// oldest-first. Used at boot to hydrate the in-memory ring
-    /// buffer.
-    pub fn sqlite_change_log_load_recent(&self, limit: usize) -> Vec<pylon_sync::ChangeEvent> {
+    /// Read the newest events from `_pylon_change_log` that fit
+    /// `max_bytes` (at most `limit`), oldest-first. Used at boot to
+    /// hydrate the in-memory ring buffer. Rows are decoded newest first
+    /// and the read stops at the budget, so it never decodes the events
+    /// the ring would drop.
+    pub fn sqlite_change_log_load_recent(
+        &self,
+        limit: usize,
+        max_bytes: usize,
+    ) -> Vec<pylon_sync::ChangeEvent> {
         let conn = match self.lock_read_conn() {
             Ok(c) => c,
             Err(_) => return Vec::new(),
         };
         let mut stmt = match conn.prepare(
             "SELECT seq, entity, row_id, kind, data, prev_data, timestamp \
-             FROM (SELECT seq, entity, row_id, kind, data, prev_data, timestamp \
-                   FROM _pylon_change_log ORDER BY seq DESC LIMIT ?1) \
-             ORDER BY seq ASC",
+             FROM _pylon_change_log ORDER BY seq DESC LIMIT ?1",
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
@@ -1911,7 +1932,7 @@ impl Runtime {
             Ok(r) => r,
             Err(_) => return Vec::new(),
         };
-        rows.flatten().flatten().collect()
+        pylon_sync::newest_within(rows.flatten().flatten(), max_bytes)
     }
 
     /// Read events with seq > `since` from `_pylon_change_log`,
