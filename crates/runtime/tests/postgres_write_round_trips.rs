@@ -412,14 +412,16 @@ fn a_write_costs_a_fixed_number_of_statements_per_row() {
             ),
             30
         );
-        // Each row has an insert and an update event with the row before.
+        // Each row has an insert and an update event. The update keeps no
+        // copy of the row before it: Lead has no read rule, so no update can
+        // change who sees a row (ChangeLog::with_prev_data_filter).
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let events = count(
                 &mut admin,
                 "SELECT count(*) FROM pylon_change_log WHERE entity = 'Lead' \
                  AND row_id = ANY($1) AND (kind = 'insert' \
-                 OR (kind = 'update' AND prev_data->>'stage' = 'new' \
+                 OR (kind = 'update' AND prev_data IS NULL \
                      AND data->>'stage' = 'contacted'))",
                 ids,
             );
