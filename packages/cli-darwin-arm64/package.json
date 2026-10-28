@@ -1,6 +1,6 @@
 {
   "name": "@pylonsync/cli-darwin-arm64",
-  "version": "0.22.63",
+  "version": "0.22.64",
   "description": "Pylon CLI binary for darwin-arm64. Installed automatically by @pylonsync/cli on Apple Silicon Macs.",
   "license": "SEE LICENSE IN LICENSE.md",
   "homepage": "https://pylonsync.com",
