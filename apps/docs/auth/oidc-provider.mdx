@@ -14,8 +14,9 @@ The full auth-code and PKCE flow:
 | `/.well-known/openid-configuration` | GET | none | OIDC discovery document |
 | `/oidc/jwks` | GET | none | RS256 public key (auto-generated, persisted) |
 | `/oidc/authorize` | GET | session cookie | Initiate auth-code flow |
-| `/oidc/token` | POST | client_id + secret + PKCE | Exchange code → id_token + access_token |
+| `/oidc/token` | POST | client_id + secret + PKCE | Exchange a code or a refresh token for tokens |
 | `/oidc/userinfo` | GET | Bearer access_token | Standard OIDC user claims |
+| `/oidc/revoke` | POST | client_id + secret | Revoke a token and its grant (RFC 7009) |
 
 ## Security stance
 
@@ -24,7 +25,9 @@ The full auth-code and PKCE flow:
 - **client_id and client_secret** are constant-time compared. Public clients (no secret in registration) authenticate via PKCE alone.
 - **id_token claims**: `iss`, `sub`, `aud`, `exp` (10 min), `iat`, `nonce` (when supplied at /authorize), `email`, `email_verified`, `name` (subject to requested scopes).
 - **access_token** is opaque random (32-byte base64url), TTL 1 hour.
-- **refresh_token is not issued.** Clients redo the auth-code flow when the access_token expires. This keeps the surface small and removes a class of long-lived bearer leak.
+- **refresh_token** is issued only when the client asks for the `offline_access` scope. See [Refresh tokens](#refresh-tokens).
+- Pylon stores access and refresh tokens as SHA-256 hashes in the auth database (SQLite or Postgres). They survive restarts and are shared by every machine. Auth codes stay in memory: they live 10 minutes and are single-use.
+- Clients authenticate at `/oidc/token` and `/oidc/revoke` with `client_secret_post` (form fields) or `client_secret_basic` (the `Authorization: Basic` header).
 
 ## Configuration
 
@@ -107,6 +110,71 @@ Authorization: Bearer <access_token>
 }
 ```
 
+## Refresh tokens
+
+Ask for `offline_access` at `/oidc/authorize` and the code exchange also returns a refresh token:
+
+```json
+{
+  "access_token": "...",
+  "token_type": "Bearer",
+  "expires_in": 3600,
+  "id_token": "...",
+  "scope": "openid email offline_access",
+  "refresh_token": "...",
+  "refresh_token_expires_in": 2592000
+}
+```
+
+Exchange it for new tokens:
+
+```http
+POST /oidc/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=refresh_token
+&refresh_token=<refresh token>
+&client_id=docs-portal
+&client_secret=shh-1234
+&scope=openid email
+```
+
+- The client authenticates the same way as for the code exchange. The refresh token must belong to that client.
+- `scope` is optional. It can narrow the scopes of the new access token, never widen them. The new refresh token keeps the grant's scopes.
+- Every refresh returns a new refresh token, valid for 30 days. A grant stays alive while the client keeps refreshing.
+- The used refresh token still works for 60 seconds, so two requests from one app that refresh at the same moment both succeed.
+- A used refresh token that comes back after those 60 seconds counts as stolen. Pylon revokes the whole grant (every access and refresh token from that sign-in) and answers `invalid_grant`. The user signs in again.
+- A refresh for a user that no longer exists fails with `invalid_grant`.
+
+A Pylon app signing in against a Pylon IdP asks for `offline_access` without configuration, because the discovery document lists it next to `orgs`. It stores the refresh token on the account link, and `ctx.auth.providerToken` refreshes it ([OAuth](/auth/oauth#calling-the-providers-api)).
+
+## Revocation
+
+`POST /oidc/revoke` (RFC 7009) takes `token` (an access or a refresh token) and the client's credentials. Pylon revokes the whole grant the token belongs to. The answer is `200` for unknown tokens and for tokens of other clients too.
+
+Pylon also revokes every grant of a user when the user:
+
+- signs out everywhere (`DELETE /api/auth/sessions`),
+- changes or resets the password, or changes the email,
+- deletes the account, or an admin deletes the user row or purges the user.
+
+## Verify a token in your functions
+
+Another app sends the access token it got from your IdP to prove which person it acts for. Check it with `ctx.auth.verifyOidcToken`:
+
+```ts
+export default action({
+  async handler(ctx) {
+    const bearer = ctx.request?.headers["authorization"]?.replace(/^Bearer /, "") ?? "";
+    const who = await ctx.auth.verifyOidcToken(bearer);
+    if (!who) throw ctx.error("UNAUTHENTICATED", "The token is not valid.");
+    // who = { userId, clientId, scopes, expiresAt }
+  },
+});
+```
+
+It returns `null` for an unknown, expired, or revoked token, and for a refresh token. It throws `OIDC_NOT_CONFIGURED` in an app that is not an IdP. It runs in actions and mutations.
+
 ## Token exchange for native apps
 
 A native app that signs in to the IdP (Sign in with Apple, Google, an email code) can sign in to a client app without a browser. It trades its IdP session for an id_token addressed to the client, with an RFC 8693 token exchange:
@@ -122,7 +190,7 @@ grant_type=urn:ietf:params:oauth:grant-type:token-exchange
 &scope=openid email profile orgs
 ```
 
-The answer carries `id_token`, `access_token` and `issued_token_type`. `scope` is optional and defaults to `openid email profile orgs`; it must include `openid`.
+The answer carries `id_token`, `access_token` and `issued_token_type`. `scope` is optional and defaults to `openid email profile orgs`; it must include `openid`. A token exchange never returns a refresh token.
 
 Token exchange is off for every client. Turn it on per client in `PYLON_OIDC_CLIENTS` with `"token_exchange": true`. The request carries no client secret, because the caller is the person's own device, so enable it only for your own apps. Guest sessions and API keys are refused.
 

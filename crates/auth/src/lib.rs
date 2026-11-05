@@ -38,6 +38,8 @@ pub mod native_id_token;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod oidc_provider;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod oidc_tokens;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod operator;
 pub mod org_federation;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1502,6 +1504,10 @@ pub struct TokenSet {
     /// app tokens are non-expiring).
     pub expires_at: Option<u64>,
     pub scope: Option<String>,
+    /// Unix epoch seconds at which `refresh_token` expires, from the
+    /// response's `refresh_token_expires_in` (a Pylon IdP, GitHub Apps and
+    /// Microsoft send it). `None` when the provider doesn't say.
+    pub refresh_token_expires_at: Option<u64>,
 }
 
 fn parse_token_response(body: &str) -> Result<TokenSet, String> {
@@ -1531,13 +1537,18 @@ fn parse_token_response(body: &str) -> Result<TokenSet, String> {
         .get("id_token")
         .and_then(|v| v.as_str())
         .map(String::from);
-    let expires_at = json
-        .get("expires_in")
-        .and_then(|v| {
-            v.as_u64()
-                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-        })
-        .map(|secs| now_secs().saturating_add(secs));
+    let expires_in = |field: &str| {
+        json.get(field)
+            .and_then(|v| {
+                v.as_u64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+            })
+            .map(|secs: u64| now_secs().saturating_add(secs))
+    };
+    let expires_at = expires_in("expires_in");
+    let refresh_token_expires_at = refresh_token
+        .as_ref()
+        .and_then(|_| expires_in("refresh_token_expires_in"));
     let scope = json.get("scope").and_then(|v| v.as_str()).map(String::from);
     Ok(TokenSet {
         access_token,
@@ -1545,6 +1556,7 @@ fn parse_token_response(body: &str) -> Result<TokenSet, String> {
         id_token,
         expires_at,
         scope,
+        refresh_token_expires_at,
     })
 }
 
@@ -3133,7 +3145,7 @@ impl Account {
             refresh_token: tokens.refresh_token.clone(),
             id_token: tokens.id_token.clone(),
             access_token_expires_at: tokens.expires_at,
-            refresh_token_expires_at: None,
+            refresh_token_expires_at: tokens.refresh_token_expires_at,
             scope: tokens.scope.clone(),
             password: None,
             avatar_url: info.avatar_url.clone(),
@@ -3414,9 +3426,16 @@ impl AccountStore {
             return Ok(account);
         }
 
+        // A refresh token the provider said has expired is as good as none:
+        // sending it only earns an invalid_grant.
         let refresh = account
             .refresh_token
             .as_deref()
+            .filter(|_| {
+                account
+                    .refresh_token_expires_at
+                    .is_none_or(|exp| exp > now_secs())
+            })
             .ok_or(RefreshError::NoRefreshToken)?;
         let registry = OAuthRegistry::shared();
         let cfg = registry
@@ -3426,10 +3445,22 @@ impl AccountStore {
         let new_tokens = cfg
             .exchange_refresh_token(refresh)
             .map_err(RefreshError::RefreshFailed)?;
+        Ok(self.apply_refreshed_tokens(account, new_tokens))
+    }
+
+    /// Persist a refresh response on the account and return the new row.
+    /// A rotated refresh token replaces the old one together with its
+    /// expiry; when the provider kept the old token
+    /// ([`OAuthConfig::exchange_refresh_token`] copies it forward), its
+    /// expiry stays.
+    fn apply_refreshed_tokens(&self, account: Account, new_tokens: TokenSet) -> Account {
         // Preserve created_at + user_id; rotate the token bundle.
         let mut updated = account.clone();
         updated.access_token = Some(new_tokens.access_token.clone());
         if let Some(rt) = new_tokens.refresh_token {
+            if account.refresh_token.as_deref() != Some(rt.as_str()) {
+                updated.refresh_token_expires_at = new_tokens.refresh_token_expires_at;
+            }
             updated.refresh_token = Some(rt);
         }
         if new_tokens.id_token.is_some() {
@@ -3441,7 +3472,7 @@ impl AccountStore {
         }
         updated.updated_at = now_secs();
         self.upsert(&updated);
-        Ok(updated)
+        updated
     }
 }
 
@@ -3465,10 +3496,28 @@ impl RefreshError {
         }
     }
 
+    /// True when the user has to sign in with the provider again: there is
+    /// no usable refresh token, or the provider's token endpoint refused
+    /// the one we sent (a 4xx such as `invalid_grant`). A network failure
+    /// or a 5xx is not: the same refresh token may work on the next try.
+    pub fn needs_reauth(&self) -> bool {
+        match self {
+            Self::NoRefreshToken => true,
+            // The `HTTP <status>:` prefix comes from this crate's
+            // `http_post_*` helpers.
+            Self::RefreshFailed(e) => e
+                .strip_prefix("HTTP ")
+                .and_then(|rest| rest.split(':').next())
+                .and_then(|code| code.trim().parse::<u16>().ok())
+                .is_some_and(|code| (400..500).contains(&code)),
+            Self::AccountNotFound | Self::ProviderNotConfigured => false,
+        }
+    }
+
     pub fn message(&self) -> String {
         match self {
             Self::AccountNotFound => "no linked account for that provider".into(),
-            Self::NoRefreshToken => "account has no stored refresh token".into(),
+            Self::NoRefreshToken => "account has no usable refresh token".into(),
             Self::RefreshFailed(e) => format!("refresh failed: {e}"),
             Self::ProviderNotConfigured => "OAuth provider not configured on this server".into(),
         }
@@ -3537,6 +3586,7 @@ mod tests {
             id_token: None,
             expires_at: None,
             scope: None,
+            refresh_token_expires_at: None,
         };
         let first = Account::new("user-1".into(), &info, &tokens);
         assert_eq!(first.avatar_url.as_deref(), Some("https://cdn/old.png"));
@@ -5025,6 +5075,75 @@ mod tests {
             .ensure_fresh_access_token(&acc.provider_id, &acc.account_id, 60)
             .unwrap_err();
         assert_eq!(err.code(), "NO_REFRESH_TOKEN");
+    }
+
+    #[test]
+    fn ensure_fresh_treats_an_expired_refresh_token_as_none() {
+        let store = AccountStore::new();
+        let mut acc = fresh_account_with_expiry(10);
+        acc.refresh_token_expires_at = Some(now_secs() - 1);
+        store.upsert(&acc);
+        let err = store
+            .ensure_fresh_access_token(&acc.provider_id, &acc.account_id, 60)
+            .unwrap_err();
+        assert_eq!(err, RefreshError::NoRefreshToken);
+        assert!(err.needs_reauth());
+    }
+
+    #[test]
+    fn needs_reauth_only_for_missing_tokens_and_provider_refusals() {
+        assert!(RefreshError::NoRefreshToken.needs_reauth());
+        assert!(
+            RefreshError::RefreshFailed(r#"HTTP 400: {"error":"invalid_grant"}"#.into())
+                .needs_reauth()
+        );
+        assert!(RefreshError::RefreshFailed("HTTP 401: nope".into()).needs_reauth());
+        assert!(!RefreshError::RefreshFailed("HTTP 503: down".into()).needs_reauth());
+        assert!(!RefreshError::RefreshFailed("HTTP error: timed out".into()).needs_reauth());
+        assert!(!RefreshError::ProviderNotConfigured.needs_reauth());
+        assert!(!RefreshError::AccountNotFound.needs_reauth());
+    }
+
+    #[test]
+    fn token_response_reads_the_refresh_token_lifetime() {
+        let t = parse_token_response(
+            r#"{"access_token":"a","refresh_token":"r","expires_in":3600,"refresh_token_expires_in":2592000}"#,
+        )
+        .unwrap();
+        let exp = t.refresh_token_expires_at.expect("refresh expiry");
+        assert!(exp >= now_secs() + 2_592_000 - 5 && exp <= now_secs() + 2_592_000);
+        // No refresh token, no refresh expiry.
+        let t =
+            parse_token_response(r#"{"access_token":"a","refresh_token_expires_in":5}"#).unwrap();
+        assert!(t.refresh_token_expires_at.is_none());
+    }
+
+    #[test]
+    fn a_rotated_refresh_token_replaces_its_expiry_and_a_kept_one_keeps_it() {
+        let store = AccountStore::new();
+        let mut acc = fresh_account_with_expiry(10);
+        acc.refresh_token_expires_at = Some(1_000);
+        let tokens = |rt: &str, exp: Option<u64>| TokenSet {
+            access_token: "at_new".into(),
+            refresh_token: Some(rt.into()),
+            id_token: None,
+            expires_at: Some(now_secs() + 3600),
+            scope: None,
+            refresh_token_expires_at: exp,
+        };
+        // exchange_refresh_token copies an unrotated token forward without
+        // an expiry: the stored expiry stays.
+        let kept = store.apply_refreshed_tokens(acc.clone(), tokens("rt_old", None));
+        assert_eq!(kept.refresh_token.as_deref(), Some("rt_old"));
+        assert_eq!(kept.refresh_token_expires_at, Some(1_000));
+        assert_eq!(kept.access_token.as_deref(), Some("at_new"));
+        let rotated = store.apply_refreshed_tokens(acc, tokens("rt_new", Some(9_000)));
+        assert_eq!(rotated.refresh_token.as_deref(), Some("rt_new"));
+        assert_eq!(rotated.refresh_token_expires_at, Some(9_000));
+        let saved = store
+            .find_by_provider(&rotated.provider_id, &rotated.account_id)
+            .unwrap();
+        assert_eq!(saved, rotated, "the refreshed row is persisted");
     }
 
     #[test]

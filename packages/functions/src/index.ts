@@ -65,6 +65,8 @@ export type {
   Stream,
   Scheduler,
   AuthInfo,
+  ProviderToken,
+  VerifiedOidcToken,
   AuthMode,
   AuthRequirement,
   FnDefinition,

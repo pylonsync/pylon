@@ -2,11 +2,11 @@
 //! can sign in against. Useful for SSO across a fleet of internal
 //! tools when you don't want to depend on Auth0/Okta/Cognito.
 //!
-//! **Status: full auth-code + PKCE flow shipped.** Pylon ships
-//! `/.well-known/openid-configuration`, `/oidc/jwks`,
-//! `/oidc/authorize`, `/oidc/token`, `/oidc/userinfo` backed by a
-//! real RSA-2048 keystore (auto-generated on first start,
-//! persisted at `PYLON_OIDC_KEY_PATH` with 0600 perms).
+//! **Status: full auth-code + PKCE flow, refresh tokens, and token
+//! revocation shipped.** Pylon ships `/.well-known/openid-configuration`,
+//! `/oidc/jwks`, `/oidc/authorize`, `/oidc/token`, `/oidc/userinfo` and
+//! `/oidc/revoke` backed by a real RSA-2048 keystore (auto-generated on
+//! first start, persisted at `PYLON_OIDC_KEY_PATH` with 0600 perms).
 //!
 //! Mandatory operator config to enable IdP mode:
 //!   - `PYLON_OIDC_ISSUER` — the externally-visible issuer URL
@@ -24,30 +24,45 @@
 //!   - id_token claims: iss, sub, aud, exp (10 min), iat, nonce
 //!     (when supplied at /authorize), email, email_verified, name.
 //!   - access_token is opaque random (32-byte b64url), TTL 1h.
-//!   - refresh_token NOT issued. Clients re-do the auth code flow
-//!     when the access_token expires — keeps the surface small and
-//!     drops a class of long-lived bearer leak.
+//!   - refresh_token is issued only when the grant includes the
+//!     `offline_access` scope. TTL 30 days, renewed on every use: each
+//!     refresh returns a new refresh token and marks the presented one
+//!     rotated. A rotated token still works for
+//!     [`REFRESH_REUSE_GRACE_SECS`] so two concurrent refreshes from one
+//!     app both succeed; after that, presenting it is treated as theft and
+//!     revokes the whole grant.
+//!   - Access and refresh tokens are stored as SHA-256 hashes in the
+//!     persistent [`OidcTokenStore`](crate::oidc_tokens::OidcTokenStore)
+//!     (SQLite or Postgres), so they survive restarts and are shared by
+//!     every replica. Auth codes stay in process memory: they live 10
+//!     minutes, are single-use, and a lost code only means the user
+//!     signs in again.
 //!
 //! What pylon implements:
 //!   - `/.well-known/openid-configuration` discovery doc
 //!   - `/oidc/jwks` — public keys other services use to verify
 //!     id_tokens we issue
 //!   - `/oidc/authorize` — kicks off an auth-code flow
-//!   - `/oidc/token` — exchange code for `id_token` + `access_token`
+//!   - `/oidc/token` — authorization_code, refresh_token, and RFC 8693
+//!     token exchange grants
 //!   - `/oidc/userinfo` — bearer-protected user info endpoint
+//!   - `/oidc/revoke` — RFC 7009 revocation; revokes the whole grant
 //!
 //! Crypto: RS256-signed id_tokens (industry default). Pylon
 //! generates a fresh RSA key on first start and stores it on disk
 //! (`PYLON_OIDC_KEY_PATH`, defaults to `<sessions.db>.oidc-key.pem`).
 //! Same key reused across restarts so issued tokens stay valid.
 //!
-//! For Wave-5 we ship the discovery + jwks + verify primitives.
-//! The `/authorize` + `/token` + `/userinfo` endpoint wiring lives
-//! in `routes/auth.rs` and uses the existing session + scope plumbing.
+//! The endpoint wiring lives in `routes/auth.rs` and uses the existing
+//! session + scope plumbing.
 //!
 //! Spec: <https://openid.net/specs/openid-connect-core-1_0.html>
 
 use serde::{Deserialize, Serialize};
+
+use crate::oidc_tokens::{
+    hash_token, InMemoryOidcTokenStore, OidcTokenKind, OidcTokenRecord, OidcTokenStore,
+};
 
 /// `.well-known/openid-configuration` shape — same fields pylon's
 /// OIDC client looks for in a remote IdP.
@@ -58,11 +73,14 @@ pub struct DiscoveryDoc {
     pub token_endpoint: String,
     pub userinfo_endpoint: String,
     pub jwks_uri: String,
+    pub revocation_endpoint: String,
     pub response_types_supported: Vec<String>,
+    pub grant_types_supported: Vec<String>,
     pub subject_types_supported: Vec<String>,
     pub id_token_signing_alg_values_supported: Vec<String>,
     pub scopes_supported: Vec<String>,
     pub token_endpoint_auth_methods_supported: Vec<String>,
+    pub revocation_endpoint_auth_methods_supported: Vec<String>,
     pub claims_supported: Vec<String>,
 }
 
@@ -77,7 +95,13 @@ impl DiscoveryDoc {
             token_endpoint: format!("{issuer}/oidc/token"),
             userinfo_endpoint: format!("{issuer}/oidc/userinfo"),
             jwks_uri: format!("{issuer}/oidc/jwks"),
+            revocation_endpoint: format!("{issuer}/oidc/revoke"),
             response_types_supported: vec!["code".into()],
+            grant_types_supported: vec![
+                "authorization_code".into(),
+                "refresh_token".into(),
+                TOKEN_EXCHANGE_GRANT.into(),
+            ],
             subject_types_supported: vec!["public".into()],
             id_token_signing_alg_values_supported: vec!["RS256".into()],
             // "orgs" is a Pylon-convention scope: the id_token/userinfo carry
@@ -86,16 +110,19 @@ impl DiscoveryDoc {
             // it automatically when they see it advertised here; third-party
             // clients ignore it, which is the correct default for a claim
             // that enumerates a user's workspaces.
+            //
+            // "offline_access" (OIDC Core §11) asks for a refresh token.
+            // Pylon clients request it, like "orgs", when a Pylon IdP
+            // advertises it (`provider::discovered_scopes`).
             scopes_supported: vec![
                 "openid".into(),
                 "email".into(),
                 "profile".into(),
                 "orgs".into(),
+                OFFLINE_ACCESS_SCOPE.into(),
             ],
-            token_endpoint_auth_methods_supported: vec![
-                "client_secret_post".into(),
-                "client_secret_basic".into(),
-            ],
+            token_endpoint_auth_methods_supported: client_auth_methods(),
+            revocation_endpoint_auth_methods_supported: client_auth_methods(),
             claims_supported: vec![
                 "sub".into(),
                 "email".into(),
@@ -107,6 +134,11 @@ impl DiscoveryDoc {
             ],
         }
     }
+}
+
+/// How clients authenticate at `/oidc/token` and `/oidc/revoke`.
+fn client_auth_methods() -> Vec<String> {
+    vec!["client_secret_post".into(), "client_secret_basic".into()]
 }
 
 /// Single JWK entry for the JWKS doc. Pylon currently only emits
@@ -496,57 +528,55 @@ impl OidcClient {
 }
 
 // ---------------------------------------------------------------------------
-// AccessTokenStore — opaque bearer tokens for the userinfo endpoint
+// Token lifetimes + scopes
 // ---------------------------------------------------------------------------
 
-/// One issued access_token. Pylon's tokens are opaque (32 random
-/// bytes base64url-encoded) rather than self-contained JWTs — the
-/// userinfo endpoint resolves the bearer to a user_id via this
-/// store, then projects the User row's safe-for-client fields.
-/// Opaque tokens make revocation O(1) (just remove the row) which
-/// the JWT-shaped alternative makes painful.
+/// Access token lifetime.
+pub const ACCESS_TOKEN_TTL_SECS: u64 = 3600;
+/// Refresh token lifetime. Each refresh issues a new refresh token with a
+/// fresh 30 days, so a grant stays alive while the client keeps using it.
+pub const REFRESH_TOKEN_TTL_SECS: u64 = 30 * 24 * 3600;
+/// How long a rotated refresh token still works. Two requests from one app
+/// that refresh at the same moment both present the same token; the
+/// second one lands inside this window and succeeds.
+pub const REFRESH_REUSE_GRACE_SECS: u64 = 60;
+/// The OIDC scope that asks for a refresh token.
+pub const OFFLINE_ACCESS_SCOPE: &str = "offline_access";
+/// The longest a stale-row sweep is skipped. Sweeps run on token issue.
+const SWEEP_INTERVAL_SECS: u64 = 300;
+
+/// Tokens returned from one issue.
 #[derive(Debug, Clone)]
-pub struct AccessToken {
-    pub token: String,
+pub struct IssuedTokens {
+    pub grant_id: String,
+    pub access_token: String,
+    pub access_expires_in: u64,
+    pub refresh_token: Option<String>,
+    pub refresh_expires_in: Option<u64>,
+}
+
+/// Why a refresh was refused. Every variant except `Storage` is
+/// `invalid_grant` on the wire (RFC 6749 §5.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefreshDenied {
+    /// Unknown, expired, revoked, or not a refresh token.
+    Invalid,
+    /// The token belongs to another client.
+    WrongClient,
+    /// A rotated token came back after the grace window. The grant is
+    /// revoked.
+    Reused { grant_id: String, revoked: usize },
+    /// The token store failed.
+    Storage(String),
+}
+
+/// A refresh token that passed every check, with its grant.
+#[derive(Debug, Clone)]
+pub struct AcceptedRefresh {
+    pub grant_id: String,
     pub user_id: String,
     pub client_id: String,
     pub scopes: Vec<String>,
-    pub expires_at: u64,
-}
-
-pub struct AccessTokenStore {
-    tokens: std::sync::Mutex<std::collections::HashMap<String, AccessToken>>,
-}
-
-impl Default for AccessTokenStore {
-    fn default() -> Self {
-        Self {
-            tokens: std::sync::Mutex::new(std::collections::HashMap::new()),
-        }
-    }
-}
-
-impl AccessTokenStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn put(&self, t: AccessToken) {
-        self.tokens.lock().unwrap().insert(t.token.clone(), t);
-    }
-
-    /// Look up a token by string. Returns None for unknown or
-    /// expired tokens; an expired token is also evicted as a
-    /// best-effort cleanup so the map doesn't grow without bound.
-    pub fn get(&self, token: &str) -> Option<AccessToken> {
-        let mut map = self.tokens.lock().unwrap();
-        let entry = map.get(token).cloned()?;
-        if entry.expires_at <= now_secs() {
-            map.remove(token);
-            return None;
-        }
-        Some(entry)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -558,23 +588,207 @@ impl AccessTokenStore {
 /// requires it.
 ///
 /// Wraps the keystore + the client registry + the auth code store
-/// + the access token store in one Arc-able bundle so the route
-/// layer does ONE lookup per request.
+/// + the token store in one Arc-able bundle so the route layer does
+/// ONE lookup per request.
 pub struct OidcProvider {
     pub keystore: std::sync::Arc<OidcKeyStore>,
     pub clients: Vec<OidcClient>,
     pub auth_codes: AuthCodeStore,
-    pub access_tokens: AccessTokenStore,
+    pub tokens: std::sync::Arc<dyn OidcTokenStore>,
+    last_sweep: std::sync::atomic::AtomicU64,
 }
 
 impl OidcProvider {
+    pub fn new(
+        keystore: std::sync::Arc<OidcKeyStore>,
+        clients: Vec<OidcClient>,
+        tokens: std::sync::Arc<dyn OidcTokenStore>,
+    ) -> Self {
+        Self {
+            keystore,
+            clients,
+            auth_codes: AuthCodeStore::new(),
+            tokens,
+            last_sweep: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
     pub fn find_client(&self, client_id: &str) -> Option<&OidcClient> {
         self.clients.iter().find(|c| c.client_id == client_id)
+    }
+
+    /// Issue an access token, plus a refresh token when `refresh_scopes`
+    /// is given and includes `offline_access`. Pass the grant id of the
+    /// refresh token being exchanged, or `None` to start a new grant.
+    ///
+    /// `access_scopes` may be narrower than `refresh_scopes` (a refresh
+    /// that asked for less); the refresh token keeps the grant's full
+    /// scopes per RFC 6749 §6.
+    pub fn issue_tokens(
+        &self,
+        grant_id: Option<&str>,
+        user_id: &str,
+        client_id: &str,
+        access_scopes: &[String],
+        refresh_scopes: Option<&[String]>,
+    ) -> Result<IssuedTokens, String> {
+        let now = now_secs();
+        self.maybe_sweep(now);
+        let grant_id = grant_id.map(String::from).unwrap_or_else(mint_random_token);
+        let record =
+            |token: &str, kind: OidcTokenKind, scopes: &[String], ttl: u64| OidcTokenRecord {
+                token_hash: hash_token(token),
+                kind,
+                grant_id: grant_id.clone(),
+                user_id: user_id.to_string(),
+                client_id: client_id.to_string(),
+                scopes: scopes.to_vec(),
+                expires_at: now + ttl,
+                created_at: now,
+                rotated_at: None,
+            };
+        let access_token = mint_random_token();
+        self.tokens.insert(&record(
+            &access_token,
+            OidcTokenKind::Access,
+            access_scopes,
+            ACCESS_TOKEN_TTL_SECS,
+        ))?;
+        let refresh_scopes = refresh_scopes.filter(|s| s.iter().any(|x| x == OFFLINE_ACCESS_SCOPE));
+        let refresh_token = match refresh_scopes {
+            Some(scopes) => {
+                let token = mint_random_token();
+                self.tokens.insert(&record(
+                    &token,
+                    OidcTokenKind::Refresh,
+                    scopes,
+                    REFRESH_TOKEN_TTL_SECS,
+                ))?;
+                Some(token)
+            }
+            None => None,
+        };
+        Ok(IssuedTokens {
+            grant_id,
+            access_token,
+            access_expires_in: ACCESS_TOKEN_TTL_SECS,
+            refresh_expires_in: refresh_token.as_ref().map(|_| REFRESH_TOKEN_TTL_SECS),
+            refresh_token,
+        })
+    }
+
+    /// Resolve a live access token. `Ok(None)` for unknown, expired,
+    /// revoked, and refresh tokens.
+    pub fn lookup_access_token(&self, token: &str) -> Result<Option<OidcTokenRecord>, String> {
+        let found = self.tokens.find(&hash_token(token), now_secs())?;
+        Ok(found.filter(|r| r.kind == OidcTokenKind::Access))
+    }
+
+    /// Check a refresh token presented by `client_id` and rotate it.
+    /// On success the caller issues new tokens under the returned grant.
+    pub fn accept_refresh_token(
+        &self,
+        client_id: &str,
+        refresh_token: &str,
+    ) -> Result<AcceptedRefresh, RefreshDenied> {
+        let now = now_secs();
+        let hash = hash_token(refresh_token);
+        let record = match self.tokens.find(&hash, now) {
+            Ok(Some(r)) if r.kind == OidcTokenKind::Refresh => r,
+            Ok(_) => return Err(RefreshDenied::Invalid),
+            Err(e) => return Err(RefreshDenied::Storage(e)),
+        };
+        // A token issued to another client is refused without touching it:
+        // the caller does not hold that client's credentials, so it must
+        // not be able to burn the real client's token either.
+        if record.client_id != client_id {
+            return Err(RefreshDenied::WrongClient);
+        }
+        let rotated_at = match self.tokens.mark_rotated(&hash, now) {
+            Ok(Some(t)) => t,
+            // Revoked between the find and the update.
+            Ok(None) => return Err(RefreshDenied::Invalid),
+            Err(e) => return Err(RefreshDenied::Storage(e)),
+        };
+        if now > rotated_at + REFRESH_REUSE_GRACE_SECS {
+            let revoked = self
+                .tokens
+                .revoke_grant(&record.grant_id)
+                .map_err(RefreshDenied::Storage)?;
+            return Err(RefreshDenied::Reused {
+                grant_id: record.grant_id,
+                revoked,
+            });
+        }
+        Ok(AcceptedRefresh {
+            grant_id: record.grant_id,
+            user_id: record.user_id,
+            client_id: record.client_id,
+            scopes: record.scopes,
+        })
+    }
+
+    /// RFC 7009: revoke the grant of `token` (access or refresh) when it
+    /// was issued to `client_id`. Returns the number of tokens removed;
+    /// 0 for unknown tokens and tokens of other clients.
+    pub fn revoke_token(&self, client_id: &str, token: &str) -> Result<usize, String> {
+        match self.tokens.find(&hash_token(token), now_secs())? {
+            Some(r) if r.client_id == client_id => self.tokens.revoke_grant(&r.grant_id),
+            _ => Ok(0),
+        }
+    }
+
+    /// Revoke every grant of a user. Returns the number of grants.
+    pub fn revoke_user(&self, user_id: &str) -> Result<usize, String> {
+        self.tokens.revoke_user(user_id)
+    }
+
+    /// Remove expired rows at most once per [`SWEEP_INTERVAL_SECS`]. Lookups
+    /// already delete the expired rows they meet; this catches the rows
+    /// nobody looks up again.
+    fn maybe_sweep(&self, now: u64) {
+        use std::sync::atomic::Ordering;
+        let last = self.last_sweep.load(Ordering::Relaxed);
+        if now < last + SWEEP_INTERVAL_SECS {
+            return;
+        }
+        if self
+            .last_sweep
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return; // another request is sweeping
+        }
+        match self.tokens.sweep_expired(now) {
+            Ok(0) => {}
+            Ok(n) => tracing::debug!("[oidc] swept {n} expired token rows"),
+            Err(e) => tracing::warn!("[oidc] expired-token sweep failed: {e}"),
+        }
     }
 }
 
 static PROVIDER: std::sync::OnceLock<Option<std::sync::Arc<OidcProvider>>> =
     std::sync::OnceLock::new();
+
+/// The token store the provider singleton uses.
+///
+/// The server installs its SQLite or Postgres store here at boot
+/// ([`install_token_store`]), before it accepts requests, instead of the
+/// store being a field threaded through every `RouterContext`: the
+/// provider is already a process singleton built from env on first use,
+/// and every route and function host that reaches it goes through
+/// [`provider_or_init`]. If nothing was installed by first use (unit
+/// tests, tools that never boot a server) the provider gets an in-memory
+/// store.
+static TOKEN_STORE: std::sync::OnceLock<std::sync::Arc<dyn OidcTokenStore>> =
+    std::sync::OnceLock::new();
+
+/// Give the provider its persistent token store. Call once at boot before
+/// serving requests. Returns `false` when a store was already in place
+/// (a second server in the same process, as in tests); the first stays.
+pub fn install_token_store(store: std::sync::Arc<dyn OidcTokenStore>) -> bool {
+    TOKEN_STORE.set(store).is_ok()
+}
 
 /// Resolve the process-wide OIDC provider state, lazy-loading on
 /// first call. Returns None when pylon-as-IdP isn't configured
@@ -596,12 +810,18 @@ pub fn provider_or_init() -> Option<std::sync::Arc<OidcProvider>> {
                      no registered clients, /oidc/authorize will reject every request"
                 );
             }
-            Some(std::sync::Arc::new(OidcProvider {
-                keystore,
-                clients,
-                auth_codes: AuthCodeStore::new(),
-                access_tokens: AccessTokenStore::new(),
-            }))
+            let tokens = TOKEN_STORE
+                .get_or_init(|| {
+                    tracing::warn!(
+                        "[oidc] no persistent token store installed; OIDC tokens live in \
+                         memory and are lost on restart"
+                    );
+                    std::sync::Arc::new(InMemoryOidcTokenStore::new())
+                })
+                .clone();
+            Some(std::sync::Arc::new(OidcProvider::new(
+                keystore, clients, tokens,
+            )))
         })
         .clone()
 }
@@ -941,30 +1161,179 @@ mod tests {
         assert!(!c.authenticate(None));
     }
 
+    fn test_provider(tokens: std::sync::Arc<dyn OidcTokenStore>) -> OidcProvider {
+        // One RSA key per test binary: keygen is slow and these tests only
+        // exercise tokens.
+        static KEY: std::sync::OnceLock<std::sync::Arc<OidcKeyStore>> = std::sync::OnceLock::new();
+        let keystore = KEY
+            .get_or_init(|| {
+                std::sync::Arc::new(OidcKeyStore::load_or_generate(&tmp_key_path()).unwrap())
+            })
+            .clone();
+        OidcProvider::new(keystore, vec![], tokens)
+    }
+
+    fn scopes(list: &str) -> Vec<String> {
+        list.split_whitespace().map(String::from).collect()
+    }
+
     #[test]
-    fn access_token_round_trip_and_expiry() {
-        let store = AccessTokenStore::new();
-        store.put(AccessToken {
-            token: "tok-1".into(),
-            user_id: "u-1".into(),
-            client_id: "c-1".into(),
-            scopes: vec!["openid".into(), "email".into()],
-            expires_at: now_secs() + 60,
-        });
-        let got = store.get("tok-1").expect("active token resolves");
-        assert_eq!(got.user_id, "u-1");
-        assert_eq!(got.scopes, vec!["openid".to_string(), "email".to_string()]);
-        // Expired token disappears + returns None.
-        store.put(AccessToken {
-            token: "tok-2".into(),
-            user_id: "u-2".into(),
-            client_id: "c-1".into(),
-            scopes: vec![],
-            expires_at: 1, // ancient
-        });
-        assert!(store.get("tok-2").is_none());
-        // Best-effort eviction means a second get also gets None.
-        assert!(store.get("tok-2").is_none());
+    fn access_token_resolves_and_refresh_token_is_not_an_access_token() {
+        let p = test_provider(std::sync::Arc::new(InMemoryOidcTokenStore::new()));
+        let s = scopes("openid email offline_access");
+        let issued = p.issue_tokens(None, "u1", "c1", &s, Some(&s)).unwrap();
+        let access = p
+            .lookup_access_token(&issued.access_token)
+            .unwrap()
+            .expect("access token resolves");
+        assert_eq!(access.user_id, "u1");
+        assert_eq!(access.client_id, "c1");
+        assert_eq!(access.scopes, s);
+        assert_eq!(access.grant_id, issued.grant_id);
+        let refresh = issued.refresh_token.expect("offline_access issues one");
+        assert!(p.lookup_access_token(&refresh).unwrap().is_none());
+        assert!(p.lookup_access_token("not-a-token").unwrap().is_none());
+    }
+
+    #[test]
+    fn only_raw_token_hashes_are_stored() {
+        let store = std::sync::Arc::new(InMemoryOidcTokenStore::new());
+        let p = test_provider(store.clone());
+        let s = scopes("openid offline_access");
+        let issued = p.issue_tokens(None, "u1", "c1", &s, Some(&s)).unwrap();
+        let now = now_secs();
+        assert!(store.find(&issued.access_token, now).unwrap().is_none());
+        assert!(store
+            .find(&hash_token(&issued.access_token), now)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn no_offline_access_means_no_refresh_token() {
+        let p = test_provider(std::sync::Arc::new(InMemoryOidcTokenStore::new()));
+        let s = scopes("openid email");
+        let issued = p.issue_tokens(None, "u1", "c1", &s, Some(&s)).unwrap();
+        assert!(issued.refresh_token.is_none());
+        assert!(issued.refresh_expires_in.is_none());
+    }
+
+    #[test]
+    fn refresh_rotates_within_grace_and_keeps_the_grant() {
+        let p = test_provider(std::sync::Arc::new(InMemoryOidcTokenStore::new()));
+        let s = scopes("openid offline_access");
+        let first = p.issue_tokens(None, "u1", "c1", &s, Some(&s)).unwrap();
+        let rt = first.refresh_token.unwrap();
+        let accepted = p.accept_refresh_token("c1", &rt).unwrap();
+        assert_eq!(accepted.grant_id, first.grant_id);
+        assert_eq!(accepted.user_id, "u1");
+        assert_eq!(accepted.scopes, s);
+        // The same token again, inside the grace window: still accepted.
+        let again = p.accept_refresh_token("c1", &rt).unwrap();
+        assert_eq!(again.grant_id, first.grant_id);
+        let second = p
+            .issue_tokens(Some(&accepted.grant_id), "u1", "c1", &s, Some(&s))
+            .unwrap();
+        assert_eq!(second.grant_id, first.grant_id);
+        assert_ne!(second.refresh_token.as_deref(), Some(rt.as_str()));
+    }
+
+    #[test]
+    fn late_reuse_of_a_rotated_refresh_token_revokes_the_grant() {
+        let store = std::sync::Arc::new(InMemoryOidcTokenStore::new());
+        let p = test_provider(store.clone());
+        let s = scopes("openid offline_access");
+        let first = p.issue_tokens(None, "u1", "c1", &s, Some(&s)).unwrap();
+        let rt = first.refresh_token.unwrap();
+        let next = p
+            .issue_tokens(Some(&first.grant_id), "u1", "c1", &s, Some(&s))
+            .unwrap();
+        // Rotated two minutes ago: past the grace window.
+        store
+            .mark_rotated(&hash_token(&rt), now_secs() - 2 * REFRESH_REUSE_GRACE_SECS)
+            .unwrap();
+        match p.accept_refresh_token("c1", &rt) {
+            Err(RefreshDenied::Reused { grant_id, revoked }) => {
+                assert_eq!(grant_id, first.grant_id);
+                assert_eq!(revoked, 4, "two access and two refresh tokens");
+            }
+            other => panic!("expected Reused, got {other:?}"),
+        }
+        assert!(p.lookup_access_token(&next.access_token).unwrap().is_none());
+        assert_eq!(
+            p.accept_refresh_token("c1", next.refresh_token.as_deref().unwrap())
+                .unwrap_err(),
+            RefreshDenied::Invalid
+        );
+    }
+
+    #[test]
+    fn refresh_token_of_another_client_is_refused_and_left_alone() {
+        let store = std::sync::Arc::new(InMemoryOidcTokenStore::new());
+        let p = test_provider(store.clone());
+        let s = scopes("openid offline_access");
+        let rt = p
+            .issue_tokens(None, "u1", "c1", &s, Some(&s))
+            .unwrap()
+            .refresh_token
+            .unwrap();
+        assert_eq!(
+            p.accept_refresh_token("c2", &rt).unwrap_err(),
+            RefreshDenied::WrongClient
+        );
+        let row = store.find(&hash_token(&rt), now_secs()).unwrap().unwrap();
+        assert_eq!(row.rotated_at, None, "a wrong client must not rotate it");
+        assert!(p.accept_refresh_token("c1", &rt).is_ok());
+    }
+
+    #[test]
+    fn an_access_token_is_not_a_refresh_token() {
+        let p = test_provider(std::sync::Arc::new(InMemoryOidcTokenStore::new()));
+        let s = scopes("openid offline_access");
+        let issued = p.issue_tokens(None, "u1", "c1", &s, Some(&s)).unwrap();
+        assert_eq!(
+            p.accept_refresh_token("c1", &issued.access_token)
+                .unwrap_err(),
+            RefreshDenied::Invalid
+        );
+    }
+
+    #[test]
+    fn revoke_token_removes_the_grant_only_for_its_client() {
+        let p = test_provider(std::sync::Arc::new(InMemoryOidcTokenStore::new()));
+        let s = scopes("openid offline_access");
+        let issued = p.issue_tokens(None, "u1", "c1", &s, Some(&s)).unwrap();
+        let other = p.issue_tokens(None, "u1", "c1", &s, Some(&s)).unwrap();
+        assert_eq!(p.revoke_token("c2", &issued.access_token).unwrap(), 0);
+        assert_eq!(p.revoke_token("c1", "unknown").unwrap(), 0);
+        assert_eq!(p.revoke_token("c1", &issued.access_token).unwrap(), 2);
+        assert!(p
+            .lookup_access_token(&issued.access_token)
+            .unwrap()
+            .is_none());
+        assert!(p
+            .lookup_access_token(&other.access_token)
+            .unwrap()
+            .is_some());
+        assert_eq!(p.revoke_user("u1").unwrap(), 1);
+        assert!(p
+            .lookup_access_token(&other.access_token)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn discovery_advertises_refresh_and_revocation() {
+        let doc = DiscoveryDoc::for_issuer("https://auth.example.com");
+        assert!(doc.scopes_supported.iter().any(|s| s == "offline_access"));
+        assert!(doc
+            .grant_types_supported
+            .iter()
+            .any(|g| g == "refresh_token"));
+        assert_eq!(
+            doc.revocation_endpoint,
+            "https://auth.example.com/oidc/revoke"
+        );
     }
 
     #[test]

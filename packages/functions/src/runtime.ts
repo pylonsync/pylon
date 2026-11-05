@@ -53,6 +53,8 @@ import type {
   ActionCtx,
   FnDefinition,
   AuthInfo,
+  ProviderToken,
+  VerifiedOidcToken,
 } from "./types";
 import { normalizeAuthClaims } from "./auth";
 import { AGENT_INVOCATION, isAgentDefinition } from "./agent";
@@ -1672,6 +1674,23 @@ async function handleCall(msg: CallMessage): Promise<void> {
         // reflects the elevated state.
         (auth as { isAdmin: boolean }).isAdmin = true;
       }
+    },
+    // Both round-trip to the host, which gates them (function type, whose
+    // token) and reads the account store or this app's OIDC token store.
+    async providerToken(provider: string, opts?: { userId?: string }) {
+      return ((await rpc(msg.call_id, {
+        type: "auth_op",
+        op: "provider_token",
+        provider,
+        user_id: opts?.userId ?? null,
+      })) ?? null) as ProviderToken | null;
+    },
+    async verifyOidcToken(token: string) {
+      return ((await rpc(msg.call_id, {
+        type: "auth_op",
+        op: "verify_oidc_token",
+        token,
+      })) ?? null) as VerifiedOidcToken | null;
     },
   };
 

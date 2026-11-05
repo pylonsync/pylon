@@ -216,6 +216,38 @@ Email verification is implicit. The OAuth provider already verified the email, s
 { "name": "createdAt",     "type": "datetime" }
 ```
 
+## Calling the provider's API
+
+Pylon stores the provider's access and refresh tokens on the account link. Server code reads a fresh access token with `ctx.auth.providerToken`:
+
+```ts
+export default action({
+  async handler(ctx) {
+    const t = await ctx.auth.providerToken("google");
+    if (!t) throw ctx.error("NOT_LINKED", "Sign in with Google first.");
+    const res = await fetch("https://www.googleapis.com/calendar/v3/users/me/calendarList", {
+      headers: { Authorization: `Bearer ${t.accessToken}` },
+    });
+    return res.json();
+  },
+});
+```
+
+- When the token expires within 60 seconds, Pylon refreshes it first and saves the new tokens. One process does not refresh one account twice at the same time.
+- The result is `{ accessToken, expiresAt, scope }`, or `null` when the user has no account with that provider.
+- The call throws `REAUTH_REQUIRED` when the token cannot be refreshed: there is no refresh token, it expired, or the provider refused it. Send the user through sign-in again.
+- The call throws `PROVIDER_UNAVAILABLE` when the provider could not be reached. Retry later.
+- The default user is the caller. `{ userId }` reads another user's account. That needs an `internal: true` action or one that called `ctx.auth.elevate`.
+- `providerToken` runs in actions only.
+
+An OIDC provider sends a refresh token only when the app asks for the `offline_access` scope. A Pylon IdP lists `orgs` and `offline_access` in its discovery document, and Pylon asks for both without configuration. Pylon does not ask a third-party IdP (Auth0, Okta, Keycloak) for `offline_access` on its own, because some of them refuse the sign-in when the client is not set up for refresh tokens. Add it there yourself:
+
+```bash
+PYLON_OAUTH_AUTH0_SCOPES="openid email profile offline_access"
+```
+
+When a later sign-in returns no refresh token, Pylon keeps the one it has.
+
 ## Discovering configured providers
 
 ```bash

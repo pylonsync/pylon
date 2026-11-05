@@ -1,6 +1,9 @@
 import type { AuthInfo } from "./types";
 
-export type AuthClaims = Omit<AuthInfo, "elevate">;
+export type AuthClaims = Omit<
+  AuthInfo,
+  "elevate" | "providerToken" | "verifyOidcToken"
+>;
 
 /** Normalize the Rust wire envelope into the public function auth shape. */
 export function normalizeAuthClaims(

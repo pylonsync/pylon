@@ -943,7 +943,7 @@ pub struct OidcDiscoveryDoc {
     #[serde(default)]
     pub token_endpoint_auth_methods_supported: Vec<String>,
     /// Advertised scopes. Only consulted for the Pylon-convention "orgs"
-    /// scope — see [`OidcDiscoveryDoc::into_spec`].
+    /// scope and for `offline_access` — see [`discovered_scopes`].
     #[serde(default)]
     pub scopes_supported: Vec<String>,
 }
@@ -983,22 +983,39 @@ impl OidcDiscoveryDoc {
             auth_url: self.authorization_endpoint,
             token_url: self.token_endpoint,
             userinfo_url: self.userinfo_endpoint,
-            // Standard OIDC scopes, plus the Pylon-convention "orgs" scope
-            // WHEN the IdP advertises it: a Pylon IdP then includes the
-            // user's org memberships in the id_token/userinfo, which is how
-            // a fleet of Pylon apps maps tenants across a federation. IdPs
-            // that don't advertise it are never asked for it.
-            scopes: if self.scopes_supported.iter().any(|s| s == "orgs") {
-                "openid email profile orgs".to_string()
-            } else {
-                "openid email profile".to_string()
-            },
+            scopes: discovered_scopes(&self.scopes_supported),
             userinfo_parser: UserinfoParser::Oidc,
             token_exchange,
             issuer: self.issuer,
             jwks_uri: self.jwks_uri,
         }
     }
+}
+
+/// The scopes a discovery-configured client asks for, from the IdP's
+/// `scopes_supported`.
+///
+/// - Always the standard `openid email profile`.
+/// - Plus the Pylon-convention `orgs` scope when the IdP advertises it: a
+///   Pylon IdP then includes the user's org memberships in the
+///   id_token/userinfo, which is how a fleet of Pylon apps maps tenants
+///   across a federation. IdPs that don't advertise it are never asked for it.
+/// - Plus `offline_access` when the IdP advertises it AND is a Pylon IdP
+///   (it advertises `orgs`). The app then gets a refresh token, which
+///   `ctx.auth.providerToken` uses to keep the access token fresh.
+///   Third-party IdPs (Auth0, Okta, Keycloak) also list `offline_access`,
+///   but some refuse the sign-in when the client is not set up for refresh
+///   tokens, so they are asked only through `PYLON_OAUTH_<NAME>_SCOPES`.
+pub fn discovered_scopes(scopes_supported: &[String]) -> String {
+    let advertises = |scope: &str| scopes_supported.iter().any(|s| s == scope);
+    let mut scopes = String::from("openid email profile");
+    if advertises("orgs") {
+        scopes.push_str(" orgs");
+        if advertises("offline_access") {
+            scopes.push_str(" offline_access");
+        }
+    }
+    scopes
 }
 
 /// Process-wide cache of OIDC discovery documents. The cache is
@@ -1063,6 +1080,49 @@ pub mod oidc_cache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn supported(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn discovered_scopes_follow_what_the_idp_advertises() {
+        // Plain OIDC IdP.
+        assert_eq!(discovered_scopes(&[]), "openid email profile");
+        assert_eq!(
+            discovered_scopes(&supported(&["openid", "email", "profile"])),
+            "openid email profile"
+        );
+        // Pylon IdP before refresh tokens: orgs only.
+        assert_eq!(
+            discovered_scopes(&supported(&["openid", "email", "profile", "orgs"])),
+            "openid email profile orgs"
+        );
+        // Pylon IdP with refresh tokens.
+        assert_eq!(
+            discovered_scopes(&supported(&[
+                "openid",
+                "email",
+                "profile",
+                "orgs",
+                "offline_access"
+            ])),
+            "openid email profile orgs offline_access"
+        );
+        // A third-party IdP that lists offline_access is not asked for it.
+        assert_eq!(
+            discovered_scopes(&supported(&["openid", "email", "offline_access"])),
+            "openid email profile"
+        );
+    }
+
+    #[test]
+    fn a_pylon_idp_discovery_doc_asks_for_orgs_and_offline_access() {
+        let doc = crate::oidc_provider::DiscoveryDoc::for_issuer("https://id.example.com");
+        let json = serde_json::to_string(&doc).unwrap();
+        let spec = OidcDiscoveryDoc::parse(&json).unwrap().into_spec();
+        assert_eq!(spec.scopes, "openid email profile orgs offline_access");
+    }
 
     #[test]
     fn every_builtin_has_unique_id() {

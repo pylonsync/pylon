@@ -321,6 +321,19 @@ pub type ApiKeyOpHook = Box<
         + Sync,
 >;
 
+/// Callback for `ctx.auth.providerToken` / `ctx.auth.verifyOidcToken`.
+/// The runner has already applied [`auth_op_gate`]; the second argument is
+/// the user whose linked account `provider_token` reads (`None` for
+/// `verify_oidc_token`). Returns the op's JSON result.
+pub type AuthOpHook = Box<
+    dyn Fn(
+            &crate::protocol::AuthOpMessage,
+            Option<&str>,
+        ) -> Result<serde_json::Value, (String, String)>
+        + Send
+        + Sync,
+>;
+
 /// Callback for `ctx.workflows.*` (start / send_event). Wired to the
 /// runtime's WorkflowEngine; returns the op's JSON result.
 pub type WorkflowOpHook = Box<
@@ -528,6 +541,7 @@ pub struct FnRunner {
     workflow_op_hook: Mutex<Option<WorkflowOpHook>>,
     audit_op_hook: Mutex<Option<AuditOpHook>>,
     api_key_op_hook: Mutex<Option<ApiKeyOpHook>>,
+    auth_op_hook: Mutex<Option<AuthOpHook>>,
     /// Hook for `ctx.connections.*`. Wires authorize-url / get /
     /// list / disconnect calls to the runtime's ConnectionManager.
     connection_hook: Mutex<Option<Arc<ConnectionHookFn>>>,
@@ -587,6 +601,7 @@ impl FnRunner {
             workflow_op_hook: Mutex::new(None),
             audit_op_hook: Mutex::new(None),
             api_key_op_hook: Mutex::new(None),
+            auth_op_hook: Mutex::new(None),
             connection_hook: Mutex::new(None),
             call_timeout: Mutex::new(DEFAULT_CALL_TIMEOUT),
             started_with: Mutex::new(None),
@@ -766,6 +781,12 @@ impl FnRunner {
     /// Install the `ctx.apiKeys.*` handler.
     pub fn set_api_key_op_hook(&self, hook: ApiKeyOpHook) {
         *self.api_key_op_hook.lock().unwrap() = Some(hook);
+    }
+
+    /// Install the `ctx.auth.providerToken` / `ctx.auth.verifyOidcToken`
+    /// handler.
+    pub fn set_auth_op_hook(&self, hook: AuthOpHook) {
+        *self.auth_op_hook.lock().unwrap() = Some(hook);
     }
 
     /// Install the `ctx.connections.*` hook. Without it, calls
@@ -2158,6 +2179,44 @@ impl FnRunner {
                     self.send(&reply)?;
                 }
 
+                TsMessage::AuthOp(req) if req.call_id == call_id => {
+                    let auth_now = current_auth_snapshot(&gate_auth, caller_is_admin);
+                    let reply = match auth_op_gate(&req, fn_type, &auth_now, caller_internal) {
+                        Err((code, msg)) => DbResultMessage::err(call_id.clone(), code, &msg),
+                        Ok(target_user) => {
+                            // A token for someone other than the caller is a
+                            // server-side power; log who asked for whose.
+                            if let Some(target) = target_user.as_deref() {
+                                if auth_now.user_id.as_deref() != Some(target) {
+                                    tracing::info!(
+                                        "[functions] auth_op: fn=\"{}\" op=\"{}\" provider=\"{}\" user=\"{}\"",
+                                        fn_name,
+                                        req.op,
+                                        req.provider.as_deref().unwrap_or(""),
+                                        target
+                                    );
+                                }
+                            }
+                            let result: Option<Result<serde_json::Value, (String, String)>> = {
+                                let hook = self.auth_op_hook.lock().unwrap();
+                                hook.as_ref().map(|cb| cb(&req, target_user.as_deref()))
+                            };
+                            match result {
+                                Some(Ok(value)) => DbResultMessage::ok(call_id.clone(), value),
+                                Some(Err((code, msg))) => {
+                                    DbResultMessage::err(call_id.clone(), &code, &msg)
+                                }
+                                None => DbResultMessage::err(
+                                    call_id.clone(),
+                                    "AUTH_OPS_NOT_CONFIGURED",
+                                    "this host has no account or OIDC token store wired",
+                                ),
+                            }
+                        }
+                    };
+                    self.send(&reply)?;
+                }
+
                 TsMessage::WorkflowOp(req) if req.call_id == call_id => {
                     // `ctx.workflows.start` / `.sendEvent` — app code
                     // driving durable workflows. Trust model matches
@@ -2728,6 +2787,85 @@ fn api_key_op_gate(
         "revoke" if req.key_id.as_deref().is_some_and(|k| !k.trim().is_empty()) => Ok(()),
         "revoke" => Err(("INVALID_ARGS", "ctx.apiKeys.revoke needs keyId".into())),
         other => Err(("INVALID_ARGS", format!("unknown ctx.apiKeys op: {other}"))),
+    }
+}
+
+/// Who may use `ctx.auth.providerToken` and `ctx.auth.verifyOidcToken`,
+/// and from where. Returns the user whose linked account `provider_token`
+/// reads.
+///
+/// - `provider_token` runs in actions only: a refresh calls the provider's
+///   token endpoint and writes the account store, which a query (re-run on
+///   every change) or a mutation (rolled back on error) must not do. The
+///   caller's own account needs no extra rights. Another user's account
+///   needs a server-side caller (`internal: true`, or elevated to admin),
+///   the same trust as `ctx.agents.run`: a public action must not hand one
+///   user another user's provider token.
+/// - `verify_oidc_token` runs in actions and mutations. It only reads, but
+///   its answer changes with time and revocation, so a query (whose
+///   result is cached and re-sent) is refused.
+fn auth_op_gate(
+    req: &crate::protocol::AuthOpMessage,
+    fn_type: FnType,
+    auth: &AuthInfo,
+    caller_internal: bool,
+) -> Result<Option<String>, (&'static str, String)> {
+    match req.op.as_str() {
+        "provider_token" => {
+            if !matches!(fn_type, FnType::Action) {
+                return Err((
+                    "AUTH_OP_ACTIONS_ONLY",
+                    "ctx.auth.providerToken is available in actions only".into(),
+                ));
+            }
+            if req.provider.as_deref().is_none_or(|p| p.trim().is_empty()) {
+                return Err((
+                    "INVALID_ARGS",
+                    "ctx.auth.providerToken needs a provider".into(),
+                ));
+            }
+            let caller = auth.user_id.as_deref().filter(|u| !u.is_empty());
+            match req.user_id.as_deref().map(str::trim) {
+                Some("") => Err((
+                    "INVALID_ARGS",
+                    "ctx.auth.providerToken userId must not be empty".into(),
+                )),
+                Some(target) if Some(target) == caller => Ok(Some(target.to_string())),
+                Some(target) => {
+                    if caller_internal || auth.is_admin {
+                        Ok(Some(target.to_string()))
+                    } else {
+                        Err((
+                            "AUTH_OP_FORBIDDEN",
+                            "ctx.auth.providerToken for another user needs a server-side caller: an internal: true action, or one that called ctx.auth.elevate({ admin: true, reason }) first".into(),
+                        ))
+                    }
+                }
+                None => match caller {
+                    Some(u) => Ok(Some(u.to_string())),
+                    None => Err((
+                        "UNAUTHENTICATED",
+                        "ctx.auth.providerToken needs a signed-in caller, or a userId".into(),
+                    )),
+                },
+            }
+        }
+        "verify_oidc_token" => {
+            if matches!(fn_type, FnType::Query) {
+                return Err((
+                    "AUTH_OP_NOT_IN_QUERY",
+                    "ctx.auth.verifyOidcToken is available in actions and mutations".into(),
+                ));
+            }
+            if req.token.as_deref().is_none_or(|t| t.trim().is_empty()) {
+                return Err((
+                    "INVALID_ARGS",
+                    "ctx.auth.verifyOidcToken needs a token".into(),
+                ));
+            }
+            Ok(None)
+        }
+        other => Err(("INVALID_ARGS", format!("unknown ctx.auth op: {other}"))),
     }
 }
 
@@ -4061,6 +4199,104 @@ mod tests {
     fn run_agent_needs_a_user() {
         let err =
             run_agent_auth(&run_agent_req("  ", false), FnType::Action, true, true).unwrap_err();
+        assert_eq!(err.0, "INVALID_ARGS");
+    }
+
+    fn auth_op_req(
+        op: &str,
+        provider: Option<&str>,
+        user_id: Option<&str>,
+        token: Option<&str>,
+    ) -> crate::protocol::AuthOpMessage {
+        crate::protocol::AuthOpMessage {
+            call_id: "c_1".into(),
+            op: op.into(),
+            provider: provider.map(String::from),
+            user_id: user_id.map(String::from),
+            token: token.map(String::from),
+        }
+    }
+
+    #[test]
+    fn provider_token_defaults_to_the_caller_and_runs_in_actions_only() {
+        let req = auth_op_req("provider_token", Some("stack0"), None, None);
+        assert_eq!(
+            auth_op_gate(&req, FnType::Action, &user_auth(), false).unwrap(),
+            user_auth().user_id
+        );
+        for fn_type in [FnType::Query, FnType::Mutation] {
+            let err = auth_op_gate(&req, fn_type, &user_auth(), true).unwrap_err();
+            assert_eq!(err.0, "AUTH_OP_ACTIONS_ONLY");
+        }
+        let anonymous = AuthInfo {
+            user_id: None,
+            ..user_auth()
+        };
+        let err = auth_op_gate(&req, FnType::Action, &anonymous, false).unwrap_err();
+        assert_eq!(err.0, "UNAUTHENTICATED");
+        let err = auth_op_gate(
+            &auth_op_req("provider_token", Some(" "), None, None),
+            FnType::Action,
+            &user_auth(),
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(err.0, "INVALID_ARGS");
+    }
+
+    #[test]
+    fn provider_token_for_another_user_needs_a_server_side_caller() {
+        let other = auth_op_req("provider_token", Some("stack0"), Some("someone_else"), None);
+        let err = auth_op_gate(&other, FnType::Action, &user_auth(), false).unwrap_err();
+        assert_eq!(err.0, "AUTH_OP_FORBIDDEN");
+        // Internal, or elevated to admin: allowed.
+        assert_eq!(
+            auth_op_gate(&other, FnType::Action, &user_auth(), true).unwrap(),
+            Some("someone_else".into())
+        );
+        assert_eq!(
+            auth_op_gate(&other, FnType::Action, &admin_auth(), false).unwrap(),
+            Some("someone_else".into())
+        );
+        // Naming yourself needs nothing extra.
+        let me = auth_op_req(
+            "provider_token",
+            Some("stack0"),
+            user_auth().user_id.as_deref(),
+            None,
+        );
+        assert_eq!(
+            auth_op_gate(&me, FnType::Action, &user_auth(), false).unwrap(),
+            user_auth().user_id
+        );
+    }
+
+    #[test]
+    fn verify_oidc_token_is_refused_in_queries_and_needs_a_token() {
+        let req = auth_op_req("verify_oidc_token", None, None, Some("tok"));
+        for fn_type in [FnType::Action, FnType::Mutation] {
+            assert_eq!(
+                auth_op_gate(&req, fn_type, &user_auth(), false).unwrap(),
+                None
+            );
+        }
+        let err = auth_op_gate(&req, FnType::Query, &user_auth(), false).unwrap_err();
+        assert_eq!(err.0, "AUTH_OP_NOT_IN_QUERY");
+        let err = auth_op_gate(
+            &auth_op_req("verify_oidc_token", None, None, Some("")),
+            FnType::Action,
+            &user_auth(),
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(err.0, "INVALID_ARGS");
+        let err = auth_op_gate(
+            &auth_op_req("whoami", None, None, None),
+            FnType::Action,
+            &user_auth(),
+            false,
+        )
+        .unwrap_err();
         assert_eq!(err.0, "INVALID_ARGS");
     }
 

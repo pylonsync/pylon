@@ -24,7 +24,7 @@
 //!   - `/oidc/token` returns 401 invalid_client for an unknown
 //!     client_id.
 //!   - `/oidc/userinfo` returns 401 invalid_token when the bearer
-//!     is missing OR points at a token the AccessTokenStore
+//!     is missing OR points at a token the OIDC token store
 //!     hasn't issued.
 
 use std::io::{Read, Write};

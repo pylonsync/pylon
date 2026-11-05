@@ -332,6 +332,7 @@ pub(crate) const AUTH_TABLES: &[&str] = &[
     "_pylon_verification_tokens",
     "_pylon_audit_events",
     "_pylon_trusted_devices",
+    "_pylon_oidc_tokens",
     "_pylon_org_sso",
     "_pylon_org_sso_state",
     "_pylon_org_saml",

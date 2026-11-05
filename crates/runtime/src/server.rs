@@ -2833,6 +2833,11 @@ fn start_server(
     let verification = auth_stores.verification;
     let audit = auth_stores.audit;
     let trusted_devices = auth_stores.trusted_devices;
+    // Before the first request: the OIDC provider singleton picks its token
+    // store up on first use.
+    if !pylon_auth::oidc_provider::install_token_store(auth_stores.oidc_tokens) {
+        tracing::warn!("[oidc] a token store was already installed in this process; keeping it");
+    }
     let org_sso = auth_stores.org_sso;
     let saml = auth_stores.saml;
     let policy_engine = Arc::new(PolicyEngine::from_manifest(runtime.manifest()));
@@ -3653,6 +3658,15 @@ fn start_server(
             let store = Arc::clone(&api_keys);
             runner.set_api_key_op_hook(Box::new(move |req| {
                 crate::app_api_keys::handle_op(&store, req)
+            }));
+        }
+        // `ctx.auth.providerToken` / `ctx.auth.verifyOidcToken`: the
+        // linked-account store the OAuth routes write, and this app's OIDC
+        // provider (when it is one).
+        for runner in ops.pool.runners() {
+            let accounts = Arc::clone(&account_store);
+            runner.set_auth_op_hook(Box::new(move |req, user_id| {
+                crate::app_auth_ops::handle_op(&accounts, req, user_id)
             }));
         }
 
@@ -11200,6 +11214,9 @@ struct AuthStores {
     verification: Arc<pylon_auth::verification::VerificationStore>,
     audit: Arc<pylon_auth::audit::AuditStore>,
     trusted_devices: Arc<dyn pylon_auth::trusted_device::TrustedDeviceStore>,
+    /// Tokens this app issues as an OIDC provider. Installed into the
+    /// provider singleton at boot; see `oidc_provider::install_token_store`.
+    oidc_tokens: Arc<dyn pylon_auth::oidc_tokens::OidcTokenStore>,
     org_sso: Arc<dyn pylon_auth::org_sso::OrgSsoStore>,
     saml: Arc<dyn pylon_auth::saml::SamlStore>,
 }
@@ -11371,6 +11388,7 @@ fn in_memory_auth_stores(session_lifetime: u64) -> Result<AuthStores, String> {
         verification: Arc::new(pylon_auth::verification::VerificationStore::new()),
         audit: Arc::new(pylon_auth::audit::AuditStore::new()),
         trusted_devices: Arc::new(pylon_auth::trusted_device::InMemoryTrustedDeviceStore::new()),
+        oidc_tokens: Arc::new(pylon_auth::oidc_tokens::InMemoryOidcTokenStore::new()),
         org_sso: Arc::new(pylon_auth::org_sso::InMemoryOrgSsoStore::new()),
         saml: Arc::new(pylon_auth::saml::InMemorySamlStore::new()),
     })
@@ -11427,6 +11445,10 @@ fn build_sqlite_auth_stores(path: &str, session_lifetime: u64) -> Result<AuthSto
         crate::trusted_device_backend::SqliteTrustedDeviceBackend::open(path)
             .map_err(|e| map_err("trusted-device", e))?,
     );
+    let oidc_tokens: Arc<dyn pylon_auth::oidc_tokens::OidcTokenStore> = Arc::new(
+        crate::oidc_token_backend::SqliteOidcTokenBackend::open(path)
+            .map_err(|e| map_err("OIDC token", e))?,
+    );
     let org_sso: Arc<dyn pylon_auth::org_sso::OrgSsoStore> = Arc::new(
         crate::org_sso_backend::SqliteOrgSsoBackend::open(path)
             .map_err(|e| map_err("org-SSO", e))?,
@@ -11447,6 +11469,7 @@ fn build_sqlite_auth_stores(path: &str, session_lifetime: u64) -> Result<AuthSto
         verification: Arc::new(verification),
         audit: Arc::new(audit),
         trusted_devices,
+        oidc_tokens,
         org_sso,
         saml,
     })
@@ -11533,6 +11556,10 @@ fn build_pg_auth_stores(
         crate::trusted_device_backend::PostgresTrustedDeviceBackend::with_pool(pool.clone())
             .map_err(|e| map_err("trusted-device", e))?,
     );
+    let oidc_tokens: Arc<dyn pylon_auth::oidc_tokens::OidcTokenStore> = Arc::new(
+        crate::oidc_token_backend::PostgresOidcTokenBackend::with_pool(pool.clone())
+            .map_err(|e| map_err("OIDC token", e))?,
+    );
     let org_sso: Arc<dyn pylon_auth::org_sso::OrgSsoStore> = Arc::new(
         crate::org_sso_backend::PostgresOrgSsoBackend::with_pool(pool.clone())
             .map_err(|e| map_err("org-SSO", e))?,
@@ -11554,6 +11581,7 @@ fn build_pg_auth_stores(
         verification: Arc::new(verification),
         audit: Arc::new(audit),
         trusted_devices,
+        oidc_tokens,
         org_sso,
         saml,
     })

@@ -93,6 +93,79 @@ export interface AuthInfo<R extends AuthRequirement = "optional"> {
    * see the new value.
    */
   elevate(options: { admin: boolean; reason: string }): Promise<void>;
+  /**
+   * A fresh access token for a user's linked account with an OAuth or
+   * OIDC provider, so server code can call the provider's API as that
+   * person. `provider` is the provider id: `"google"`, `"github"`, or the
+   * `<name>` of a `PYLON_OAUTH_<NAME>_OIDC_ISSUER` provider.
+   *
+   * When the stored token expires within 60 seconds, Pylon refreshes it
+   * first and saves the new tokens (the provider may rotate the refresh
+   * token). Refreshes of one account are serialized within a process.
+   *
+   * - Defaults to the caller. `userId` names another user; that needs an
+   *   `internal: true` action or one that called `ctx.auth.elevate`.
+   * - Returns `null` when the user has no account with that provider.
+   * - Throws `REAUTH_REQUIRED` when the token cannot be refreshed: there
+   *   is no refresh token, it expired, or the provider refused it. The
+   *   user must sign in with the provider again. A stale token is never
+   *   returned.
+   * - Throws `PROVIDER_UNAVAILABLE` when the provider could not be reached
+   *   or answered with a server error. Retrying can succeed.
+   *
+   * Actions only. An app signing in against a Pylon identity provider
+   * asks for `offline_access` (refresh tokens) on its own. For other OIDC
+   * providers, add it with `PYLON_OAUTH_<NAME>_SCOPES`.
+   *
+   * ```ts
+   * const t = await ctx.auth.providerToken("stack0");
+   * if (!t) throw ctx.error("NOT_LINKED", "Sign in with Stack0 first.");
+   * await fetch("https://cloud.stack0.dev/api/fn/whoami", {
+   *   headers: { Authorization: `Bearer ${t.accessToken}` },
+   * });
+   * ```
+   */
+  providerToken(
+    provider: string,
+    opts?: { userId?: string },
+  ): Promise<ProviderToken | null>;
+  /**
+   * Resolve an access token that THIS app issued as an OIDC provider
+   * (`PYLON_OIDC_ISSUER` is set and other apps sign in against it).
+   * Another app sends the token to prove which person it acts for.
+   *
+   * Returns `null` for an unknown, expired, or revoked token, and for a
+   * refresh token. Throws `OIDC_NOT_CONFIGURED` when this app is not an
+   * OIDC provider. Available in actions and mutations.
+   *
+   * ```ts
+   * const bearer = ctx.request?.headers["authorization"]?.replace(/^Bearer /, "");
+   * const who = bearer ? await ctx.auth.verifyOidcToken(bearer) : null;
+   * if (!who || who.clientId !== "studio") throw ctx.error("UNAUTHENTICATED", "Bad token.");
+   * ```
+   */
+  verifyOidcToken(token: string): Promise<VerifiedOidcToken | null>;
+}
+
+/** Result of {@link AuthInfo.providerToken}. */
+export interface ProviderToken {
+  accessToken: string;
+  /** Unix seconds when `accessToken` expires. `null` when the provider
+   *  issues tokens that do not expire. */
+  expiresAt: number | null;
+  /** Space-separated scopes the provider granted, when it said. */
+  scope: string | null;
+}
+
+/** Result of {@link AuthInfo.verifyOidcToken}. */
+export interface VerifiedOidcToken {
+  /** The user the token was issued for, in this app. */
+  userId: string;
+  /** The OIDC client (the other app) the token was issued to. */
+  clientId: string;
+  scopes: string[];
+  /** Unix seconds when the token expires. */
+  expiresAt: number;
 }
 
 // ---------------------------------------------------------------------------

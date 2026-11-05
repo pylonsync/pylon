@@ -14,9 +14,9 @@ use pylon_auth::{
 use pylon_runtime::{
     account_backend::PostgresAccountBackend, api_key_backend::PostgresApiKeyBackend,
     audit_backend::PostgresAuditBackend, magic_code_backend::PostgresMagicCodeBackend,
-    oauth_backend::PostgresOAuthBackend, org_sso_backend::PostgresOrgSsoBackend,
-    saml_backend::PostgresSamlBackend, session_backend::PostgresSessionBackend,
-    trusted_device_backend::PostgresTrustedDeviceBackend,
+    oauth_backend::PostgresOAuthBackend, oidc_token_backend::PostgresOidcTokenBackend,
+    org_sso_backend::PostgresOrgSsoBackend, saml_backend::PostgresSamlBackend,
+    session_backend::PostgresSessionBackend, trusted_device_backend::PostgresTrustedDeviceBackend,
     verification_backend::PostgresVerificationBackend,
 };
 use pylon_storage::pg_datastore::PgPool;
@@ -369,4 +369,62 @@ fn sso_and_saml_state_keep_the_guest_binding() {
     });
     let got = saml.take_state("rs_pg_guest", "org_pg").expect("state");
     assert_eq!(got.guest_binding.as_deref(), Some("guest_saml"));
+}
+
+#[test]
+fn oidc_token_backend_passes_conformance() {
+    let Some(url) = pg_url() else {
+        return;
+    };
+    let b = PostgresOidcTokenBackend::with_pool(pool(&url)).expect("with_pool");
+    // Unique tag per run: the suite's rows never collide with an earlier
+    // run's on a shared database.
+    let tag = format!(
+        "pg-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    pylon_auth::oidc_tokens::conformance::run(&b, &tag);
+}
+
+/// Two concurrent rotations of one refresh token agree on one time: the
+/// UPDATE ... COALESCE ... RETURNING is atomic under the row lock.
+#[test]
+fn oidc_token_backend_rotation_is_set_once_under_concurrency() {
+    use pylon_auth::oidc_tokens::{OidcTokenKind, OidcTokenRecord, OidcTokenStore};
+    let Some(url) = pg_url() else {
+        return;
+    };
+    let b = Arc::new(PostgresOidcTokenBackend::with_pool(pool(&url)).expect("with_pool"));
+    let hash = format!(
+        "pg-race-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    b.insert(&OidcTokenRecord {
+        token_hash: hash.clone(),
+        kind: OidcTokenKind::Refresh,
+        grant_id: format!("{hash}-grant"),
+        user_id: format!("{hash}-user"),
+        client_id: "c".into(),
+        scopes: vec!["openid".into(), "offline_access".into()],
+        expires_at: 9_999_999_999,
+        created_at: 1,
+        rotated_at: None,
+    })
+    .unwrap();
+    let handles: Vec<_> = (0..8u64)
+        .map(|i| {
+            let b = Arc::clone(&b);
+            let hash = hash.clone();
+            std::thread::spawn(move || b.mark_rotated(&hash, 1_000 + i).unwrap().unwrap())
+        })
+        .collect();
+    let times: Vec<u64> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    assert!(times.iter().all(|t| *t == times[0]), "{times:?}");
+    b.revoke_grant(&format!("{hash}-grant")).unwrap();
 }

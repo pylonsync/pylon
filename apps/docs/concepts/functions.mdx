@@ -52,6 +52,8 @@ ctx.auth.tenantId // string | null  (selected org)
 ctx.auth.roles    // string[] (exact active-org/session roles)
 ctx.auth.isGuest  // boolean — true for an anonymous guest session
 ctx.auth.elevate({ admin: true, reason: "..." })  // promote AFTER verifying a webhook/HMAC
+ctx.auth.providerToken("google", { userId? })    // actions: fresh provider access token, or null
+ctx.auth.verifyOidcToken(token)                   // actions + mutations: token this app's IdP issued, or null
 // No ctx.auth.email on the handler ctx — fetch the user row for email:
 //   const u = await ctx.db.get("User", ctx.auth.userId)
 

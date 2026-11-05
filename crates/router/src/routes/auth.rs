@@ -2927,6 +2927,7 @@ pub(crate) fn handle(
             id_token: None,
             expires_at: None,
             scope: None,
+            refresh_token_expires_at: None,
         };
         return Some(
             match crate::complete_login_without_email(ctx, "steam", &userinfo, &tokens) {
@@ -2962,9 +2963,10 @@ pub(crate) fn handle(
     // callback, including the org federation mirror from the `orgs` claim,
     // so the user lands with the same workspaces as on the web.
     //
-    // Body: { "id_token": "<jwt>", "access_token"?: "<IdP access token>" }.
-    // The access token is stored on the account link so the periodic org
-    // resync can read the IdP's userinfo, as after a browser sign-in.
+    // Body: { "id_token": "<jwt>", "access_token"?: "<IdP access token>",
+    // "expires_in"?: <seconds> }. The access token is stored on the account
+    // link so the periodic org resync can read the IdP's userinfo, as after
+    // a browser sign-in.
     //
     // 404 unless `<provider>` is configured with PYLON_OAUTH_<NAME>_OIDC_ISSUER.
     if let Some(provider_name) = url
@@ -3114,6 +3116,20 @@ pub(crate) fn handle(
                 .map(String::from),
             orgs: pylon_auth::parse_external_orgs(claims.get("orgs")),
         };
+        // When the access token expires: `expires_in` from the body (the
+        // token exchange answer carries it), else the id_token's own `exp`,
+        // which a Pylon IdP sets earlier than the access token's. Never
+        // "no expiry": `ctx.auth.providerToken` would then hand out the
+        // token after the IdP stopped accepting it.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let access_expires_at = data
+            .get("expires_in")
+            .and_then(|v| v.as_u64())
+            .map(|secs| now.saturating_add(secs))
+            .or_else(|| claims.get("exp").and_then(|v| v.as_u64()));
         let tokens = pylon_auth::TokenSet {
             access_token: data
                 .get("access_token")
@@ -3122,8 +3138,9 @@ pub(crate) fn handle(
                 .to_string(),
             refresh_token: None,
             id_token: Some(id_token.to_string()),
-            expires_at: None,
+            expires_at: access_expires_at,
             scope: None,
+            refresh_token_expires_at: None,
         };
         return Some(
             match crate::complete_login_from_userinfo(ctx, provider_name, &userinfo, &tokens) {
@@ -3292,6 +3309,7 @@ pub(crate) fn handle(
             id_token: Some(id_token.to_string()),
             expires_at: None,
             scope: None,
+            refresh_token_expires_at: None,
         };
         return Some(
             match crate::complete_login_from_userinfo(ctx, provider.name(), &userinfo, &tokens) {
@@ -3932,7 +3950,13 @@ pub(crate) fn handle(
             None => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
         };
         let n = ctx.session_store.revoke_all_for_user(user_id);
-        return Some((200, serde_json::json!({"revoked_count": n}).to_string()));
+        // Signing out everywhere also signs out of the apps that use this
+        // app as their identity provider.
+        let oidc_grants = revoke_oidc_grants_for_user(user_id);
+        return Some((
+            200,
+            serde_json::json!({"revoked_count": n, "revoked_oidc_grants": oidc_grants}).to_string(),
+        ));
     }
 
     // ─── API keys ───────────────────────────────────────────────────────
@@ -4160,6 +4184,7 @@ pub(crate) fn handle(
         // for THIS request so the user isn't logged out of their
         // own password-change tab.
         let total_revoked = ctx.session_store.revoke_all_for_user(&user_id);
+        let oidc_grants = revoke_oidc_grants_for_user(&user_id);
         let session = create_session_with_device(ctx, user_id.clone());
         ctx.maybe_set_session_cookie(&session.token);
         return Some((
@@ -4167,6 +4192,7 @@ pub(crate) fn handle(
             serde_json::json!({
                 "changed": true,
                 "revoked_sessions": total_revoked,
+                "revoked_oidc_grants": oidc_grants,
                 "token": session.token,
                 "expires_at": session.expires_at,
             })
@@ -6908,34 +6934,29 @@ pub(crate) fn handle(
         if grant_type == pylon_auth::oidc_provider::TOKEN_EXCHANGE_GRANT {
             return Some(oidc_token_exchange(ctx, &provider, &form));
         }
+        if grant_type == "refresh_token" {
+            return Some(oidc_refresh_grant(ctx, &provider, &form));
+        }
         if grant_type != "authorization_code" {
             return Some((
                 400,
                 json_error(
                     "unsupported_grant_type",
-                    "pylon supports grant_type=authorization_code and token exchange (RFC 8693)",
+                    "pylon supports grant_type=authorization_code, refresh_token, and token exchange (RFC 8693)",
                 ),
             ));
         }
         let code_param = form.get("code").map(String::as_str).unwrap_or("");
         let redirect_uri = form.get("redirect_uri").map(String::as_str).unwrap_or("");
-        let client_id = form.get("client_id").map(String::as_str).unwrap_or("");
-        let client_secret = form.get("client_secret").map(String::as_str);
         let code_verifier = form.get("code_verifier").map(String::as_str).unwrap_or("");
 
         // Authenticate client BEFORE consuming the auth code. A bad
         // client_secret must not burn a single-use code that the
         // legitimate client could otherwise still redeem.
-        let client = match provider.find_client(client_id) {
-            Some(c) => c,
-            None => return Some((401, json_error("invalid_client", "unknown client_id"))),
+        let client = match oidc_authenticate_client(ctx, &provider, &form) {
+            Ok(c) => c,
+            Err(e) => return Some(e),
         };
-        if !client.authenticate(client_secret) {
-            return Some((
-                401,
-                json_error("invalid_client", "client authentication failed"),
-            ));
-        }
         // Consume the code (single-use, expiry checked).
         let stored = match provider.auth_codes.take(code_param) {
             Some(c) => c,
@@ -6980,11 +7001,64 @@ pub(crate) fn handle(
         return Some(mint_oidc_tokens(
             ctx,
             &provider,
-            &client.client_id,
-            &stored.user_id,
-            &stored.scopes,
-            stored.nonce.as_deref(),
+            OidcMint {
+                client_id: &client.client_id,
+                user_id: &stored.user_id,
+                scopes: &stored.scopes,
+                refresh_scopes: Some(&stored.scopes),
+                grant_id: None,
+                nonce: stored.nonce.as_deref(),
+            },
         ));
+    }
+
+    // POST /oidc/revoke — RFC 7009. The client authenticates as at
+    // /oidc/token; the token may be an access or a refresh token, and the
+    // whole grant it belongs to is revoked. Unknown tokens, and tokens of
+    // other clients, still get 200 (§2.2) so the endpoint does not tell a
+    // caller which tokens exist.
+    if url == "/oidc/revoke" && method == HttpMethod::Post {
+        let provider = match pylon_auth::oidc_provider::provider_or_init() {
+            Some(p) => p,
+            None => {
+                return Some((
+                    404,
+                    json_error(
+                        "OIDC_NOT_CONFIGURED",
+                        "set PYLON_OIDC_ISSUER to enable IdP mode",
+                    ),
+                ))
+            }
+        };
+        let form = crate::parse_query(body);
+        let client = match oidc_authenticate_client(ctx, &provider, &form) {
+            Ok(c) => c,
+            Err(e) => return Some(e),
+        };
+        let token = form.get("token").map(String::as_str).unwrap_or("");
+        if token.is_empty() {
+            return Some((400, json_error("invalid_request", "token is required")));
+        }
+        return match provider.revoke_token(&client.client_id, token) {
+            Ok(n) => {
+                if n > 0 {
+                    tracing::info!(
+                        "[oidc] client \"{}\" revoked a grant ({} tokens)",
+                        client.client_id,
+                        n
+                    );
+                }
+                Some((200, "{}".into()))
+            }
+            Err(e) => {
+                tracing::error!("[oidc] token revocation failed: {e}");
+                // §2.2.1: the server could not revoke; the client may retry.
+                Some((
+                    503,
+                    json_error("temporarily_unavailable", "could not revoke the token"),
+                ))
+            }
+        };
     }
 
     if url == "/oidc/userinfo" && method == HttpMethod::Get {
@@ -7015,13 +7089,20 @@ pub(crate) fn handle(
                 ))
             }
         };
-        let access = match provider.access_tokens.get(&token) {
-            Some(a) => a,
-            None => {
+        let access = match provider.lookup_access_token(&token) {
+            Ok(Some(a)) => a,
+            Ok(None) => {
                 return Some((
                     401,
                     json_error("invalid_token", "access_token unknown or expired"),
                 ))
+            }
+            Err(e) => {
+                tracing::error!("[oidc] token store lookup failed: {e}");
+                return Some((
+                    500,
+                    json_error("server_error", "could not read the token store"),
+                ));
             }
         };
         let user_entity = &ctx.store.manifest().auth.user.entity;
@@ -7447,6 +7528,7 @@ pub(crate) fn handle(
         }
         // Revoke ALL existing sessions — same posture as password change.
         let revoked = ctx.session_store.revoke_all_for_user(&user_id);
+        let oidc_grants = revoke_oidc_grants_for_user(&user_id);
         accept_invites_for_verified_email(ctx, &user_id, &consumed.email);
         let session = create_session_with_device(ctx, user_id.clone());
         ctx.maybe_set_session_cookie(&session.token);
@@ -7460,6 +7542,7 @@ pub(crate) fn handle(
                 .user(user_id.clone())
                 .actor(user_id.clone())
                 .meta("revoked_sessions", revoked.to_string())
+                .meta("revoked_oidc_grants", oidc_grants.to_string())
                 .build(),
         );
         return Some((
@@ -7765,6 +7848,7 @@ pub(crate) fn handle(
         // Revoke other sessions on email change — same blast-radius
         // posture as password change.
         ctx.session_store.revoke_all_for_user(&user_id);
+        revoke_oidc_grants_for_user(&user_id);
         accept_invites_for_verified_email(ctx, &user_id, &new_email);
         let session = create_session_with_device(ctx, user_id.clone());
         ctx.maybe_set_session_cookie(&session.token);
@@ -7902,6 +7986,8 @@ pub(crate) fn handle(
         // that would happen to match no user (find returns None) but
         // still pollute the table.
         let revoked_trust = ctx.trusted_devices.revoke_all_for_user(&user_id);
+        // Tokens this app's IdP issued to other apps for this user.
+        let revoked_oidc = revoke_oidc_grants_for_user(&user_id);
         // Delete the user row.
         match ctx
             .store
@@ -7919,6 +8005,7 @@ pub(crate) fn handle(
                 .meta("revoked_api_keys", revoked_keys.to_string())
                 .meta("unlinked_accounts", revoked_accounts.to_string())
                 .meta("revoked_trusted_devices", revoked_trust.to_string())
+                .meta("revoked_oidc_grants", revoked_oidc.to_string())
                 .build(),
         );
         return Some((
@@ -8244,24 +8331,44 @@ fn newest_avatar(accounts: Vec<pylon_auth::Account>) -> Option<String> {
         .and_then(|a| a.avatar_url)
 }
 
-/// Mint the id_token (and the opaque access token for `/oidc/userinfo`)
-/// this IdP returns from `/oidc/token`, for either grant.
+/// What `/oidc/token` mints for one grant.
+#[cfg(not(target_arch = "wasm32"))]
+struct OidcMint<'a> {
+    client_id: &'a str,
+    user_id: &'a str,
+    /// Scopes of the access token and id_token.
+    scopes: &'a [String],
+    /// The grant's full scopes. A refresh token is issued when these
+    /// include `offline_access`. `None` issues no refresh token.
+    refresh_scopes: Option<&'a [String]>,
+    /// The grant a refresh continues. `None` starts a new grant.
+    grant_id: Option<&'a str>,
+    nonce: Option<&'a str>,
+}
+
+/// Mint the id_token, the opaque access token for `/oidc/userinfo`, and
+/// the refresh token when the grant asked for `offline_access`, for every
+/// `/oidc/token` grant.
 #[cfg(not(target_arch = "wasm32"))]
 fn mint_oidc_tokens(
     ctx: &RouterContext,
     provider: &pylon_auth::oidc_provider::OidcProvider,
-    client_id: &str,
-    user_id: &str,
-    scopes: &[String],
-    nonce: Option<&str>,
+    mint: OidcMint<'_>,
 ) -> (u16, String) {
+    let OidcMint {
+        client_id,
+        user_id,
+        scopes,
+        refresh_scopes,
+        grant_id,
+        nonce,
+    } = mint;
     let issuer = std::env::var("PYLON_OIDC_ISSUER").unwrap_or_default();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let id_token_ttl: u64 = 600; // 10 min
-    let access_token_ttl: u64 = 3600; // 1 hour
 
     // Pull email + name from the user row when scope requested.
     let user_entity = &ctx.store.manifest().auth.user.entity;
@@ -8315,24 +8422,251 @@ fn mint_oidc_tokens(
             return (500, json_error("server_error", "id_token signing failed"));
         }
     };
-    let access_token = pylon_auth::oidc_provider::mint_random_token();
-    provider
-        .access_tokens
-        .put(pylon_auth::oidc_provider::AccessToken {
-            token: access_token.clone(),
-            user_id: user_id.to_string(),
-            client_id: client_id.to_string(),
-            scopes: scopes.to_vec(),
-            expires_at: now + access_token_ttl,
-        });
-    let body = serde_json::json!({
-        "access_token": access_token,
+    // Tokens are only returned once the store has them: a token that was
+    // never persisted would fail at /oidc/userinfo and at refresh.
+    let issued = match provider.issue_tokens(grant_id, user_id, client_id, scopes, refresh_scopes) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("[oidc] token store write failed: {e}");
+            return (
+                500,
+                json_error("server_error", "could not store the tokens"),
+            );
+        }
+    };
+    let mut body = serde_json::json!({
+        "access_token": issued.access_token,
         "token_type": "Bearer",
-        "expires_in": access_token_ttl,
+        "expires_in": issued.access_expires_in,
         "id_token": id_token,
         "scope": scopes.join(" "),
     });
+    if let (Some(rt), Some(ttl)) = (issued.refresh_token, issued.refresh_expires_in) {
+        body["refresh_token"] = serde_json::Value::String(rt);
+        body["refresh_token_expires_in"] = ttl.into();
+    }
     (200, body.to_string())
+}
+
+/// Client credentials of a `/oidc/token` or `/oidc/revoke` request:
+/// `client_secret_basic` (RFC 6749 §2.3.1, the `Authorization: Basic`
+/// header) or `client_secret_post` (form fields). A request may use only
+/// one method. Returns `(client_id, client_secret)`.
+#[cfg(not(target_arch = "wasm32"))]
+fn oidc_client_credentials(
+    ctx: &RouterContext,
+    form: &std::collections::HashMap<String, String>,
+) -> Result<(String, Option<String>), (u16, String)> {
+    let basic = ctx
+        .request_headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+        .and_then(|(_, v)| {
+            let (scheme, rest) = v.trim().split_once(' ')?;
+            scheme.eq_ignore_ascii_case("basic").then(|| rest.trim())
+        });
+    let Some(encoded) = basic else {
+        return Ok((
+            form.get("client_id").cloned().unwrap_or_default(),
+            form.get("client_secret").cloned(),
+        ));
+    };
+    if form.contains_key("client_secret") {
+        return Err((
+            400,
+            json_error(
+                "invalid_request",
+                "use one client authentication method, not Basic and client_secret together",
+            ),
+        ));
+    }
+    use base64::Engine;
+    let malformed = || {
+        (
+            401,
+            json_error("invalid_client", "malformed Basic credentials"),
+        )
+    };
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()
+        .and_then(|b| String::from_utf8(b).ok())
+        .ok_or_else(malformed)?;
+    let (id, secret) = decoded.split_once(':').ok_or_else(malformed)?;
+    // §2.3.1: both halves are form-urlencoded before the base64 step.
+    let id = crate::percent_decode(id, true);
+    if let Some(form_id) = form.get("client_id") {
+        if *form_id != id {
+            return Err((
+                400,
+                json_error(
+                    "invalid_request",
+                    "client_id does not match the Basic credentials",
+                ),
+            ));
+        }
+    }
+    Ok((id, Some(crate::percent_decode(secret, true))))
+}
+
+/// Look up and authenticate the client of a `/oidc/token` or
+/// `/oidc/revoke` request.
+#[cfg(not(target_arch = "wasm32"))]
+fn oidc_authenticate_client<'p>(
+    ctx: &RouterContext,
+    provider: &'p pylon_auth::oidc_provider::OidcProvider,
+    form: &std::collections::HashMap<String, String>,
+) -> Result<&'p pylon_auth::oidc_provider::OidcClient, (u16, String)> {
+    let (client_id, client_secret) = oidc_client_credentials(ctx, form)?;
+    let client = provider
+        .find_client(&client_id)
+        .ok_or_else(|| (401, json_error("invalid_client", "unknown client_id")))?;
+    if !client.authenticate(client_secret.as_deref()) {
+        return Err((
+            401,
+            json_error("invalid_client", "client authentication failed"),
+        ));
+    }
+    Ok(client)
+}
+
+/// `POST /oidc/token` with `grant_type=refresh_token` (RFC 6749 §6).
+///
+/// The client authenticates exactly as for the code grant, and the refresh
+/// token must have been issued to it. `scope` may narrow the grant, never
+/// widen it. The presented token is rotated: a reuse within
+/// `REFRESH_REUSE_GRACE_SECS` succeeds (two requests from one app racing),
+/// a later reuse revokes the whole grant. The new tokens keep the grant id.
+#[cfg(not(target_arch = "wasm32"))]
+fn oidc_refresh_grant(
+    ctx: &RouterContext,
+    provider: &pylon_auth::oidc_provider::OidcProvider,
+    form: &std::collections::HashMap<String, String>,
+) -> (u16, String) {
+    use pylon_auth::oidc_provider::RefreshDenied;
+    let client = match oidc_authenticate_client(ctx, provider, form) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let refresh_token = form.get("refresh_token").map(String::as_str).unwrap_or("");
+    if refresh_token.is_empty() {
+        return (
+            400,
+            json_error("invalid_request", "refresh_token is required"),
+        );
+    }
+    let accepted = match provider.accept_refresh_token(&client.client_id, refresh_token) {
+        Ok(a) => a,
+        Err(RefreshDenied::Storage(e)) => {
+            tracing::error!("[oidc] token store failed during refresh: {e}");
+            return (
+                500,
+                json_error("server_error", "could not read the token store"),
+            );
+        }
+        Err(RefreshDenied::Reused { grant_id, revoked }) => {
+            tracing::warn!(
+                "[oidc] rotated refresh token reused after the grace window; revoked grant \"{}\" of client \"{}\" ({} tokens)",
+                grant_id,
+                client.client_id,
+                revoked
+            );
+            return (
+                400,
+                json_error(
+                    "invalid_grant",
+                    "refresh token was already used; the grant is revoked",
+                ),
+            );
+        }
+        Err(RefreshDenied::Invalid | RefreshDenied::WrongClient) => {
+            return (
+                400,
+                json_error(
+                    "invalid_grant",
+                    "refresh token unknown, expired, or revoked",
+                ),
+            )
+        }
+    };
+    // `scope` is form-encoded (RFC 6749 §3.3), so `+` separates scopes as
+    // at /authorize.
+    let scopes: Vec<String> = match form.get("scope").map(String::as_str) {
+        Some(requested) if !requested.trim().is_empty() => {
+            let mut narrowed: Vec<String> = Vec::new();
+            for scope in requested
+                .split(|c: char| c.is_whitespace() || c == '+')
+                .filter(|s| !s.is_empty())
+            {
+                if !accepted.scopes.iter().any(|g| g == scope) {
+                    return (
+                        400,
+                        json_error("invalid_scope", "scope is wider than the original grant"),
+                    );
+                }
+                if !narrowed.iter().any(|n| n == scope) {
+                    narrowed.push(scope.to_string());
+                }
+            }
+            narrowed
+        }
+        _ => accepted.scopes.clone(),
+    };
+    // The person must still exist. A deleted user's grants are revoked by
+    // the delete cascade; this covers a row removed some other way.
+    let user_entity = &ctx.store.manifest().auth.user.entity;
+    if ctx
+        .store
+        .get_by_id(user_entity, &accepted.user_id)
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        if let Err(e) = provider.tokens.revoke_grant(&accepted.grant_id) {
+            tracing::warn!("[oidc] revoking the grant of a missing user failed: {e}");
+        }
+        return (
+            400,
+            json_error("invalid_grant", "the user no longer exists"),
+        );
+    }
+    mint_oidc_tokens(
+        ctx,
+        provider,
+        OidcMint {
+            client_id: &client.client_id,
+            user_id: &accepted.user_id,
+            scopes: &scopes,
+            refresh_scopes: Some(&accepted.scopes),
+            grant_id: Some(&accepted.grant_id),
+            nonce: None,
+        },
+    )
+}
+
+/// Revoke every OIDC grant this app's IdP issued to `user_id`. Called
+/// wherever all of a user's sessions are revoked (sign out everywhere,
+/// password change or reset, email change, account delete), so the apps
+/// that sign in against this IdP lose their tokens too. Returns the number
+/// of grants; 0 when this app is not an IdP.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn revoke_oidc_grants_for_user(user_id: &str) -> usize {
+    let Some(provider) = pylon_auth::oidc_provider::provider_or_init() else {
+        return 0;
+    };
+    match provider.revoke_user(user_id) {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::error!("[oidc] revoking the grants of user \"{user_id}\" failed: {e}");
+            0
+        }
+    }
+}
+
+/// No IdP on wasm32: there is nothing to revoke.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn revoke_oidc_grants_for_user(_user_id: &str) -> usize {
+    0
 }
 
 /// `POST /oidc/token` with `grant_type` = token exchange (RFC 8693): a
@@ -8418,13 +8752,19 @@ fn oidc_token_exchange(
             )
         }
     };
+    // EXCHANGE_SCOPES has no offline_access: an exchange never yields a
+    // refresh token.
     let (status, body) = mint_oidc_tokens(
         ctx,
         provider,
-        &client.client_id,
-        &session.user_id,
-        &scopes,
-        None,
+        OidcMint {
+            client_id: &client.client_id,
+            user_id: &session.user_id,
+            scopes: &scopes,
+            refresh_scopes: None,
+            grant_id: None,
+            nonce: None,
+        },
     );
     if status != 200 {
         return (status, body);

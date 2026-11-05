@@ -553,6 +553,13 @@ pub enum TsMessage {
     #[serde(rename = "api_key_op")]
     ApiKeyOp(ApiKeyOpMessage),
 
+    /// `ctx.auth.providerToken(provider, { userId })` and
+    /// `ctx.auth.verifyOidcToken(token)`. The runner checks the function
+    /// type and who may act for another user; the host reads the account
+    /// store or this app's OIDC token store.
+    #[serde(rename = "auth_op")]
+    AuthOp(AuthOpMessage),
+
     /// `ctx.workflows.*` — start a durable workflow or deliver an event
     /// to a waiting one, from app code (mutations/actions). The host
     /// routes it to the WorkflowEngine via the workflow_op_hook.
@@ -637,6 +644,7 @@ impl TsMessage {
             TsMessage::WorkflowOp(m) => Some(&m.call_id),
             TsMessage::AuditOp(m) => Some(&m.call_id),
             TsMessage::ApiKeyOp(m) => Some(&m.call_id),
+            TsMessage::AuthOp(m) => Some(&m.call_id),
             TsMessage::Return(m) => Some(&m.call_id),
             TsMessage::Error(m) => Some(&m.call_id),
             TsMessage::ResponseStart(m) => Some(&m.call_id),
@@ -676,6 +684,25 @@ pub struct WorkflowOpMessage {
     pub event: Option<String>,
     #[serde(default)]
     pub data: Option<serde_json::Value>,
+}
+
+/// `ctx.auth.providerToken` / `ctx.auth.verifyOidcToken` from app code.
+/// Replied to with a `result` frame.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthOpMessage {
+    pub call_id: String,
+    /// `"provider_token"` or `"verify_oidc_token"`.
+    pub op: String,
+    /// provider_token: the OAuth/OIDC provider id (`"google"`, or the
+    /// `<name>` of `PYLON_OAUTH_<NAME>_OIDC_ISSUER`).
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// provider_token: whose linked account. `None` means the caller.
+    #[serde(default)]
+    pub user_id: Option<String>,
+    /// verify_oidc_token: the access token to resolve.
+    #[serde(default)]
+    pub token: Option<String>,
 }
 
 /// `ctx.apiKeys.*` from app code. `op` is "create" or "revoke".
@@ -1520,6 +1547,29 @@ mod tests {
                 assert_eq!(db.id.as_deref(), Some("lot_1"));
             }
             _ => panic!("expected Db message"),
+        }
+    }
+
+    #[test]
+    fn ts_message_deserializes_auth_op() {
+        // Exactly what runtime.ts sends for ctx.auth.providerToken.
+        let json = r#"{"type":"auth_op","call_id":"c1","op":"provider_token","provider":"stack0","user_id":null}"#;
+        match serde_json::from_str::<TsMessage>(json).unwrap() {
+            TsMessage::AuthOp(m) => {
+                assert_eq!(m.call_id, "c1");
+                assert_eq!(m.op, "provider_token");
+                assert_eq!(m.provider.as_deref(), Some("stack0"));
+                assert!(m.user_id.is_none());
+                assert!(m.token.is_none());
+            }
+            _ => panic!("expected AuthOp message"),
+        }
+        let json = r#"{"type":"auth_op","call_id":"c2","op":"verify_oidc_token","token":"tok"}"#;
+        let msg = serde_json::from_str::<TsMessage>(json).unwrap();
+        assert_eq!(msg.call_id(), Some("c2"));
+        match msg {
+            TsMessage::AuthOp(m) => assert_eq!(m.token.as_deref(), Some("tok")),
+            _ => panic!("expected AuthOp message"),
         }
     }
 

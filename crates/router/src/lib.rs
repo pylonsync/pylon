@@ -1133,6 +1133,7 @@ pub(crate) fn complete_oauth_login_pkce(
             id_token: None,
             expires_at: None,
             scope: None,
+            refresh_token_expires_at: None,
         };
         (info, tokens)
     } else {
@@ -1291,6 +1292,14 @@ fn complete_login(
             let mut refreshed =
                 pylon_auth::Account::new(existing.user_id.clone(), userinfo, tokens);
             refreshed.created_at = existing.created_at;
+            // Providers often send a refresh token only on the first
+            // consent (Google), or only for some scopes (a Pylon IdP without
+            // offline_access). The earlier one is still valid, so a sign-in
+            // that brought none must not erase it.
+            if refreshed.refresh_token.is_none() {
+                refreshed.refresh_token = existing.refresh_token;
+                refreshed.refresh_token_expires_at = existing.refresh_token_expires_at;
+            }
             ctx.account_store.upsert(&refreshed);
             existing.user_id
         }
@@ -2214,13 +2223,15 @@ fn cascade_clean_user_auth_stores(ctx: &RouterContext, user_id: &str) {
     }
     let revoked_accounts = ctx.account_store.delete_for_user(user_id);
     let revoked_trust = ctx.trusted_devices.revoke_all_for_user(user_id);
+    let revoked_oidc = routes::auth::revoke_oidc_grants_for_user(user_id);
     tracing::info!(
-        "[auth] cascade-cleaned auth stores for deleted user \"{}\": sessions={}, api_keys={}, accounts={}, trusted_devices={}",
+        "[auth] cascade-cleaned auth stores for deleted user \"{}\": sessions={}, api_keys={}, accounts={}, trusted_devices={}, oidc_grants={}",
         user_id,
         revoked_sessions,
         revoked_keys,
         revoked_accounts,
-        revoked_trust
+        revoked_trust,
+        revoked_oidc
     );
 }
 
@@ -2596,11 +2607,14 @@ pub(crate) fn gdpr_purge(ctx: &RouterContext, user_id: &str) -> (u16, String) {
     // Invalidate every active session for the user. Even after the row is
     // gone, an in-flight session token would let a purged user keep acting.
     let revoked = ctx.session_store.revoke_all_for_user(user_id);
+    // Same for tokens this app's IdP issued to other apps.
+    let oidc_grants_revoked = routes::auth::revoke_oidc_grants_for_user(user_id);
 
     let resp = serde_json::json!({
         "user_id": user_id,
         "rows_deleted": deleted,
         "sessions_revoked": revoked,
+        "oidc_grants_revoked": oidc_grants_revoked,
         "errors": errors,
         "purged_at": pylon_kernel::util::now_iso(),
     });
