@@ -114,6 +114,7 @@ without changing the bundle.
   max_tokens?: number;     // default 4096
   temperature?: number;
   cache_control?: { type: "ephemeral"; ttl?: "5m" | "1h" }; // automatic prompt caching
+  tool_choice?: { type: "auto" } | { type: "any" } | { type: "tool"; name: string } | { type: "none" };
 }
 ```
 

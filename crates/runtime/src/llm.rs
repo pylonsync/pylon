@@ -245,6 +245,21 @@ pub struct LlmCompleteRequest {
     /// prompts by itself and ignores both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
+    /// Which tool the model must call. Default: the model decides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ToolChoice>,
+}
+
+/// Anthropic's `tool_choice`: `auto` (the model decides), `any` (some
+/// tool), `tool` (the named tool), or `none`. OpenAI gets the same choice
+/// as `auto`, `required`, `{ type: "function", ... }`, or `none`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolChoice {
+    Auto,
+    Any,
+    Tool { name: String },
+    None,
 }
 
 /// `{ type: "ephemeral", ttl?: "5m" | "1h" }`. Serde refuses any other
@@ -1053,6 +1068,9 @@ fn anthropic_request_body(req: &LlmCompleteRequest, stream: bool) -> serde_json:
     if let Some(cache) = &req.cache_control {
         body["cache_control"] = serde_json::json!(cache);
     }
+    if let Some(choice) = &req.tool_choice {
+        body["tool_choice"] = serde_json::json!(choice);
+    }
     if !req.tools.is_empty() {
         body["tools"] = serde_json::json!(req
             .tools
@@ -1210,6 +1228,16 @@ fn openai_request_body(
                 }
             }))
             .collect::<Vec<_>>());
+    }
+    if let Some(choice) = &req.tool_choice {
+        body["tool_choice"] = match choice {
+            ToolChoice::Auto => serde_json::json!("auto"),
+            ToolChoice::Any => serde_json::json!("required"),
+            ToolChoice::Tool { name } => {
+                serde_json::json!({ "type": "function", "function": { "name": name } })
+            }
+            ToolChoice::None => serde_json::json!("none"),
+        };
     }
     body
 }
@@ -2217,6 +2245,68 @@ mod tests {
             content[1].get("cache_control").is_none(),
             "a block without a breakpoint sends no cache_control"
         );
+    }
+
+    #[test]
+    fn tool_choice_reaches_both_providers_in_their_shape() {
+        let req: LlmCompleteRequest = serde_json::from_value(serde_json::json!({
+            "model": "m",
+            "messages": [{ "role": "user", "content": "hi" }],
+            "tools": [{ "name": "judge", "input_schema": { "type": "object" } }],
+            "tool_choice": { "type": "tool", "name": "judge" }
+        }))
+        .unwrap();
+        assert_eq!(
+            anthropic_request_body(&req, false)["tool_choice"],
+            serde_json::json!({ "type": "tool", "name": "judge" })
+        );
+        assert_eq!(
+            openai_request_body(&req, false, false)["tool_choice"],
+            serde_json::json!({ "type": "function", "function": { "name": "judge" } })
+        );
+        for (choice, openai) in [
+            (ToolChoice::Auto, "auto"),
+            (ToolChoice::Any, "required"),
+            (ToolChoice::None, "none"),
+        ] {
+            let req = LlmCompleteRequest {
+                tool_choice: Some(choice.clone()),
+                ..req.clone()
+            };
+            assert_eq!(
+                openai_request_body(&req, false, false)["tool_choice"],
+                openai
+            );
+            assert_eq!(
+                anthropic_request_body(&req, false)["tool_choice"],
+                serde_json::json!(choice)
+            );
+        }
+        let plain = LlmCompleteRequest {
+            tool_choice: None,
+            ..req
+        };
+        assert!(anthropic_request_body(&plain, false)
+            .get("tool_choice")
+            .is_none());
+        assert!(openai_request_body(&plain, false, false)
+            .get("tool_choice")
+            .is_none());
+    }
+
+    #[test]
+    fn a_bad_tool_choice_is_refused() {
+        for bad in [
+            serde_json::json!({ "type": "tool" }),
+            serde_json::json!({ "type": "function", "name": "x" }),
+            serde_json::json!("auto"),
+        ] {
+            let parsed = serde_json::from_value::<LlmCompleteRequest>(serde_json::json!({
+                "messages": [],
+                "tool_choice": bad,
+            }));
+            assert!(parsed.is_err(), "accepted {bad}");
+        }
     }
 
     #[test]

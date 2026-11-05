@@ -913,7 +913,19 @@ export interface LlmCompleteRequest {
    * `cache_control` on a text block instead.
    */
   cache_control?: LlmCacheControl;
+  /**
+   * Which tool the model must call: "auto" (the model decides, the
+   * default), "any" (some tool), "tool" (the named tool), or "none".
+   * Forcing a tool is the dependable way to get structured output.
+   */
+  tool_choice?: LlmToolChoice;
 }
+
+export type LlmToolChoice =
+  | { type: "auto" }
+  | { type: "any" }
+  | { type: "tool"; name: string }
+  | { type: "none" };
 
 export interface LlmUsage {
   /**

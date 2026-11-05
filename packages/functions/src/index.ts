@@ -102,6 +102,7 @@ export type {
   LlmCacheControl,
   LlmMediaSource,
   LlmTool,
+  LlmToolChoice,
   LlmCompleteRequest,
   LlmCompleteResponse,
   LlmUsage,
