@@ -2200,6 +2200,19 @@ pub(crate) fn handle_delete(ctx: &RouterContext, entity: &str, id: &str) -> (u16
     }
 }
 
+/// Revoke the OIDC grants this app's IdP issued to `user_id`
+/// (routes/auth.rs). The auth routes are not built for wasm32, where there
+/// is no IdP and nothing to revoke.
+#[cfg(not(target_arch = "wasm32"))]
+fn revoke_oidc_grants_for_user(user_id: &str) -> usize {
+    routes::auth::revoke_oidc_grants_for_user(user_id)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn revoke_oidc_grants_for_user(_user_id: &str) -> usize {
+    0
+}
+
 /// Wipe every auth-side row keyed on `user_id`. Called after a
 /// User row is deleted via `/api/entities/<User>/<id>`. The
 /// self-service `/api/auth/account` DELETE handler runs the same
@@ -2223,7 +2236,7 @@ fn cascade_clean_user_auth_stores(ctx: &RouterContext, user_id: &str) {
     }
     let revoked_accounts = ctx.account_store.delete_for_user(user_id);
     let revoked_trust = ctx.trusted_devices.revoke_all_for_user(user_id);
-    let revoked_oidc = routes::auth::revoke_oidc_grants_for_user(user_id);
+    let revoked_oidc = revoke_oidc_grants_for_user(user_id);
     tracing::info!(
         "[auth] cascade-cleaned auth stores for deleted user \"{}\": sessions={}, api_keys={}, accounts={}, trusted_devices={}, oidc_grants={}",
         user_id,
@@ -2608,7 +2621,7 @@ pub(crate) fn gdpr_purge(ctx: &RouterContext, user_id: &str) -> (u16, String) {
     // gone, an in-flight session token would let a purged user keep acting.
     let revoked = ctx.session_store.revoke_all_for_user(user_id);
     // Same for tokens this app's IdP issued to other apps.
-    let oidc_grants_revoked = routes::auth::revoke_oidc_grants_for_user(user_id);
+    let oidc_grants_revoked = revoke_oidc_grants_for_user(user_id);
 
     let resp = serde_json::json!({
         "user_id": user_id,

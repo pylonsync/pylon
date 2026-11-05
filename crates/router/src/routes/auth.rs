@@ -8663,12 +8663,6 @@ pub(crate) fn revoke_oidc_grants_for_user(user_id: &str) -> usize {
     }
 }
 
-/// No IdP on wasm32: there is nothing to revoke.
-#[cfg(target_arch = "wasm32")]
-pub(crate) fn revoke_oidc_grants_for_user(_user_id: &str) -> usize {
-    0
-}
-
 /// `POST /oidc/token` with `grant_type` = token exchange (RFC 8693): a
 /// native app that signed in to this IdP (Apple, Google, email code) trades
 /// that session for an id_token addressed to a first-party client, so it
