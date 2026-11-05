@@ -99,10 +99,12 @@ export type {
   Llm,
   LlmMessage,
   LlmContentBlock,
+  LlmCacheControl,
   LlmMediaSource,
   LlmTool,
   LlmCompleteRequest,
   LlmCompleteResponse,
+  LlmUsage,
   LlmStreamEvent,
   Rooms,
   // Platform domains — app authors name these when handling ctx.domains

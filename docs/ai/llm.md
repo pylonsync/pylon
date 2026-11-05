@@ -113,6 +113,7 @@ without changing the bundle.
   tools?: LlmTool[];
   max_tokens?: number;     // default 4096
   temperature?: number;
+  cache_control?: { type: "ephemeral"; ttl?: "5m" | "1h" }; // automatic prompt caching
 }
 ```
 
@@ -121,7 +122,7 @@ A message is `{ role, content }` where `content` is either a string
 
 ```ts
 type LlmContentBlock =
-  | { type: "text"; text: string }
+  | { type: "text"; text: string; cache_control?: { type: "ephemeral"; ttl?: "5m" | "1h" } }
   | { type: "tool_use"; id: string; name: string; input: object }
   | { type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean };
 ```
@@ -133,7 +134,12 @@ The response:
   model: string;
   content: LlmContentBlock[];
   stop_reason: "end_turn" | "tool_use" | "max_tokens" | "stop_sequence";
-  usage: { input_tokens: number; output_tokens: number };
+  usage: {
+    input_tokens: number;                // after the last cache breakpoint
+    output_tokens: number;
+    cache_creation_input_tokens: number; // written to the cache
+    cache_read_input_tokens: number;     // read from the cache
+  };
 }
 ```
 
@@ -141,6 +147,32 @@ OpenAI requests translate at the transport boundary. `tool_use`
 blocks emit as `tool_calls`, `tool_result` blocks emit as
 `role: "tool"` follow-ups, and the response shape comes back in the
 canonical Anthropic format.
+
+## Prompt caching
+
+Anthropic caches a prompt prefix when the request marks it. Pylon
+passes the marks through and reports the cache tokens in `usage`.
+
+- Set `cache_control` on the request for a tool loop or a chat. The
+  provider puts the breakpoint on the last block and moves it forward on
+  each call, so every turn reads the turns before it from the cache.
+- Set `cache_control` on a text block when many calls share a prefix and
+  then differ. Put the shared text in that block and the changing text in
+  a later block. The tools and `system` come before the messages, so
+  they are in every cached prefix.
+- A prefix shorter than the model's minimum (512 tokens on the Claude 5
+  models, 1,024 to 4,096 on older ones) is not cached, and the provider
+  returns no error. Check `cache_creation_input_tokens` and
+  `cache_read_input_tokens`.
+- The cache lasts 5 minutes, or 1 hour with `ttl: "1h"`. A write costs
+  1.25x base input (2x for 1 hour) and a read about 0.1x.
+- Calls that run at the same time do not read each other's cache. Send
+  the first call alone, then the rest.
+
+The whole prompt is `input_tokens + cache_creation_input_tokens +
+cache_read_input_tokens`. OpenAI caches long prompts by itself, ignores
+`cache_control`, and reports its cached tokens as
+`cache_read_input_tokens`.
 
 ## Tool-use loop
 

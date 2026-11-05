@@ -97,6 +97,10 @@ pub enum LlmContent {
 pub enum ContentBlock {
     Text {
         text: String,
+        /// A prompt-cache breakpoint after this block (Anthropic). The
+        /// prefix up to and including the block is cached.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     ToolUse {
         id: String,
@@ -234,6 +238,40 @@ pub struct LlmCompleteRequest {
     pub max_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    /// Automatic prompt caching (Anthropic): the provider puts the cache
+    /// breakpoint on the last cacheable block and moves it forward as a
+    /// conversation grows. For a breakpoint at a fixed place, set
+    /// `cache_control` on a text block instead. OpenAI caches long
+    /// prompts by itself and ignores both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
+}
+
+/// `{ type: "ephemeral", ttl?: "5m" | "1h" }`. Serde refuses any other
+/// shape, so a typo fails the call instead of silently not caching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheControl {
+    #[serde(rename = "type")]
+    pub kind: CacheKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<CacheTtl>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheKind {
+    Ephemeral,
+}
+
+/// Five minutes is the provider default. A one-hour write costs 2x base
+/// input instead of 1.25x.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CacheTtl {
+    #[serde(rename = "5m")]
+    FiveMinutes,
+    #[serde(rename = "1h")]
+    OneHour,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,8 +285,52 @@ pub struct LlmCompleteResponse {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 pub struct LlmUsage {
+    /// Input tokens read at the full price: the tokens after the last
+    /// cache breakpoint, or all of them when nothing was cached. The
+    /// whole prompt is input + cache_creation + cache_read.
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// Tokens written to the prompt cache (1.25x base input for a 5m
+    /// TTL, 2x for 1h). Always 0 on OpenAI.
+    #[serde(default)]
+    pub cache_creation_input_tokens: u32,
+    /// Tokens read from the prompt cache (0.1x base input on most models).
+    #[serde(default)]
+    pub cache_read_input_tokens: u32,
+}
+
+/// Usage from an Anthropic `usage` object (a message, or the
+/// `message_start` event of a stream).
+fn anthropic_usage(u: &serde_json::Value) -> LlmUsage {
+    let n = |key: &str| u.get(key).and_then(|t| t.as_u64()).unwrap_or(0) as u32;
+    LlmUsage {
+        input_tokens: n("input_tokens"),
+        output_tokens: n("output_tokens"),
+        cache_creation_input_tokens: n("cache_creation_input_tokens"),
+        cache_read_input_tokens: n("cache_read_input_tokens"),
+    }
+}
+
+/// Usage from an OpenAI `usage` object. OpenAI counts cached tokens
+/// inside `prompt_tokens`; they move to `cache_read_input_tokens` so the
+/// fields mean the same thing for both providers.
+fn openai_usage(u: &serde_json::Value) -> LlmUsage {
+    let prompt = u.get("prompt_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32;
+    let cached = u
+        .get("prompt_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0) as u32;
+    let cached = cached.min(prompt);
+    LlmUsage {
+        input_tokens: prompt - cached,
+        output_tokens: u
+            .get("completion_tokens")
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0) as u32,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: cached,
+    }
 }
 
 /// Streaming event emitted while a response is generated. Mirrors
@@ -662,8 +744,7 @@ impl LlmClient {
                         model = m.to_string();
                     }
                     if let Some(u) = value.get("message").and_then(|m| m.get("usage")) {
-                        usage.input_tokens =
-                            u.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32;
+                        usage = anthropic_usage(u);
                     }
                 }
                 "content_block_start" => {
@@ -676,6 +757,7 @@ impl LlmClient {
                         "text" => {
                             content.push(ContentBlock::Text {
                                 text: String::new(),
+                                cache_control: None,
                             });
                             open = OpenBlock::Text(content.len() - 1);
                         }
@@ -713,7 +795,7 @@ impl LlmClient {
                     match (&mut open, dt) {
                         (OpenBlock::Text(idx), "text_delta") => {
                             if let Some(t) = delta.get("text").and_then(|v| v.as_str()) {
-                                if let ContentBlock::Text { text } = &mut content[*idx] {
+                                if let ContentBlock::Text { text, .. } = &mut content[*idx] {
                                     text.push_str(t);
                                 }
                                 on_event(StreamEvent::TextDelta {
@@ -865,13 +947,8 @@ impl LlmClient {
             // Capture usage from any chunk that carries it — OpenAI's
             // final chunk has empty choices + a populated usage object
             // when stream_options.include_usage is set.
-            if let Some(u) = value.get("usage") {
-                if let Some(p) = u.get("prompt_tokens").and_then(|v| v.as_u64()) {
-                    usage.input_tokens = p as u32;
-                }
-                if let Some(c) = u.get("completion_tokens").and_then(|v| v.as_u64()) {
-                    usage.output_tokens = c as u32;
-                }
+            if let Some(u) = value.get("usage").filter(|u| u.is_object()) {
+                usage = openai_usage(u);
             }
             let choice = value.get("choices").and_then(|c| c.get(0));
             if let Some(c) = choice {
@@ -931,7 +1008,10 @@ impl LlmClient {
 
         let mut content: Vec<ContentBlock> = Vec::new();
         if !text_buf.is_empty() {
-            content.push(ContentBlock::Text { text: text_buf });
+            content.push(ContentBlock::Text {
+                text: text_buf,
+                cache_control: None,
+            });
         }
         for (id, name, raw_args) in tool_calls {
             let input = serde_json::from_str::<serde_json::Value>(&raw_args)
@@ -969,6 +1049,9 @@ fn anthropic_request_body(req: &LlmCompleteRequest, stream: bool) -> serde_json:
     }
     if let Some(t) = req.temperature {
         body["temperature"] = serde_json::json!(t);
+    }
+    if let Some(cache) = &req.cache_control {
+        body["cache_control"] = serde_json::json!(cache);
     }
     if !req.tools.is_empty() {
         body["tools"] = serde_json::json!(req
@@ -1182,7 +1265,7 @@ fn serialize_messages_openai(m: &LlmMessage) -> Vec<serde_json::Value> {
             }
             for b in blocks {
                 match b {
-                    ContentBlock::Text { text } => {
+                    ContentBlock::Text { text, .. } => {
                         text_chunks.push(text.clone());
                         parts.push(serde_json::json!({"type": "text", "text": text}));
                     }
@@ -1252,17 +1335,7 @@ fn parse_anthropic_message(v: serde_json::Value) -> Result<LlmCompleteResponse, 
         .and_then(|s| s.as_str())
         .unwrap_or("end_turn")
         .to_string();
-    let usage_obj = v.get("usage");
-    let usage = LlmUsage {
-        input_tokens: usage_obj
-            .and_then(|u| u.get("input_tokens"))
-            .and_then(|t| t.as_u64())
-            .unwrap_or(0) as u32,
-        output_tokens: usage_obj
-            .and_then(|u| u.get("output_tokens"))
-            .and_then(|t| t.as_u64())
-            .unwrap_or(0) as u32,
-    };
+    let usage = v.get("usage").map(anthropic_usage).unwrap_or_default();
     let content: Vec<ContentBlock> = v
         .get("content")
         .and_then(|c| c.as_array())
@@ -1286,17 +1359,7 @@ fn parse_openai_completion(v: serde_json::Value) -> Result<LlmCompleteResponse, 
         .and_then(|m| m.as_str())
         .unwrap_or("")
         .to_string();
-    let usage_obj = v.get("usage");
-    let usage = LlmUsage {
-        input_tokens: usage_obj
-            .and_then(|u| u.get("prompt_tokens"))
-            .and_then(|t| t.as_u64())
-            .unwrap_or(0) as u32,
-        output_tokens: usage_obj
-            .and_then(|u| u.get("completion_tokens"))
-            .and_then(|t| t.as_u64())
-            .unwrap_or(0) as u32,
-    };
+    let usage = v.get("usage").map(openai_usage).unwrap_or_default();
     let choice = v
         .get("choices")
         .and_then(|c| c.get(0))
@@ -1311,7 +1374,10 @@ fn parse_openai_completion(v: serde_json::Value) -> Result<LlmCompleteResponse, 
     let mut content: Vec<ContentBlock> = Vec::new();
     if let Some(text) = message.get("content").and_then(|c| c.as_str()) {
         if !text.is_empty() {
-            content.push(ContentBlock::Text { text: text.into() });
+            content.push(ContentBlock::Text {
+                text: text.into(),
+                cache_control: None,
+            });
         }
     }
     if let Some(tcs) = message.get("tool_calls").and_then(|c| c.as_array()) {
@@ -1794,6 +1860,7 @@ mod tests {
         let req = with_blocks(vec![
             ContentBlock::Text {
                 text: "Read these.".into(),
+                cache_control: None,
             },
             ContentBlock::Image {
                 source: media("image/png"),
@@ -1932,12 +1999,14 @@ mod tests {
         let req = with_blocks(vec![
             ContentBlock::Text {
                 text: "Before:".into(),
+                cache_control: None,
             },
             ContentBlock::Image {
                 source: media("image/png"),
             },
             ContentBlock::Text {
                 text: "After:".into(),
+                cache_control: None,
             },
             ContentBlock::Image {
                 source: media("image/jpeg"),
@@ -1960,6 +2029,7 @@ mod tests {
         let req = with_blocks(vec![
             ContentBlock::Text {
                 text: "What is this?".into(),
+                cache_control: None,
             },
             ContentBlock::Image {
                 source: media("image/webp"),
@@ -1994,6 +2064,7 @@ mod tests {
                     content: LlmContent::Blocks(vec![
                         ContentBlock::Text {
                             text: "Let me check.".into(),
+                            cache_control: None,
                         },
                         ContentBlock::ToolUse {
                             id: "tool_use_1".into(),
@@ -2119,6 +2190,127 @@ mod tests {
             }
             other => panic!("expected ToolUse, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cache_control_arrives_from_a_function_and_reaches_anthropic() {
+        let req: LlmCompleteRequest = serde_json::from_value(serde_json::json!({
+            "model": "m",
+            "cache_control": { "type": "ephemeral", "ttl": "1h" },
+            "messages": [{ "role": "user", "content": [
+                { "type": "text", "text": "site profile", "cache_control": { "type": "ephemeral" } },
+                { "type": "text", "text": "batch" }
+            ]}]
+        }))
+        .unwrap();
+        let body = anthropic_request_body(&req, false);
+        assert_eq!(
+            body["cache_control"],
+            serde_json::json!({ "type": "ephemeral", "ttl": "1h" })
+        );
+        let content = &body["messages"][0]["content"];
+        assert_eq!(
+            content[0]["cache_control"],
+            serde_json::json!({ "type": "ephemeral" })
+        );
+        assert!(
+            content[1].get("cache_control").is_none(),
+            "a block without a breakpoint sends no cache_control"
+        );
+    }
+
+    #[test]
+    fn no_cache_control_sends_none() {
+        let body = anthropic_request_body(
+            &with_blocks(vec![ContentBlock::Text {
+                text: "hi".into(),
+                cache_control: None,
+            }]),
+            false,
+        );
+        assert!(body.get("cache_control").is_none());
+        assert!(body["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none());
+    }
+
+    #[test]
+    fn a_bad_cache_control_is_refused() {
+        for bad in [
+            serde_json::json!({ "type": "persistent" }),
+            serde_json::json!({ "type": "ephemeral", "ttl": "2h" }),
+            serde_json::json!({ "type": "ephemeral", "tll": "1h" }),
+        ] {
+            let parsed = serde_json::from_value::<LlmCompleteRequest>(serde_json::json!({
+                "messages": [],
+                "cache_control": bad,
+            }));
+            assert!(parsed.is_err(), "accepted {bad}");
+        }
+    }
+
+    #[test]
+    fn openai_body_leaves_cache_control_out() {
+        let mut req = with_blocks(vec![ContentBlock::Text {
+            text: "hi".into(),
+            cache_control: Some(CacheControl {
+                kind: CacheKind::Ephemeral,
+                ttl: None,
+            }),
+        }]);
+        req.cache_control = Some(CacheControl {
+            kind: CacheKind::Ephemeral,
+            ttl: Some(CacheTtl::OneHour),
+        });
+        let body = openai_request_body(&req, false, false);
+        assert!(!body.to_string().contains("cache_control"));
+    }
+
+    #[test]
+    fn anthropic_response_reports_cache_tokens() {
+        let parsed = parse_anthropic_message(serde_json::json!({
+            "model": "m",
+            "content": [],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 50,
+                "output_tokens": 7,
+                "cache_creation_input_tokens": 248,
+                "cache_read_input_tokens": 1800
+            },
+        }))
+        .unwrap();
+        assert_eq!(parsed.usage.input_tokens, 50);
+        assert_eq!(parsed.usage.output_tokens, 7);
+        assert_eq!(parsed.usage.cache_creation_input_tokens, 248);
+        assert_eq!(parsed.usage.cache_read_input_tokens, 1800);
+    }
+
+    #[test]
+    fn openai_cached_tokens_move_out_of_input_tokens() {
+        let parsed = parse_openai_completion(serde_json::json!({
+            "model": "gpt-4o",
+            "choices": [{ "message": { "role": "assistant", "content": "ok" }, "finish_reason": "stop" }],
+            "usage": {
+                "prompt_tokens": 2000,
+                "completion_tokens": 5,
+                "prompt_tokens_details": { "cached_tokens": 1536 }
+            }
+        }))
+        .unwrap();
+        assert_eq!(parsed.usage.input_tokens, 464);
+        assert_eq!(parsed.usage.cache_read_input_tokens, 1536);
+        assert_eq!(parsed.usage.cache_creation_input_tokens, 0);
+        assert_eq!(parsed.usage.output_tokens, 5);
+    }
+
+    #[test]
+    fn usage_without_cache_fields_reads_as_zero() {
+        let usage: LlmUsage =
+            serde_json::from_value(serde_json::json!({ "input_tokens": 3, "output_tokens": 4 }))
+                .unwrap();
+        assert_eq!(usage.cache_creation_input_tokens, 0);
+        assert_eq!(usage.cache_read_input_tokens, 0);
     }
 
     #[test]
@@ -2584,6 +2776,79 @@ mod tests {
             .expect("provider thread reports");
         assert!(closed, "the client never closed the provider connection");
         assert!(written < 50, "provider kept writing: {written} deltas");
+    }
+
+    /// A provider that answers one request with `sse` and reports the
+    /// request body it read.
+    fn canned_anthropic_stream(sse: &'static str) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = vec![0u8; 64 * 1024];
+            let mut got = Vec::new();
+            let head_end = loop {
+                let n = sock.read(&mut buf).unwrap();
+                got.extend_from_slice(&buf[..n]);
+                if let Some(i) = got.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break i + 4;
+                }
+            };
+            let head = String::from_utf8_lossy(&got[..head_end]).to_ascii_lowercase();
+            let length: usize = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .map(|v| v.trim().parse().unwrap())
+                .unwrap_or(0);
+            while got.len() < head_end + length {
+                let n = sock.read(&mut buf).unwrap();
+                got.extend_from_slice(&buf[..n]);
+            }
+            let _ =
+                tx.send(String::from_utf8_lossy(&got[head_end..head_end + length]).into_owned());
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{sse}"
+            );
+            sock.write_all(reply.as_bytes()).unwrap();
+        });
+        (base, rx)
+    }
+
+    #[test]
+    fn stream_sends_cache_control_and_reports_cache_tokens() {
+        let (base, request) = canned_anthropic_stream(concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"m\",\"usage\":{\"input_tokens\":12,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":3000,\"output_tokens\":1}}}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":9}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        ));
+        let req: LlmCompleteRequest = serde_json::from_value(serde_json::json!({
+            "cache_control": { "type": "ephemeral" },
+            "messages": [{ "role": "user", "content": "hi" }]
+        }))
+        .unwrap();
+        let mut done = None;
+        let resp = client_for(&base)
+            .stream(req, &mut |event| {
+                if let StreamEvent::Done { usage, .. } = event {
+                    done = Some(usage);
+                }
+            })
+            .unwrap();
+        let sent: serde_json::Value =
+            serde_json::from_str(&request.recv_timeout(Duration::from_secs(5)).unwrap()).unwrap();
+        assert_eq!(
+            sent["cache_control"],
+            serde_json::json!({ "type": "ephemeral" })
+        );
+        assert_eq!(resp.usage.input_tokens, 12);
+        assert_eq!(resp.usage.cache_read_input_tokens, 3000);
+        assert_eq!(resp.usage.output_tokens, 9);
+        assert_eq!(done.unwrap().cache_read_input_tokens, 3000);
     }
 
     #[test]

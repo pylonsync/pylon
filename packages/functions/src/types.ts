@@ -598,7 +598,7 @@ export type LlmStreamEvent =
   | {
       type: "done";
       stop_reason: string;
-      usage: { input_tokens: number; output_tokens: number };
+      usage: LlmUsage;
     };
 
 /**
@@ -839,8 +839,23 @@ export interface LlmMessage {
   content: string | LlmContentBlock[];
 }
 
+/**
+ * A prompt-cache breakpoint (Anthropic). Five minutes is the default TTL;
+ * a cache write costs 1.25x base input for "5m" and 2x for "1h", and a
+ * cache read costs about 0.1x. OpenAI caches long prompts by itself and
+ * ignores this.
+ */
+export interface LlmCacheControl {
+  type: "ephemeral";
+  ttl?: "5m" | "1h";
+}
+
 export type LlmContentBlock =
-  | { type: "text"; text: string }
+  /**
+   * `cache_control` caches the prompt up to and including this block, so
+   * later calls that start with the same blocks read it from the cache.
+   */
+  | { type: "text"; text: string; cache_control?: LlmCacheControl }
   | {
       type: "tool_use";
       id: string;
@@ -890,6 +905,31 @@ export interface LlmCompleteRequest {
   /** Defaults to 4096. */
   max_tokens?: number;
   temperature?: number;
+  /**
+   * Automatic prompt caching: the provider puts the breakpoint on the last
+   * cacheable block and moves it forward as a conversation grows. Use it
+   * for tool loops and chats. For a breakpoint at a fixed place (a shared
+   * prefix followed by text that changes on each call), set
+   * `cache_control` on a text block instead.
+   */
+  cache_control?: LlmCacheControl;
+}
+
+export interface LlmUsage {
+  /**
+   * Input tokens at the full price: the tokens after the last cache
+   * breakpoint. The whole prompt is input_tokens +
+   * cache_creation_input_tokens + cache_read_input_tokens.
+   */
+  input_tokens: number;
+  output_tokens: number;
+  /**
+   * Tokens written to the prompt cache. 0 on OpenAI. Absent when the app
+   * runs on a Pylon runtime before 0.22.66.
+   */
+  cache_creation_input_tokens?: number;
+  /** Tokens read from the prompt cache. Absent before Pylon 0.22.66. */
+  cache_read_input_tokens?: number;
 }
 
 export interface LlmCompleteResponse {
@@ -897,7 +937,7 @@ export interface LlmCompleteResponse {
   content: LlmContentBlock[];
   /** `end_turn` | `tool_use` | `max_tokens` | `stop_sequence` */
   stop_reason: string;
-  usage: { input_tokens: number; output_tokens: number };
+  usage: LlmUsage;
 }
 
 // ---------------------------------------------------------------------------
