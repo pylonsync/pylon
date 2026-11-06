@@ -12,26 +12,31 @@ import { placeholderImage } from "../lib/studio";
 // With no REPLICATE_API_TOKEN it returns a clearly-labeled placeholder instead,
 // so the whole flow (and this job) work with zero config.
 //
-// Not internal, but harmless if called directly: it only advances a generation's
-// own prediction; results sync only to the owner (Generation is owner-read).
+// Scheduled jobs retain the user identity from generate. Direct calls must
+// have the same owner before they can update or schedule a generation.
 
 const REPLICATE = "https://api.replicate.com/v1";
 const POLL_MS = 3000;
 const MAX_ATTEMPTS = 200; // ~10 min ceiling, then give up
 
 export default action<{ id: string; attempts?: number }, { ok: boolean }>({
-  auth: "public",
+  auth: "user",
   args: { id: v.id("Generation"), attempts: v.optional(v.int()) },
   async handler(ctx, args) {
+    const userId = ctx.auth.userId;
+    if (!userId) throw ctx.error("AUTH_REQUIRED", "Sign in to check a generation.");
     const attempts = args.attempts ?? 0;
     const gen = await ctx.runQuery<{
       id: string;
+      userId: string;
       kind: string;
       prompt: string;
       status: string;
       predictionId?: string | null;
     } | null>("_getGeneration", { id: args.id });
-    if (!gen || gen.status === "done" || gen.status === "failed") return { ok: true };
+    if (!gen) return { ok: true };
+    if (gen.userId !== userId) throw ctx.error("NOT_FOUND", "Generation not found.");
+    if (gen.status === "done" || gen.status === "failed") return { ok: true };
 
     const update = (patch: Record<string, unknown>) => ctx.runMutation("_updateGeneration", { id: args.id, ...patch });
     const reschedule = () =>

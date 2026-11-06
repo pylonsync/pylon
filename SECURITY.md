@@ -91,6 +91,10 @@ documented here so deployers can make informed decisions:
 
 ## Secure defaults in production
 
+The runtime image and generated deployment Dockerfiles disable development
+mode by default. Configure trusted origins before starting them. Existing
+images need an explicit `PYLON_DEV_MODE=false` setting until rebuilt.
+
 Set at minimum:
 
 - `PYLON_ADMIN_TOKEN` — admin API token (long random string)

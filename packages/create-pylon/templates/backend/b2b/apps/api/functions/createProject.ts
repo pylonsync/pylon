@@ -1,16 +1,13 @@
 import { mutation, v } from "@pylonsync/functions";
 
-/**
- * Create a Project inside an Org. Project policy already gates this
- * to org members; we additionally trim the name and stamp the caller
- * as creator.
- */
+/** Create a project for an organization member. Use the caller as creator. */
 export default mutation({
 	args: { orgId: v.id("Org"), name: v.string() },
 	async handler(ctx, args: { orgId: string; name: string }) {
 		if (!ctx.auth.userId) {
 			throw ctx.error("UNAUTHENTICATED", "log in first");
 		}
+		await ctx.requireMember(args.orgId, { entity: "Membership" });
 		const name = args.name.trim();
 		if (!name) throw ctx.error("EMPTY_NAME", "project name cannot be empty");
 		const id = await ctx.db.insert("Project", {

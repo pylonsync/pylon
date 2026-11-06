@@ -2,13 +2,7 @@ import { mutation, v } from "@pylonsync/functions";
 
 const ROLES = new Set(["owner", "admin", "member"]);
 
-/**
- * Promote/demote a member. Only one row per (orgId, userId) so we
- * find by composite then update. Setting role=owner does NOT change
- * Org.ownerId — those are separate concepts (the founder vs current
- * org-leadership members); this scaffold leaves transfer-of-ownership
- * as a separate flow.
- */
+/** Change a membership role after checking organization administration access. */
 export default mutation({
 	args: {
 		orgId: v.id("Org"),
@@ -25,6 +19,7 @@ export default mutation({
 				`role must be one of ${[...ROLES].join(", ")}`,
 			);
 		}
+		await ctx.requireMember(args.orgId, { entity: "Membership", role: ["owner", "admin"] });
 		const memberships = (await ctx.db.query("Membership", {
 			orgId: args.orgId,
 			userId: args.userId,
