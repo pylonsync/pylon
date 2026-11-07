@@ -366,3 +366,74 @@ Upgrade every OIDC provider replica before relying on this fix. Old replicas do 
 Release the prior runtime and image fixes through the normal process. Set `PYLON_DEV_MODE=false` and trusted origins on existing deployments. Existing B2B and AI Studio apps need the prior handler changes and regenerated manifests. Review old AI Studio jobs without saved caller identity. Apply the Satori and fflate updates to independent app dependencies. Scan each app's lockfile. The metrics token still permits the existing privileged read routes; protect it as a data-access credential.
 
 Next main area: authorization and tenant isolation. Include provider-token caller gates and organization-scoped function access.
+
+
+## 2026-11-07
+
+Reviewed checkout commit: `5595e7676ea49282af7d715907e46bd878bfc881` on `security/daily-review-2026-11-02`.
+Reviewed PR worktree commit: `11d4ee1cf` on `security/daily-review-2026-11-06` in `/tmp/pylon-security-pr-20261106`.
+
+Both worktrees started with no tracked edits. Each had untracked Python cache files. These files were preserved and excluded from the commit. Prior fixes are committed in open [PR #80](https://github.com/pylonsync/pylon/pull/80). They are not open findings in this working tree. This run adds its fix and report to that PR. The primary checkout also receives this commit so the next daily run can see the result.
+
+Read SECURITY.md, both October 27 reports, the daily log, and CI and daily security workflows. The scheduled review task already runs daily at 09:00 local time. Its next run is November 8. No duplicate task was created. The SSH fetch failed because no accepted key was available. Authenticated HTTPS fetched main successfully at `617adefb6`. Main and the PR had no new commits since the last successful review. No production service was tested.
+
+### Authorization and tenant isolation
+
+Traced aggregate, graph, lookup, sync snapshot, update, and function authorization paths. Checked provider-token caller gates, strict function policy handling, the membership helper, and B2B template schema and handlers. Prior B2B checks remain present. The B2B row-dependent read policies reject aggregate requests before storage access. No new template defect was confirmed in these paths.
+
+**Confirmed: malformed aggregate filters bypass the active tenant filter.** In `crates/router/src/routes/queries.rs`, the aggregate route inserts the active `orgId` only when `where` is an object. Field validation previously accepted other JSON types. Both SQLite and PostgreSQL aggregate builders ignore a non-object `where` value. The request could therefore omit the tenant restriction.
+
+The local HTTP regression creates one Project row in each of two organizations. Alice belongs to organization A and selects it. The test uses a row-independent read policy that allows signed-in users. A normal count returns 1. Before the fix, `{"count":"*","where":null}` returned 200 with `{"rows":[{"count":2}]}`. The regression failed on that response. This confirms a cross-tenant aggregate result through the active-tenant filter bypass.
+
+This is a conditional defense-in-depth issue. The caller needs access to the aggregate endpoint, an active tenant, and a policy that permits aggregate reads. The entity must have an `orgId` field and data in another tenant. Row-dependent read policies already deny this route. A broad row-independent policy can also permit other read routes, so this finding does not establish a bypass of a restrictive row policy. Aggregate results can include counts, sums, or grouped public values. The HTTP test confirms the count exposure only.
+
+The route now rejects a non-object aggregate specification or `where` with 400 before it applies tenant scope or calls storage. No policy was weakened. Unit tests cover null, arrays, strings, booleans, and numbers. The HTTP regression checks those filters, a missing filter, and an explicit foreign `orgId`. Valid requests still return only the active tenant's count. This validation is shared by both storage backends. The HTTP reproduction used SQLite; PostgreSQL was traced in source but was not run today.
+
+### Current advisory scans
+
+OSV scanned all 12 tracked supported lockfiles in both worktrees. Both scans returned 1 for findings. The severity gate returned 0. These are not clean scans.
+
+| Scope | OSV result in the PR worktree |
+| --- | --- |
+| Production/root Cargo | 9 advisory groups |
+| Root Bun | No reported matches |
+| Studio build tools | 1 group: minimatch 10.2.5 |
+| Docker/build | No reported matches in three locks |
+| Search benchmark | 8 advisory groups |
+| Vendor-only SAML | No reported matches |
+| Shard and Swift | No reported matches in four locks |
+
+`cargo audit --json` returned 0 with the existing ignores. RustSec database commit: `309392b18f6b17022f82c701f300433126901068`, last updated November 6. It reported zero unsuppressed vulnerabilities, seven unmaintained warnings, and two unsoundness warnings. `cargo deny check` passed advisories, bans, licenses, and sources. Image-lock consistency and advisory-ignore checks passed. No dependency or ignore changed.
+
+Existing risks remain:
+
+- Studio minimatch 10.2.5 matches [GHSA-g3hv-75wg-m249](https://github.com/advisories/GHSA-g3hv-75wg-m249). The current advisory lists 11.0.1 as fixed. Exploitation requires attacker-controlled patterns with optimization level 2 or greater. The prior review found version-10 callers and no affected production HTTP path. Keep build configuration trusted. A caller upgrade or tested major-version migration remains required. This run did not validate that migration.
+- `im` and `sized-chunks` retain memory-safety warnings. [RUSTSEC-2026-0255](https://rustsec.org/advisories/RUSTSEC-2026-0255.html) still lists no patched version. Remote exploitation was not established. Dependency migration needs compatibility tests; no validated runtime mitigation was found.
+- Seven maintenance warnings and the existing RSA exception remain. Passing checks do not patch them.
+
+### Verification
+
+| Command | Result |
+| --- | --- |
+| `cargo test -p pylon-runtime --test update_policy_scope aggregate_rejects_invalid_where_without_losing_tenant_scope` before fix | Failed as expected: 200 and count 2 instead of 400 |
+| `cargo test -p pylon-runtime --test update_policy_scope --test oauth_tenant_handoff` after fix | 17 passed on local HTTP servers |
+| `cargo test -p pylon-router -p pylon-policy -p pylon-functions --lib` after fix | 178 router, 107 policy, and 93 function tests passed; one existing performance test ignored |
+| `bun test packages/functions/src/b2b-template-security.test.ts packages/functions/src/member.test.ts packages/functions/src/runtime-auth-ops.test.ts` | 21 passed with pinned Bun 1.4.4 |
+| `python3 -m unittest discover -s tools -p 'test_*.py'` | 3 passed |
+| `python3 tools/scan-lockfiles.py` | All 12 locks scanned; exit 1 for findings |
+| `python3 tools/osv-gate.py` on scan JSON | Exit 0 under the existing severity policy |
+| `cargo audit --json` and `cargo deny check` | Exit 0 with the warnings above |
+| `bash tools/check-image-locks.sh` and `bash tools/check-security-ignores.sh` | Passed |
+| `cargo fmt --all -- --check` and `git diff --check` | Passed |
+
+The first regression draft had an incorrect expected response envelope. It was corrected before the recorded failure that demonstrated count 2. Rust tests compiled the changed router and runtime. Existing compiler warnings remain. No TypeScript source or dependency changed, so no additional TypeScript build was required. Local evidence uses `/tmp/pylon-security-20261107-*`. The final source and report diff was inspected before commit.
+
+Full workspace tests, PostgreSQL integration tests, Studio lint and build, Windows builds, container builds and image scans, cloud permissions, deployed secrets, operating-system libraries, and Nix flake inputs were not checked today. These are gaps, not clean results.
+
+### Deployment follow-up and next review
+
+Release the runtime fix through the normal process. Existing clients must omit `where` or supply an object; `where: null` now returns 400. Existing generated apps receive this fix through a runtime update. Keep row-dependent tenant policies for private data. Do not rely only on the aggregate route's extra tenant filter.
+
+The prior OIDC, runtime, template, image, and dependency follow-up in the November 6 entry still applies. Update every OIDC replica. Existing B2B and AI Studio apps need their prior handler changes. Configure production mode and trusted origins. Scan each application's lockfile. No merge, deployment, or release was performed.
+
+Next main area: HTTP, CSRF, CORS, and WebSocket boundaries. Include origin checks on early-return routes and tenant changes on persistent connections.
