@@ -11,7 +11,9 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use pylon_auth::oidc_tokens::{split_scopes, OidcTokenKind, OidcTokenRecord, OidcTokenStore};
+use pylon_auth::oidc_tokens::{
+    split_scopes, validate_token_bundle, OidcTokenKind, OidcTokenRecord, OidcTokenStore,
+};
 use rusqlite::{Connection, OptionalExtension};
 
 const TABLE: &str = "_pylon_oidc_tokens";
@@ -92,9 +94,38 @@ fn sqlite_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OidcTokenRecord> {
 }
 
 impl OidcTokenStore for SqliteOidcTokenBackend {
-    fn insert(&self, r: &OidcTokenRecord) -> Result<(), String> {
-        self.lock()?
-            .execute(
+    fn insert_tokens(
+        &self,
+        records: &[OidcTokenRecord],
+        require_live_grant: bool,
+    ) -> Result<(), String> {
+        let first = validate_token_bundle(records)?;
+        let mut conn = self.lock()?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| format!("begin OIDC issue: {e}"))?;
+        if require_live_grant {
+            let active: bool = tx
+                .query_row(
+                    &format!(
+                        "SELECT EXISTS(SELECT 1 FROM {TABLE} WHERE grant_id = ?1
+                    AND user_id = ?2 AND client_id = ?3 AND kind = 'refresh' AND expires_at > ?4)"
+                    ),
+                    rusqlite::params![
+                        first.grant_id,
+                        first.user_id,
+                        first.client_id,
+                        first.created_at as i64
+                    ],
+                    |row| row.get(0),
+                )
+                .map_err(|e| format!("check OIDC grant: {e}"))?;
+            if !active {
+                return Err("OIDC grant is no longer active".into());
+            }
+        }
+        for r in records {
+            tx.execute(
                 &format!(
                     "INSERT INTO {TABLE} ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
                 ),
@@ -107,11 +138,12 @@ impl OidcTokenStore for SqliteOidcTokenBackend {
                     r.scopes_joined(),
                     r.expires_at as i64,
                     r.created_at as i64,
-                    r.rotated_at.map(|n| n as i64),
+                    r.rotated_at.map(|n| n as i64)
                 ],
             )
-            .map(|_| ())
-            .map_err(|e| format!("insert OIDC token: {e}"))
+            .map_err(|e| format!("insert OIDC token: {e}"))?;
+        }
+        tx.commit().map_err(|e| format!("commit OIDC issue: {e}"))
     }
 
     fn find(&self, token_hash: &str, now: u64) -> Result<Option<OidcTokenRecord>, String> {
@@ -241,34 +273,48 @@ mod pg {
         }
     }
 
+    // All replicas use this transaction lock for issuance and revocation.
+    // Lock by user so grant revocation and user revocation share the same lock.
+    // Read committed statements after the lock see the preceding transaction.
+    fn lock_user(tx: &mut postgres::Transaction<'_>, user_id: &str) -> Result<(), postgres::Error> {
+        tx.query_one(
+            "SELECT pg_advisory_xact_lock(hashtextextended('pylon:oidc:' || $1::text, 0))",
+            &[&user_id],
+        )?;
+        Ok(())
+    }
+
     impl OidcTokenStore for PostgresOidcTokenBackend {
-        fn insert(&self, r: &OidcTokenRecord) -> Result<(), String> {
-            let scopes = r.scopes_joined();
-            let expires_at = r.expires_at as i64;
-            let created_at = r.created_at as i64;
-            let rotated_at = r.rotated_at.map(|n| n as i64);
-            self.conn
-                .with_client(|c| {
-                    c.execute(
-                        &format!(
-                            "INSERT INTO {TABLE} ({COLUMNS})
-                             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
-                        ),
-                        &[
-                            &r.token_hash,
-                            &r.kind.as_str(),
-                            &r.grant_id,
-                            &r.user_id,
-                            &r.client_id,
-                            &scopes,
-                            &expires_at,
-                            &created_at,
-                            &rotated_at,
-                        ],
-                    )
-                })
-                .map(|_| ())
-                .map_err(|e| format!("insert OIDC token: {e}"))
+        fn insert_tokens(
+            &self,
+            records: &[OidcTokenRecord],
+            require_live_grant: bool,
+        ) -> Result<(), String> {
+            let first = validate_token_bundle(records)?;
+            self.conn.with_client(|c| {
+                let mut tx = c.build_transaction()
+                        .isolation_level(postgres::IsolationLevel::ReadCommitted).start()?;
+                lock_user(&mut tx, &first.user_id)?;
+                if require_live_grant {
+                    let active: bool = tx.query_one(
+                        &format!("SELECT EXISTS(SELECT 1 FROM {TABLE} WHERE grant_id = $1
+                            AND user_id = $2 AND client_id = $3 AND kind = 'refresh' AND expires_at > $4)"),
+                        &[&first.grant_id, &first.user_id, &first.client_id, &(first.created_at as i64)],
+                    )?.get(0);
+                    if !active { return Ok(false); }
+                }
+                for r in records {
+                    tx.execute(
+                        &format!("INSERT INTO {TABLE} ({COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"),
+                        &[&r.token_hash, &r.kind.as_str(), &r.grant_id, &r.user_id, &r.client_id,
+                            &r.scopes_joined(), &(r.expires_at as i64), &(r.created_at as i64),
+                            &r.rotated_at.map(|n| n as i64)],
+                    )?;
+                }
+                tx.commit()?;
+                Ok(true)
+            }).map_err(|e| format!("issue OIDC tokens: {e}"))?
+                .then_some(()).ok_or_else(|| "OIDC grant is no longer active".into())
         }
 
         fn find(&self, token_hash: &str, now: u64) -> Result<Option<OidcTokenRecord>, String> {
@@ -318,28 +364,40 @@ mod pg {
         fn revoke_grant(&self, grant_id: &str) -> Result<usize, String> {
             self.conn
                 .with_client(|c| {
-                    c.execute(
+                    let mut tx = c
+                        .build_transaction()
+                        .isolation_level(postgres::IsolationLevel::ReadCommitted)
+                        .start()?;
+                    let owner = tx.query_opt(
+                        &format!("SELECT user_id FROM {TABLE} WHERE grant_id = $1 LIMIT 1"),
+                        &[&grant_id],
+                    )?;
+                    let Some(owner) = owner else {
+                        return Ok(0);
+                    };
+                    lock_user(&mut tx, owner.get::<_, &str>(0))?;
+                    let removed = tx.execute(
                         &format!("DELETE FROM {TABLE} WHERE grant_id = $1"),
                         &[&grant_id],
-                    )
+                    )?;
+                    tx.commit()?;
+                    Ok(removed as usize)
                 })
-                .map(|n| n as usize)
                 .map_err(|e| format!("revoke OIDC grant: {e}"))
         }
 
         fn revoke_user(&self, user_id: &str) -> Result<usize, String> {
-            self.conn
-                .with_client(|c| {
-                    c.query_one(
-                        &format!(
-                            "WITH gone AS (DELETE FROM {TABLE} WHERE user_id = $1 RETURNING grant_id)
-                             SELECT COUNT(DISTINCT grant_id) FROM gone"
-                        ),
-                        &[&user_id],
-                    )
-                })
-                .map(|row| row.get::<_, i64>(0) as usize)
-                .map_err(|e| format!("revoke OIDC user: {e}"))
+            self.conn.with_client(|c| {
+                let mut tx = c.build_transaction()
+                        .isolation_level(postgres::IsolationLevel::ReadCommitted).start()?;
+                lock_user(&mut tx, user_id)?;
+                let row = tx.query_one(
+                    &format!("WITH gone AS (DELETE FROM {TABLE} WHERE user_id = $1 RETURNING grant_id)
+                        SELECT COUNT(DISTINCT grant_id) FROM gone"), &[&user_id],
+                )?;
+                tx.commit()?;
+                Ok(row.get::<_, i64>(0) as usize)
+            }).map_err(|e| format!("revoke OIDC user: {e}"))
         }
 
         fn sweep_expired(&self, now: u64) -> Result<usize, String> {
@@ -367,10 +425,22 @@ mod tests {
         conformance::run(&SqliteOidcTokenBackend::in_memory().unwrap(), "sqlite");
     }
 
+    #[test]
+    fn sqlite_connections_serialize_refresh_and_revocation() {
+        let path = tmp_db();
+        let a = SqliteOidcTokenBackend::open(&path).unwrap();
+        let b = SqliteOidcTokenBackend::open(&path).unwrap();
+        conformance::concurrent_revocation(&a, &b, "sqlite-connections");
+        drop((a, b));
+        let _ = std::fs::remove_file(path);
+    }
+
     fn tmp_db() -> String {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         std::env::temp_dir()
             .join(format!(
-                "pylon-oidc-tokens-{}-{}.db",
+                "pylon-oidc-tokens-{}-{}-{id}.db",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

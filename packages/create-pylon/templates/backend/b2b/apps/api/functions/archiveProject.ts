@@ -1,14 +1,12 @@
 import { mutation, v } from "@pylonsync/functions";
 
-/**
- * Soft-delete: set archived = true. Project policy gates updates to
- * org owner/admin only, so a regular member can't archive a project
- * even if they created it. Restore by writing archived = false (this
- * scaffold doesn't ship a restore action — left as an exercise).
- */
+/** Archive a project after checking organization administration access. */
 export default mutation({
 	args: { id: v.id("Project") },
 	async handler(ctx, args: { id: string }) {
+		const project = await ctx.db.get("Project", args.id);
+		if (!project) throw ctx.error("NOT_FOUND", "project not found");
+		await ctx.requireMember(project.orgId as string, { entity: "Membership", role: ["owner", "admin"] });
 		await ctx.db.update("Project", args.id, { archived: true });
 		return await ctx.db.get("Project", args.id);
 	},

@@ -71,9 +71,9 @@ COPY --chown=pylon:pylon package.json bun.lock* package-lock.json* ./
 RUN find node_modules -maxdepth 2 -type l -delete 2>/dev/null; bun install
 COPY --chown=pylon:pylon . .
 
-# The base image defaults to PYLON_DEV_MODE=true so the container boots
-# with zero config. For production, set (via --env / your platform's secrets):
-#   PYLON_DEV_MODE=false
+# Disable development access, including when using an older base image.
+ENV PYLON_DEV_MODE=false
+# Configure these values via --env or your platform's secrets:
 #   PYLON_ADMIN_TOKEN=<64+ random hex bytes>
 #   PYLON_CORS_ORIGIN=https://your-app.example.com   (or manifest.auth.trustedOrigins)
 
@@ -648,6 +648,23 @@ fn sanitize_app_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deployment_images_disable_dev_access() {
+        let base = include_str!("../../../../Dockerfile");
+        let generated = generate_dockerfile();
+        for dockerfile in [base, generated.as_str()] {
+            let mode = dockerfile
+                .lines()
+                .filter_map(|line| line.strip_prefix("ENV PYLON_DEV_MODE="))
+                .last();
+            assert_eq!(
+                mode,
+                Some("false"),
+                "deployment must explicitly disable dev access"
+            );
+        }
+    }
 
     #[test]
     fn dockerfile_runs_the_app_on_the_runtime_image() {

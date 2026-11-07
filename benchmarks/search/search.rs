@@ -25,6 +25,7 @@ fn f(name: &str, ty: &str) -> ManifestField {
         field_type: ty.into(),
         optional: false,
         unique: false,
+        ..Default::default()
     }
 }
 
@@ -48,7 +49,9 @@ fn build_manifest() -> AppManifest {
             text: vec!["name".into(), "description".into()],
             facets: vec!["brand".into(), "category".into(), "color".into()],
             sortable: vec!["price".into(), "rating".into(), "createdAt".into()],
+            language: None,
         }),
+        ..Default::default()
     };
     AppManifest {
         manifest_version: 1,
@@ -59,6 +62,7 @@ fn build_manifest() -> AppManifest {
         actions: vec![],
         policies: vec![],
         routes: vec![],
+        ..Default::default()
     }
 }
 
@@ -71,9 +75,8 @@ fn seed(rt: &Runtime, count: usize) {
         let adj = ADJ.choose(&mut rng).unwrap();
         let noun = NOUN.choose(&mut rng).unwrap();
         let name = format!("{} {} {}", brand, adj, noun);
-        let description = format!(
-            "A {color} {category} for everyday wear. {adj} construction with a soft feel."
-        );
+        let description =
+            format!("A {color} {category} for everyday wear. {adj} construction with a soft feel.");
         rt.insert(
             "Product",
             &json!({
