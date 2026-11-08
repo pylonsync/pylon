@@ -437,3 +437,73 @@ Release the runtime fix through the normal process. Existing clients must omit `
 The prior OIDC, runtime, template, image, and dependency follow-up in the November 6 entry still applies. Update every OIDC replica. Existing B2B and AI Studio apps need their prior handler changes. Configure production mode and trusted origins. Scan each application's lockfile. No merge, deployment, or release was performed.
 
 Next main area: HTTP, CSRF, CORS, and WebSocket boundaries. Include origin checks on early-return routes and tenant changes on persistent connections.
+
+
+## 2026-11-08
+
+Reviewed primary checkout: `1e817c447` on `security/daily-review-2026-11-02`.
+Reviewed PR worktree: `0abb67f37` on `security/daily-review-2026-11-06` in `/tmp/pylon-security-pr-20261106`.
+
+Both worktrees had no tracked edits. Untracked Python cache files were preserved. Read SECURITY.md, both October 27 reports, prior daily entries, and the CI and daily security workflows. Prior fixes remain in open [PR #80](https://github.com/pylonsync/pylon/pull/80). They are not new open findings. Authenticated HTTPS fetch confirmed that main remains at `617adefb6`. No new main or PR source changes required review since November 7. The existing task runs daily at 09:00 local time. Its next run is November 9. No duplicate task was created.
+
+### HTTP, CSRF, CORS, and WebSocket boundaries
+
+Traced early admin returns, the form-route CSRF gate, bearer-to-cookie fallback, CORS origin selection, and the main-port WebSocket cookie origin gate. Checked the dedicated WebSocket explicit-token path, session revocation, tenant changes, role enrichment, and broadcast authorization. Reviewed the B2B server cookie helper and schema, plus consumer and AI Studio auth defaults. These templates use shared runtime controls. No new template or origin-check defect was confirmed in these samples.
+
+**Confirmed, conditional: a connected WebSocket could retain revoked role or admin access.** `WsHub::revalidate` compared only the resolved user and tenant. Broadcast policy checks used the stored connection identity. A role downgrade or removal of database-derived admin status could leave both IDs unchanged. The connection therefore kept its old permissions through repeated credential checks.
+
+An attacker needs an existing authenticated sync connection opened while privileged. The deployment must use organization-role or database-derived admin permissions that are later revoked. Role-based read policies can then continue to allow private updates to that connection. This is continued access after revocation, not anonymous access. Both sync WebSocket entry points share this lifecycle. Row-dependent membership policies and the separate room access refresh already provide their own checks; this finding does not establish a bypass of those controls.
+
+The initial regression failed before the fix: revalidation returned no closed client after the role changed. The final regression covers both role downgrade and admin revocation. It confirms an authorized broadcast before revocation, connection closure, removal of CRDT subscriptions, and no later broadcast. It uses a local in-memory connection and a controlled permission resolver. It does not reproduce an attack through a browser or a live database.
+
+Revalidation now starts from the credential, adds current database permissions, and compares the complete identity. A changed identity closes the connection through the existing cleanup path. This preserves credential-owned roles. No authorization control was weakened. The periodic check still runs every 30 seconds; this fix does not promise immediate revocation. Scheduling and database delays can extend that interval. Revoke the session for urgent removal of local access. Multi-replica revocation timing remains a separate deployment concern.
+
+### Current advisory scans
+
+OSV scanned all 12 tracked supported lockfiles in the PR worktree. It returned 1 for findings. `tools/osv-gate.py` returned 0 under the existing severity policy. This is not a clean scan.
+
+| Scope | Result |
+| --- | --- |
+| Production/root Cargo | 9 advisory groups |
+| Root Bun | No reported matches |
+| Studio build tools | 1 group: minimatch 10.2.5 |
+| Docker/build | No reported matches in three locks |
+| Search benchmark | 8 advisory groups |
+| Vendor-only SAML | No reported matches |
+| Shard and Swift | No reported matches in four locks |
+
+`cargo audit --json` returned 0 with existing ignores. RustSec database commit: `309392b18f6b17022f82c701f300433126901068`, last updated November 6. It reported zero unsuppressed vulnerabilities, seven unmaintained warnings, and two unsoundness warnings. `cargo deny check` passed advisories, bans, licenses, and sources. Image-lock consistency and advisory-ignore checks passed. No dependency or ignore changed.
+
+Current upstream data still lists minimatch 11.0.1 as the fix for [GHSA-g3hv-75wg-m249](https://github.com/advisories/GHSA-g3hv-75wg-m249). The existing Studio version-10 callers need a tested major migration or caller upgrade. Keep build patterns trusted. No production HTTP exploit was established. [RUSTSEC-2026-0255](https://rustsec.org/advisories/RUSTSEC-2026-0255.html) still lists no patched sized-chunks release. The im and sized-chunks memory-safety warnings, maintenance warnings, and existing RSA exception remain. Migration needs compatibility tests. No validated runtime mitigation was found for the memory-safety warnings. Passing gates do not resolve these risks.
+
+### Verification
+
+All commands ran in the PR worktree unless noted.
+
+| Command | Result |
+| --- | --- |
+| `cargo test -p pylon-runtime --lib revalidation_closes_a_socket_after_role_or_admin_revocation` before fix | Failed as expected: no closed client |
+| `cargo test -p pylon-runtime --lib ws::tests` after fix | 108 passed; this substring also selects workflow tests |
+| `cargo test -p pylon-runtime --lib request_auth::` | 7 passed |
+| `cargo test -p pylon-runtime --lib server::ws_origin_tests` | 3 passed |
+| `cargo test -p pylon-plugin --lib csrf` | 14 passed |
+| `cargo test -p pylon-runtime --test admin_mutation_security --test bearer_cookie_fallback --test csrf_form_route --test ws_live_fanout --test oauth_tenant_handoff --test rooms_ws_push` | 21 passed across six local HTTP/WebSocket suites |
+| `python3 -m unittest discover -s tools -p 'test_*.py'` | 3 passed |
+| `node --test packages/create-pylon/test/scaffold.test.mjs` | 10 passed |
+| `python3 tools/scan-lockfiles.py` | All 12 locks scanned; exit 1 for findings |
+| `python3 tools/osv-gate.py` on scan JSON | Exit 0 |
+| `cargo audit --json` and `cargo deny check` | Exit 0 with warnings above |
+| Image-lock and advisory-ignore checks | Passed |
+| `cargo fmt --all -- --check` and `git diff --check` | Passed |
+
+Rust tests compiled the changed runtime. Existing compiler warnings remain. No TypeScript or dependency changed, so no TypeScript type check or build was run. The final source and report diff was inspected. Local scan and test evidence uses `/tmp/pylon-security-20261108-*`.
+
+Full workspace tests, PostgreSQL tests, Studio lint and build, Windows builds, container builds and image scans, cloud permissions, deployed secrets, operating-system libraries, and Nix flake inputs were not checked today. No production service was tested. These are gaps, not clean results.
+
+### Deployment follow-up and next review
+
+Release the runtime fix to every replica. Existing generated apps receive this fix through a runtime update. No new template migration is required for this finding. Prior OIDC, template, production-mode, and dependency follow-up from November 6 and 7 still applies. Existing B2B and AI Studio apps need those earlier handler changes. Scan each app's lockfile. No merge, deployment, or release was performed.
+
+This run commits the fix and report to PR #80 and copies the commit to the primary checkout. The user's final instruction authorizes the PR push. Untracked cache files remain excluded.
+
+Next main area: files, SSRF, and path traversal. Include remote fetch redirects, uploaded-file authorization, and generated app file handlers.

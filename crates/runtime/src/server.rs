@@ -233,7 +233,8 @@ fn spawn_streaming_response<R: std::io::Read + Send + 'static>(
 
 /// How often every WebSocket's credential is re-checked (and expired
 /// sessions swept). Session events end connections at once; this bounds
-/// how long an expired session, JWT, or revoked API key keeps one open.
+/// how long an expired credential or changed role or admin status keeps
+/// one open.
 const WS_REVALIDATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Body framing for an SSE response written raw through
