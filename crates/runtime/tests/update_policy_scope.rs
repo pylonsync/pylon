@@ -615,15 +615,23 @@ fn list_totals_use_sql_counts_only_for_row_independent_policies() {
             .insert("Doc", &json!({"orgId":ORG_B,"name":"theirs"}))
             .unwrap();
         COUNTS.store(0, std::sync::atomic::Ordering::SeqCst);
-        app.runtime.lock_conn_pub().unwrap().trace_v2(
-            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
-            Some(trace),
-        );
+        app.runtime
+            .lock_conn_pub()
+            .unwrap()
+            .trace_v2(
+                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(trace),
+            )
+            .unwrap();
         let (status, body) = app.call("GET", "/api/entities/Doc?page=1&per_page=1", json!(null));
         app.runtime
             .lock_conn_pub()
             .unwrap()
-            .trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+            .trace_v2(
+                rusqlite::trace::TraceEventCodes::empty(),
+                None::<fn(rusqlite::trace::TraceEvent<'_>)>,
+            )
+            .unwrap();
         assert_eq!(status, 200, "{body}");
         assert_eq!(body["total"], expected_total, "{rule}: {body}");
         assert_eq!(

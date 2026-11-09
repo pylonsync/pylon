@@ -507,3 +507,79 @@ Release the runtime fix to every replica. Existing generated apps receive this f
 This run commits the fix and report to PR #80 and copies the commit to the primary checkout. The user's final instruction authorizes the PR push. Untracked cache files remain excluded.
 
 Next main area: files, SSRF, and path traversal. Include remote fetch redirects, uploaded-file authorization, and generated app file handlers.
+
+## 2026-11-09
+
+Reviewed primary checkout: `8248736ea` on `security/daily-review-2026-11-02`.
+Reviewed PR worktree: `eaa3ad352` on `security/daily-review-2026-11-06` in `/tmp/pylon-security-pr-20261106`.
+
+Both worktrees started without tracked edits. Untracked Python caches were preserved. Read SECURITY.md, both October 27 reports, prior daily entries, and the CI and daily security workflows. Fetched origin. Main remains at `617adefb6`. The only PR commit since the previous reviewed base is the November 8 WebSocket fix. It was checked as an existing fix. No new main change required review. The daily task remains set for 09:00 local time. Its next run is November 10. No duplicate task was created.
+
+### Files, server-side fetches, and path traversal
+
+Traced upload initialization, confirmation, local PUT, file deletion, and download authorization. Checked local and private S3 owner records, active tenant checks, public visibility, signed URL expiry, and file response types. Reviewed server-function file hooks and the requirement for application authorization before minting a signed URL. Checked local ID validation and canonical paths for static files and local image sources. Reviewed remote image host/path checks, redirect revalidation, the guarded DNS resolver, byte limits, and decoded pixel limits. Sampled consumer image URL validation and upload visibility, backend consumer handlers, and the AI Studio fetch targets. No new application bypass was confirmed in these paths.
+
+### Confirmed dependency issue and fix
+
+Current RustSec data added `RUSTSEC-2026-0459` to today's results. The root and search benchmark locks used `libsqlite3-sys 0.33.0` through `rusqlite 0.35.0`, with bundled SQLite enabled. Cargo audit and Cargo deny both failed before the fix. OSV reported the issue at CVSS 6.8; its existing high-severity gate passed despite this finding.
+
+The [upstream SQLite fix](https://github.com/sqlite/sqlite/commit/e5bf119821f25be1d7f10ef0a2edbe175289166e) initializes the rest of a page when its WAL frame is shorter than the database page. WAL means write-ahead log. Without the fix, a read can retain old buffer bytes. An attacker must supply or modify the database and its sibling WAL file, then have the victim open them. Pylon opens SQLite files for application storage, sessions, jobs, and CLI migration. The CLI restore command can copy both database and WAL files. This confirms an affected dependency and relevant file-open paths. It does not establish anonymous HTTP exploitation. Use trusted backup files and restrict write access to database directories until updated.
+
+Updated the workspace to `rusqlite 0.41.1` and `libsqlite3-sys 0.39.1`, which bundles SQLite 3.54.1. Regenerated the root and benchmark locks with Cargo 1.98.1. Docker uses Rust 1.98 and the workspace manifest and lockfile. The dependency's Rust 1.89 minimum is within that toolchain. Docker JavaScript dependency consistency passed. No advisory ignore changed.
+
+Reviewed the dependency API changes. Enabled `fallible_uint` to preserve checked `u64` and `usize` conversions. Updated three existing SQL-trace tests to the new `trace_v2` API and checked its result. Expanded SQL remains available to the query assertions. The existing column-name iterator usage compiles unchanged. Lockfile changes also include the new hashlink dependency, target-specific SQLite WASM packages, and Cargo's Windows dependency resolution changes. Windows and WASM targets were not built.
+
+Added `tools/sqlite-wal-regression.c`. This bounded regression uses the actual SQLite internal WAL reader with a controlled file reader. It supplies a 512-byte frame to a 4096-byte buffer filled with known bytes. It checks the frame contents and requires the remaining bytes to be zero. It failed with exit 1 against the old bundled source and passed against the new source. No real database or process secrets were read. This tests the defective read operation directly; it is not an end-to-end exploit against a Pylon server. The file includes compilation instructions. It is a manual regression, not a new CI job.
+
+### Current advisory scans
+
+Final OSV scan covered all 12 tracked supported lockfiles. Exit 1 reports remaining findings. The OSV severity gate returned 0. The scan is not clean.
+
+| Scope | Final result |
+| --- | --- |
+| Production/root Cargo | 9 advisory groups; SQLite match removed |
+| Root Bun | No reported matches |
+| Studio build tools | 1 group: minimatch 10.2.5 |
+| Docker/build | No reported matches in three locks |
+| Search benchmark | 8 advisory groups; SQLite match removed |
+| Vendor-only SAML | No reported matches |
+| Shard and Swift | No reported matches in four locks |
+
+Final `cargo audit --json` returned 0 with existing ignores. RustSec commit: `899077d9d471b9fd3dbf4b2faea8ef26e83692e8`, updated November 9. It reported zero unsuppressed vulnerabilities, seven maintenance warnings, and two unsoundness warnings. `cargo deny check` passed advisories, bans, licenses, and sources. Image-lock and ignore-date checks passed.
+
+Existing risks remain. [Minimatch GHSA-g3hv-75wg-m249](https://github.com/advisories/GHSA-g3hv-75wg-m249) still lists 11.0.1 as fixed. Studio's version-10 callers need a tested migration. Keep build patterns trusted. No affected production HTTP path was established. The im and sized-chunks memory-safety warnings remain; [RUSTSEC-2026-0255](https://rustsec.org/advisories/RUSTSEC-2026-0255.html) has no patched release. Migration needs compatibility tests. No validated runtime mitigation was found. The RSA exception and maintenance warnings also remain. Passing gates do not resolve them.
+
+### Verification
+
+Commands ran in the PR worktree. Initial scans also covered the primary checkout.
+
+| Command | Result |
+| --- | --- |
+| Compile and run `tools/sqlite-wal-regression.c` against old/new bundled sources | Old failed as expected; new passed |
+| `cargo test -p pylon-storage --lib` | 208 passed |
+| `cargo test -p pylon-runtime --lib` | 1,185 passed; 7 existing tests ignored |
+| `cargo test -p pylon-runtime --test file_serving --test functions_files --test vector_search --test update_policy_scope --test oidc_refresh_tokens --test admin_mutation_security` | 45 passed |
+| `cargo test -p pylon-runtime --test functions_files` with Bun 1.4.4 on PATH | Passed; repeats the function file integration test with pinned Bun |
+| `cargo test -p pylon-cli commands::migrate` | 10 passed |
+| `cargo test -p pylon-kernel net_guard` | 6 passed |
+| `cargo check --locked --manifest-path benchmarks/search/Cargo.toml` | Passed |
+| Bun 1.4.4 tests: runtime-files, AI Studio security, consumer social | 20 passed |
+| `python3 -m unittest discover -s tools -p 'test_*.py'` | 3 passed |
+| `node --test packages/create-pylon/test/scaffold.test.mjs` | 10 passed |
+| `python3 tools/scan-lockfiles.py` | All 12 locks scanned; exit 1 for findings |
+| `python3 tools/osv-gate.py` on final JSON | Exit 0 |
+| Cargo audit and Cargo deny | Exit 0 after update |
+| Image-lock and advisory-ignore checks | Passed |
+| `cargo fmt --all -- --check` and `git diff --check` | Passed |
+
+Initial upgrade builds failed on the removed trace API and the newly optional integer conversions. Follow-up compilation caught the trace callback lifetime and optional expanded SQL result. These were corrected before the passing runs. No test assertion or authorization control was removed. The first HTTP suite used the installed Bun 1.3.14; the file-function test was repeated with pinned Bun 1.4.4. Existing compiler warnings remain. Local evidence uses `/tmp/pylon-security-20261109-*`.
+
+The final source, lockfile, regression, and report diffs were inspected. Full workspace tests, PostgreSQL integration tests, Windows/WASM builds, Studio lint/build, container builds and image scans, deployed secrets, cloud permissions, system libraries, and Nix flake inputs were not checked. No TypeScript source changed; no TypeScript type check or build was run. These are gaps, not clean results. No production service was tested.
+
+### Deployment follow-up and next review
+
+Rebuild and release the runtime, CLI, and Docker images with the updated lockfile. Existing generated apps need that runtime update. This finding requires no template handler migration. Restrict database directory access and accept only trusted backups. Existing B2B and AI Studio apps still need the earlier handler changes. The prior OIDC replica, production-mode, and independent app dependency follow-up remains in force. Scan each application's own lockfile.
+
+This run adds its commit to PR #80 and copies it to the primary checkout. The final user instruction authorizes the PR push. No merge, deployment, or release is performed. Python cache files remain excluded.
+
+Next main area: server functions and generated app templates. Include signed file URL authorization at application call sites and job caller identity.
