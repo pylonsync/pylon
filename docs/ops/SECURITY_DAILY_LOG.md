@@ -583,3 +583,73 @@ Rebuild and release the runtime, CLI, and Docker images with the updated lockfil
 This run adds its commit to PR #80 and copies it to the primary checkout. The final user instruction authorizes the PR push. No merge, deployment, or release is performed. Python cache files remain excluded.
 
 Next main area: server functions and generated app templates. Include signed file URL authorization at application call sites and job caller identity.
+
+## 2026-11-10
+
+Reviewed primary checkout: `cc4890eb8` on `security/daily-review-2026-11-02`.
+Reviewed PR worktree: `a8f2902d3e9242f7acdabf1b2d42ee6da3a368c3` on `security/daily-review-2026-11-06` in `/tmp/pylon-security-pr-20261106`.
+
+Both checkouts started without tracked edits. Existing Python caches were preserved and excluded. Read SECURITY.md, both October 27 reports, prior daily entries, and the security workflows. SSH fetch failed because public-key authentication was unavailable. HTTPS fetch with the existing GitHub CLI credentials passed. Remote main remains `617adefb6`; remote PR #80 matches the PR worktree. The only commit since the last reviewed PR base is the November 9 SQLite fix. Its dependency, API, and test changes were checked as an existing fix. No new main change required review. The existing daily task runs at 09:00 local time. No duplicate task was created.
+
+### Server functions and generated app templates
+
+Traced function identity through nested calls, schedule requests, persisted JobAuth, and job execution. User ID, tenant ID, admin state, and guest state are retained. Job roles default to empty. Public functions cannot schedule internal targets without admin authority. Internal helpers and explicit elevation remain trusted application code. Reviewed signed-file URL hooks and application authorization requirements. No signedUrl call site was found in generated templates. Checked the public documentation and SDK examples as code that applications can copy.
+
+Sampled B2B membership checks, AI Studio generation ownership, AI Chat conversation ownership and guest limits, mobile note ownership and account deletion, and the shared-team policies in CRM, helpdesk, invoices, and projects. Shared access in those team templates is explicit in their trust model. It is not evidence of a cross-tenant flaw. No new runtime or template-handler bypass was confirmed in this review.
+
+### Confirmed example flaw and fix
+
+The signed-file examples in `apps/docs/concepts/functions.mdx` and `packages/functions/src/types.ts` checked membership for a caller-selected event, then signed a separately supplied file ID. Neither example checked that the file belonged to the event. The runtime signing hook deliberately delegates recipient authorization to the application. A valid signed URL permits a download without the normal owner check.
+
+An affected app must copy this example, enable signed file URLs, and expose the function. The attacker needs organizer membership in one organization, an event in that organization, and the ID of another private file in the same deployment. The attacker can then request a URL for that unrelated file. The local reproduction executes both published examples with an unfiltered test database and a recording signer. Both original examples accepted the unrelated file ID. This confirms the example-level authorization defect. It does not establish that a deployed app copied it. No production system or private file was accessed.
+
+Both examples now reject a missing event or a file ID that differs from `Event.fileId`. Both retain the organizer check. Added instructions require the application to validate file ownership before it assigns Event.fileId. A client-writable association would defeat this check and must not be used. No runtime privilege or advisory policy changed.
+
+Added `signed-file-example-security.test.ts`. It extracts and executes both actual examples. The initial run failed both unrelated-file denial tests against the old examples. All six final tests pass. They cover unrelated files, an authorized organizer, an outsider, and a missing event. They also check that rejected calls do not reach the signer.
+
+### Current advisory scans
+
+Scanned all 12 tracked supported lockfiles in both checkouts. OSV returned 1 for findings. The severity gate returned 0. Neither scan is clean. No new advisory group appeared compared with November 9.
+
+| Scope | Result |
+| --- | --- |
+| Production/root Cargo | 9 existing advisory groups |
+| Root Bun | No reported matches |
+| Studio build tools | 1 group: minimatch 10.2.5 |
+| Docker/build | No reported matches in three locks |
+| Search benchmark | 8 existing advisory groups |
+| Vendor-only SAML | No reported matches |
+| Shard and Swift | No reported matches in four locks |
+
+Cargo audit and Cargo deny returned 0 in both checkouts. RustSec commit: `28d73fc95e5972af3403225a217def57dcaba3c4`, updated November 10. Audit reported zero unsuppressed vulnerabilities, seven maintenance warnings, and two unsoundness warnings. Cargo deny passed advisories, bans, licenses, and sources. Image-lock and advisory-ignore date checks passed in both checkouts.
+
+The minimatch advisory still lists 11.0.1 as fixed. The Studio version-10 callers still need a tested migration. Keep build patterns trusted. Existing im and sized-chunks memory-safety warnings have no patched version in the reported dependency chain. Migration needs compatibility tests. No validated runtime mitigation was found. The RSA exception remains active. These are unresolved risks, not new findings or resolved advisories. No dependency or ignore file changed today.
+
+### Verification and gaps
+
+The following checks ran in the PR worktree:
+
+| Command | Result |
+| --- | --- |
+| Bun 1.4.4 signed-file example regression, before fix | 2 expected failures; 4 passed |
+| Bun 1.4.4 tests: signed-file examples, B2B, AI Studio, runtime-files | 23 passed |
+| `cargo test -p pylon-runtime --test scheduler_new_function --test functions_files --test fn_sse_auth_gate` with Bun 1.4.4 on PATH | 3 passed |
+| `bun run --cwd packages/functions check` with Bun 1.4.4 | Passed |
+| `bun run --cwd packages/functions build` with Bun 1.4.4 | Passed |
+| `python3 -m unittest discover -s tools -p 'test_*.py'` | 3 passed |
+| `node --test packages/create-pylon/test/scaffold.test.mjs` | 10 passed |
+| `python3 tools/scan-lockfiles.py` | All 12 locks scanned; exit 1 for findings |
+| `python3 tools/osv-gate.py` on final JSON | Exit 0 |
+| Cargo audit and Cargo deny | Exit 0 with existing policy and warnings |
+| Image-lock and advisory-ignore checks | Passed |
+| `git diff --check` | Passed |
+
+Reviewed the final source comments, documentation, test, and log changes. Local evidence uses `/tmp/pylon-security-20261110-*`. The tests execute example handlers with local fixtures. They do not run a generated app over HTTP or download a real signed file. Full workspace tests, PostgreSQL integration tests, Studio and docs-site builds, container builds and image scans, deployed secrets, cloud permissions, system libraries, and Nix flake inputs were not checked. No Rust source changed, so no new Rust formatting check was run. These are scan and validation gaps.
+
+### Existing apps and next review
+
+Apps that copied either signed-file example must add the association check and protect the association's write path. Updating the SDK alone does not change copied application handlers. Already issued URLs remain valid until expiry. The prior runtime, B2B, AI Studio, OIDC, production-mode, and independent dependency follow-up still applies.
+
+This run prepares a commit for PR #80 and a copy for the primary checkout. The final user instruction authorizes the push. No merge, release, or deployment is performed.
+
+Next main area: secrets and deployment configuration. Check runtime defaults and generated deployment files without logging secret values.

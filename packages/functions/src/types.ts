@@ -1190,13 +1190,18 @@ export type RequireMember = (
  * `<img src>` and download links).
  *
  * WHO gets a URL is the calling function's responsibility — wrap the mint
- * in a membership-gated function so authorization stays app-policy-driven:
+ * in a function that checks membership and the file association.
+ * The application must validate file ownership before it sets Event.fileId.
+ * Clients must not be able to set that field to an arbitrary private file:
  *
  * ```ts
  * export default query({
  *   args: { eventId: v.id("Event"), fileId: v.string() },
  *   async handler(ctx, args) {
  *     const event = await ctx.db.get("Event", args.eventId);
+ *     if (!event || event.fileId !== args.fileId) {
+ *       throw ctx.error("NOT_FOUND", "Event file not found.");
+ *     }
  *     await ctx.requireMember(event.orgId, { role: "organizer" });
  *     return { url: await ctx.files.signedUrl(args.fileId) };
  *   },
