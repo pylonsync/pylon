@@ -64,17 +64,42 @@ fn configure_autotools() -> Vec<String> {
         false
     };
 
-    if !dynamic {
-        println!("cargo:rustc-link-lib=xmlsec1-openssl"); // -lxmlsec1-openssl
-    }
-    println!("cargo:rustc-link-lib=xmlsec1"); // -lxmlsec1
-    println!("cargo:rustc-link-lib=xml2"); // -lxml2
-    println!("cargo:rustc-link-lib=ssl"); // -lssl
-    println!("cargo:rustc-link-lib=crypto"); // -lcrypto
+    // PKG_CONFIG_ALL_STATIC / XMLSEC1_OPENSSL_STATIC select the archives. The
+    // published Linux binary is built this way (docker/linux-release), so it
+    // starts on a machine that has no xmlsec1 or libxml2 installed.
+    println!("cargo:rerun-if-env-changed=PKG_CONFIG_ALL_STATIC");
+    println!("cargo:rerun-if-env-changed=XMLSEC1_OPENSSL_STATIC");
+    let link_static = env::var_os("PKG_CONFIG_ALL_STATIC").is_some()
+        || env::var_os("XMLSEC1_OPENSSL_STATIC").is_some();
 
-    PkgConfig::new()
-        .probe("xmlsec1")
-        .expect("Could not find xmlsec1 using pkg-config");
+    if link_static {
+        assert!(
+            !dynamic,
+            "a static link needs an xmlsec1 built with --disable-crypto-dl; \
+             this one loads its crypto backend with dlopen"
+        );
+        // Archives resolve symbols left to right, so each library comes
+        // before the ones it uses: xmlsec1-openssl and xmlsec1, then libxml2,
+        // then OpenSSL.
+        for package in ["xmlsec1-openssl", "libxml-2.0", "openssl"] {
+            PkgConfig::new()
+                .statik(true)
+                .probe(package)
+                .unwrap_or_else(|e| panic!("Could not find a static {package}: {e}"));
+        }
+    } else {
+        if !dynamic {
+            println!("cargo:rustc-link-lib=xmlsec1-openssl"); // -lxmlsec1-openssl
+        }
+        println!("cargo:rustc-link-lib=xmlsec1"); // -lxmlsec1
+        println!("cargo:rustc-link-lib=xml2"); // -lxml2
+        println!("cargo:rustc-link-lib=ssl"); // -lssl
+        println!("cargo:rustc-link-lib=crypto"); // -lcrypto
+
+        PkgConfig::new()
+            .probe("xmlsec1")
+            .expect("Could not find xmlsec1 using pkg-config");
+    }
 
     let mut args = cflags;
     args.extend(fetch_xmlsec_config_libs());

@@ -24,7 +24,7 @@ framework: schema, row-level policies, server functions, live queries,
 and server-rendered React on one port.
 
 Load the skill first:
-  npx skills add pylonsync/pylon-skills
+  npx -y skills add pylonsync/pylon-skills -y -a claude-code -a codex -a cursor
 
 References:
   Docs index (agent-readable)  https://docs.pylonsync.com/llms.txt
@@ -33,9 +33,9 @@ References:
 
 Scaffold:
   npm create @pylonsync/pylon@latest my-app
-  # add --template saas | chat | shop | directory | crm | ai-chat (18 total)
+  # add -- --template saas | chat | shop | directory | crm | ai-chat (18 total)
 
-Requires Bun >= 1.0 on PATH.
+Requires Bun >= 1.0 on PATH. Linux: x86_64, glibc 2.28 or newer.
 
 Then build: `;
 
@@ -176,7 +176,7 @@ function SelfPanel() {
 			<p className="text-[12.5px] text-[var(--color-ink-3)]">
 				Add{" "}
 				<code className="font-mono text-[var(--color-ink-2)]">
-					--template saas
+					-- --template saas
 				</code>{" "}
 				to start from one of 18 working apps.
 			</p>

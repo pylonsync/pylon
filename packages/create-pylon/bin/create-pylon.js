@@ -22,12 +22,14 @@
  */
 
 import {
+	copyFileSync,
 	cpSync,
 	existsSync,
 	mkdirSync,
 	readFileSync,
 	readdirSync,
 	statSync,
+	symlinkSync,
 	writeFileSync,
 	renameSync,
 } from "node:fs";
@@ -249,7 +251,9 @@ const resolveTemplate = (name) =>
 // ---------------------------------------------------------------------------
 
 const args = argv.slice(2);
-let projectName = args.find((a) => !a.startsWith("--"));
+
+// Flags that take a value. `--flag value` and `--flag=value` are both accepted.
+const VALUE_FLAGS = ["--template", "--platforms"];
 
 const flags = {
 	pm: pickValue(args, "--bun", "--pnpm", "--yarn", "--npm")?.replace(/^--/, ""),
@@ -257,9 +261,8 @@ const flags = {
 	platforms: takeValue(args, "--platforms"),
 	skipInstall: args.includes("--skip-install"),
 	// --skill / --no-skill: install the Pylon skill into the new project via
-	// `npx skills add pylonsync/pylon-skills` — the skills.sh CLI detects the
-	// coding agent (Claude Code / Codex / Cursor) and drops the skill from the
-	// public pylon-skills repo, which each release copies from skills/. undefined => prompt (default yes).
+	// the skills.sh CLI, from the public pylon-skills repo, which each release
+	// copies from skills/. undefined => prompt (default yes).
 	skill: args.includes("--skill")
 		? true
 		: args.includes("--no-skill")
@@ -267,6 +270,23 @@ const flags = {
 			: undefined,
 	help: args.includes("--help") || args.includes("-h"),
 };
+
+// Arguments that are neither a flag nor the value of a value flag.
+const positionals = args.filter(
+	(a, i) =>
+		!a.startsWith("-") && !(i > 0 && VALUE_FLAGS.includes(args[i - 1])),
+);
+
+recoverNpmSwallowedFlags(flags, positionals, process.env);
+
+let projectName = positionals.shift();
+if (positionals.length > 0) {
+	console.error(
+		`\nError: unexpected argument(s): ${positionals.join(" ")}\n` +
+			`Usage: npm create @pylonsync/pylon@latest [name] -- [options]\n`,
+	);
+	exit(1);
+}
 
 function takeValue(arr, name) {
 	const flagWithEq = arr.find((a) => a.startsWith(name + "="));
@@ -285,13 +305,75 @@ function pickValue(arr, ...candidates) {
 	return undefined;
 }
 
+/**
+ * Restore the flags npm consumed.
+ *
+ * `npm create pkg name --template saas` (no `--` separator) does not pass
+ * `--template` to this script. npm 7+ parses it as its own boolean option,
+ * sets `npm_config_template=true`, and passes `saas` as a plain positional.
+ * `--template=saas` arrives as `npm_config_template=saas` with no positional.
+ * Boolean flags arrive as `npm_config_<name>=true`, and `--no-skill` as an
+ * empty `npm_config_skill`.
+ *
+ * A value flag whose value cannot be identified is an error. The scaffold
+ * does not continue on a default template the caller did not ask for.
+ */
+function recoverNpmSwallowedFlags(flags, positionals, env) {
+	if (!(env.npm_config_user_agent ?? "").startsWith("npm/")) return;
+
+	const isTemplate = (v) =>
+		TEMPLATES_AVAILABLE.includes(resolveTemplate(v.toLowerCase()));
+	const isPlatformList = (v) =>
+		v
+			.split(",")
+			.every((p) => PLATFORMS_AVAILABLE.includes(p.trim().toLowerCase()));
+
+	const recoverValue = (key, accepts, valid) => {
+		const raw = env[`npm_config_${key}`];
+		if (flags[key] !== undefined || raw === undefined || raw === "") return;
+		if (raw !== "true") {
+			flags[key] = raw;
+			return;
+		}
+		// The value follows the project name, so search from the end.
+		for (let i = positionals.length - 1; i >= 0; i--) {
+			if (accepts(positionals[i])) {
+				flags[key] = positionals.splice(i, 1)[0];
+				return;
+			}
+		}
+		console.error(
+			`\nError: npm consumed --${key} and its value is not a known ${key} value.\n` +
+				`Valid: ${valid.join(", ")}\n` +
+				`Put "--" before the options so npm passes them on:\n` +
+				`  npm create @pylonsync/pylon@latest my-app -- --${key} <value>\n`,
+		);
+		exit(1);
+	};
+	recoverValue("template", isTemplate, TEMPLATES_AVAILABLE);
+	recoverValue("platforms", isPlatformList, PLATFORMS_AVAILABLE);
+
+	if (!flags.pm) {
+		flags.pm = ["bun", "pnpm", "yarn", "npm"].find(
+			(pm) => env[`npm_config_${pm}`] === "true",
+		);
+	}
+	if (env.npm_config_skip_install === "true") flags.skipInstall = true;
+	if (flags.skill === undefined && env.npm_config_skill !== undefined) {
+		flags.skill = env.npm_config_skill === "true";
+	}
+	if (env.npm_config_help === "true") flags.help = true;
+}
+
 if (flags.help) {
 	const tmplLines = Object.entries(TEMPLATE_REGISTRY).map(
 		([k, v]) =>
 			`    ${k.padEnd(10)} ${v.blurb} (${v.unified ? "single app" : v.platforms.join(", ")})`,
 	);
 	process.stdout.write(`
-Usage: npm create @pylonsync/pylon [name] [options]
+Usage: npm create @pylonsync/pylon@latest [name] -- [options]
+
+  npm needs the "--" before the options. bun, pnpm and yarn do not.
 
   --template <t>         ${TEMPLATES_AVAILABLE.join(" | ")}
 ${tmplLines.join("\n")}
@@ -301,29 +383,30 @@ ${tmplLines.join("\n")}
                          except consumer, where ios,expo scaffolds native apps on a shared backend
   --bun|--pnpm|--yarn|--npm
   --skip-install         scaffold only, don't run install
+  --skill | --no-skill   add the Pylon skill to the project for Claude Code, Codex and Cursor
 
 Examples:
-  npm create @pylonsync/pylon my-app                        # default — the smallest SSR app that runs
-  npm create @pylonsync/pylon my-app --template saas        # building a product? start here: landing + orgs + billing
-  npm create @pylonsync/pylon my-app --template mobile      # App Store-ready Expo app + backend: onboarding, sign-in, paywall
-  npm create @pylonsync/pylon my-app --template consumer --platforms ios,expo   # photo app: SwiftUI + Expo on one backend
-  npm create @pylonsync/pylon my-app --template todo        # live, optimistic todo (SSR, one port)
-  npm create @pylonsync/pylon my-app --template chat         # realtime live chat room
-  npm create @pylonsync/pylon my-app --template waitlist     # coming-soon landing + live signup counter
-  npm create @pylonsync/pylon my-app --template local-service # appointment business + live booking availability
-  npm create @pylonsync/pylon my-app --template restaurant   # restaurant menu + live reservation availability
-  npm create @pylonsync/pylon my-app --template creator      # personal brand + live newsletter subscriber count
-  npm create @pylonsync/pylon my-app --template shop         # DTC store + live inventory
-  npm create @pylonsync/pylon my-app --template agency       # studio/agency + live project availability
-  npm create @pylonsync/pylon my-app --template marketplace  # two-sided marketplace + realtime offers
-  npm create @pylonsync/pylon my-app --template directory    # searchable directory + facets + live upvotes
-  npm create @pylonsync/pylon my-app --template crm          # sales CRM — live pipeline board, ⌘K, activity timeline
-  npm create @pylonsync/pylon my-app --template helpdesk     # support inbox — SLA triage, shared threads, internal notes
-  npm create @pylonsync/pylon my-app --template invoices     # invoicing — line items, payments, derived ageing
-  npm create @pylonsync/pylon my-app --template inventory    # stock control — append-only ledger, reorder flags
-  npm create @pylonsync/pylon my-app --template projects     # client delivery — task board, time tracking, budgets
-  npm create @pylonsync/pylon my-app --template ai-chat      # streaming LLM chat + synced history
-  npm create @pylonsync/pylon my-app --template ai-studio    # generative media studio + live gallery
+  npm create @pylonsync/pylon@latest my-app                 # default — the smallest SSR app that runs
+  npm create @pylonsync/pylon@latest my-app -- --template saas        # building a product? start here: landing + orgs + billing
+  npm create @pylonsync/pylon@latest my-app -- --template mobile      # App Store-ready Expo app + backend: onboarding, sign-in, paywall
+  npm create @pylonsync/pylon@latest my-app -- --template consumer --platforms ios,expo   # photo app: SwiftUI + Expo on one backend
+  npm create @pylonsync/pylon@latest my-app -- --template todo        # live, optimistic todo (SSR, one port)
+  npm create @pylonsync/pylon@latest my-app -- --template chat         # realtime live chat room
+  npm create @pylonsync/pylon@latest my-app -- --template waitlist     # coming-soon landing + live signup counter
+  npm create @pylonsync/pylon@latest my-app -- --template local-service # appointment business + live booking availability
+  npm create @pylonsync/pylon@latest my-app -- --template restaurant   # restaurant menu + live reservation availability
+  npm create @pylonsync/pylon@latest my-app -- --template creator      # personal brand + live newsletter subscriber count
+  npm create @pylonsync/pylon@latest my-app -- --template shop         # DTC store + live inventory
+  npm create @pylonsync/pylon@latest my-app -- --template agency       # studio/agency + live project availability
+  npm create @pylonsync/pylon@latest my-app -- --template marketplace  # two-sided marketplace + realtime offers
+  npm create @pylonsync/pylon@latest my-app -- --template directory    # searchable directory + facets + live upvotes
+  npm create @pylonsync/pylon@latest my-app -- --template crm          # sales CRM — live pipeline board, ⌘K, activity timeline
+  npm create @pylonsync/pylon@latest my-app -- --template helpdesk     # support inbox — SLA triage, shared threads, internal notes
+  npm create @pylonsync/pylon@latest my-app -- --template invoices     # invoicing — line items, payments, derived ageing
+  npm create @pylonsync/pylon@latest my-app -- --template inventory    # stock control — append-only ledger, reorder flags
+  npm create @pylonsync/pylon@latest my-app -- --template projects     # client delivery — task board, time tracking, budgets
+  npm create @pylonsync/pylon@latest my-app -- --template ai-chat      # streaming LLM chat + synced history
+  npm create @pylonsync/pylon@latest my-app -- --template ai-studio    # generative media studio + live gallery
 `);
 	exit(0);
 }
@@ -435,8 +518,8 @@ if (flags.skill === undefined) {
 			.toLowerCase();
 		flags.skill = ans !== "n" && ans !== "no";
 	} else {
-		// Non-interactive: can't prompt. The actual install is TTY-gated below,
-		// so this only controls whether the footer prints the one-liner hint.
+		// Non-interactive: no prompt. The skill file ships in this package, so
+		// adding it needs no network.
 		flags.skill = true;
 	}
 }
@@ -736,30 +819,70 @@ if (!flags.skipInstall) {
 // ---------------------------------------------------------------------------
 // Optional: install the Pylon skill into the project's coding agent.
 //
-// `npx skills add pylonsync/pylon-skills` (skills.sh) detects the installed
-// agent (Claude Code / Codex / Cursor) and drops the skill from the public
-// pylon-skills repo, which each release copies from this repo's skills/. We
-// only auto-run it when stdin is a TTY: the skills CLI prompts for scope and
-// agent, which would hang a non-interactive scaffold (CI, piped input). When
-// we can't run it, the footer prints the one-liner so the user can opt in.
+// On a TTY the skills.sh CLI installs it from the public pylon-skills repo
+// and asks which agents to install to. Without a TTY that prompt cancels the
+// install, and the CLI needs git, which slim CI and container images do not
+// have. So the package also carries the skill file, and the scaffolder writes
+// it to .agents/skills/pylon (read by Codex, Cursor and the other agents that
+// use that directory) with a link from .claude/skills/pylon for Claude Code.
+// That is the same layout the CLI produces.
 // ---------------------------------------------------------------------------
 
 const SKILL_REPO = "pylonsync/pylon-skills";
 const SKILL_INSTALL_CMD = `npx skills add ${SKILL_REPO}`;
-let skillInstalled = false;
-if (flags.skill && stdin.isTTY) {
-	console.log("\nAdding the Pylon skill to your coding agent...");
+// skill/ is copied in when the package is published. A source checkout reads
+// the canonical file.
+const BUNDLED_SKILL = [
+	join(HERE, "..", "skill", "SKILL.md"),
+	join(HERE, "..", "..", "..", "skills", "pylon", "SKILL.md"),
+].find((p) => existsSync(p));
+
+async function runSkillsCli(extraArgs) {
 	const { spawnSync } = await import("node:child_process");
-	const result = spawnSync("npx", ["-y", "skills", "add", SKILL_REPO], {
-		cwd: root,
-		stdio: "inherit",
-	});
-	skillInstalled = result.status === 0;
-	if (!skillInstalled) {
-		console.warn(
-			`\nCouldn't add the skill automatically. Run it yourself anytime:\n  ${SKILL_INSTALL_CMD}\n`,
-		);
+	const result = spawnSync(
+		"npx",
+		["-y", "skills", "add", SKILL_REPO, ...extraArgs],
+		{
+			cwd: root,
+			stdio: stdin.isTTY ? "inherit" : ["ignore", "inherit", "inherit"],
+			shell: process.platform === "win32",
+		},
+	);
+	return result.status === 0;
+}
+
+function writeBundledSkill() {
+	if (!BUNDLED_SKILL) return false;
+	const dir = join(root, ".agents", "skills", "pylon");
+	mkdirSync(dir, { recursive: true });
+	copyFileSync(BUNDLED_SKILL, join(dir, "SKILL.md"));
+	const claudeSkills = join(root, ".claude", "skills");
+	const claudeLink = join(claudeSkills, "pylon");
+	mkdirSync(claudeSkills, { recursive: true });
+	if (!existsSync(claudeLink)) {
+		try {
+			symlinkSync(join("..", "..", ".agents", "skills", "pylon"), claudeLink, "dir");
+		} catch {
+			// Windows without the symlink privilege.
+			mkdirSync(claudeLink, { recursive: true });
+			copyFileSync(BUNDLED_SKILL, join(claudeLink, "SKILL.md"));
+		}
 	}
+	return true;
+}
+
+let skillInstalled = false;
+if (flags.skill) {
+	console.log("\nAdding the Pylon skill to your coding agent...");
+	if (stdin.isTTY) skillInstalled = await runSkillsCli([]);
+	if (!skillInstalled) skillInstalled = writeBundledSkill();
+	if (!skillInstalled && !stdin.isTTY) {
+		skillInstalled = await runSkillsCli([
+			"-y",
+			...["claude-code", "codex", "cursor"].flatMap((agent) => ["-a", agent]),
+		]);
+	}
+	if (!skillInstalled) console.warn("\nThe skill was not added.");
 }
 
 // ---------------------------------------------------------------------------
@@ -810,7 +933,7 @@ if (platforms.includes("expo"))
 const skillLine = skillInstalled
 	? "\nPylon skill added to your coding agent (Claude Code / Codex / Cursor).\n"
 	: flags.skill
-		? `\nAdd the Pylon skill to your coding agent:\n  ${SKILL_INSTALL_CMD}\n`
+		? `\nAdd the Pylon skill to your coding agent:\n  cd ${projectName} && ${SKILL_INSTALL_CMD}\n`
 		: "";
 
 // Surface the in-repo operating manual. Pylon is agent-native: a coding agent

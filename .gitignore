@@ -104,3 +104,6 @@ packages/cli-linux-x64/bin/
 packages/cli-win32-x64/bin/
 .gstack/
 dump.rdb
+
+# Copied from skills/pylon/ when @pylonsync/create-pylon is published.
+packages/create-pylon/skill/

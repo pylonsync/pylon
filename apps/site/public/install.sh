@@ -62,6 +62,14 @@ Linux)
   Run via Docker instead:  docker run -p 4321:4321 ghcr.io/pylonsync/pylon:latest
   Or build from source:    cargo install pylon-cli"
         fi
+        # The binary is built against glibc 2.28. On an older glibc the
+        # loader rejects it with "version GLIBC_2.28 not found".
+        glibc="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')"
+        if [ -n "$glibc" ] && [ "$(printf '%s\n2.28\n' "$glibc" | sort -V | head -n 1)" != "2.28" ]; then
+            fail "the prebuilt Linux binary needs glibc 2.28 or newer; this system has $glibc.
+  Run via Docker instead:  docker run -p 4321:4321 ghcr.io/pylonsync/pylon:latest
+  Or build from source:    cargo install pylon-cli"
+        fi
         target="x86_64-unknown-linux-gnu"
         ;;
     aarch64 | arm64)

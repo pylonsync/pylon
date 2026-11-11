@@ -52,7 +52,7 @@ const BUILD: Resource[] = [
 		name: "Starter templates",
 		href: "/developers/examples",
 		what: "Eighteen working apps: SaaS, chat, shop, marketplace, directory, CRM, helpdesk, AI chat, and more.",
-		how: "npm create @pylonsync/pylon@latest my-app --template saas",
+		how: "npm create @pylonsync/pylon@latest my-app -- --template saas",
 		icon: Boxes,
 	},
 	{

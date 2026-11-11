@@ -141,7 +141,7 @@ Errors:
 4. Pylon parses the XML and verifies the digital signature against the configured `idp_x509_cert_pem`, using `xmlsec1`. It validates the assertions and extracts the email and display name from the configured attributes.
 5. Pylon then runs the same user-lookup, auto-join, and session-mint flow as OIDC.
 
-`xmlsec1` and `libxml2` are required system dependencies. The Pylon Docker image includes both. For self-hosted, from-source builds, install them directly:
+The prebuilt binaries and the Pylon Docker image include `xmlsec1` and `libxml2`. A from-source build links them from the system. Install them first:
 
 ```bash
 # macOS

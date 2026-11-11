@@ -153,7 +153,7 @@ The build copies `public/` and the image files under `app/`. If your code reads 
 
 The binaries are for the platform that ran the build. To build for Linux, run the build on Linux, for example in a Docker build stage.
 
-On Linux, the `pylon` binary loads libxml2 and libxmlsec1 at start (SAML signature checks). The host must have them. On Debian and Ubuntu, install `libxml2 libxmlsec1 libxmlsec1-openssl`.
+On Linux, the prebuilt `pylon` binary needs glibc 2.28 or newer (Debian 10, Ubuntu 20.04, RHEL 8) and no other system library. A `pylon` you built from source loads libxml2 and libxmlsec1 from the host. On Debian and Ubuntu, install `libxml2 libxmlsec1 libxmlsec1-openssl`.
 
 ## Docker
 

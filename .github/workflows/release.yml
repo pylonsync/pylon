@@ -303,6 +303,11 @@ jobs:
           # version range to be queryable. (Bun rewrites to the local
           # workspace version regardless, but ordering by topology
           # keeps the registry consistent for anyone watching.)
+          # create-pylon carries the agent skill and writes it into each new
+          # project. The canonical file is skills/pylon/SKILL.md.
+          mkdir -p packages/create-pylon/skill
+          cp skills/pylon/SKILL.md packages/create-pylon/skill/SKILL.md
+
           for pkg in "${PYLON_PKGS[@]}"; do
             [[ -f "$pkg/package.json" ]] || continue
             NAME="$(node -p "require('./$pkg/package.json').name")"
@@ -494,12 +499,11 @@ jobs:
           # from source via https://github.com/pylonsync/pylon. Add this
           # target back once we either get a self-hosted Intel runner or
           # solve the libxmlsec1 cross-compile.
-          # Dropped temporarily: x86_64-unknown-linux-musl (alpine has
-          # no libxmlsec1 package fitting samael's needs) and
-          # aarch64-unknown-linux-gnu (cross-compiling libxmlsec1 from
-          # ubuntu-24.04 is non-trivial). Add back once we either
-          # static-link xmlsec1 or drop samael's xmlsec feature in
-          # favor of an in-process verifier.
+          # Not built: x86_64-unknown-linux-musl and aarch64-unknown-linux-gnu.
+          # The Linux binary comes from ci.yml's build job, which builds for
+          # the runner's architecture in the docker/linux-release image.
+          # aarch64 needs an arm64 runner in that job's matrix plus a
+          # cli-linux-arm64 npm package; musl needs a musl build image.
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             archive: zip
@@ -517,44 +521,6 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2
         if: runner.os != 'Linux'
-      - if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
-          mkdir -p .cargo
-          cat >> .cargo/config.toml <<'EOF'
-          [target.aarch64-unknown-linux-gnu]
-          linker = "aarch64-linux-gnu-gcc"
-          EOF
-      # samael's xmlsec feature requires libxmlsec1 1.3.x (where
-      # xmlSecSize is `size_t`/Rust `usize`). Ubuntu noble + Debian
-      # bookworm ship 1.2.x where the type is `unsigned int`/`u32`, and
-      # samael's Rust code passes the value as `usize` — hard compile
-      # error. Trixie + Homebrew ship 1.3.x.
-      #
-      # We patch samael in-tree (see [patch.crates-io] in root Cargo.toml)
-      # to handle the type mismatch, so the system libxmlsec1 version
-      # matters less here — Ubuntu's 1.2.x is fine for linkage. The
-      # patch covers the compile-time bindgen mismatch.
-      - if: runner.os == 'Linux'
-        # Hard cap + retry: a hung apt mirror once wedged this step for
-        # 4h with no timeout, blocking the whole release queue. Fail
-        # fast and retry a fresh mirror instead.
-        timeout-minutes: 15
-        run: |
-          for attempt in 1 2 3; do
-            if sudo timeout 300 apt-get update && \
-               sudo timeout 300 apt-get install -y \
-                 libxml2-dev libxmlsec1-dev libxmlsec1-openssl \
-                 libclang-dev clang; then
-              exit 0
-            fi
-            echo "apt attempt ${attempt} failed or timed out; retrying in 15s"
-            sleep 15
-          done
-          echo "apt install failed after 3 attempts" >&2
-          exit 1
       - if: runner.os == 'macOS'
         timeout-minutes: 15
         run: |
@@ -590,6 +556,10 @@ jobs:
             --name "ci-release-$TARGET" --dir "target/$TARGET/release"
           chmod +x "target/$TARGET/release/pylon"
           test "$(target/$TARGET/release/pylon --version)" = "pylon $VERSION"
+          # The shared library list, the glibc floor, and a start on the
+          # distros people install on.
+          scripts/verify-linux-binary.sh "target/$TARGET/release/pylon"
+          scripts/smoke-linux-binary.sh "target/$TARGET/release/pylon"
       - name: Build
         if: runner.os != 'Linux'
         run: cargo build --release --locked --bin pylon --target ${{ matrix.target }}
@@ -625,8 +595,8 @@ jobs:
           cd "target/$TARGET/release"
           # macOS carries its vendored dylibs in lib/ (see the bundle step above)
           # and the binary resolves them via @loader_path, so the archive has to
-          # keep the two side by side. The Linux build links its deps from the
-          # distro and ships the binary alone.
+          # keep the two side by side. The Linux build links its C dependencies
+          # statically (docker/linux-release) and ships the binary alone.
           if [ "$OS_NAME" = "macOS" ]; then
             tar czf "../../../pylon-$TAG-$TARGET.tar.gz" pylon lib
           else

@@ -13,6 +13,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+	lstatSync,
 	mkdtempSync,
 	existsSync,
 	readFileSync,
@@ -264,4 +265,146 @@ test("the imessage template is listed in --help", () => {
 	const res = spawnSync(process.execPath, [CLI, "--help"], { encoding: "utf8" });
 	assert.equal(res.status, 0);
 	assert.match(res.stdout, /imessage/);
+});
+
+// npm 7+ consumes options that come before a `--` separator. These tests
+// reproduce the environment npm gives the scaffolder in that case.
+function runUnderNpm(args, npmConfig, cwd) {
+	const env = { ...process.env, npm_config_user_agent: "npm/10.9.3 node/v22.0.0" };
+	for (const key of Object.keys(env)) {
+		if (/^npm_config_(template|platforms|skip_install|skill|bun|pnpm|yarn|npm|help)$/.test(key)) {
+			delete env[key];
+		}
+	}
+	Object.assign(env, npmConfig);
+	return spawnSync(process.execPath, [CLI, ...args], {
+		cwd,
+		env,
+		encoding: "utf8",
+		input: "",
+		timeout: 30000,
+	});
+}
+
+const templateOf = (root) =>
+	existsSync(join(root, "app", "(marketing)")) ||
+	readFileSync(join(root, "app.ts"), "utf8").includes("Organization")
+		? "saas"
+		: "other";
+
+test("`npm create … my-app --template saas` without `--` still scaffolds saas", () => {
+	const dir = mkdtempSync(join(tmpdir(), "cp-npm-swallow-"));
+	const res = runUnderNpm(
+		["myapp", "saas"],
+		{
+			npm_config_template: "true",
+			npm_config_skip_install: "true",
+			npm_config_skill: "",
+			npm_config_bun: "true",
+		},
+		dir,
+	);
+	assert.equal(res.status, 0, res.stderr);
+	assert.match(res.stdout, /Creating myapp \(saas\)/);
+	assert.equal(templateOf(join(dir, "myapp")), "saas");
+});
+
+test("`--template=saas` consumed by npm scaffolds saas", () => {
+	const dir = mkdtempSync(join(tmpdir(), "cp-npm-eq-"));
+	const res = runUnderNpm(
+		["myapp"],
+		{ npm_config_template: "saas", npm_config_skip_install: "true", npm_config_skill: "" },
+		dir,
+	);
+	assert.equal(res.status, 0, res.stderr);
+	assert.match(res.stdout, /Creating myapp \(saas\)/);
+});
+
+test("npm-consumed --template and --platforms are both recovered", () => {
+	const dir = mkdtempSync(join(tmpdir(), "cp-npm-two-"));
+	const res = runUnderNpm(
+		["myapp", "consumer", "ios,expo"],
+		{
+			npm_config_template: "true",
+			npm_config_platforms: "true",
+			npm_config_skip_install: "true",
+			npm_config_skill: "",
+		},
+		dir,
+	);
+	assert.equal(res.status, 0, res.stderr);
+	assert.ok(existsSync(join(dir, "myapp", "apps", "ios")), "apps/ios missing");
+	assert.ok(existsSync(join(dir, "myapp", "apps", "expo")), "apps/expo missing");
+});
+
+test("an npm-consumed --template with an unknown value exits non-zero and creates nothing", () => {
+	const dir = mkdtempSync(join(tmpdir(), "cp-npm-bad-"));
+	const res = runUnderNpm(
+		["myapp", "sass"],
+		{ npm_config_template: "true", npm_config_skip_install: "true" },
+		dir,
+	);
+	assert.equal(res.status, 1);
+	assert.match(res.stderr, /npm consumed --template/);
+	assert.deepEqual(readdirSync(dir), []);
+});
+
+test("an extra positional argument exits non-zero and creates nothing", () => {
+	const dir = mkdtempSync(join(tmpdir(), "cp-extra-"));
+	const res = spawnSync(
+		process.execPath,
+		[CLI, "myapp", "saas", "--skip-install", "--no-skill"],
+		{ cwd: dir, env: { ...process.env, npm_config_user_agent: "" }, encoding: "utf8", input: "" },
+	);
+	assert.equal(res.status, 1);
+	assert.match(res.stderr, /unexpected argument\(s\): saas/);
+	assert.deepEqual(readdirSync(dir), []);
+});
+
+test("a flag value before the project name is not taken as the name", () => {
+	const dir = mkdtempSync(join(tmpdir(), "cp-order-"));
+	const res = spawnSync(
+		process.execPath,
+		[CLI, "--template", "todo", "myapp", "--bun", "--skip-install", "--no-skill"],
+		{ cwd: dir, env: { ...process.env, npm_config_user_agent: "" }, encoding: "utf8", input: "" },
+	);
+	assert.equal(res.status, 0, res.stderr);
+	assert.match(res.stdout, /Creating myapp \(todo\)/);
+});
+
+test("a non-interactive scaffold adds the skill with no network, git, or prompt", () => {
+	const dir = mkdtempSync(join(tmpdir(), "cp-skill-"));
+	// An empty PATH hides npx and git, so only the bundled file can succeed.
+	const res = spawnSync(process.execPath, [CLI, "myapp", "--bun", "--skip-install"], {
+		cwd: dir,
+		env: { PATH: "" },
+		encoding: "utf8",
+		input: "",
+		timeout: 30000,
+	});
+	assert.equal(res.status, 0, res.stderr);
+	const root = join(dir, "myapp");
+	const canonical = readFileSync(
+		resolve(HERE, "..", "..", "..", "skills", "pylon", "SKILL.md"),
+		"utf8",
+	);
+	assert.equal(
+		readFileSync(join(root, ".agents", "skills", "pylon", "SKILL.md"), "utf8"),
+		canonical,
+	);
+	// Claude Code reads .claude/skills; the link resolves to the same file.
+	assert.ok(lstatSync(join(root, ".claude", "skills", "pylon")).isSymbolicLink());
+	assert.equal(
+		readFileSync(join(root, ".claude", "skills", "pylon", "SKILL.md"), "utf8"),
+		canonical,
+	);
+	assert.match(res.stdout, /Pylon skill added/);
+});
+
+test("--no-skill adds no skill", () => {
+	const dir = mkdtempSync(join(tmpdir(), "cp-noskill-"));
+	const res = runScaffold({ name: "myapp", template: "barebones", cwd: dir });
+	assert.equal(res.status, 0, res.stderr);
+	assert.ok(!existsSync(join(dir, "myapp", ".agents")));
+	assert.ok(!existsSync(join(dir, "myapp", ".claude", "skills")));
 });

@@ -41,7 +41,7 @@ export function templateRepoUrl(template: string): string {
  * template the docs no longer describe.
  */
 export function createCommand(template: string): string {
-	return `npm create @pylonsync/pylon@latest my-app --template ${template}`;
+	return `npm create @pylonsync/pylon@latest my-app -- --template ${template}`;
 }
 
 /**
