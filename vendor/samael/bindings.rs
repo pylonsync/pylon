@@ -67,10 +67,20 @@ fn configure_autotools() -> Vec<String> {
     // PKG_CONFIG_ALL_STATIC / XMLSEC1_OPENSSL_STATIC select the archives. The
     // published Linux binary is built this way (docker/linux-release), so it
     // starts on a machine that has no xmlsec1 or libxml2 installed.
-    println!("cargo:rerun-if-env-changed=PKG_CONFIG_ALL_STATIC");
-    println!("cargo:rerun-if-env-changed=XMLSEC1_OPENSSL_STATIC");
-    let link_static = env::var_os("PKG_CONFIG_ALL_STATIC").is_some()
-        || env::var_os("XMLSEC1_OPENSSL_STATIC").is_some();
+    // XMLSEC1_DYNAMIC / XMLSEC1_OPENSSL_DYNAMIC keep the shared libraries, as
+    // they do in pkg-config.
+    for var in [
+        "PKG_CONFIG_ALL_STATIC",
+        "XMLSEC1_OPENSSL_STATIC",
+        "XMLSEC1_DYNAMIC",
+        "XMLSEC1_OPENSSL_DYNAMIC",
+    ] {
+        println!("cargo:rerun-if-env-changed={var}");
+    }
+    let set = |var: &str| env::var_os(var).is_some();
+    let link_static = (set("PKG_CONFIG_ALL_STATIC") || set("XMLSEC1_OPENSSL_STATIC"))
+        && !set("XMLSEC1_DYNAMIC")
+        && !set("XMLSEC1_OPENSSL_DYNAMIC");
 
     if link_static {
         assert!(

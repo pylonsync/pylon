@@ -349,6 +349,18 @@ test("an npm-consumed --template with an unknown value exits non-zero and create
 	assert.deepEqual(readdirSync(dir), []);
 });
 
+test("an npm-consumed --template with two template names as arguments exits non-zero", () => {
+	const dir = mkdtempSync(join(tmpdir(), "cp-npm-ambiguous-"));
+	const res = runUnderNpm(
+		["saas", "chat"],
+		{ npm_config_template: "true", npm_config_skip_install: "true" },
+		dir,
+	);
+	assert.equal(res.status, 1);
+	assert.match(res.stderr, /more than one argument is a template value \(saas, chat\)/);
+	assert.deepEqual(readdirSync(dir), []);
+});
+
 test("an extra positional argument exits non-zero and creates nothing", () => {
 	const dir = mkdtempSync(join(tmpdir(), "cp-extra-"));
 	const res = spawnSync(

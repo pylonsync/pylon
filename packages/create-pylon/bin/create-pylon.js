@@ -335,15 +335,19 @@ function recoverNpmSwallowedFlags(flags, positionals, env) {
 			flags[key] = raw;
 			return;
 		}
-		// The value follows the project name, so search from the end.
-		for (let i = positionals.length - 1; i >= 0; i--) {
-			if (accepts(positionals[i])) {
-				flags[key] = positionals.splice(i, 1)[0];
-				return;
-			}
+		// npm does not say which positional was the value. Exactly one must
+		// qualify: with two, either could be the project name.
+		const matches = positionals.filter(accepts);
+		if (matches.length === 1) {
+			flags[key] = positionals.splice(positionals.indexOf(matches[0]), 1)[0];
+			return;
 		}
+		const problem =
+			matches.length === 0
+				? `its value is not a known ${key} value`
+				: `more than one argument is a ${key} value (${matches.join(", ")})`;
 		console.error(
-			`\nError: npm consumed --${key} and its value is not a known ${key} value.\n` +
+			`\nError: npm consumed --${key} and ${problem}.\n` +
 				`Valid: ${valid.join(", ")}\n` +
 				`Put "--" before the options so npm passes them on:\n` +
 				`  npm create @pylonsync/pylon@latest my-app -- --${key} <value>\n`,
