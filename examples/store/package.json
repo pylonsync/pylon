@@ -12,12 +12,12 @@
     "@pylonsync/functions": "workspace:*",
     "@pylonsync/react": "workspace:*",
     "@pylonsync/sdk": "workspace:*",
-    "lucide-react": "^0.475.0",
+    "lucide-react": "^0.577.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
   "devDependencies": {
-    "@tailwindcss/cli": "^4.1.0",
+    "@tailwindcss/cli": "^4.3.5",
     "@types/node": "^22.10.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",

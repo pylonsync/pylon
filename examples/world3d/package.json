@@ -14,15 +14,15 @@
     "@pylonsync/react": "workspace:*",
     "@pylonsync/realtime": "workspace:*",
     "@pylonsync/sdk": "workspace:*",
-    "@tailwindcss/cli": "^4.3.0",
+    "@tailwindcss/cli": "^4.3.5",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tailwindcss": "^4.3.0",
-    "three": "^0.180.0"
+    "three": "^0.187.0"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",
-    "@types/three": "^0.180.0",
+    "@types/three": "^0.187.0",
     "typescript": "^5.6.0"
   }
 }

@@ -15,12 +15,12 @@
     "@pylonsync/loro": "workspace:*",
     "@pylonsync/react": "workspace:*",
     "@pylonsync/sync": "workspace:*",
-    "lucide-react": "^0.469.0",
+    "lucide-react": "^0.577.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "^4.1.0",
+    "@tailwindcss/vite": "^4.3.5",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^4.7.0",

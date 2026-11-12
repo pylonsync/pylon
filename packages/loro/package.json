@@ -38,7 +38,7 @@
     "@types/react": "^19.0.0",
     "typescript": "^5.5",
     "loro-prosemirror": "^0.4.4",
-    "prosemirror-model": "^1.25.0",
+    "prosemirror-model": "^1.25.13",
     "prosemirror-state": "^1.4.3",
     "prosemirror-schema-basic": "^1.2.4",
     "prosemirror-view": "^1.42.3",

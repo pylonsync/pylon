@@ -13,7 +13,7 @@
     "prepack": "bun run build"
   },
   "devDependencies": {
-    "fake-indexeddb": "^6.2.5"
+    "fake-indexeddb": "^6.2.8"
   },
   "files": [
     "src",
