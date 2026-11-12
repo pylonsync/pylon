@@ -91,9 +91,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # runtime-base holds everything from Debian, Bun and npm; the stage after it
 # adds Pylon. CI builds and scans this stage alone (`--target runtime-base`)
 # without the Rust build.
-FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS runtime-base
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS runtime-base
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# apt-get upgrade installs the security fixes published after the pinned
+# base image was built.
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     ca-certificates curl unzip \
     # git: OpenCode computes a session's file diff from the repository, so
     # without it /session/:id/diff returns 200 with an empty array and the
@@ -137,6 +139,8 @@ RUN cd /usr/local/lib/opencode && bun install --frozen-lockfile \
 # committed lockfiles, frozen. A stage of its own so CI can build and scan it
 # without the Rust build (ci.yml, image-scan).
 FROM bun AS image-deps
+# Security fixes published after the pinned bun image was built.
+RUN apt-get update && apt-get upgrade -y && apt-get clean
 # Runtime deps of the @pylonsync/* packages, for a customer's web build to
 # resolve through Node's walk-up from /pylon/packages/<name>/src/ ("Rollup
 # failed to resolve import 'loro-crdt'" without them). The list and its exact

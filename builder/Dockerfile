@@ -34,9 +34,12 @@
 FROM oven/bun:1.4.4@sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d AS bun
 
 # Pinned by digest; Renovate opens the PRs that move it.
-FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 
+# apt-get upgrade installs the security fixes published after the pinned
+# base image was built.
 RUN apt-get update \
+	&& apt-get upgrade -y \
 	&& apt-get install -y --no-install-recommends \
 		ca-certificates curl unzip tar gzip git \
 		# Runtime shared libs for samael's SAML XMLDSig verification path.
