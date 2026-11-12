@@ -41,12 +41,17 @@ jobs:
               - 'vendor/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - 'benchmarks/**/Cargo.lock'
               - 'Dockerfile'
               - 'docker/linux-release/**'
               - 'scripts/build-linux-release.sh'
               - 'scripts/verify-linux-binary.sh'
               - 'scripts/smoke-linux-binary.sh'
               - 'rust-toolchain*'
+              - 'deny.toml'
+              - 'osv-scanner.toml'
+              - '.cargo/audit.toml'
+              - '.github/workflows/security-daily.yml'
               - '.config/nextest.toml'
               - '.github/workflows/release.yml'
               - '.github/workflows/ci.yml'
@@ -68,6 +73,7 @@ jobs:
               - '.github/workflows/ci.yml'
             swift:
               - 'packages/swift/**'
+              - 'Package.resolved'
               - 'crates/cli/src/swift_codegen.rs'
               - '.github/workflows/ci.yml'
             csharp:
@@ -349,6 +355,8 @@ jobs:
         run: bash tools/check-image-locks.sh
       - run: node --test scripts/npm-postflight.test.mjs
       - run: bun run check
+      - name: Function authorization and image security regressions
+        run: bun test packages/functions/src/b2b-template-security.test.ts packages/functions/src/ai-studio-template-security.test.ts packages/functions/src/member.test.ts packages/functions/src/ssr-og-image.test.ts
       # The TS package tests ran nowhere until now — `check` is typecheck only,
       # so packages/sync's 200 sync tests and packages/react's mounted hook
       # tests were local-only and could rot unnoticed. Scoped to the two
@@ -485,7 +493,7 @@ jobs:
   audit:
     name: dependency advisories
     needs: changes
-    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ts == 'true'
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ts == 'true' || needs.changes.outputs.images == 'true' || needs.changes.outputs.swift == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
@@ -505,9 +513,8 @@ jobs:
           echo "${OSV_SHA256}  osv-scanner" | sha256sum -c -
           chmod +x osv-scanner
           # Exit 1 means findings; the gate decides which ones fail.
-          ./osv-scanner scan source --config osv-scanner.toml --format json \
-            --lockfile Cargo.lock --lockfile bun.lock \
-            --lockfile crates/studio_api/web/bun.lock > osv.json || [ $? -eq 1 ]
+          python3 -m unittest discover -s tools -p 'test_*.py'
+          python3 tools/scan-lockfiles.py --scanner ./osv-scanner > osv.json || [ $? -eq 1 ]
           python3 tools/osv-gate.py < osv.json
 
   # The runtime image's Debian, Bun and npm layer (the Dockerfile's

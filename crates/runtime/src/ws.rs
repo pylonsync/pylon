@@ -1919,20 +1919,16 @@ impl WsHub {
                 if handle.token.is_none() {
                     continue;
                 }
-                let (user_id, tenant_id) = match handle.auth.read() {
-                    Ok(g) => (g.user_id.clone(), g.tenant_id.clone()),
-                    Err(poisoned) => {
-                        let g = poisoned.into_inner();
-                        (g.user_id.clone(), g.tenant_id.clone())
-                    }
+                let previous = match handle.auth.read() {
+                    Ok(g) => g.clone(),
+                    Err(poisoned) => poisoned.into_inner().clone(),
                 };
-                // The tenant counts too: a session whose org membership
-                // ended resolves without its org, and the socket must not
-                // keep receiving that org's rows. The client reconnects
-                // with the same token and gets the current identity.
+                // Resolve from the credential before adding current database
+                // roles and admin status. Stored privileges can be revoked
+                // without changing the user or active tenant.
                 let still_valid = resolver
                     .recheck_token(handle.token.as_deref(), Surface::App)
-                    .is_ok_and(|ctx| ctx.user_id == user_id && ctx.tenant_id == tenant_id);
+                    .is_ok_and(|ctx| self.current_auth(&ctx, ctx.roles.clone()) == previous);
                 if !still_valid {
                     self.end_client(id, &handle);
                     ended.push(id);
@@ -4100,6 +4096,82 @@ mod tests {
         member.store(false, std::sync::atomic::Ordering::SeqCst);
         assert_eq!(hub.revalidate_all_clients(), vec![0]);
         assert_eq!(hub.client_count(), 0);
+    }
+
+    #[test]
+    fn revalidation_closes_a_socket_after_role_or_admin_revocation() {
+        for revoke_admin in [false, true] {
+            let manifest = Arc::new(pylon_kernel::AppManifest {
+                entities: vec![pylon_kernel::ManifestEntity {
+                    name: "Doc".into(),
+                    ..Default::default()
+                }],
+                policies: vec![pylon_kernel::ManifestPolicy {
+                    name: "owner_only".into(),
+                    entity: Some("Doc".into()),
+                    allow_read: Some("auth.hasAnyRole(\"owner\")".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+            let policy = PolicyEngine::from_manifest(&manifest);
+            let event = ChangeEvent {
+                seq: 1,
+                entity: "Doc".into(),
+                row_id: "private".into(),
+                kind: pylon_sync::ChangeKind::Insert,
+                data: Some(serde_json::json!({"id": "private"})),
+                prev_data: None,
+                timestamp: String::new(),
+            };
+            let payload: Arc<str> = Arc::from("private update");
+            let hub = WsHub::new(
+                Arc::new(PolicyEngine::from_manifest(&manifest)),
+                manifest.clone(),
+                manifest.auth.user.clone(),
+            );
+            let sessions = Arc::new(pylon_auth::SessionStore::new());
+            let session = sessions.create("alice".into());
+            hub.set_auth_resolver(crate::request_auth::AuthResolver::from_sessions(
+                Arc::clone(&sessions),
+            ));
+            let privileged = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let current = Arc::clone(&privileged);
+            let enrich: AuthEnricher = Arc::new(move |ctx| {
+                let allowed = current.load(std::sync::atomic::Ordering::SeqCst);
+                if revoke_admin {
+                    ctx.is_admin = allowed;
+                } else if ctx.roles.is_empty() {
+                    ctx.roles = vec![if allowed { "owner" } else { "member" }.into()];
+                }
+            });
+            hub.set_auth_enricher(Arc::clone(&enrich));
+            let mut auth = sessions.resolve(Some(&session.token));
+            enrich(&mut auth);
+            let stream: Box<dyn WsStream> = Box::new(std::io::Cursor::new(Vec::<u8>::new()));
+            let client = hub.shards[0].add(
+                0,
+                WebSocket::from_raw_socket(stream, Role::Server, None),
+                auth,
+                Some(session.token.clone()),
+                Vec::new(),
+            );
+            let rx = client.outbound_rx.lock().unwrap().take().unwrap();
+            hub.subscriptions.subscribe(0, "Doc", "private");
+            assert!(hub.revalidate_all_clients().is_empty());
+            hub.shards[0].broadcast_change(&event, &payload, None, &policy);
+            assert!(matches!(rx.try_recv(), Ok(OutboundMessage::Text(_))));
+            privileged.store(false, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(hub.revalidate_all_clients(), vec![0]);
+            assert_eq!(hub.client_count(), 0);
+            assert!(hub.subscriptions.subscribers("Doc", "private").is_empty());
+            assert!(matches!(
+                rx.try_recv(),
+                Ok(OutboundMessage::Control(Message::Close(_)))
+            ));
+            hub.shards[0].broadcast_change(&event, &payload, None, &policy);
+            assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        }
     }
 
     #[test]

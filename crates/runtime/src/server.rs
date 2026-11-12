@@ -233,7 +233,8 @@ fn spawn_streaming_response<R: std::io::Read + Send + 'static>(
 
 /// How often every WebSocket's credential is re-checked (and expired
 /// sessions swept). Session events end connections at once; this bounds
-/// how long an expired session, JWT, or revoked API key keeps one open.
+/// how long an expired credential or changed role or admin status keeps
+/// one open.
 const WS_REVALIDATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Body framing for an SSE response written raw through
@@ -5421,47 +5422,40 @@ fn start_server(
             return;
         }
 
-        // --- /admin/operators: manage the Studio operator accounts that
-        // `pylon admin ...` drives.
-        //
-        // Authorized by the same gate as every other /admin/* route, which
-        // means `PYLON_ADMIN_TOKEN` or an already-admin session. That is the
-        // whole bootstrap story and it deliberately introduces no new
-        // credential: anyone holding the admin token can already read and
-        // write every row through these endpoints, so letting them mint an
-        // operator grants no authority they lacked.
-        //
-        // What it changes is what happens afterwards. The token stops being
-        // something a human carries into a browser, each operator is a
-        // separate revocable credential, and actions get a name attached.
-        // Mint a single-use studio ticket. The control plane calls this with
-        // the app's admin token and hands the ticket to `pylon studio`, which
-        // opens /studio/enter?ticket=<t> in the browser. The operator never
-        // sees the admin token.
-        if url == "/admin/studio-ticket" && method == Method::Post {
-            if !dev_admin_open
-                && !verify_admin_or_metrics_auth(
-                    &request,
-                    admin_token.as_deref(),
-                    &cookie_config,
-                    &session_store,
-                    &account_store,
-                    runtime.as_ref(),
-                )
+        // Operator management and ticket issuance require administration access.
+        let operator_route = url == "/admin/operators" || url.starts_with("/admin/operators/");
+        let ticket_route = url == "/admin/studio-ticket" && method == Method::Post;
+        if operator_route || ticket_route {
+            let credential = verify_admin_auth(
+                &request,
+                admin_token.as_deref(),
+                &cookie_config,
+                &session_store,
+                &account_store,
+                runtime.as_ref(),
+            );
+            let denial = if !dev_admin_open && credential.is_none() {
+                Some((401, json_error("UNAUTHORIZED", "requires PYLON_ADMIN_TOKEN or an admin session")))
+            } else if credential == Some(AdminCredential::Cookie)
+                && csrf_check(&request, &csrf, is_dev).is_err()
             {
-                let body = json_error(
-                    "UNAUTHORIZED",
-                    "/admin/studio-ticket requires PYLON_ADMIN_TOKEN or an admin session",
-                );
+                Some((403, json_error("CSRF_REJECTED", "request origin is not allowed")))
+            } else {
+                None
+            };
+            if let Some((status, body)) = denial {
                 let response = with_security_headers(
-                    Response::from_string(body).with_status_code(401u16).with_header(
-                        Header::from_bytes("Content-Type", "application/json").unwrap(),
-                    ),
+                    Response::from_string(body)
+                        .with_status_code(status)
+                        .with_header(Header::from_bytes("Content-Type", "application/json").unwrap()),
                 );
                 let _ = request.respond(response);
-                mt.record_request("POST", 401);
+                mt.record_request(method.as_str(), status);
                 return;
             }
+        }
+
+        if ticket_route {
             let (status, body) = match ensure_studio_ticket_operator(&account_store) {
                 Some(uid) => {
                     let ticket = mint_studio_ticket(&uid);
@@ -5493,37 +5487,23 @@ fn start_server(
             return;
         }
 
-        if url == "/admin/operators" || url.starts_with("/admin/operators/") {
-            if !dev_admin_open
-                && !verify_admin_or_metrics_auth(
-                    &request,
-                    admin_token.as_deref(),
-                    &cookie_config,
-                    &session_store,
-                    &account_store,
-                    runtime.as_ref(),
-                )
-            {
-                let body = json_error(
-                    "UNAUTHORIZED",
-                    "/admin/operators requires PYLON_ADMIN_TOKEN or an admin session",
-                );
-                let response = with_security_headers(
-                    Response::from_string(body)
-                        .with_status_code(401u16)
-                        .with_header(
-                            Header::from_bytes("Content-Type", "application/json").unwrap(),
-                        ),
-                );
-                let _ = request.respond(response);
-                mt.record_request(method.as_str(), 401);
-                return;
-            }
-
-            let read_json = |request: &mut tiny_http::Request| -> serde_json::Value {
-                let mut buf = Vec::new();
-                let _ = request.as_reader().read_to_end(&mut buf);
-                serde_json::from_slice(&buf).unwrap_or(serde_json::Value::Null)
+        if operator_route {
+            let payload = if method == Method::Post {
+                match read_operator_json(&mut request) {
+                    Ok(value) => value,
+                    Err((status, body)) => {
+                        let response = with_security_headers(
+                            Response::from_string(body)
+                                .with_status_code(status)
+                                .with_header(Header::from_bytes("Content-Type", "application/json").unwrap()),
+                        );
+                        let _ = request.respond(response);
+                        mt.record_request(method.as_str(), status);
+                        return;
+                    }
+                }
+            } else {
+                serde_json::Value::Null
             };
             let op_json = |o: &pylon_auth::operator::Operator| {
                 serde_json::json!({
@@ -5545,7 +5525,7 @@ fn start_server(
                     .to_string(),
                 ),
                 ("/admin/operators", Method::Post) => {
-                    let v = read_json(&mut request);
+                    let v = &payload;
                     let username = v["username"].as_str().unwrap_or_default().to_string();
                     let password = v["password"].as_str().unwrap_or_default().to_string();
                     match pylon_auth::operator::create(&account_store, &username, &password) {
@@ -5570,7 +5550,7 @@ fn start_server(
                         .trim_start_matches("/admin/operators/")
                         .trim_end_matches("/password")
                         .to_string();
-                    let v = read_json(&mut request);
+                    let v = &payload;
                     let password = v["password"].as_str().unwrap_or_default().to_string();
                     match pylon_auth::operator::set_password(&account_store, &username, &password) {
                         Ok(()) => {
@@ -10403,6 +10383,69 @@ mod sse_unauth_warning_tests {
     }
 }
 
+const OPERATOR_BODY_MAX_BYTES: u64 = 64 * 1024;
+
+fn read_operator_json(
+    request: &mut tiny_http::Request,
+) -> Result<serde_json::Value, (u16, String)> {
+    let content_type = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Content-Type"))
+        .map(|h| h.value.as_str().split(';').next().unwrap_or("").trim());
+    if !content_type.is_some_and(|ct| ct.eq_ignore_ascii_case("application/json")) {
+        return Err((
+            415,
+            json_error("UNSUPPORTED_MEDIA_TYPE", "requires application/json"),
+        ));
+    }
+    let too_large = || {
+        (
+            413,
+            json_error("BODY_TOO_LARGE", "operator request exceeds 64 KiB"),
+        )
+    };
+    if request
+        .body_length()
+        .is_some_and(|len| len as u64 > OPERATOR_BODY_MAX_BYTES)
+    {
+        return Err(too_large());
+    }
+    let mut body = Vec::new();
+    request
+        .as_reader()
+        .take(OPERATOR_BODY_MAX_BYTES + 1)
+        .read_to_end(&mut body)
+        .map_err(|_| {
+            (
+                400,
+                json_error("INVALID_BODY", "could not read request body"),
+            )
+        })?;
+    if body.len() as u64 > OPERATOR_BODY_MAX_BYTES {
+        return Err(too_large());
+    }
+    serde_json::from_slice(&body)
+        .map_err(|_| (400, json_error("INVALID_JSON", "invalid JSON body")))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AdminCredential {
+    Explicit,
+    Cookie,
+}
+
+fn admin_bearer(request: &tiny_http::Request) -> Option<&str> {
+    let value = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Authorization"))?
+        .value
+        .as_str();
+    let (scheme, token) = value.split_once(' ')?;
+    (scheme.eq_ignore_ascii_case("Bearer") && !token.trim().is_empty()).then(|| token.trim())
+}
+
 fn verify_admin_or_metrics_auth(
     request: &tiny_http::Request,
     admin_token: Option<&str>,
@@ -10411,65 +10454,56 @@ fn verify_admin_or_metrics_auth(
     accounts: &pylon_auth::AccountStore,
     runtime: &Runtime,
 ) -> bool {
-    let admin_bytes = admin_token.unwrap_or("").as_bytes();
-    let metrics_token_owned = std::env::var("PYLON_METRICS_TOKEN")
-        .ok()
-        .unwrap_or_default();
-    let metrics_bytes = metrics_token_owned.as_bytes();
-    let bearer_ok = request.headers().iter().any(|h| {
-        let name = h.field.as_str().as_str();
-        if !name.eq_ignore_ascii_case("Authorization") {
-            return false;
-        }
-        let token = match h.value.as_str().strip_prefix("Bearer ") {
-            Some(t) => t,
-            None => return false,
-        };
-        let admin_match =
-            !admin_bytes.is_empty() && pylon_auth::constant_time_eq(token.as_bytes(), admin_bytes);
-        let metrics_match = !metrics_bytes.is_empty()
-            && pylon_auth::constant_time_eq(token.as_bytes(), metrics_bytes);
-        admin_match || metrics_match
-    });
-    if bearer_ok {
+    let metrics = std::env::var("PYLON_METRICS_TOKEN").unwrap_or_default();
+    if admin_bearer(request).is_some_and(|token| {
+        !metrics.is_empty() && pylon_auth::constant_time_eq(token.as_bytes(), metrics.as_bytes())
+    }) {
         return true;
     }
-    // Session-cookie path. Resolves the configured cookie name to a
-    // session, looks up the User row, and checks the manifest's
-    // `auth.user.adminField` OR the PYLON_ADMIN_EMAILS allowlist
-    // (the same two paths the main dispatcher uses for
-    // `ctx.is_admin`).
-    // `/admin/*` is Studio's: the operator cookie first, then the app's.
-    let cookie_token = request
-        .headers()
-        .iter()
-        .find(|h| h.field.as_str() == "Cookie" || h.field.as_str() == "cookie")
-        .and_then(|h| {
-            let cookies = h.value.as_str();
-            pylon_auth::extract_session_cookie(cookies, &studio_cookie_name(cookie_config))
-                .or_else(|| pylon_auth::extract_session_cookie(cookies, &cookie_config.name))
-        });
-    // Also accept a session presented as a bearer token. The main dispatcher
-    // resolves both, and a caller holding a session shouldn't be admin on one
-    // transport and anonymous on the other.
-    let bearer_session = request
-        .headers()
-        .iter()
-        .find(|h| {
-            h.field
-                .as_str()
-                .as_str()
-                .eq_ignore_ascii_case("Authorization")
-        })
-        .and_then(|h| h.value.as_str().strip_prefix("Bearer ").map(str::to_string));
-    let session_user_id = cookie_token
-        .as_deref()
-        .or(bearer_session.as_deref())
-        .and_then(|t| session_store.get(t))
-        .map(|s| s.user_id);
-    let Some(uid) = session_user_id.as_deref() else {
-        return false;
+    verify_admin_auth(
+        request,
+        admin_token,
+        cookie_config,
+        session_store,
+        accounts,
+        runtime,
+    )
+    .is_some()
+}
+
+fn verify_admin_auth(
+    request: &tiny_http::Request,
+    admin_token: Option<&str>,
+    cookie_config: &pylon_auth::CookieConfig,
+    session_store: &pylon_auth::SessionStore,
+    accounts: &pylon_auth::AccountStore,
+    runtime: &Runtime,
+) -> Option<AdminCredential> {
+    let is_admin_session = |token: &str| {
+        session_store
+            .get(token)
+            .is_some_and(|session| admin_session_user(&session.user_id, accounts, runtime))
     };
+    if let Some(token) = admin_bearer(request) {
+        let token_matches = admin_token.is_some_and(|admin| {
+            !admin.is_empty() && pylon_auth::constant_time_eq(token.as_bytes(), admin.as_bytes())
+        });
+        if token_matches || is_admin_session(token) {
+            return Some(AdminCredential::Explicit);
+        }
+    }
+    let cookies = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Cookie"))?
+        .value
+        .as_str();
+    let token = pylon_auth::extract_session_cookie(cookies, &studio_cookie_name(cookie_config))
+        .or_else(|| pylon_auth::extract_session_cookie(cookies, &cookie_config.name))?;
+    is_admin_session(&token).then_some(AdminCredential::Cookie)
+}
+
+fn admin_session_user(uid: &str, accounts: &pylon_auth::AccountStore, runtime: &Runtime) -> bool {
     // Studio operators are admins of the deployment by definition, and own no
     // row in the app's User entity for the checks below to find. Without this,
     // an operator loads Studio and every /admin/* panel in it 401s.

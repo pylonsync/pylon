@@ -465,9 +465,21 @@ fn vector_hits_use_one_projected_batch_query() {
     }
     for in_transaction in [false, true] {
         VECTOR_SQL.with(|sql| sql.borrow_mut().clear());
-        rt.lock_conn_pub().unwrap().trace(Some(|sql| {
-            VECTOR_SQL.with(|queries| queries.borrow_mut().push(sql.to_owned()));
-        }));
+        rt.lock_conn_pub()
+            .unwrap()
+            .trace_v2(
+                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(|event: rusqlite::trace::TraceEvent<'_>| {
+                    if let rusqlite::trace::TraceEvent::Stmt(stmt, _) = event {
+                        VECTOR_SQL.with(|queries| {
+                            queries
+                                .borrow_mut()
+                                .push(stmt.expanded_sql().expect("SQL trace expansion"))
+                        });
+                    }
+                }),
+            )
+            .unwrap();
         let query = json!({"field": "embedding", "vector": [1.0, 0.0, 0.0, 0.0], "limit": 200});
         let result = if in_transaction {
             let conn = rt.lock_conn_pub().unwrap();
@@ -476,7 +488,13 @@ fn vector_hits_use_one_projected_batch_query() {
         } else {
             DataStore::vector_search(&rt, "Doc", &query).unwrap()
         };
-        rt.lock_conn_pub().unwrap().trace(None);
+        rt.lock_conn_pub()
+            .unwrap()
+            .trace_v2(
+                rusqlite::trace::TraceEventCodes::empty(),
+                None::<fn(rusqlite::trace::TraceEvent<'_>)>,
+            )
+            .unwrap();
         assert_eq!(result["hits"].as_array().unwrap().len(), 200);
         VECTOR_SQL.with(|sql| {
             let queries = sql.borrow();

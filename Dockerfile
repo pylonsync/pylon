@@ -254,11 +254,9 @@ ENV PYLON_DB_PATH=/data/pylon.db
 ENV PYLON_FILES_DIR=/data/uploads
 ENV PYLON_SESSION_DB=/data/sessions.db
 ENV PYLON_FUNCTIONS_RUNTIME=/pylon/packages/functions/src/runtime.ts
-# Default to dev mode so the container boots without forcing operators to
-# pre-configure PYLON_CORS_ORIGIN. Lock it down in production by setting
-# PYLON_DEV_MODE=false AND PYLON_CORS_ORIGIN=https://your-frontend.example.com
-# via `fly secrets set` (or your platform's equivalent).
-ENV PYLON_DEV_MODE=true
+# Require production settings by default. Configure trusted origins in the
+# app manifest or PYLON_CORS_ORIGIN before starting the container.
+ENV PYLON_DEV_MODE=false
 
 USER pylon:pylon
 WORKDIR /app

@@ -84,9 +84,7 @@ jobs:
             fi
           done
           # Exit 1 means findings; the report decides what matters.
-          osv-scanner scan source --config osv-scanner.toml --format json \
-            --lockfile Cargo.lock --lockfile bun.lock \
-            --lockfile crates/studio_api/web/bun.lock > results/osv.json || true
+          python3 tools/scan-lockfiles.py > results/osv.json || [ $? -eq 1 ] || exit $?
           audit=passed; cargo audit >/dev/null 2>&1 || audit=failed
           deny=passed; cargo deny check >/dev/null 2>&1 || deny=failed
           ignores=passed; bash tools/check-security-ignores.sh || ignores=failed

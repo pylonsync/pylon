@@ -96,7 +96,18 @@ pub fn hash_token(token: &str) -> String {
 pub trait OidcTokenStore: Send + Sync {
     /// Store a new token. A token whose insert fails must not be handed
     /// to the client.
-    fn insert(&self, record: &OidcTokenRecord) -> Result<(), String>;
+    fn insert(&self, record: &OidcTokenRecord) -> Result<(), String> {
+        self.insert_tokens(std::slice::from_ref(record), false)
+    }
+
+    /// Insert one token bundle atomically with respect to revocation.
+    /// For a refresh, require a live refresh token for this grant, user,
+    /// and client. A revoked grant must not be recreated.
+    fn insert_tokens(
+        &self,
+        records: &[OidcTokenRecord],
+        require_live_grant: bool,
+    ) -> Result<(), String>;
 
     /// Find a token by hash. Expired rows are deleted and reported as
     /// `None`.
@@ -119,6 +130,22 @@ pub trait OidcTokenStore: Send + Sync {
     fn sweep_expired(&self, now: u64) -> Result<usize, String>;
 }
 
+/// Validate the shared identity and unique token hashes of an issued bundle.
+pub fn validate_token_bundle(records: &[OidcTokenRecord]) -> Result<&OidcTokenRecord, String> {
+    let first = records.first().ok_or("empty OIDC token bundle")?;
+    let mut hashes = std::collections::HashSet::new();
+    if records.iter().any(|r| {
+        r.grant_id != first.grant_id
+            || r.user_id != first.user_id
+            || r.client_id != first.client_id
+            || r.created_at != first.created_at
+            || !hashes.insert(&r.token_hash)
+    }) {
+        return Err("invalid OIDC token bundle".into());
+    }
+    Ok(first)
+}
+
 /// In-memory token store. Lost on restart; tests and dev only.
 #[derive(Default)]
 pub struct InMemoryOidcTokenStore {
@@ -136,9 +163,30 @@ impl InMemoryOidcTokenStore {
 }
 
 impl OidcTokenStore for InMemoryOidcTokenStore {
-    fn insert(&self, record: &OidcTokenRecord) -> Result<(), String> {
-        self.lock()
-            .insert(record.token_hash.clone(), record.clone());
+    fn insert_tokens(
+        &self,
+        records: &[OidcTokenRecord],
+        require_live_grant: bool,
+    ) -> Result<(), String> {
+        let first = validate_token_bundle(records)?;
+        let mut rows = self.lock();
+        if require_live_grant
+            && !rows.values().any(|r| {
+                r.grant_id == first.grant_id
+                    && r.user_id == first.user_id
+                    && r.client_id == first.client_id
+                    && r.kind == OidcTokenKind::Refresh
+                    && !r.is_expired(first.created_at)
+            })
+        {
+            return Err("OIDC grant is no longer active".into());
+        }
+        if records.iter().any(|r| rows.contains_key(&r.token_hash)) {
+            return Err("duplicate OIDC token hash".into());
+        }
+        for r in records {
+            rows.insert(r.token_hash.clone(), r.clone());
+        }
         Ok(())
     }
 
@@ -213,6 +261,48 @@ pub mod conformance {
         }
     }
 
+    /// Check that a refresh cannot restore access after either revocation path.
+    pub fn concurrent_revocation(a: &dyn OidcTokenStore, b: &dyn OidcTokenStore, tag: &str) {
+        for user_wide in [false, true] {
+            for i in 0..10 {
+                let grant = format!("{tag}-{user_wide}-{i}");
+                let user = format!("user-{grant}");
+                let old = record(
+                    &format!("{grant}-old"),
+                    OidcTokenKind::Refresh,
+                    &grant,
+                    &user,
+                    1_000,
+                );
+                let next = record(
+                    &format!("{grant}-next"),
+                    OidcTokenKind::Access,
+                    &grant,
+                    &user,
+                    1_000,
+                );
+                a.insert(&old).unwrap();
+                let barrier = std::sync::Barrier::new(2);
+                std::thread::scope(|scope| {
+                    let issue = scope.spawn(|| {
+                        barrier.wait();
+                        a.insert_tokens(std::slice::from_ref(&next), true)
+                    });
+                    barrier.wait();
+                    if user_wide {
+                        b.revoke_user(&user).unwrap();
+                    } else {
+                        b.revoke_grant(&grant).unwrap();
+                    }
+                    // Either issuance won and revocation removed it, or issuance was refused.
+                    let _ = issue.join().unwrap();
+                });
+                assert!(a.find(&next.token_hash, 100).unwrap().is_none());
+                assert!(a.insert_tokens(std::slice::from_ref(&next), true).is_err());
+            }
+        }
+    }
+
     /// Run every check against `store`. Hashes are prefixed with `tag` so
     /// a shared database (Postgres in CI) can run the suite more than once.
     pub fn run(store: &dyn OidcTokenStore, tag: &str) {
@@ -220,6 +310,32 @@ pub mod conformance {
         let h = |s: &str| format!("{tag}-{s}");
         let g = |s: &str| format!("{tag}-grant-{s}");
         let u = |s: &str| format!("{tag}-user-{s}");
+
+        concurrent_revocation(store, store, tag);
+        // An insert failure must roll back the whole bundle.
+        let existing = record(
+            &h("duplicate"),
+            OidcTokenKind::Refresh,
+            &g("atomic"),
+            &u("atomic"),
+            now + 60,
+        );
+        let fresh = record(
+            &h("rollback"),
+            OidcTokenKind::Access,
+            &g("atomic"),
+            &u("atomic"),
+            now + 60,
+        );
+        store.insert(&existing).unwrap();
+        assert!(store
+            .insert_tokens(&[fresh.clone(), existing.clone()], true)
+            .is_err());
+        assert!(store.find(&fresh.token_hash, now).unwrap().is_none());
+        store.revoke_grant(&existing.grant_id).unwrap();
+        assert!(store
+            .insert_tokens(std::slice::from_ref(&fresh), true)
+            .is_err());
 
         // Round trip keeps every field.
         let access = record(&h("a1"), OidcTokenKind::Access, &g("1"), &u("1"), now + 60);

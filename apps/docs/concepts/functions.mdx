@@ -100,11 +100,16 @@ export default query({
   args: { eventId: v.id("Event"), fileId: v.string() },
   async handler(ctx, args) {
     const event = await ctx.db.get("Event", args.eventId);
+    if (!event || event.fileId !== args.fileId) {
+      throw ctx.error("NOT_FOUND", "Event file not found.");
+    }
     await ctx.requireMember(event.orgId, { role: "organizer" });
     return { url: await ctx.files.signedUrl(args.fileId, { ttlSecs: 300 }) };
   },
 });
 ```
+
+Check both organization membership and the file association. This example assumes that `Event.fileId` stores an authorized upload. Validate file ownership before setting that field. Do not let clients assign an arbitrary private file ID.
 
 The returned path (`/api/files/<id>?sig=<hmac>&exp=<unix>`) is anonymously fetchable until it expires. It works in `<img src>` and download links. `ttlSecs` defaults to 300 and is capped at 24 hours; a signed URL is a bearer capability, so keep lifetimes short. Invalid or expired signatures fall back to the ordinary owner check, so nothing new becomes enumerable.
 

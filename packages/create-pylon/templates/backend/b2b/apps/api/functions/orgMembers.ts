@@ -1,13 +1,13 @@
 import { query, v } from "@pylonsync/functions";
 
-/**
- * List every member of an Org. Membership policy gates this to
- * org-admins + owners (members see only their own row), so non-admin
- * callers get a single-element array; admins get everyone.
- */
+/** Administrators can list all members. Other members can read their own row. */
 export default query({
 	args: { orgId: v.id("Org") },
 	async handler(ctx, args: { orgId: string }) {
-		return await ctx.db.query("Membership", { orgId: args.orgId });
+		const member = await ctx.requireMember(args.orgId, { entity: "Membership" });
+		const filter = member.role === "owner" || member.role === "admin"
+			? { orgId: args.orgId }
+			: { orgId: args.orgId, userId: ctx.auth.userId };
+		return await ctx.db.query("Membership", filter);
 	},
 });

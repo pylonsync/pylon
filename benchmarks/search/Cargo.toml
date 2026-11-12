@@ -19,3 +19,8 @@ pylon-kernel = { path = "../../crates/core" }
 pylon-http = { path = "../../crates/http" }
 serde_json = "1"
 rand = "0.8"
+
+# Match the runtime workspace's patched dependencies.
+[patch.crates-io]
+samael = { path = "../../vendor/samael" }
+tiny_http = { path = "../../vendor/tiny_http" }

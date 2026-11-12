@@ -634,6 +634,7 @@ impl OidcProvider {
     ) -> Result<IssuedTokens, String> {
         let now = now_secs();
         self.maybe_sweep(now);
+        let require_live_grant = grant_id.is_some();
         let grant_id = grant_id.map(String::from).unwrap_or_else(mint_random_token);
         let record =
             |token: &str, kind: OidcTokenKind, scopes: &[String], ttl: u64| OidcTokenRecord {
@@ -648,26 +649,27 @@ impl OidcProvider {
                 rotated_at: None,
             };
         let access_token = mint_random_token();
-        self.tokens.insert(&record(
+        let mut records = vec![record(
             &access_token,
             OidcTokenKind::Access,
             access_scopes,
             ACCESS_TOKEN_TTL_SECS,
-        ))?;
+        )];
         let refresh_scopes = refresh_scopes.filter(|s| s.iter().any(|x| x == OFFLINE_ACCESS_SCOPE));
         let refresh_token = match refresh_scopes {
             Some(scopes) => {
                 let token = mint_random_token();
-                self.tokens.insert(&record(
+                records.push(record(
                     &token,
                     OidcTokenKind::Refresh,
                     scopes,
                     REFRESH_TOKEN_TTL_SECS,
-                ))?;
+                ));
                 Some(token)
             }
             None => None,
         };
+        self.tokens.insert_tokens(&records, require_live_grant)?;
         Ok(IssuedTokens {
             grant_id,
             access_token,
@@ -1320,6 +1322,29 @@ mod tests {
             .lookup_access_token(&other.access_token)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn refresh_cannot_restore_a_revoked_grant() {
+        for revoke_user in [false, true] {
+            let p = test_provider(std::sync::Arc::new(InMemoryOidcTokenStore::new()));
+            let s = scopes("openid offline_access");
+            let first = p.issue_tokens(None, "u1", "c1", &s, Some(&s)).unwrap();
+            let accepted = p
+                .accept_refresh_token("c1", first.refresh_token.as_deref().unwrap())
+                .unwrap();
+            // Revocation completes while the refresh request prepares its response.
+            if revoke_user {
+                p.revoke_user("u1").unwrap();
+            } else {
+                p.revoke_token("c1", &first.access_token).unwrap();
+            }
+            assert!(
+                p.issue_tokens(Some(&accepted.grant_id), "u1", "c1", &s, Some(&s))
+                    .is_err(),
+                "an in-flight refresh must not restore a revoked grant"
+            );
+        }
     }
 
     #[test]

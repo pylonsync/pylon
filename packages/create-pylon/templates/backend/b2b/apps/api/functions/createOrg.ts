@@ -32,7 +32,8 @@ export default mutation({
 			ownerId: ctx.auth.userId,
 			createdAt: new Date().toISOString(),
 		});
-		await ctx.db.insert("Membership", {
+		// The caller just created this organization. No membership exists yet.
+		await ctx.db.unsafe.insert("Membership", {
 			orgId,
 			userId: ctx.auth.userId,
 			role: "owner",

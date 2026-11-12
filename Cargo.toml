@@ -45,7 +45,7 @@ serde_json = "1"
 # Sequence diff for the CRDT container merge (pylon-crdt).
 similar = "2"
 url = "2"
-rusqlite = { version = "0.35", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
 tiny_http = "0.12"
 postgres = { version = "0.19", features = ["with-serde_json-1", "with-chrono-0_4"] }
 # Pure-Rust TLS — no OpenSSL dep, builds cleanly on musl + arm64 cross

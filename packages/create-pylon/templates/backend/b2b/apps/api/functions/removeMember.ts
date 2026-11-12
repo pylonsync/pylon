@@ -1,14 +1,10 @@
 import { mutation, v } from "@pylonsync/functions";
 
-/**
- * Remove a User from an Org. Refuses to remove the org's owner
- * (transfer ownership first via setMemberRole + a manual Org.ownerId
- * update — left as an exercise; this scaffold stops at the safety
- * check).
- */
+/** Remove a member. Keep the founding owner in the organization. */
 export default mutation({
 	args: { orgId: v.id("Org"), userId: v.id("User") },
 	async handler(ctx, args: { orgId: string; userId: string }) {
+		await ctx.requireMember(args.orgId, { entity: "Membership", role: ["owner", "admin"] });
 		const org = (await ctx.db.get("Org", args.orgId)) as any;
 		if (!org) throw ctx.error("NOT_FOUND", "org not found");
 		if (org.ownerId === args.userId) {

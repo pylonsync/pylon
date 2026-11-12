@@ -572,6 +572,14 @@ fn validate_public_aggregate(
     entity: &str,
     spec: &serde_json::Value,
 ) -> Result<(), (u16, String)> {
+    // The tenant filter requires an object. A non-object `where` would
+    // skip that filter and reach storage as an unrestricted aggregate.
+    if !spec.is_object() || spec.get("where").is_some_and(|filter| !filter.is_object()) {
+        return Err((
+            400,
+            json_error("INVALID_QUERY", "aggregate spec and where must be objects"),
+        ));
+    }
     if let Some(field) = spec.get("count").and_then(|value| value.as_str()) {
         if field != "*" {
             crate::require_public_field(manifest, entity, field)?;
@@ -666,6 +674,31 @@ mod public_field_tests {
             result,
             json!({"Doc":[{"id":"a", "title":"root", "children":[{"id":"b", "children":[{"id":"c"}]}]}]})
         );
+    }
+
+    #[test]
+    fn aggregate_requires_object_spec_and_filter() {
+        let manifest = manifest();
+        for invalid in [
+            json!(null),
+            json!([]),
+            json!("invalid"),
+            json!(false),
+            json!(0),
+        ] {
+            for spec in [invalid.clone(), json!({"count": "*", "where": invalid})] {
+                let (status, body) =
+                    validate_public_aggregate(&manifest, "Doc", &spec).unwrap_err();
+                assert_eq!(status, 400);
+                assert!(body.contains("INVALID_QUERY"));
+            }
+        }
+        for spec in [
+            json!({"count": "*"}),
+            json!({"count": "*", "where": {"title": "allowed"}}),
+        ] {
+            assert!(validate_public_aggregate(&manifest, "Doc", &spec).is_ok());
+        }
     }
 
     #[test]

@@ -615,15 +615,23 @@ fn list_totals_use_sql_counts_only_for_row_independent_policies() {
             .insert("Doc", &json!({"orgId":ORG_B,"name":"theirs"}))
             .unwrap();
         COUNTS.store(0, std::sync::atomic::Ordering::SeqCst);
-        app.runtime.lock_conn_pub().unwrap().trace_v2(
-            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
-            Some(trace),
-        );
+        app.runtime
+            .lock_conn_pub()
+            .unwrap()
+            .trace_v2(
+                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(trace),
+            )
+            .unwrap();
         let (status, body) = app.call("GET", "/api/entities/Doc?page=1&per_page=1", json!(null));
         app.runtime
             .lock_conn_pub()
             .unwrap()
-            .trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+            .trace_v2(
+                rusqlite::trace::TraceEventCodes::empty(),
+                None::<fn(rusqlite::trace::TraceEvent<'_>)>,
+            )
+            .unwrap();
         assert_eq!(status, 200, "{body}");
         assert_eq!(body["total"], expected_total, "{rule}: {body}");
         assert_eq!(
@@ -784,4 +792,50 @@ fn framework_entities_are_not_readable_through_the_query_routes() {
     );
     assert_eq!(s, 200, "{out}");
     assert!(out.to_string().contains("victim"));
+}
+
+#[test]
+fn aggregate_rejects_invalid_where_without_losing_tenant_scope() {
+    let mut schema = manifest();
+    schema
+        .policies
+        .iter_mut()
+        .find(|p| p.entity.as_deref() == Some("Project"))
+        .unwrap()
+        .allow_read = Some("auth.userId != null".into());
+    let app = start_manifest(schema);
+    for org in [ORG_A, ORG_B] {
+        app.runtime
+            .insert("Project", &json!({"orgId": org, "name": "Roadmap"}))
+            .unwrap();
+    }
+    for spec in [
+        json!({"count": "*"}),
+        json!({"count": "*", "where": {"orgId": ORG_B}}),
+    ] {
+        let (status, body) = app.call("POST", "/api/aggregate/Project", spec);
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            json!({"rows": [{"count": 1}]}),
+            "aggregate must stay in the active tenant"
+        );
+    }
+    for filter in [
+        Value::Null,
+        json!([]),
+        json!("invalid"),
+        json!(false),
+        json!(0),
+    ] {
+        let (status, body) = app.call(
+            "POST",
+            "/api/aggregate/Project",
+            json!({"count": "*", "where": filter}),
+        );
+        assert_eq!(
+            status, 400,
+            "invalid where must not expose other tenants: {body}"
+        );
+    }
 }

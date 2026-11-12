@@ -621,7 +621,15 @@ mod tests {
     #[test]
     fn selective_facets_skip_the_full_rowid_scan() {
         let mut conn = seed_store(30);
-        conn.trace(Some(record_sql));
+        conn.trace_v2(
+            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(|event: rusqlite::trace::TraceEvent<'_>| {
+                if let rusqlite::trace::TraceEvent::Stmt(stmt, _) = event {
+                    record_sql(&stmt.expanded_sql().expect("SQL trace expansion"));
+                }
+            }),
+        )
+        .unwrap();
         SEARCH_SQL.with(|queries| queries.borrow_mut().clear());
         let mut query = facet_query();
         query
