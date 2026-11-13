@@ -873,3 +873,5 @@ Rebuild and release the runtime, CLI, native WebTransport clients, and Docker im
 Next main area: authorization and tenant isolation. Prioritize atomic backup-code consumption as a separate authentication follow-up.
 
 PR worktree validation: `/Users/ericc59/Dev/pylon-security-20261113-pr` contains the reviewed runtime source and lockfiles unchanged. Its five Python tests passed, including both Docker context tests. Formatting, image-lock consistency, ignore-date checks, and diff whitespace checks passed. The final source, lockfile, regression, and report diffs were inspected. The primary checkout still has only its pre-existing untracked Python cache.
+
+Delivery confirmed: commit `30a04f481` was pushed to `security/daily-review-2026-11-13-pr`. [PR #83](https://github.com/pylonsync/pylon/pull/83) is open against main. It excludes the blocked monitoring changes. Full workspace Clippy and full workspace tests were not run. No merge or deployment occurred.
