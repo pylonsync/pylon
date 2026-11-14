@@ -86,13 +86,17 @@ ENV PYLON_DEV_MODE=false
 fn generate_dockerignore() -> String {
     format!(
         r#"# {GENERATED_MARKER}
-node_modules
-.pylon
-.git
+**/node_modules
+**/.pylon
+**/.git
 deploy
 dist
-*.db
-.env*
+# Exclude local credentials and database state at every directory depth.
+**/*.db
+**/*.db-journal
+**/*.db-shm
+**/*.db-wal
+**/.env*
 "#
     )
 }
