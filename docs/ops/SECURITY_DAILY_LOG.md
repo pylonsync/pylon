@@ -875,3 +875,67 @@ Next main area: authorization and tenant isolation. Prioritize atomic backup-cod
 PR worktree validation: `/Users/ericc59/Dev/pylon-security-20261113-pr` contains the reviewed runtime source and lockfiles unchanged. Its five Python tests passed, including both Docker context tests. Formatting, image-lock consistency, ignore-date checks, and diff whitespace checks passed. The final source, lockfile, regression, and report diffs were inspected. The primary checkout still has only its pre-existing untracked Python cache.
 
 Delivery confirmed: commit `30a04f481` was pushed to `security/daily-review-2026-11-13-pr`. [PR #83](https://github.com/pylonsync/pylon/pull/83) is open against main. It excludes the blocked monitoring changes. Full workspace Clippy and full workspace tests were not run. No merge or deployment occurred.
+
+## 2026-11-14
+
+Reviewed main: `d294cb035fd20bed30d79a222fb764091c291fc6`. HTTPS fetch confirmed no main changes since the last review. Reviewed PR #83 at `c312aae66a74a0d041a07be3c6f8feb4c81c0a4a` in `/Users/ericc59/Dev/pylon-security-20261113-pr`. The primary checkout remains at `ce9189551` on `security/daily-review-2026-11-02`. Both checkouts had no tracked edits. Existing Python caches and other worktrees were preserved.
+
+Read SECURITY.md, both October 27 reports, daily reports through November 13, and the security workflows. The primary log stops at November 10; newer entries were read from the PR worktree before choosing the review area. The November 11 Docker and dependency fixes and the November 13 TOTP and QUIC fixes are already in PR #83. They were not counted as new findings. The November 12 monitoring fixes remain on local branches because the available push credential lacks workflow scope. The daily task already runs at 09:00 local time. No duplicate task was created.
+
+### Authorization and tenant isolation
+
+Traced row reads, filtered queries, lookup, aggregate and graph queries, nested graph targets, search gates, private-field projection, REST updates, sync writes, CRDT updates, tenant selection, and scoped admin data access. Checked that update policies run against the stored and resulting row. Checked the aggregate filter validation added by the earlier review. Graph and search requests reject row-dependent policies before bulk execution. Checked the distinction between global operators and admins with an active tenant.
+
+Reviewed the B2B membership helper and generated organization, member, and project handlers. Organization and user IDs are both used for membership lookup. Role checks remain in member management and project archiving. Sampled the AI Studio ownership checks and the signed-file examples. These checks do not establish complete coverage of all handlers or concurrent state changes.
+
+No new security issue was confirmed. No application, dependency, authorization, or advisory-ignore file changed today. This commit adds the review record only. Existing fixes remain ready for review in PR #83.
+
+### Current advisory scans
+
+Scanned all 12 tracked supported lockfiles in the primary checkout and the PR worktree. The primary checkout still contains older rustix and QUIC versions. Their matches are already fixed in PR #83. Final results below describe the PR worktree. OSV returned 1 for findings. `tools/osv-gate.py` returned 0 under the existing severity policy. The scan is not clean.
+
+| Scope | Result |
+| --- | --- |
+| Production/root Cargo | 9 existing advisory groups |
+| Root Bun | No reported matches |
+| Studio build tools | 1 existing minimatch 10.2.5 group |
+| Docker/build | No reported matches in three locks |
+| Search benchmark | 8 existing advisory groups |
+| Vendor-only SAML | No reported matches |
+| Shard and Swift | No reported matches in four locks |
+
+Cargo audit and Cargo deny returned 0 in the PR worktree. RustSec commit: `4ef2df8e806a65e2f1ecc14f56f51249062b23d6`, updated November 13. Audit reported zero unsuppressed vulnerabilities, seven maintenance warnings, and two unsoundness warnings. Cargo deny passed advisories, bans, licenses, and sources. Image-lock consistency and advisory-ignore date checks passed. No new advisory group appeared compared with the November 13 final scan.
+
+Existing minimatch, im, sized-chunks, and RSA risks remain. Minimatch needs a tested migration to fixed version 11.0.1. Keep build patterns trusted. The memory-safety findings need dependency migration and compatibility tests; no validated runtime mitigation was established. The RSA exception remains active. A passing gate does not resolve these findings.
+
+### Verification
+
+Rust tests used the primary checkout's build cache. The first HTTP build failed because the PR worktree lacked `crates/studio_api/web/dist/index.html`. Copied the existing local bundle and repeated the tests. Studio was not rebuilt. Initial template tests used installed Bun 1.3.14 and failed to load the B2B data-URL module. Repeated all four suites with pinned Bun 1.4.4 through `npx --yes bun@1.4.4`. No test was disabled or changed.
+
+| Command | Result |
+| --- | --- |
+| `cargo test --locked -p pylon-policy --lib` | 107 passed |
+| `cargo test --locked -p pylon-router --lib` | 178 passed; 1 existing test ignored |
+| `cargo test --locked -p pylon-runtime --test update_policy_scope --test admin_mutation_security --test totp_security` | 18 passed after restoring the existing Studio bundle |
+| Bun 1.4.4: member, B2B, AI Studio, signed-file example tests | 30 passed |
+| `python3 -m unittest discover -s tools -p 'test_*.py' -v` | Failed: 3 scanner tests passed; both Docker context tests timed out after 120 seconds each |
+| `node --test packages/create-pylon/test/scaffold.test.mjs` | 19 passed |
+| `python3 tools/scan-lockfiles.py` | All 12 locks scanned; exit 1 for findings |
+| `python3 tools/osv-gate.py` | Exit 0 |
+| `cargo audit --json` and `cargo deny check` | Exit 0 with existing warnings and ignores |
+| Image-lock and advisory-ignore checks | Passed |
+| `cargo fmt --all -- --check` and `git diff --check` | Passed |
+
+Both Docker context builds timed out, including the network-disabled scratch-image test. Docker exclusion behavior was not verified today. Restore the local builder and repeat `python3 -m unittest discover -s tools -p 'test_docker_context.py' -v`. No Docker rule was changed.
+
+Local evidence uses `/tmp/pylon-security-20261114-*`. No production service was tested. Full workspace tests, PostgreSQL integration, multi-replica concurrency, Windows/Linux release builds, full image builds and vulnerability scans, native C library scans, deployed secrets, cloud permissions, and Nix inputs were not checked. No source changed, so no new TypeScript type check, package build, or Studio build was run. These are validation gaps.
+
+### Remaining work and deployment steps
+
+The backup-code consumption race recorded on November 13 remains open. It requires a session, a valid backup code, and concurrent requests. Consumption must become an atomic storage operation across SQLite and PostgreSQL. A process-local lock does not protect multiple replicas. Require a current authenticator code through an application gate for sensitive operations until that fix is tested. This run did not reproduce or repair the race.
+
+The monitoring workflow and runtime-watcher fixes still need a push credential with workflow access. The runtime watcher's bounded release-history limit and native-library scan gap also remain. No failed scan is treated as clean.
+
+Today's report requires no new application migration. Prior deployment steps still apply: rebuild and release the patched runtime, CLI, native WebTransport clients, and images; send a current TOTP code when regenerating backup codes; update existing generated Docker ignore rules; apply the earlier B2B, AI Studio, and signed-file handler fixes; and scan each app's own lockfile. Rotate secrets if an accessible old image or cache included them. No merge, release, or deployment was performed.
+
+This run adds the dated report to PR #83 under the user's final commit-and-push instruction. Next main area: HTTP, CSRF, CORS, and WebSocket boundaries. Keep atomic backup-code consumption and the blocked monitoring changes on the follow-up list.
