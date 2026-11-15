@@ -939,3 +939,68 @@ The monitoring workflow and runtime-watcher fixes still need a push credential w
 Today's report requires no new application migration. Prior deployment steps still apply: rebuild and release the patched runtime, CLI, native WebTransport clients, and images; send a current TOTP code when regenerating backup codes; update existing generated Docker ignore rules; apply the earlier B2B, AI Studio, and signed-file handler fixes; and scan each app's own lockfile. Rotate secrets if an accessible old image or cache included them. No merge, release, or deployment was performed.
 
 This run adds the dated report to PR #83 under the user's final commit-and-push instruction. Next main area: HTTP, CSRF, CORS, and WebSocket boundaries. Keep atomic backup-code consumption and the blocked monitoring changes on the follow-up list.
+
+## 2026-11-15
+
+Reviewed main: `d294cb035fd20bed30d79a222fb764091c291fc6`. HTTPS fetch confirmed no main changes since yesterday. Reviewed PR #83 at `7b2f68987ec7b94a1d94aface5dad5c156940a6f` in `/Users/ericc59/Dev/pylon-security-20261113-pr`. The only new PR commit since yesterday's reviewed base records that review. The primary checkout remains at `ce9189551`. Both checkouts started without tracked edits. Existing Python caches and other worktrees were preserved. This run changes the existing PR worktree only.
+
+Read SECURITY.md, both October 27 reports, prior daily reports through November 14, and the security workflows. Existing PR fixes were accounted for before review. The scheduler confirms the daily task at 09:00 local time, with the next run on November 16. No duplicate task was created.
+
+### HTTP, CSRF, CORS, and WebSocket review
+
+Traced CORS origin selection, the CSRF gate, form dispatch, cookie identity resolution, API bearer fallback, admin mutations, sync WebSocket upgrades, SSE cookie trust, and shard transport credentials. CSRF means cross-site request forgery. Sync cookies require a trusted WebSocket origin. Shard connections use explicit credentials without session cookies. Reviewed the copied Next.js API rewrites and client providers in the generated web templates. They use the runtime's HTTP controls. No template file required a change.
+
+Confirmed a conditional form-route CSRF bypass. In `crates/runtime/src/server.rs`, the early gate skips requests with any `Authorization: Bearer ...` header. Form dispatch occurs before the shared API identity check. In `crates/runtime/src/frontend.rs`, `serve_via_form_rpc` resolves identity from the cookie alone through `resolve_request_auth`. It does not validate that bearer. A false bearer can therefore bypass the form origin check while leaving cookie authentication available to the handler.
+
+An affected app must expose a state-changing `route.ts` handler. For a browser attack, the attacker must control an origin that the route or proxy permits through a credentialed CORS preflight with the Authorization header. That origin must be excluded from the CSRF allowlist. The browser must also send the victim's session cookie. Same-site origins can meet that cookie condition; cross-site use depends on cookie settings. Without preflight permission, the browser cannot send this request shape. This is not a bypass from every arbitrary website. The impact depends on the operations exposed by the application's handler.
+
+The local HTTP regression reached the stub handler and returned 200 before the fix. It expected 403. Repeated the failure with production mode, an explicit CORS allowlist, and a narrower CSRF allowlist. The test uses synthetic credentials and a recording handler. It proves the dispatch bypass, not a complete browser attack or an authenticated database mutation. Cookie identity exposure follows from the source trace above. No live system was tested.
+
+The fix requires the CSRF check for matched form routes even when a bearer header is present. API bearer authentication retains its existing behavior. The regression checks requests with a false bearer, with and without a synthetic cookie. Rejected requests must not reach the handler. A trusted-origin request with the same bearer still succeeds. Existing form checks now run in production mode with memory-only stores. No advisory suppression, authorization weakening, or test disabling was used.
+
+### Current advisory results
+
+OSV scanned all 12 tracked supported lockfiles. It returned 1 for findings. The existing severity gate returned 0. This is not a clean scan. No new advisory group appeared compared with yesterday.
+
+| Scope | Result |
+| --- | --- |
+| Production/root Cargo | 9 existing groups |
+| Root Bun | No reported matches |
+| Studio build tools | 1 existing minimatch group |
+| Docker/build | No reported matches in three locks |
+| Search benchmark | 8 existing groups |
+| Vendor-only SAML | No reported matches |
+| Shard and Swift | No reported matches in four locks |
+
+Cargo audit returned 0 with zero unsuppressed vulnerabilities, seven maintenance warnings, and two unsoundness warnings. RustSec commit: `02e2517f457a359fc6d3440ea4560c8ea188fee8`, updated November 15. Cargo deny passed advisories, bans, licenses, and sources. Image-lock consistency and advisory-ignore date checks passed. No dependency or ignore file changed.
+
+The [minimatch advisory](https://github.com/advisories/GHSA-g3hv-75wg-m249) still lists 11.0.1 as fixed. Studio needs a tested migration from version 10. Keep build patterns trusted. The im and sized-chunks memory-safety findings still need migration and compatibility tests. No validated runtime mitigation was established. The RSA exception remains active. Passing scan gates do not resolve these risks.
+
+### Verification and gaps
+
+Rust tests used the primary checkout's build cache and the existing Studio bundle. Studio was not rebuilt.
+
+| Command | Result |
+| --- | --- |
+| `cargo test --locked -p pylon-runtime --test csrf_form_route bearer_header_does_not_bypass_form_csrf` without the fix | Failed as expected: 200 instead of 403; repeated in production mode |
+| `cargo test --locked -p pylon-runtime --test csrf_form_route --test bearer_cookie_fallback --test admin_mutation_security` with the fix | 11 passed |
+| `cargo test --locked -p pylon-runtime --lib ws_origin_tests` | 3 passed |
+| `cargo test --locked -p pylon-runtime --lib upgrade_credentials_resolve_through_the_shared_rules` | 1 passed |
+| `python3 -m unittest discover -s tools -p 'test_*.py' -v` | 3 scanner tests passed; 2 Docker context tests failed because the Docker daemon was unavailable |
+| `node --test packages/create-pylon/test/scaffold.test.mjs` | 19 passed |
+| `python3 tools/scan-lockfiles.py` and `tools/osv-gate.py` | Scan exit 1; gate exit 0 |
+| `cargo audit --json` and `cargo deny check` | Exit 0 with warnings above |
+| Image-lock and advisory-ignore checks | Passed |
+| `cargo fmt --all -- --check` and `git diff --check` | Passed after formatting the test |
+
+The initial formatting check found one long test setup line. Formatting corrected it. The final checks passed. Reviewed the final runtime, test, and report diff. Local evidence uses `/tmp/pylon-security-20261115-*`.
+
+Docker context behavior remains unverified today. Start the local Docker daemon and repeat the two context tests. Full workspace tests, browser exploitation, PostgreSQL integration, multi-replica concurrency, release builds, full image builds and scans, native C library scans, deployed secrets, cloud permissions, and Nix inputs were not checked. No TypeScript source changed, so TypeScript checks and package builds were not run. Existing compiler warnings remain.
+
+### Remaining work and deployment steps
+
+The backup-code consumption race remains open as recorded on November 13. It requires a session, a valid code, and concurrent requests. It needs an atomic check-and-consume storage operation with SQLite and PostgreSQL concurrency tests. Until then, require a current authenticator code through an application gate for sensitive operations. The November 12 monitoring fixes remain local because the available push credential lacks workflow scope. Their release-history and native-library scan gaps also remain.
+
+Rebuild and release the patched runtime and images to protect existing form routes. No copied template handler change is needed for today's fix. Until deployment, keep credentialed CORS access limited to origins trusted for mutations, including route and proxy preflight settings. Prior Docker ignore, TOTP client, B2B, AI Studio, signed-file example, and independent app dependency steps still apply.
+
+This run commits and pushes the fix and report to PR #83 under the user's final instruction. No merge or deployment is performed. Next main area: files, SSRF, and path traversal. Keep atomic backup-code consumption and the blocked monitoring changes on the follow-up list.

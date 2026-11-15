@@ -137,16 +137,18 @@ fn available_port() -> u16 {
 
 fn start_stub_server(form_called: Arc<AtomicBool>) -> u16 {
     let port = available_port();
-    // Dev mode so the in-memory server boots without prod-only config
-    // (PYLON_CORS_ORIGIN, persistent session store, ...). PYLON_CSRF_ORIGINS
-    // is honored REGARDLESS of dev mode, so set an explicit allowlist that
-    // excludes the "attacker" origin — dev's default `*` would trust everyone.
-    // SAFETY: this test binary is a dedicated process; env is isolated.
-    // Once per binary — a per-call set_var races the other test threads
-    // reading the environment. See the note in e2e_smoke.rs.
+    // CORS permits both origins. Only the good origin can make mutations.
+    // This models a read client with no permission to use cookie mutations.
+    // Set the process environment once before starting any server thread.
     static CSRF_ENV: std::sync::Once = std::sync::Once::new();
     CSRF_ENV.call_once(|| unsafe {
-        std::env::set_var("PYLON_DEV_MODE", "1");
+        std::env::set_var("PYLON_DEV_MODE", "0");
+        std::env::set_var(
+            "PYLON_CORS_ORIGIN",
+            "http://good.example,http://evil.example",
+        );
+        std::env::set_var("PYLON_SESSION_DB", ":memory:");
+        std::env::set_var("PYLON_JOBS_DB", ":memory:");
         std::env::set_var("PYLON_CSRF_ORIGINS", "http://good.example");
     });
     let rt = Arc::new(Runtime::in_memory(form_route_manifest()).unwrap());
@@ -194,13 +196,13 @@ fn start_stub_server(form_called: Arc<AtomicBool>) -> u16 {
 
 /// POST an urlencoded form to `path` with an explicit `Origin`, return the
 /// HTTP status.
-fn post_form_with_origin(port: u16, path: &str, origin: &str) -> u16 {
+fn post_form_with_headers(port: u16, path: &str, origin: &str, headers: &str) -> u16 {
     let host_port = format!("127.0.0.1:{port}");
     let body = "name=alice";
     let request = format!(
         "POST {path} HTTP/1.1\r\nHost: {host_port}\r\nOrigin: {origin}\r\n\
          Content-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\
-         Connection: close\r\n\r\n{body}",
+         Connection: close\r\n{headers}\r\n{body}",
         body.len()
     );
     let mut stream = TcpStream::connect(&host_port).expect("connect");
@@ -224,7 +226,7 @@ fn csrf_gate_precedes_route_form_dispatch() {
     // 1. Forged cross-origin POST → rejected by the CSRF gate with 403, and
     //    the form handler is NEVER reached. Before the fix this dispatched to
     //    `serve_via_form_rpc` and ran the handler (a state-changing write).
-    let status = post_form_with_origin(port, "/contact", "http://evil.example");
+    let status = post_form_with_headers(port, "/contact", "http://evil.example", "");
     assert_eq!(
         status, 403,
         "forged-origin POST to a route.ts form handler must be CSRF-rejected (403), got {status}"
@@ -235,7 +237,7 @@ fn csrf_gate_precedes_route_form_dispatch() {
     );
 
     // 2. Allowed origin → clears CSRF, dispatches to the handler (200).
-    let status = post_form_with_origin(port, "/contact", "http://good.example");
+    let status = post_form_with_headers(port, "/contact", "http://good.example", "");
     assert_eq!(
         status, 200,
         "allowed-origin POST must clear CSRF and reach the handler (200), got {status}"
@@ -244,4 +246,30 @@ fn csrf_gate_precedes_route_form_dispatch() {
         form_called.load(Ordering::SeqCst),
         "the form handler must run for an allowed-origin request"
     );
+}
+
+#[test]
+fn bearer_header_does_not_bypass_form_csrf() {
+    let form_called = Arc::new(AtomicBool::new(false));
+    let port = start_stub_server(Arc::clone(&form_called));
+    for headers in [
+        "Authorization: Bearer invalid\r\n",
+        "Authorization: Bearer invalid\r\nCookie: pylon_session=invalid\r\n",
+    ] {
+        assert_eq!(
+            post_form_with_headers(port, "/contact", "http://evil.example", headers),
+            403,
+        );
+        assert!(!form_called.load(Ordering::SeqCst));
+    }
+    assert_eq!(
+        post_form_with_headers(
+            port,
+            "/contact",
+            "http://good.example",
+            "Authorization: Bearer invalid\r\n",
+        ),
+        200,
+    );
+    assert!(form_called.load(Ordering::SeqCst));
 }

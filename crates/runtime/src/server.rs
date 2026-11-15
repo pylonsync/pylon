@@ -6157,7 +6157,14 @@ fn start_server(
             // classic sense — browsers don't auto-attach bearer tokens. Skip
             // the check for them so server-to-server API callers keep working
             // without needing Origin headers.
-            if !is_bearer && !matches!(method, Method::Get | Method::Head | Method::Options) {
+            // Form routes resolve identity from cookies. They do not validate
+            // the bearer header before dispatch, so it cannot exempt them.
+            let is_form_route = is_bearer
+                && frontend_config.is_active()
+                && crate::frontend::match_form_route(&url, &frontend_config.ssr_routes).is_some();
+            if (!is_bearer || is_form_route)
+                && !matches!(method, Method::Get | Method::Head | Method::Options)
+            {
                 if let Err(err) = csrf_check(&request, &csrf, is_dev) {
                     let body = json_error(&err.code, &err.message);
                     let response = with_security_headers(
