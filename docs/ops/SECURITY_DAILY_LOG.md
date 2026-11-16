@@ -1004,3 +1004,66 @@ The backup-code consumption race remains open as recorded on November 13. It req
 Rebuild and release the patched runtime and images to protect existing form routes. No copied template handler change is needed for today's fix. Until deployment, keep credentialed CORS access limited to origins trusted for mutations, including route and proxy preflight settings. Prior Docker ignore, TOTP client, B2B, AI Studio, signed-file example, and independent app dependency steps still apply.
 
 This run commits and pushes the fix and report to PR #83 under the user's final instruction. No merge or deployment is performed. Next main area: files, SSRF, and path traversal. Keep atomic backup-code consumption and the blocked monitoring changes on the follow-up list.
+
+## 2026-11-16
+
+Reviewed PR #83 at `ce91c4e6d6bbf48592b0829da45db86a59275be9` in `/Users/ericc59/Dev/pylon-security-20261113-pr`. HTTPS fetch confirmed that main remains at `d294cb035fd20bed30d79a222fb764091c291fc6`. The only PR change since yesterday's reviewed base is the form-route CSRF fix. Reviewed its source and test diff as an existing fix. The primary checkout remains at `ce9189551`. Both checkouts started without tracked edits. Existing Python caches and other worktrees were preserved.
+
+Read SECURITY.md, both October 27 reports, prior daily reports through November 15, and the security workflows. The primary checkout lacks the latest daily changes, so this review used the PR worktree. Existing fixes were not reported as new issues. The daily task remains set for 09:00 local time. Its next run is November 17. No duplicate task was created.
+
+### Files, server-side requests, and path handling
+
+Traced upload initialization, confirmation, local PUT, deletion, and download dispatch. Checked owner and tenant matching, missing owner records, public visibility, scoped admin restrictions, upload limits, and response media types. Reviewed local asset ID checks and private S3 owner checks before signed redirects. Public S3 and Stack0 use different access models; these checks do not establish private-file isolation for those configurations.
+
+Reviewed signed file URL expiry, signature verification, and application authorization at the copied documentation and SDK examples. Reviewed local image path containment, remote image host and path checks, redirect revalidation, guarded DNS resolution, and response byte limits. Sampled static frontend path containment and client bundle path checks. Reviewed consumer upload URL validation and AI Studio's fixed provider host and generation ownership checks.
+
+No new issue was confirmed in this review. No application, dependency, template, or advisory-ignore file changed. This commit adds the review record only. The checks do not cover every storage configuration or concurrent filesystem mutation.
+
+### Current advisory scans
+
+OSV scanned all 12 tracked supported lockfiles in the PR worktree. It returned 1 for findings. `tools/osv-gate.py` returned 0 under the existing severity policy. The scan is not clean. No new advisory group appeared compared with November 15.
+
+| Scope | Result |
+| --- | --- |
+| Production/root Cargo | 9 existing advisory groups |
+| Root Bun | No reported matches |
+| Studio build tools | 1 existing minimatch 10.2.5 group |
+| Docker/build | No reported matches in three locks |
+| Search benchmark | 8 existing advisory groups |
+| Vendor-only SAML | No reported matches |
+| Shard and Swift | No reported matches in four locks |
+
+Cargo audit returned 0 with existing ignores. It reported zero unsuppressed vulnerabilities, seven maintenance warnings, and two unsoundness warnings. RustSec commit: `02e2517f457a359fc6d3440ea4560c8ea188fee8`, updated November 15. Cargo deny passed advisories, bans, licenses, and sources. Image-lock consistency and advisory-ignore date checks passed.
+
+The current [minimatch advisory](https://github.com/advisories/GHSA-g3hv-75wg-m249) still lists 11.0.1 as fixed. Studio's version-10 callers need a tested migration. Keep build patterns trusted. The im and sized-chunks memory-safety findings need dependency migration and compatibility tests. No validated runtime mitigation was established. The RSA exception remains active. Passing gates do not resolve these risks.
+
+### Verification and gaps
+
+Rust tests used the primary checkout's build cache and the existing Studio bundle. Studio was not rebuilt. Local evidence uses `/tmp/pylon-security-20261116-*`.
+
+| Command | Result |
+| --- | --- |
+| `cargo test --locked -p pylon-runtime --lib image_optim` | 24 passed |
+| `cargo test --locked -p pylon-runtime --test file_serving --test functions_files` | 5 passed |
+| `cargo test --locked -p pylon-kernel net_guard` | 6 passed |
+| `cargo test --locked -p pylon-storage --lib files` | 31 passed |
+| `cargo test --locked -p pylon-runtime --lib file_urls` | 4 passed |
+| `cargo test --locked -p pylon-runtime --lib resolve_safe` | 2 passed |
+| `cargo test --locked -p pylon-runtime --test functions_files --test csrf_form_route` with Bun 1.4.4 on PATH | 3 passed |
+| Bun 1.4.4: runtime-files, signed-file examples, AI Studio security | 13 passed |
+| `python3 -m unittest discover -s tools -p 'test_scan_lockfiles.py' -v` | 3 passed |
+| `python3 -m unittest discover -s tools -p 'test_docker_context.py' -v` | Both failed: Docker daemon unavailable |
+| `node --test packages/create-pylon/test/scaffold.test.mjs` | 19 passed |
+| `python3 tools/scan-lockfiles.py` and `tools/osv-gate.py` | Scan exit 1; gate exit 0 |
+| `cargo audit --json` and `cargo deny check` | Exit 0 with warnings above |
+| Image-lock and advisory-ignore checks | Passed |
+
+The initial file integration run used the installed Bun. Repeated it with pinned Bun 1.4.4. Existing compiler warnings remain. Docker exclusion behavior was not verified today. Start the local Docker daemon and repeat the two context tests. Full workspace tests, real S3 and Stack0 integration, PostgreSQL integration, multi-replica concurrency, release builds, full image builds and scans, native C library scans, deployed secrets, cloud permissions, and Nix inputs were not checked. No source changed, so TypeScript checks, formatting, and package builds were not repeated. No production service was tested.
+
+### Remaining work and deployment steps
+
+The backup-code consumption race remains open as recorded on November 13. It requires a session, a valid code, and concurrent requests. It needs an atomic storage operation with SQLite and PostgreSQL concurrency tests. Require a current authenticator code through an application gate for sensitive operations until that fix is tested. The November 12 monitoring fixes remain local because the available push credential lacks workflow scope. Their release-history and native-library scan gaps also remain.
+
+Today's report requires no new application migration. Prior deployment steps still apply. Rebuild and release the patched runtime, CLI, native WebTransport clients, and images. Update copied Docker ignore rules, B2B handlers, AI Studio handlers, and signed-file examples. Send a current TOTP code when regenerating backup codes. Scan each application's own lockfile. Keep credentialed CORS origins limited to trusted mutation origins until the form-route fix is deployed. Rotate secrets if an accessible old image or cache included them.
+
+The final report diff and whitespace check are reviewed before commit. This run commits and pushes the report to PR #83 under the user's final instruction. No merge or deployment is performed. Next main area: server functions and generated app templates. Keep atomic backup-code consumption and the blocked monitoring changes on the follow-up list.
