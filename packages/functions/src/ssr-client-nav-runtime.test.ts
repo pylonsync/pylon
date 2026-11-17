@@ -88,6 +88,14 @@ describe("instant client navigation", () => {
     expect(saveDataSight).toBe(0);
     expect(intent).toBeGreaterThan(0);
   });
+
+  test("a page prefetch is marked as one, and a click is not", () => {
+    // The server refuses to render a marked request when it is busy. A click
+    // must never be refused that way.
+    const { prefetchHeaders, clickHeaders } = report.prefetch;
+    expect(prefetchHeaders).toEqual({ nav: "1", prefetch: "1" });
+    expect(clickHeaders).toEqual({ nav: "1", prefetch: null });
+  });
 });
 
 describe("a deploy while the page is open", () => {

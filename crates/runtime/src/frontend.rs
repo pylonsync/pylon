@@ -2613,6 +2613,20 @@ fn serve_via_ssr_rpc(
         Some(f) => f.clone(),
         None => return Err(request),
     };
+    // Every caller has already tried the render cache, so from here the
+    // request costs a render.
+    if sheds_prefetch(
+        is_prefetch_request(&request),
+        ssr_renders_in_flight(),
+        ssr_prefetch_max_renders(),
+    ) {
+        tracing::debug!(
+            route = %matched.route.path,
+            "SSR prefetch not rendered: renders in flight at the limit"
+        );
+        let _ = request.respond(ssr_prefetch_shed_response(cors_origin));
+        return Ok(());
+    }
     // Build the client bundle BEFORE dispatching the render. The Bun renderer
     // reads the bundle manifest off disk for head injection — a render racing
     // the boot-time warm (fire-and-forget thread in server.rs) finds no
@@ -2835,10 +2849,15 @@ fn serve_via_ssr_rpc(
     // Dev diagnostics: wall-clock around the render, so the ring + `pylon
     // diagnostics` report end-to-end render time. Dev-only (cheap Instant).
     let render_t0 = std::time::Instant::now();
+    // Counted from here, not from inside the thread, so a burst of requests
+    // sees each other. Dropped when the render thread ends, or at once if the
+    // thread fails to spawn.
+    let render_in_flight = RenderInFlight::start();
     let render_thread = std::thread::Builder::new()
         .name("pylon-ssr-render".into())
         .stack_size(512 * 1024)
         .spawn(move || {
+            let _render_in_flight = render_in_flight;
             let on_response_start: pylon_functions::runner::ResponseStartCallback = Box::new(
                 move |status: u16, headers: std::collections::HashMap<String, String>| {
                     if headers.keys().any(|k| {
@@ -3325,6 +3344,82 @@ pub fn is_nav_request(request: &Request) -> bool {
             .eq_ignore_ascii_case("x-pylon-nav")
             && h.value.as_str().trim() == "1"
     })
+}
+
+/// Is this a `<Link>` prefetch: a navigation request sent before the click?
+/// The client runtime sets `X-Pylon-Prefetch: 1` on those only. The header
+/// changes neither the response shape nor any cache key; it only allows
+/// [`sheds_prefetch`] to refuse the render.
+pub fn is_prefetch_request(request: &Request) -> bool {
+    request.headers().iter().any(|h| {
+        h.field
+            .as_str()
+            .as_str()
+            .eq_ignore_ascii_case("x-pylon-prefetch")
+            && h.value.as_str().trim() == "1"
+    })
+}
+
+/// SSR renders the runner has not finished, of every kind.
+static SSR_RENDERS_IN_FLIGHT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Counts one render in [`SSR_RENDERS_IN_FLIGHT`] from `start` until drop.
+struct RenderInFlight;
+
+impl RenderInFlight {
+    fn start() -> Self {
+        SSR_RENDERS_IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        RenderInFlight
+    }
+}
+
+impl Drop for RenderInFlight {
+    fn drop(&mut self) {
+        SSR_RENDERS_IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+fn ssr_renders_in_flight() -> usize {
+    SSR_RENDERS_IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// A prefetch is rendered only while fewer than this many renders are in
+/// flight. Override with `PYLON_SSR_PREFETCH_MAX_RENDERS`; default 4. With 0,
+/// a prefetch is answered only from the render cache and never rendered.
+fn ssr_prefetch_max_renders() -> usize {
+    parse_prefetch_max_renders(
+        std::env::var("PYLON_SSR_PREFETCH_MAX_RENDERS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn parse_prefetch_max_renders(raw: Option<&str>) -> usize {
+    raw.and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(4)
+}
+
+/// Refuse to render this request? Renders share one runner, so a prefetch
+/// that starts while the runner is busy delays the pages people are waiting
+/// for. Only a prefetch is ever refused: the user has not clicked, and the
+/// click fetches the page itself.
+fn sheds_prefetch(prefetch: bool, renders_in_flight: usize, max_renders: usize) -> bool {
+    prefetch && renders_in_flight >= max_renders
+}
+
+/// The 503 for a prefetch the server refused to render. The client runtime
+/// treats any non-200 prefetch as "nothing warmed".
+fn ssr_prefetch_shed_response(cors_origin: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+    let mut resp = Response::from_data(b"prefetch skipped: server busy".to_vec())
+        .with_status_code(503u16)
+        .with_header(Header::from_bytes("Content-Type", "text/plain; charset=utf-8").unwrap())
+        .with_header(Header::from_bytes("Retry-After", "1").unwrap())
+        .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap());
+    if let Ok(h) = Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes()) {
+        resp = resp.with_header(h);
+    }
+    resp
 }
 
 /// Cache-key `vary` for a render, derived from its request `Host` (see
@@ -6138,6 +6233,55 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(60));
         assert!(ssr_ready());
         SSR_WARMING.store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    #[test]
+    fn only_a_prefetch_is_refused_and_only_at_the_limit() {
+        // A click or a document load renders however busy the server is.
+        assert!(!sheds_prefetch(false, 0, 4));
+        assert!(!sheds_prefetch(false, 100, 4));
+        assert!(!sheds_prefetch(false, 0, 0));
+        // A prefetch renders below the limit and is refused at it.
+        assert!(!sheds_prefetch(true, 3, 4));
+        assert!(sheds_prefetch(true, 4, 4));
+        assert!(sheds_prefetch(true, 26, 4));
+        // Limit 0: a prefetch is never rendered.
+        assert!(sheds_prefetch(true, 0, 0));
+    }
+
+    #[test]
+    fn prefetch_render_limit_defaults_to_four() {
+        assert_eq!(parse_prefetch_max_renders(None), 4);
+        assert_eq!(parse_prefetch_max_renders(Some("not a number")), 4);
+        assert_eq!(parse_prefetch_max_renders(Some(" 8 ")), 8);
+        assert_eq!(parse_prefetch_max_renders(Some("0")), 0);
+    }
+
+    #[test]
+    fn a_render_counts_as_in_flight_until_it_ends() {
+        // Other tests in this binary may render at the same time, so each
+        // check is a floor, not an exact count.
+        let first = RenderInFlight::start();
+        assert!(ssr_renders_in_flight() >= 1);
+        let second = RenderInFlight::start();
+        assert!(ssr_renders_in_flight() >= 2);
+        drop(first);
+        assert!(ssr_renders_in_flight() >= 1);
+        drop(second);
+    }
+
+    #[test]
+    fn a_refused_prefetch_is_a_503_no_cache_can_keep() {
+        let resp = ssr_prefetch_shed_response("*");
+        assert_eq!(resp.status_code().0, 503);
+        let header = |name: &str| {
+            resp.headers()
+                .iter()
+                .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name))
+                .map(|h| h.value.as_str().to_string())
+        };
+        assert_eq!(header("cache-control").as_deref(), Some("no-store"));
+        assert_eq!(header("retry-after").as_deref(), Some("1"));
     }
 
     #[test]

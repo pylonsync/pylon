@@ -86,6 +86,8 @@ const Slow = page("slow");
 const Offline = page("offline");
 
 const fetches: string[] = [];
+/** The X-Pylon-Nav and X-Pylon-Prefetch headers of each fetch, by URL. */
+const fetchHeaders: Record<string, { nav: string | null; prefetch: string | null }> = {};
 const scrolls: number[] = [];
 /** Full page loads (\`location.href = ...\`) the runtime started. */
 const fullLoads: string[] = [];
@@ -190,9 +192,11 @@ async function setUp() {
     get: () => hrefDescriptor.get!.call(win.location),
     set: (value: string) => fullLoads.push(value),
   });
-  const fakeFetch = async (input: any) => {
+  const fakeFetch = async (input: any, init?: any) => {
     const url = typeof input === "string" ? input : input.url;
     fetches.push(url);
+    const sent = new Headers(init?.headers);
+    fetchHeaders[url] = { nav: sent.get("x-pylon-nav"), prefetch: sent.get("x-pylon-prefetch") };
     if (url === "/_pylon/build/manifest.json") {
       const body = MODE === "stale-manifest" ? STALE_MANIFEST : MANIFEST;
       return new Response(JSON.stringify(body), { status: 200 });
@@ -302,7 +306,19 @@ async function prefetchTiming() {
   await pylon.prefetch("/offline", { document: true });
   await settle();
   const intent = preloads().length - beforeSave;
-  return { sightBeforeIdle, sightAfterIdle, saveDataSight, intent };
+
+  // A page prefetch tells the server the user has not clicked yet. The URL
+  // has a query no later step navigates to, so the payload stays unused.
+  await pylon.prefetch("/reports?prefetched=1", { document: true });
+  await settle();
+  return {
+    sightBeforeIdle,
+    sightAfterIdle,
+    saveDataSight,
+    intent,
+    prefetchHeaders: fetchHeaders["/reports?prefetched=1"] ?? null,
+    clickHeaders: fetchHeaders["/slow"] ?? null,
+  };
 }
 /** A deploy while the page is open: its build's route files are gone. */
 async function afterDeploy() {

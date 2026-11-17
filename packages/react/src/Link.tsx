@@ -16,13 +16,14 @@
 //     covers links off screen, such as a tab bar, so the first tap is warm
 //     too, without counting against this page's first paint. For a route
 //     that navigates with no page fetch (`navigation = "client"` or an
-//     offline route), the runtime also loads its entry then. On hover,
-//     touch, pointerdown, or focus it fetches the chunks at once and also
-//     fetches
-//     the page itself, which costs a server render, so that waits for a
-//     real signal of intent rather than firing for a screenful of links.
-//     Focus is included so a keyboard user tabbing to a link gets the
-//     same warm path a mouse user gets.
+//     offline route), the runtime also loads its entry then. On intent it
+//     fetches the chunks at once and also fetches the page itself, which
+//     costs a server render, so that waits for a real signal rather than
+//     firing for a screenful of links. Intent is a cursor that stays on the
+//     link, a touch that stays down without moving, a mouse press, or focus
+//     (see ./linkIntent). A cursor crossing the link, or a touch that starts
+//     a scroll, fetches nothing. The runtime also keeps at most two page
+//     prefetches waiting on the server at a time.
 //   - Modifier keys (cmd/ctrl/shift/alt) or middle-click fall
 //     through to the browser's default behavior (open in new tab,
 //     etc.) — matches Next.js semantics.
@@ -34,6 +35,7 @@
 // (HTML still prefetches) or by setting `target="_blank"`.
 
 import React, { useEffect, useRef } from "react";
+import { watchLinkIntent } from "./linkIntent";
 
 declare global {
   interface Window {
@@ -42,7 +44,7 @@ declare global {
         href: string,
         opts?: {
           /** Also fetch the page payload. Costs a server render, so only on an
-           *  intent signal: hover, touch, or focus. */
+           *  intent signal (see ./linkIntent). */
           document?: boolean;
         },
       ) => Promise<void>;
@@ -167,24 +169,13 @@ export function Link({
       io.observe(el);
     }
 
-    el.addEventListener("mouseenter", warmPage);
-    el.addEventListener("touchstart", warmPage, { passive: true });
-    // A press starts ~100 ms before the click: enough to start the fetch.
-    el.addEventListener("pointerdown", warmPage);
-    // Focus is the keyboard's version of hover, and a stronger signal: a
-    // cursor slides across links it isn't aiming at, but nobody tabs onto one
-    // idly. Without it, tabbing to a link and pressing Enter took the cold
-    // path while a mouse user got the warm one — the wrong way round.
-    el.addEventListener("focus", warmPage);
+    const stopIntent = watchLinkIntent(el, warmPage);
 
     return () => {
       if (typeof window.cancelIdleCallback === "function") window.cancelIdleCallback(idle);
       else window.clearTimeout(idle);
       io?.disconnect();
-      el.removeEventListener("mouseenter", warmPage);
-      el.removeEventListener("touchstart", warmPage);
-      el.removeEventListener("pointerdown", warmPage);
-      el.removeEventListener("focus", warmPage);
+      stopIntent();
     };
   }, [href, prefetch]);
 

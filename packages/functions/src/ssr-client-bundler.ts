@@ -729,9 +729,16 @@ function warmRouteEntry(component) {
 // The server answers with the head metadata + __PYLON_DATA__ and skips the
 // page markup, which this runtime re-renders from that data anyway. The host
 // keys its render cache on the same header, so the two shapes never share an
-// entry. Prefetch and navigate MUST send identical headers, or the prefetched
+// entry. Prefetch and navigate MUST both send these, or the prefetched
 // response is the wrong shape for the click that consumes it.
 const NAV_REQUEST_HEADERS = { Accept: "text/html", "X-Pylon-Nav": "1" };
+
+// Marks a navigation request as a prefetch: the user has not clicked yet.
+// The host answers 503 instead of rendering when it already has renders in
+// flight (PYLON_SSR_PREFETCH_MAX_RENDERS), and the click then fetches the
+// page itself. The header changes neither the response shape nor the host's
+// cache key.
+const PREFETCH_REQUEST_HEADERS = { ...NAV_REQUEST_HEADERS, "X-Pylon-Prefetch": "1" };
 
 // Payloads warmed by a hover, consumed by the click that follows. See
 // ./nav-cache for why this is in memory rather than an HTTP-level prefetch.
@@ -740,7 +747,7 @@ const navPayloads = createNavPayloadCache({
   fetchPage: (target) =>
     fetch(target, {
       credentials: "same-origin",
-      headers: NAV_REQUEST_HEADERS,
+      headers: PREFETCH_REQUEST_HEADERS,
     }).then((res) => {
       // A redirect means the URL navigate() would commit isn't the one that
       // answered; let the real navigation resolve that itself.

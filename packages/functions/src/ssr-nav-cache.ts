@@ -28,10 +28,16 @@ export interface NavPayloadCacheDeps {
   /** Cap on retained payloads; the oldest is evicted first. Pages are whole
    *  HTML documents, so this bounds memory on a link-dense page. */
   max?: number;
+  /** Cap on prefetch requests that have not answered yet. Each one is a
+   *  server render, so this bounds what one tab can ask of the server at a
+   *  time. A prefetch over the cap is skipped, and the click fetches the page
+   *  itself. */
+  maxInFlight?: number;
 }
 
 export interface NavPayloadCache {
-  /** Warm `target`, unless a fresh entry is already present or in flight. */
+  /** Warm `target`, unless a fresh entry is already present or in flight, or
+   *  `maxInFlight` prefetches are still waiting on the server. */
   prefetch(target: string): void;
   /** Hand over `target`'s payload, or null. Single-use: a prefetch
    *  accelerates the NEXT click, and holding it past that would serve
@@ -50,6 +56,10 @@ export function createNavPayloadCache(
   const { fetchPage, now } = deps;
   const ttlMs = deps.ttlMs ?? 15000;
   const max = deps.max ?? 8;
+  const maxInFlight = deps.maxInFlight ?? 2;
+  // Counts requests, not entries: a request stays in flight after its entry
+  // is evicted, taken, or cleared, and the server is still rendering it.
+  let inFlight = 0;
   // Holds the in-flight PROMISE, not just the resolved text, so a click that
   // lands mid-prefetch joins that request rather than starting a second one —
   // the common case, since hover-to-click is usually shorter than the render.
@@ -59,6 +69,7 @@ export function createNavPayloadCache(
     prefetch(target: string): void {
       const hit = entries.get(target);
       if (hit && now() - hit.at < ttlMs) return;
+      if (inFlight >= maxInFlight) return;
       // Re-warming an expired target: drop it first so the refreshed entry
       // re-enters at the END of the insertion order. Map.set on an existing
       // key keeps its original position, which would make a repeatedly
@@ -74,7 +85,12 @@ export function createNavPayloadCache(
       }
       // A rejected fetch must not surface as an unhandled rejection when
       // nobody ends up clicking; resolve to null and let the click refetch.
-      const promise = fetchPage(target).catch(() => null);
+      inFlight++;
+      const promise = fetchPage(target)
+        .catch(() => null)
+        .finally(() => {
+          inFlight--;
+        });
       entries.set(target, { at: now(), promise });
     },
 
