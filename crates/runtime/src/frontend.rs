@@ -536,9 +536,10 @@ pub(crate) fn respond_not_modified(request: Request, etag: &str, cache: &str, co
 /// - `Content-Security-Policy: sandbox` runs anything that still renders in
 ///   an opaque origin with scripts off. PDF is left out so the browser's
 ///   viewer keeps working; a PDF cannot reach the page's origin.
-pub(crate) fn respond_user_file(
+pub(crate) fn respond_user_file<R: std::io::Read + std::io::Seek + Send + 'static>(
     request: Request,
-    bytes: Vec<u8>,
+    reader: R,
+    total: usize,
     declared_type: &str,
     cache: &str,
     etag: Option<&str>,
@@ -561,10 +562,9 @@ pub(crate) fn respond_user_file(
     if !inline {
         extra.push(Header::from_bytes("Content-Disposition", "attachment").unwrap());
     }
-    let total = bytes.len();
     respond_reader_with_headers(
         request,
-        std::io::Cursor::new(bytes),
+        reader,
         total,
         content_type,
         cache,

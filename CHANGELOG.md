@@ -5,6 +5,7 @@
 ### Features
 
 * **runtime:** `GET /api/files/<id>` and files in `public/` send an `ETag` (file size and modification time) and answer a matching `If-None-Match` with 304. A `Range` request whose `If-Range` names another version gets the whole file. Before, there was no validator, so a browser or CDN downloaded the whole file again each time its copy expired.
+* **runtime:** `GET /api/files/<id>` on local storage streams the file from disk. Before, each request read the whole file into memory, a range request for a few bytes of a video included.
 * **runtime:** a public file from `GET /api/files/<id>` is sent with `public, max-age=3600` (was 300). `PYLON_PUBLIC_FILE_MAX_AGE_SECS` sets the lifetime.
 * **runtime:** the client build has brotli and gzip copies of its text files, written at build time; the runtime sends one by `Accept-Encoding`, with `Vary: Accept-Encoding`. A 2.5 MB build is 0.6 MB with brotli.
 * **ssr:** named imports from a namespace barrel (`import { Dialog } from "radix-ui"`) are rewritten at build time to the package they re-export, so each route bundles only the Radix packages it uses. Veritas home: 191 KB → 158 KB gzip of JavaScript (the 55 KB shared Radix chunk is gone).

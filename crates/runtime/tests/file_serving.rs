@@ -209,6 +209,21 @@ fn upload_and_fetch(mime: &str, bytes: &[u8]) -> Reply {
     )
 }
 
+/// Decode a chunked transfer-encoded body.
+fn dechunk(body: &str) -> String {
+    let mut out = String::new();
+    let mut rest = body;
+    while let Some((size, tail)) = rest.split_once("\r\n") {
+        let size = usize::from_str_radix(size.trim(), 16).expect("chunk size");
+        if size == 0 {
+            break;
+        }
+        out.push_str(&tail[..size]);
+        rest = tail[size..].strip_prefix("\r\n").expect("chunk end");
+    }
+    out
+}
+
 fn assert_contained(r: &Reply) {
     assert_eq!(
         r.headers.get("x-content-type-options").map(String::as_str),
@@ -415,4 +430,31 @@ fn a_range_request_for_another_version_gets_the_whole_file() {
         ],
     );
     assert_eq!(dated.status, 200);
+}
+
+#[test]
+fn a_range_in_the_middle_of_a_large_file_returns_those_bytes() {
+    let bytes: Vec<u8> = (0..1_000_000u32).map(|i| b'a' + (i % 26) as u8).collect();
+    let path = upload("text/plain", &bytes, "public");
+
+    // The server sends a body this size with chunked transfer encoding.
+    let whole = get_with(&path, None, &[]);
+    assert_eq!(whole.status, 200);
+    assert_eq!(
+        whole.headers.get("transfer-encoding").map(String::as_str),
+        Some("chunked")
+    );
+    assert_eq!(dechunk(&whole.body).as_bytes(), &bytes[..]);
+
+    let part = get_with(&path, None, &["Range: bytes=700000-700009"]);
+    assert_eq!(part.status, 206);
+    assert_eq!(part.body.as_bytes(), &bytes[700_000..700_010]);
+    assert_eq!(
+        part.headers.get("content-range").map(String::as_str),
+        Some("bytes 700000-700009/1000000")
+    );
+
+    let tail = get_with(&path, None, &["Range: bytes=-5"]);
+    assert_eq!(tail.status, 206);
+    assert_eq!(tail.body.as_bytes(), &bytes[999_995..]);
 }

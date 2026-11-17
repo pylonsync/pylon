@@ -1648,6 +1648,10 @@ fn file_is_public(
     matches!(owner, Ok(Some(o)) if o.public)
 }
 
+/// A seekable body for a file response.
+trait ReadSeek: std::io::Read + std::io::Seek + Send {}
+impl<T: std::io::Read + std::io::Seek + Send> ReadSeek for T {}
+
 const DEFAULT_UPLOAD_MAX_BYTES: usize = 200 * 1024 * 1024;
 
 /// Seconds a browser or shared cache may keep a public file before it asks
@@ -7505,13 +7509,32 @@ fn start_server(
                             return;
                         }
                     }
-                    match storage.get(asset_id) {
-                        Ok(content) => {
+                    // A backend whose bytes are a file on this machine hands
+                    // over the handle, so the response streams from disk.
+                    // Other backends return the bytes in memory.
+                    type Body = Box<dyn ReadSeek>;
+                    let opened: Result<(Body, usize), pylon_storage::files::FileStorageError> =
+                        match storage.open(asset_id) {
+                            Some(Ok((file, length))) => usize::try_from(length)
+                                .map(|length| (Box::new(file) as Body, length))
+                                .map_err(|_| pylon_storage::files::FileStorageError {
+                                    code: "READ_FAILED".into(),
+                                    message: "File is too large".into(),
+                                }),
+                            Some(Err(e)) => Err(e),
+                            None => storage.get(asset_id).map(|content| {
+                                let length = content.len();
+                                (Box::new(std::io::Cursor::new(content)) as Body, length)
+                            }),
+                        };
+                    match opened {
+                        Ok((body, length)) => {
                             let ct = stored_content_type(storage, asset_id);
                             mt.record_request("GET", 200);
                             crate::frontend::respond_user_file(
                                 request,
-                                content,
+                                body,
+                                length,
                                 &ct,
                                 &cache,
                                 etag.as_deref(),

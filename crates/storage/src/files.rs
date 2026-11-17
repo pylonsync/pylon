@@ -140,6 +140,16 @@ pub trait FileStorage: Send + Sync {
         None
     }
 
+    /// Open the file stored at `id` for reading, with its length in bytes.
+    /// `GET /api/files/<id>` streams from the handle, so a download holds
+    /// one read buffer in memory and a range request reads only its range.
+    ///
+    /// Returns `None` for backends whose bytes are not a file on this
+    /// machine; the caller then reads them with [`FileStorage::get`].
+    fn open(&self, _id: &str) -> Option<Result<(std::fs::File, u64), FileStorageError>> {
+        None
+    }
+
     /// Validator for the bytes stored at `id`, as an HTTP `ETag` value
     /// (quotes included). It changes when the bytes change, so
     /// `GET /api/files/<id>` can answer a matching `If-None-Match` with 304.
@@ -727,6 +737,22 @@ impl FileStorage for LocalFileStorage {
             return None;
         }
         Some(trimmed.to_string())
+    }
+
+    fn open(&self, id: &str) -> Option<Result<(std::fs::File, u64), FileStorageError>> {
+        let not_found = || FileStorageError {
+            code: "NOT_FOUND".into(),
+            message: "File not found".into(),
+        };
+        let opened = validate_local_id(id).and_then(|()| {
+            let file = std::fs::File::open(self.dir.join(id)).map_err(|_| not_found())?;
+            let metadata = file.metadata().map_err(|_| not_found())?;
+            if !metadata.is_file() {
+                return Err(not_found());
+            }
+            Ok((file, metadata.len()))
+        });
+        Some(opened)
     }
 
     fn entity_tag(&self, id: &str) -> Option<String> {
@@ -1354,6 +1380,35 @@ mod tests {
         storage.delete(&stored.id).unwrap();
         assert_eq!(storage.entity_tag(&stored.id), None);
         assert_eq!(storage.entity_tag("../escape"), None);
+    }
+
+    #[test]
+    fn local_open_returns_a_handle_and_the_length() {
+        use std::io::Read;
+        let dir = tempfile::tempdir().unwrap();
+        let storage = LocalFileStorage::new(dir.path().to_str().unwrap(), "/api/files");
+        let stored = storage
+            .store("a.bin", b"twelve bytes", "application/octet-stream")
+            .unwrap();
+        let (mut file, length) = storage.open(&stored.id).unwrap().unwrap();
+        assert_eq!(length, 12);
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"twelve bytes");
+
+        assert_eq!(
+            storage.open("missing").unwrap().unwrap_err().code,
+            "NOT_FOUND"
+        );
+        assert_eq!(
+            storage.open("../escape").unwrap().unwrap_err().code,
+            "INVALID_ID"
+        );
+        // A directory inside the storage dir is not a file.
+        assert_eq!(
+            storage.open(".ownership").unwrap().unwrap_err().code,
+            "NOT_FOUND"
+        );
     }
 
     #[test]
