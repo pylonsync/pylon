@@ -2614,19 +2614,18 @@ fn serve_via_ssr_rpc(
         None => return Err(request),
     };
     // Every caller has already tried the render cache, so from here the
-    // request costs a render.
-    if sheds_prefetch(
-        is_prefetch_request(&request),
-        ssr_renders_in_flight(),
-        ssr_prefetch_max_renders(),
-    ) {
+    // request costs a render. Counted from here, before the bundle build and
+    // the wait for the runner, so requests that arrive together see each
+    // other. The count ends when the render thread ends, or on any return
+    // before the thread starts.
+    let Some(render_in_flight) = RenderInFlight::admit(is_prefetch_request(&request)) else {
         tracing::debug!(
             route = %matched.route.path,
             "SSR prefetch not rendered: renders in flight at the limit"
         );
         let _ = request.respond(ssr_prefetch_shed_response(cors_origin));
         return Ok(());
-    }
+    };
     // Build the client bundle BEFORE dispatching the render. The Bun renderer
     // reads the bundle manifest off disk for head injection — a render racing
     // the boot-time warm (fire-and-forget thread in server.rs) finds no
@@ -2849,10 +2848,6 @@ fn serve_via_ssr_rpc(
     // Dev diagnostics: wall-clock around the render, so the ring + `pylon
     // diagnostics` report end-to-end render time. Dev-only (cheap Instant).
     let render_t0 = std::time::Instant::now();
-    // Counted from here, not from inside the thread, so a burst of requests
-    // sees each other. Dropped when the render thread ends, or at once if the
-    // thread fails to spawn.
-    let render_in_flight = RenderInFlight::start();
     let render_thread = std::thread::Builder::new()
         .name("pylon-ssr-render".into())
         .stack_size(512 * 1024)
@@ -3349,7 +3344,7 @@ pub fn is_nav_request(request: &Request) -> bool {
 /// Is this a `<Link>` prefetch: a navigation request sent before the click?
 /// The client runtime sets `X-Pylon-Prefetch: 1` on those only. The header
 /// changes neither the response shape nor any cache key; it only allows
-/// [`sheds_prefetch`] to refuse the render.
+/// [`RenderInFlight::admit`] to refuse the render.
 pub fn is_prefetch_request(request: &Request) -> bool {
     request.headers().iter().any(|h| {
         h.field
@@ -3364,24 +3359,50 @@ pub fn is_prefetch_request(request: &Request) -> bool {
 static SSR_RENDERS_IN_FLIGHT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-/// Counts one render in [`SSR_RENDERS_IN_FLIGHT`] from `start` until drop.
-struct RenderInFlight;
+/// One render counted in a renders-in-flight counter, from admission until
+/// drop.
+pub(crate) struct RenderInFlight(&'static std::sync::atomic::AtomicUsize);
 
 impl RenderInFlight {
-    fn start() -> Self {
-        SSR_RENDERS_IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        RenderInFlight
+    /// Count a render that always runs (a click, a document load, a warm-up).
+    pub(crate) fn start() -> Self {
+        Self::admit_on(&SSR_RENDERS_IN_FLIGHT, false, 0).expect("only a prefetch is refused")
+    }
+
+    /// Count this request's render, or refuse it. Renders share one runner,
+    /// so a prefetch that starts while the runner is busy delays the pages
+    /// people are waiting for. Only a prefetch is ever refused: the user has
+    /// not clicked, and the click fetches the page itself.
+    fn admit(prefetch: bool) -> Option<Self> {
+        Self::admit_on(&SSR_RENDERS_IN_FLIGHT, prefetch, ssr_prefetch_max_renders())
+    }
+
+    /// A prefetch is admitted only while fewer than `max_renders` are in
+    /// flight. The check and the count are one atomic step, so requests that
+    /// arrive together cannot all pass at the last free place.
+    fn admit_on(
+        counter: &'static std::sync::atomic::AtomicUsize,
+        prefetch: bool,
+        max_renders: usize,
+    ) -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        if prefetch {
+            counter
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                    (n < max_renders).then_some(n + 1)
+                })
+                .ok()?;
+        } else {
+            counter.fetch_add(1, Ordering::AcqRel);
+        }
+        Some(RenderInFlight(counter))
     }
 }
 
 impl Drop for RenderInFlight {
     fn drop(&mut self) {
-        SSR_RENDERS_IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
     }
-}
-
-fn ssr_renders_in_flight() -> usize {
-    SSR_RENDERS_IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// A prefetch is rendered only while fewer than this many renders are in
@@ -3398,14 +3419,6 @@ fn ssr_prefetch_max_renders() -> usize {
 fn parse_prefetch_max_renders(raw: Option<&str>) -> usize {
     raw.and_then(|v| v.trim().parse::<usize>().ok())
         .unwrap_or(4)
-}
-
-/// Refuse to render this request? Renders share one runner, so a prefetch
-/// that starts while the runner is busy delays the pages people are waiting
-/// for. Only a prefetch is ever refused: the user has not clicked, and the
-/// click fetches the page itself.
-fn sheds_prefetch(prefetch: bool, renders_in_flight: usize, max_renders: usize) -> bool {
-    prefetch && renders_in_flight >= max_renders
 }
 
 /// The 503 for a prefetch the server refused to render. The client runtime
@@ -6235,18 +6248,58 @@ mod tests {
         SSR_WARMING.store(false, std::sync::atomic::Ordering::Release);
     }
 
+    fn render_counter() -> &'static std::sync::atomic::AtomicUsize {
+        Box::leak(Box::new(std::sync::atomic::AtomicUsize::new(0)))
+    }
+
     #[test]
     fn only_a_prefetch_is_refused_and_only_at_the_limit() {
+        let counter = render_counter();
+        let count = || counter.load(std::sync::atomic::Ordering::Acquire);
         // A click or a document load renders however busy the server is.
-        assert!(!sheds_prefetch(false, 0, 4));
-        assert!(!sheds_prefetch(false, 100, 4));
-        assert!(!sheds_prefetch(false, 0, 0));
+        let clicks: Vec<_> = (0..6)
+            .map(|_| RenderInFlight::admit_on(counter, false, 4).expect("a click is never refused"))
+            .collect();
+        assert_eq!(count(), 6);
+        assert!(RenderInFlight::admit_on(counter, true, 4).is_none());
+        // A refused prefetch is not counted.
+        assert_eq!(count(), 6);
+        drop(clicks);
+        assert_eq!(count(), 0);
+
         // A prefetch renders below the limit and is refused at it.
-        assert!(!sheds_prefetch(true, 3, 4));
-        assert!(sheds_prefetch(true, 4, 4));
-        assert!(sheds_prefetch(true, 26, 4));
+        let held: Vec<_> = (0..4)
+            .map(|_| RenderInFlight::admit_on(counter, true, 4).expect("below the limit"))
+            .collect();
+        assert!(RenderInFlight::admit_on(counter, true, 4).is_none());
+        drop(held);
+        assert_eq!(count(), 0);
+
         // Limit 0: a prefetch is never rendered.
-        assert!(sheds_prefetch(true, 0, 0));
+        assert!(RenderInFlight::admit_on(counter, true, 0).is_none());
+        assert!(RenderInFlight::admit_on(counter, false, 0).is_some());
+    }
+
+    #[test]
+    fn prefetches_that_arrive_together_cannot_pass_the_limit() {
+        // The check and the count were two steps: with one place left, every
+        // request that checked before any had counted was admitted.
+        let counter = render_counter();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+        let admitted: Vec<Option<RenderInFlight>> = (0..16)
+            .map(|_| {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    RenderInFlight::admit_on(counter, true, 4)
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|t| t.join().unwrap())
+            .collect();
+        assert_eq!(admitted.iter().filter(|a| a.is_some()).count(), 4);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 4);
     }
 
     #[test]
@@ -6255,19 +6308,6 @@ mod tests {
         assert_eq!(parse_prefetch_max_renders(Some("not a number")), 4);
         assert_eq!(parse_prefetch_max_renders(Some(" 8 ")), 8);
         assert_eq!(parse_prefetch_max_renders(Some("0")), 0);
-    }
-
-    #[test]
-    fn a_render_counts_as_in_flight_until_it_ends() {
-        // Other tests in this binary may render at the same time, so each
-        // check is a floor, not an exact count.
-        let first = RenderInFlight::start();
-        assert!(ssr_renders_in_flight() >= 1);
-        let second = RenderInFlight::start();
-        assert!(ssr_renders_in_flight() >= 2);
-        drop(first);
-        assert!(ssr_renders_in_flight() >= 1);
-        drop(second);
     }
 
     #[test]

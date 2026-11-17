@@ -7,7 +7,8 @@
 //   - Hover counts once the cursor has stayed on the link for
 //     HOVER_INTENT_MS.
 //   - A touch counts once it has stayed down for TOUCH_INTENT_MS with no
-//     movement. A touch that moves is a scroll.
+//     movement. A touch that moves is a scroll. A touch that lifts sooner
+//     is a tap, and the click fetches the page.
 //   - A mouse or pen press counts at once.
 //   - Focus counts at once.
 //
@@ -72,6 +73,10 @@ export function watchLinkIntent(
     ["touchstart", onTouchStart, true],
     ["touchmove", disarm, true],
     ["touchcancel", disarm, false],
+    // The finger lifted before the timer. A tap is followed by a click, which
+    // fetches the page. A page that cancels the tap gets no click, and then
+    // nothing should be fetched.
+    ["touchend", disarm, false],
     // A press starts ~100 ms before the click: enough to start the fetch.
     ["pointerdown", onPointerDown, false],
     // Focus is the keyboard's version of hover, and a stronger signal: nobody

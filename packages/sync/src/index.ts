@@ -1861,13 +1861,7 @@ export class SyncEngine {
         if (c.seq > high) high = c.seq;
       }
     }
-    if (this.reconcileWatches.size > 0) {
-      for (const c of filtered) {
-        for (const watch of this.reconcileWatches) {
-          if (watch.entity === c.entity) watch.touched.add(c.row_id);
-        }
-      }
-    }
+    for (const c of filtered) this.noteReconcileTouched(c.entity, c.row_id);
     // Pick the cursor target. Explicit `targetCursor` (from pull) wins
     // — pull's response carries the server's authoritative current_seq
     // even when no changes landed in this window. Otherwise derive
@@ -2837,12 +2831,11 @@ export class SyncEngine {
   /** Backoff for entities whose fetch failed: doubling from the base,
    *  capped. */
   private static readonly PENDING_RECONCILE_RETRY_BASE_MS = 250;
-  private static readonly PENDING_RECONCILE_RETRY_MAX_MS = 10_000;
-  /** Timed retries in a row before the engine stops asking. The entities
-   *  stay pending, and the next reconcile (reconnect, the page becomes
-   *  visible, a server hint) fetches them again. Without a limit, a tab
-   *  asked a server that kept failing every 10 s for as long as it was open. */
-  private static readonly PENDING_RECONCILE_MAX_RETRIES = 8;
+  /** Five minutes. A hinted reconcile must land (no other event tells this
+   *  replica that a share changed), so retries never stop; they slow down.
+   *  With the old cap of 10 s, a tab asked a server that kept failing every
+   *  10 s for as long as it was open. */
+  private static readonly PENDING_RECONCILE_RETRY_MAX_MS = 300_000;
 
   /**
    * Keep `entities` pending until a reconcile of them completes. Used for
@@ -2850,8 +2843,8 @@ export class SyncEngine {
    * membership changed which rows this user may read, and no other event
    * will tell this replica) and for entities an earlier reconcile skipped.
    * Requests are merged, run at most once a second, and an entity whose
-   * fetch failed is retried with backoff, up to
-   * PENDING_RECONCILE_MAX_RETRIES times in a row.
+   * fetch failed is retried with backoff until it lands or the engine
+   * stops. The backoff doubles up to PENDING_RECONCILE_RETRY_MAX_MS.
    */
   private queuePendingReconcile(entities: string[]): void {
     for (const e of entities) this.pendingReconcile.set(e, ++this.pendingReconcileSeq);
@@ -2896,15 +2889,11 @@ export class SyncEngine {
     }
     this.pendingReconcileRetries = skipped.length > 0 ? this.pendingReconcileRetries + 1 : 0;
     if (this.pendingReconcile.size === 0) return;
-    if (this.pendingReconcileRetries >= SyncEngine.PENDING_RECONCILE_MAX_RETRIES) {
-      // Left pending for the next reconcile. That one starts a new count.
-      this.pendingReconcileRetries = 0;
-      return;
-    }
     const delay =
       skipped.length > 0
         ? Math.min(
-            SyncEngine.PENDING_RECONCILE_RETRY_BASE_MS * 2 ** (this.pendingReconcileRetries - 1),
+            // The exponent is capped so the product stays a finite number.
+            SyncEngine.PENDING_RECONCILE_RETRY_BASE_MS * 2 ** Math.min(this.pendingReconcileRetries - 1, 30),
             SyncEngine.PENDING_RECONCILE_RETRY_MAX_MS,
           )
         : SyncEngine.PENDING_RECONCILE_DEBOUNCE_MS;
@@ -2976,6 +2965,14 @@ export class SyncEngine {
    *  change event wrote since the fetch started. The fetched rows may be
    *  older than those events, so the reconcile leaves these rows alone. */
   private reconcileWatches = new Set<{ entity: string; touched: Set<string> }>();
+
+  /** Record a row that something newer than a running fetch just wrote or
+   *  removed: a change event, a revocation. */
+  private noteReconcileTouched(entity: string, rowId: string): void {
+    for (const watch of this.reconcileWatches) {
+      if (watch.entity === entity) watch.touched.add(rowId);
+    }
+  }
 
   /** Scoped reconcile batch that has not started running yet. */
   private scopedReconcileBatch: {
@@ -3075,9 +3072,11 @@ export class SyncEngine {
         tombstoneSeq,
         fetchTruncated,
         touched,
-        // Checked again when the apply runs: the session can flip while
-        // the apply waits behind queued change events.
-        () => this.session.signature() === sessionBeforeFetch,
+        // Checked when the apply runs: either can change while the apply
+        // waits behind queued change events.
+        // A replica reset during the fetch wiped the rows this fetch
+        // would be compared with; the pull after the reset refills them.
+        () => this.session.signature() === sessionBeforeFetch && this.replicaEpoch === epochBeforeFetch,
       );
       if (applied) done.push(entity);
     };
@@ -3727,6 +3726,10 @@ export class SyncEngine {
     rowId: string,
     tombstoneSeq: number,
   ): void {
+    // A reconcile fetch in flight may have read the row before the server
+    // revoked it. Without this it would put the row back, and nothing later
+    // would remove it again.
+    this.noteReconcileTouched(entity, rowId);
     const removed = this.store.revokeRow(entity, rowId, tombstoneSeq);
     if (removed) {
       if (this.persistence) {

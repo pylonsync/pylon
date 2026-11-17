@@ -31,7 +31,8 @@ final class ReconcileRaceTests: XCTestCase {
     private func makeEngine(
         rows: [[String: Any]],
         frames: [String],
-        fetches: Counter
+        fetches: Counter,
+        resetDuringFetch: Bool = false
     ) async -> SyncEngine {
         let box = EngineBox()
         let mock = MockTransport()
@@ -50,6 +51,7 @@ final class ReconcileRaceTests: XCTestCase {
                 fetches.bump()
                 if let engine = box.get() {
                     for frame in frames { await engine.handleTextFrame(frame) }
+                    if resetDuringFetch { await engine.resetReplica(wipeMutations: false) }
                 }
                 let resp: [String: Any] = ["data": rows, "has_more": false, "next_cursor": NSNull()]
                 return (200, try JSONSerialization.data(withJSONObject: resp))
@@ -133,6 +135,36 @@ final class ReconcileRaceTests: XCTestCase {
             frames: [frame(2, "delete", "f1")],
             fetches: fetches)
         await engine.handleTextFrame(frame(1, "insert", "f1", name: "Team"))
+        await engine.reconcile(["Folder"])
+        let got = await names(engine)
+        XCTAssertEqual(got, [:])
+    }
+
+    func testARowRevokedDuringTheFetchIsNotPutBack() async throws {
+        let fetches = Counter()
+        // The server read f1 before it revoked it. A later event for another
+        // row moves the cursor past the revocation.
+        let engine = await makeEngine(
+            rows: [["id": "f1", "name": "Team"], ["id": "f2", "name": "Second"]],
+            frames: [
+                #"{"type":"row-revoked","entity":"Folder","row_id":"f1","seq":2}"#,
+                frame(3, "insert", "f3", name: "Third"),
+            ],
+            fetches: fetches)
+        await engine.handleTextFrame(frame(1, "insert", "f1", name: "Team"))
+        await engine.reconcile(["Folder"])
+        let got = await names(engine)
+        XCTAssertEqual(got, ["f2": "Second", "f3": "Third"])
+    }
+
+    func testAFetchThatAReplicaResetInterruptedIsNotApplied() async throws {
+        let fetches = Counter()
+        // The reset wipes the replica; the pull that follows it refills it.
+        let engine = await makeEngine(
+            rows: [["id": "f1", "name": "From before the reset"]],
+            frames: [],
+            fetches: fetches,
+            resetDuringFetch: true)
         await engine.reconcile(["Folder"])
         let got = await names(engine)
         XCTAssertEqual(got, [:])

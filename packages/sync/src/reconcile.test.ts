@@ -920,6 +920,39 @@ describe("a reconcile whose fetch raced change events", () => {
     engine.stop();
   });
 
+  test("a row revoked during the fetch is not put back", async () => {
+    const engine = makeEngine();
+    const inner = engine as unknown as Internals & {
+      handleRowRevocation(entity: string, rowId: string, tombstoneSeq: number): void;
+    };
+    seedStore(engine, "Folder", [{ id: "f1", name: "Team" }]);
+    // The server read f1 before it revoked it. A later event for another
+    // row moves the cursor past the revocation.
+    folderServer([{ id: "f1", name: "Team" }, { id: "f2", name: "Second" }], () => {
+      inner.handleRowRevocation("Folder", "f1", 1);
+      void inner.enqueueApply([event(2, "insert", "f3", { id: "f3", name: "Third" })]);
+    });
+    inner.running = true;
+
+    await engine.reconcile(["Folder"]);
+    expect(names(engine)).toEqual({ f2: "Second", f3: "Third" });
+    engine.stop();
+  });
+
+  test("a fetch that a replica reset interrupted is not applied", async () => {
+    const engine = makeEngine();
+    const inner = engine as unknown as Internals & { replicaEpoch: number };
+    // The reset wipes the replica; the pull that follows it refills it.
+    folderServer([{ id: "f1", name: "From before the reset" }], () => {
+      inner.replicaEpoch += 1;
+    });
+    inner.running = true;
+
+    await engine.reconcile(["Folder"]);
+    expect(names(engine)).toEqual({});
+    engine.stop();
+  });
+
   test("an event for another entity does not protect this entity's rows", async () => {
     const engine = makeEngine();
     const inner = engine as unknown as Internals;
@@ -980,16 +1013,16 @@ describe("pending reconciles end when they should", () => {
     engine.stop();
   });
 
-  test("a server that keeps failing is asked a limited number of times", async () => {
+  test("retries of a failing fetch slow down to the cap and still land", async () => {
     const statics = SyncEngine as unknown as {
-      PENDING_RECONCILE_MAX_RETRIES: number;
       PENDING_RECONCILE_RETRY_BASE_MS: number;
+      PENDING_RECONCILE_RETRY_MAX_MS: number;
       PENDING_RECONCILE_MIN_INTERVAL_MS: number;
     };
     const saved = { ...statics };
-    statics.PENDING_RECONCILE_MAX_RETRIES = 3;
     statics.PENDING_RECONCILE_RETRY_BASE_MS = 10;
-    statics.PENDING_RECONCILE_MIN_INTERVAL_MS = 10;
+    statics.PENDING_RECONCILE_RETRY_MAX_MS = 200;
+    statics.PENDING_RECONCILE_MIN_INTERVAL_MS = 1;
     try {
       let failing = true;
       const fetches = server(() => (failing ? 503 : 200));
@@ -997,20 +1030,23 @@ describe("pending reconciles end when they should", () => {
       const inner = engine as unknown as Internals;
       inner.running = true;
       await engine.reconcile(["Document"]);
-      await sleep(600);
-      // The first fetch and three timed retries. Then the engine stops asking.
-      expect(fetches()).toBe(4);
+      // Delays: 100 (debounce), 20, 40, 80, 160, then 200 each. A fixed
+      // 10 ms interval would have made about 90 requests by now.
+      await sleep(900);
+      const whileFailing = fetches();
+      expect(whileFailing).toBeGreaterThanOrEqual(6);
+      expect(whileFailing).toBeLessThanOrEqual(9);
       expect([...inner.pendingReconcile.keys()]).toEqual(["Document"]);
 
-      // The next reconcile fetches the entity again and clears it.
+      // Nothing else triggers a reconcile. The timer alone lands it.
       failing = false;
-      await engine.reconcile(["Document"]);
-      expect(fetches()).toBe(5);
+      await sleep(450);
       expect(inner.pendingReconcile.size).toBe(0);
+      expect(fetches()).toBeLessThanOrEqual(whileFailing + 2);
       engine.stop();
     } finally {
-      statics.PENDING_RECONCILE_MAX_RETRIES = saved.PENDING_RECONCILE_MAX_RETRIES;
       statics.PENDING_RECONCILE_RETRY_BASE_MS = saved.PENDING_RECONCILE_RETRY_BASE_MS;
+      statics.PENDING_RECONCILE_RETRY_MAX_MS = saved.PENDING_RECONCILE_RETRY_MAX_MS;
       statics.PENDING_RECONCILE_MIN_INTERVAL_MS = saved.PENDING_RECONCILE_MIN_INTERVAL_MS;
     }
   });

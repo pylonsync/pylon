@@ -619,11 +619,14 @@ public actor SyncEngine {
     private var nextReconcileWatch = 0
 
     private func noteTouchedForReconcile(_ changes: [ChangeEvent]) {
-        if reconcileWatches.isEmpty { return }
-        for change in changes {
-            for key in reconcileWatches.keys where reconcileWatches[key]?.entity == change.entity {
-                reconcileWatches[key]?.touched.insert(change.row_id)
-            }
+        for change in changes { noteTouchedForReconcile(entity: change.entity, rowId: change.row_id) }
+    }
+
+    /// Record a row that something newer than a running fetch just wrote or
+    /// removed: a change event, a revocation.
+    private func noteTouchedForReconcile(entity: String, rowId: String) {
+        for key in reconcileWatches.keys where reconcileWatches[key]?.entity == entity {
+            reconcileWatches[key]?.touched.insert(rowId)
         }
     }
 
@@ -636,6 +639,7 @@ public actor SyncEngine {
         let pendingKeys = await mutations.pendingRowKeys()
         for entity in names {
             let sessionBefore = sessionSignature()
+            let epochBefore = replicaEpoch
             let serverRows: [Row]
             nextReconcileWatch += 1
             let watch = nextReconcileWatch
@@ -656,6 +660,9 @@ public actor SyncEngine {
             // under the old session and would tombstone rows the new one
             // can see. Skip.
             if sessionSignature() != sessionBefore { continue }
+            // A replica reset during the fetch wiped the rows this fetch
+            // would be compared with; the pull after the reset refills them.
+            if replicaEpoch != epochBefore { continue }
             // Change events that arrived during the fetch. The fetch still
             // applies; only the rows those events wrote are left alone,
             // because the fetch may have read them before the event. An
@@ -1236,6 +1243,9 @@ public actor SyncEngine {
     /// it has no global seq and only this recipient's visibility changed.
     /// Mirrors the TS `handleRowRevocation`.
     private func handleRowRevocation(entity: String, rowId: String, tombstoneSeq: Int64) async {
+        // A reconcile fetch in flight may have read the row before the
+        // server revoked it. Without this it would put the row back.
+        noteTouchedForReconcile(entity: entity, rowId: rowId)
         let removed = store.revokeRow(entity, id: rowId, tombstoneSeq: tombstoneSeq)
         if removed, let persistence {
             try? await persistence.persist(ChangeEvent(

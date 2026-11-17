@@ -247,7 +247,12 @@ pub(crate) fn handle(
                         .iter()
                         .find(|e| e.name == entity_name)
                         .and_then(|e| e.sync_limit);
-                    if let Some(cap) = cap {
+                    // A cursor an older server handed out (a bare row id)
+                    // continues that server's ascending walk below. Starting
+                    // the newest-first walk in the middle of it would mix two
+                    // row sets in one fetch.
+                    let legacy_cursor = after.is_some_and(|a| !a.starts_with(TAIL_CURSOR_PREFIX));
+                    if let Some(cap) = cap.filter(|_| !legacy_cursor) {
                         if let Some(response) =
                             capped_replication_page(ctx, entity_name, cap, after, limit)
                         {

@@ -94,6 +94,17 @@ describe("link intent", () => {
     expect(h.intents()).toBe(0);
   });
 
+  test("a touch that lifts before the timer asks for nothing", () => {
+    // A page can cancel the tap, and then no click follows. A timer left
+    // running would fetch a page the user did not open.
+    const h = harness();
+    h.fire("touchstart");
+    h.advance(TOUCH_INTENT_MS - 1);
+    h.fire("touchend");
+    h.advance(1000);
+    expect(h.intents()).toBe(0);
+  });
+
   test("a touch that stays down is intent", () => {
     const h = harness();
     h.fire("pointerdown", { pointerType: "touch" });

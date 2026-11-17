@@ -6215,6 +6215,10 @@ impl pylon_router::FnOps for FnOpsImpl {
                                 continue;
                             }
                             attempts += 1;
+                            // Counted like a request's render: a warm-up
+                            // still running when traffic starts takes the
+                            // same runner.
+                            let _in_flight = crate::frontend::RenderInFlight::start();
                             last = runner.render_route(
                                 component,
                                 layouts.clone(),

@@ -1357,6 +1357,45 @@ fn a_capped_entity_with_fewer_rows_than_the_cap_ends_in_one_request() {
 }
 
 #[test]
+fn a_cursor_from_an_older_server_continues_its_ascending_walk() {
+    // A deploy between two pages of one fetch. The older server walked from
+    // the oldest row and handed out a bare row id as the cursor.
+    let rt = Arc::new(Runtime::in_memory(scoped_manifest("true", Some(3))).unwrap());
+    let port = start_server(rt);
+    let token = mint_guest(port);
+    for i in 0..6 {
+        insert_note(port, &token, &format!("n{i}"));
+    }
+    // The id of n1, as the older server's first page of 2 rows ended on it.
+    let (_, body) = http(
+        port,
+        "GET",
+        "/api/entities/Note/cursor?limit=2",
+        Some(&token),
+        None,
+    );
+    let first: Value = serde_json::from_str(&body).unwrap();
+    let legacy = first["next_cursor"].as_str().unwrap().to_string();
+
+    let (status, body) = http(
+        port,
+        "GET",
+        &format!("/api/entities/Note/cursor?limit=100&sync=1&after={legacy}"),
+        Some(&token),
+        None,
+    );
+    assert_eq!(status, 200, "{body}");
+    let r: Value = serde_json::from_str(&body).unwrap();
+    let titles: Vec<&str> = r["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(titles, vec!["n2", "n3", "n4", "n5"]);
+}
+
+#[test]
 fn a_direct_read_of_a_capped_entity_is_not_capped() {
     let rt = Arc::new(Runtime::in_memory(scoped_manifest("true", Some(2))).unwrap());
     let port = start_server(rt);
