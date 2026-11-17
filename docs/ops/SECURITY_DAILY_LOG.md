@@ -1067,3 +1067,78 @@ The backup-code consumption race remains open as recorded on November 13. It req
 Today's report requires no new application migration. Prior deployment steps still apply. Rebuild and release the patched runtime, CLI, native WebTransport clients, and images. Update copied Docker ignore rules, B2B handlers, AI Studio handlers, and signed-file examples. Send a current TOTP code when regenerating backup codes. Scan each application's own lockfile. Keep credentialed CORS origins limited to trusted mutation origins until the form-route fix is deployed. Rotate secrets if an accessible old image or cache included them.
 
 The final report diff and whitespace check are reviewed before commit. This run commits and pushes the report to PR #83 under the user's final instruction. No merge or deployment is performed. Next main area: server functions and generated app templates. Keep atomic backup-code consumption and the blocked monitoring changes on the follow-up list.
+
+## 2026-11-17
+
+Reviewed main at `c53a69bb75563499fa39f7b4ba37c79a6ca31310` (0.22.72). PR #83 has merged. Created branch `security/daily-review-2026-11-17` in `/Users/ericc59/Dev/pylon-security-20261117` from an HTTPS fetch of main. The primary checkout remains at `ce9189551`. It has no tracked edits. Its Python caches and all other worktrees were preserved. No existing work was reset or copied over.
+
+Read SECURITY.md, both October 27 reports, prior daily findings through November 16, and the security workflows. Accounted for the fixes already merged from PR #83. Compared main with the last report commit, `045427467`. Reviewed the new replication pagination, sync reconciliation, page prefetch limits, release dependency pins, and Docker manifest synchronization. Sampled the Swift and C# reconciliation changes. Native clients and binary artifacts were not built or audited. The existing daily task remains at 09:00 local time. No duplicate task was created.
+
+### Server functions and generated templates
+
+Traced public function authentication, nested mutation transactions, scheduling identity, internal target restrictions, cancellation, and explicit elevation. Server function code remains trusted code with database access. Sampled the B2B and SaaS membership checks, consumer ownership helpers, mobile note and account deletion handlers, public Todo and Widget demos, and shared chat access. The public demo policies are explicit. They were not reported as new authorization flaws.
+
+Reviewed the shop checkout, reservation, release, webhook signature, and owner order paths. Confirmed one new template defect. No new runtime authorization bypass was confirmed.
+
+### Confirmed shop availability issue and fix
+
+`packages/create-pylon/templates/shop/functions/checkout.ts` reserved stock before it validated `successUrl` and `cancelUrl`. The nested `reserveCart` mutation commits independently of the action. A later URL validation error leaves a pending order. No payment session exists, so its expiry webhook cannot release that stock.
+
+The affected app must use the copied shop checkout with `STRIPE_SECRET_KEY` configured. An anonymous caller needs only a public product slug and available stock. A request with an invalid or disallowed redirect can reserve all remaining units without starting payment. This can make a product unavailable until the owner restores it. No account, payment, or secret is needed by the caller. Remote exploitation against a deployed app was not tested.
+
+Moved both redirect checks before reservation when Stripe is enabled. The existing URL policy is unchanged. Manual orders still accept unused redirect fields. No advisory was suppressed and no authorization control was weakened.
+
+Added `packages/functions/src/shop-checkout-security.test.ts`. It executes the actual checkout, reserve, and release handlers with the real redirect validator. The database fixture is local. The payment transport is a recording test stub. Before the fix, four denial tests failed because stock changed from three to zero. After the fix, all seven tests pass. They cover malformed and foreign-host URLs in both fields, valid payment checkout, payment failure with stock restoration, and manual orders. Rejected calls cannot create an order, invoke a mutation, or reach the payment transport.
+
+This fixes invalid-URL stock loss. It does not add protection against abuse of otherwise valid reservations or repair existing pending orders.
+
+### Current advisory scans
+
+OSV scanned all 12 tracked supported lockfiles. It returned 1 for findings. `tools/osv-gate.py` returned 0 under the existing severity policy. The scan is not clean.
+
+| Scope | Result |
+| --- | --- |
+| Production/root Cargo | 10 advisory groups; one new Chrono maintenance warning |
+| Root Bun | No reported matches |
+| Studio build tools | One existing minimatch 10.2.5 group |
+| Docker/build | No reported matches in three locks; manifest consistency passed |
+| Search benchmark | 9 groups; one new Chrono maintenance warning |
+| Vendor-only SAML | One new Chrono maintenance warning |
+| Shard and Swift | No reported matches in four locks |
+
+[RUSTSEC-2026-0543](https://github.com/RustSec/advisory-db/blob/main/crates/chrono/RUSTSEC-2026-0543.md) marks Chrono as unmaintained. It lists no patched version. Root and benchmark locks use 0.4.44; the standalone SAML lock uses 0.4.41. Source tracing found direct use in authentication timestamps and policy time comparisons. A migration to time or jiff needs behavior and compatibility tests, including authentication expiry and SAML processing. The advisory does not describe an exploit. No runtime mitigation or compatible version-only fix was established. Keep this warning visible and plan the migration.
+
+Cargo audit returned 0 with existing ignores. RustSec commit: `233155b4025b854c68a4b199c0e32d7fd53291a2`, updated November 17. It reported zero unsuppressed vulnerabilities, eight maintenance warnings, and two unsoundness warnings. Cargo deny passed advisories, bans, licenses, and sources. Image-lock and advisory-ignore date checks passed. No dependency or ignore file changed.
+
+The [minimatch advisory](https://github.com/advisories/GHSA-g3hv-75wg-m249) still lists 11.0.1 as fixed. Studio's version-10 callers need a tested major-version migration. Keep build patterns trusted. The existing im and sized-chunks memory-safety findings still need dependency migration and compatibility tests. No validated runtime mitigation was found. The RSA exception remains active. Passing gates do not resolve these risks.
+
+### Verification and gaps
+
+Used pinned Bun 1.4.4 through `npm exec --yes --package=bun@1.4.4`. The frozen root install passed. Rust tests used that Bun on PATH, the primary checkout's build cache, and a copy of its existing Studio bundle. Studio was not rebuilt. Local evidence uses `/tmp/pylon-security-20261117-*`.
+
+| Command | Result |
+| --- | --- |
+| `bun test packages/functions/src/shop-checkout-security.test.ts`, before fix | 4 expected failures; 3 passed |
+| Bun tests: shop checkout, B2B, AI Studio, signed-file examples, SSR navigation cache, Stripe URLs, sync reconciliation, Link intent | 106 passed |
+| `bun run --cwd packages/functions check` | Passed |
+| `bun run --cwd packages/functions build` | Passed |
+| `cargo test --locked -p pylon-runtime --test sync_protocol --test scheduler_new_function --test functions_files` | 34 passed |
+| `cargo test --locked -p pylon-runtime --lib prefetch` | 4 passed |
+| `python3 -m unittest discover -s tools -p 'test_*.py' -v` | 3 scanner tests passed; 2 Docker context tests failed because the Docker daemon was unavailable |
+| `node --test packages/create-pylon/test/scaffold.test.mjs` | 19 passed |
+| `python3 tools/scan-lockfiles.py` and `tools/osv-gate.py` | Scan exit 1; gate exit 0 |
+| `cargo audit --json` and `cargo deny check` | Exit 0 with warnings above |
+| Image-lock and advisory-ignore checks | Passed |
+| `git diff --check` | Passed |
+
+Reviewed the final handler, regression test, and report diff. No Rust source changed. No Rust formatting check was needed. Existing compiler warnings remain. Tests did not run a generated shop over HTTP or use real Stripe. Full workspace tests, PostgreSQL integration, multi-replica concurrency, native client builds, release builds, full image builds and scans, native C library scans, deployed secrets, cloud permissions, and Nix inputs were not checked. Docker exclusion behavior remains unverified today. Start the local Docker daemon and repeat its two tests. No production service was tested.
+
+### Remaining work and deployment steps
+
+Existing shop apps must copy the checkout change and redeploy. A scaffolder or SDK update does not edit copied handlers. Inspect pending orders that have no payment session. Confirm payment state before cancelling them through the owner flow to restore stock. Until patched, restrict checkout access or reject invalid redirects before the handler runs.
+
+The backup-code consumption race from November 13 remains open. It needs an atomic storage operation and SQLite/PostgreSQL concurrency tests. Require a current authenticator code through an application gate for sensitive operations until fixed. The November 12 monitoring fixes remain in a separate local branch because the available push credential lacked workflow scope. Their release-history and native-library scan gaps remain. Those local fixes were not reported as new findings or overwritten.
+
+Earlier copied-handler and deployment follow-up still applies. Main now includes the prior security patches, but this review did not verify deployed versions. This run commits the fix, regression tests, and report to a new PR under the user's final instruction. No merge or deployment is performed.
+
+Next main area: secrets and deployment configuration. Retain atomic backup-code consumption, dependency migration, and the blocked monitoring changes as follow-up work.
