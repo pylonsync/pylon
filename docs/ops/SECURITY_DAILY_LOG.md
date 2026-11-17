@@ -653,3 +653,417 @@ Apps that copied either signed-file example must add the association check and p
 This run prepares a commit for PR #80 and a copy for the primary checkout. The final user instruction authorizes the push. No merge, release, or deployment is performed.
 
 Next main area: secrets and deployment configuration. Check runtime defaults and generated deployment files without logging secret values.
+
+## 2026-11-11
+
+Reviewed primary checkout: `ce91895512ca90c4d7641acc01881b5f7bf848fb` on `security/daily-review-2026-11-02`.
+Reviewed PR base: `948417e2c` on `origin/security/daily-review-2026-11-06`.
+Changes are in `/Users/ericc59/Dev/pylon-security-20261111`, branch `security/daily-review-2026-11-11`.
+
+The primary checkout had 18 tracked edits plus new Linux release scripts, a build directory, and Python caches. These were preserved. Reviewed the installer, scaffolder, release workflow, and static-library changes as pending user work. They are not included in this commit. Read SECURITY.md, both October 27 reports, prior daily findings, and security workflows. HTTPS fetch passed after SSH authentication failed. Remote main remains `617adefb6`. The only PR commit since the last reviewed base is the November 10 signed-file example fix. It remains fixed. The daily task still runs at 09:00 local time. No duplicate task was created.
+
+### Secrets and deployment settings
+
+Checked runtime development access, production Docker and systemd defaults, generated deployment files, cloud upload exclusions, manifest symlink handling, required-environment checks, secret-list output, and database URL redaction. Sampled generated app deployment settings. No new authentication bypass was confirmed. Existing production-mode fixes were not counted as open findings.
+
+Confirmed a conditional secret and data leak through Docker build contexts. The generated `.dockerignore` excluded `.env*`, `.git`, `.pylon`, and database files only at the context root. It omitted SQLite journal files. The repository `.dockerignore` omitted environment files and nested database and Git state. Generated Dockerfiles use `COPY . .`. The repository Dockerfile copies the context into its builder and copies `packages` into the final image. Local files under those copied paths can therefore enter images or build caches. [Docker documents the recursive `**` pattern](https://docs.docker.com/build/concepts/context/).
+
+An affected build must contain a private file in one of those paths. An attacker needs access to the resulting image, its filesystem, or the affected build context/cache. Public image access can be sufficient. Anonymous HTTP access was not established. No real secret was read or used in the reproduction.
+
+Both ignore files now exclude environment files, database files and their WAL, SHM, and rollback journals at all depths. Generated rules also exclude nested dependency, Git, and Pylon state directories. The repository rule now excludes nested Git directories. Added Docker integration tests with synthetic files. Both failed before the fix: 12 private paths entered the generated-app image and 9 entered the repository-context image. Both pass after the fix. Positive checks retain application code, package metadata, and the lockfile. Tests use `FROM scratch`, no network, and local filesystem export. Existing CI Python test discovery includes these tests. Docker absence is reported as a skip; a failed build fails the test.
+
+### Dependency fix and API compatibility
+
+Today's advisory data added `RUSTSEC-2026-0486` / `GHSA-jh2m-fhpj-3vr7` to the root and search benchmark results. `rustix 1.1.4` can mark unwritten bytes as initialized when an extended-attribute call receives an empty buffer. The dependency enters the runtime through Wasmtime and the CLI through tar/xattr. Test tooling also uses it. No remote Pylon exploit was established. Exploitation requires an affected caller, the empty-buffer condition, and a filesystem attribute value or list. Restrict local file and attribute writes until the updated binaries are available.
+
+Updated rustix to 1.1.6 in both locks with Cargo 1.98.1. The [upstream fix adds separate size-query functions](https://github.com/bytecodealliance/rustix/commit/8e6aaa6713d2bb64b1fdd8c472e3a32a10a76d70). Source review found that xattr 1.6.1 still used the old query convention. Updated it to 1.7.0 in the root lock. The benchmark does not include xattr. Cargo also changed Windows dependency selections during regeneration. Windows was not built. Docker uses the workspace lockfile; JavaScript image dependency consistency still passes. No advisory ignore changed.
+
+Added `tools/rustix-xattr-regression.rs` as a manual regression. It runs in a temporary Cargo project with exact dependency versions documented in the file. It uses synthetic filesystem attributes. The old rustix version fails the empty-buffer test with a panic. Updating only rustix makes the large-attribute test fail: an 8192-byte attribute reads as zero bytes. Updating both dependencies passes both tests. An initial probe compile error was corrected before these runs. This tests the dependency behavior directly, not an HTTP exploit or memory corruption.
+
+### Current scans
+
+The final OSV scan covered all 12 tracked supported lockfiles. It returned 1 for findings. `tools/osv-gate.py` returned 0 under the existing severity policy. This is not a clean scan.
+
+| Scope | Final result |
+| --- | --- |
+| Production/root Cargo | 9 existing advisory groups; rustix match removed |
+| Root Bun | No reported matches |
+| Studio build tools | 1 group: minimatch 10.2.5 |
+| Docker/build | No reported matches in three locks |
+| Search benchmark | 8 existing groups; rustix match removed |
+| Vendor-only SAML | No reported matches |
+| Shard and Swift | No reported matches in four locks |
+
+Cargo audit and Cargo deny returned 0. RustSec commit: `fd6f39814c4d3c359fdbe223d0280dec4933f78f`, updated November 11. Final audit: zero unsuppressed vulnerabilities, seven maintenance warnings, and two unsoundness warnings. Initial audit had three unsoundness warnings, including rustix. Cargo deny passed advisories, bans, licenses, and sources. Image-lock and advisory-ignore checks passed.
+
+Existing minimatch, im, and sized-chunks findings remain. Current upstream data still lists minimatch 11.0.1 as fixed; its version-10 callers need a tested migration. Keep build patterns trusted. The sized-chunks memory-safety advisory still has no patched release. No validated runtime mitigation was established for those memory-safety findings. The existing RSA exception remains active. These are unresolved risks, not new findings.
+
+### Verification and limits
+
+Commands ran in the isolated worktree. Rust tests used the primary checkout's build cache. The existing Studio bundle was copied into the worktree for compilation; Studio was not rebuilt.
+
+| Command | Result |
+| --- | --- |
+| `python3 -m unittest discover -s tools -p 'test_docker_context.py' -v` before fix | 2 expected failures |
+| `python3 -m unittest discover -s tools -p 'test_*.py' -v` after fix | 5 passed; no skips |
+| `cargo test --test regression` in temporary projects using the manual probe | Old rustix: 1 failed; old xattr with fixed rustix: 1 failed; final pair: 2 passed |
+| `cargo test --locked -p pylon-cli commands::deploy` | 24 passed with final dependencies |
+| `cargo test --locked -p pylon-runtime --lib shard_wasm` | 41 passed |
+| `cargo check --locked --manifest-path benchmarks/search/Cargo.toml` | Passed |
+| `node --test packages/create-pylon/test/scaffold.test.mjs` | 10 passed |
+| `python3 tools/scan-lockfiles.py` and `python3 tools/osv-gate.py` | Exit 1 for findings; gate exit 0 |
+| `cargo audit --json` and `cargo deny check` | Exit 0 with warnings above |
+| Image-lock and advisory-ignore checks | Passed |
+| `cargo fmt --all -- --check`, manual probe `rustfmt --check`, `git diff --check` | Passed |
+
+Reviewed the final source, regression, and lockfile diffs. Local evidence uses `/tmp/pylon-security-20261111-*`. Existing compiler warnings remain. Full workspace tests, PostgreSQL integration, Windows/Linux binary builds, full production images, image vulnerability scans, deployed secrets, cloud permissions, system libraries, and Nix flake inputs were not checked. The pending static-library build work in the primary checkout was not built or scanned. No TypeScript source changed, so no TypeScript type check or build was run. No production service was tested.
+
+### Existing apps, delivery, and next review
+
+Existing generated Docker apps must update their `.dockerignore` rules. A CLI update does not edit old generated files. Rebuild affected images and binaries. If an old image or cache included secrets and was accessible to others, rotate those secrets and remove affected artifacts through the normal retention process. The prior runtime, B2B, AI Studio, OIDC, signed-file example, and independent app dependency follow-up still applies.
+
+The final user instruction authorizes committing and pushing to a PR. GitHub CLI authentication returned HTTP 401. SSH authentication failed. The HTTPS push preflight had no usable credentials. The changes are committed locally; PR delivery needs restored GitHub authentication. No merge, deployment, release, or external message was performed.
+
+Next main area: dependency and build security. Include the pending Linux static-library release path, Studio minimatch migration, and scanner failure handling.
+
+## 2026-11-12
+
+Reviewed main commit: `d294cb035`. Primary checkout: `ce91895512ca90c4d7641acc01881b5f7bf848fb` on `security/daily-review-2026-11-02`. The primary checkout had no tracked edits. Its untracked Python cache was preserved. Yesterday's fixes were committed as `12158fdfd` in a separate worktree and had not reached main.
+
+Read SECURITY.md, both October 27 reports, prior daily entries, and the security workflows. The daily task already runs at 09:00 local time. No duplicate task was created. GitHub authentication works today. PR #80 merged. Created `/Users/ericc59/Dev/pylon-security-20261112` from current main. Applied yesterday's commit as `a08c5a571`. No unrelated work was changed. This PR includes yesterday's Docker context exclusions and rustix/xattr updates. They are existing fixes, not new findings.
+
+### Dependency and build review
+
+Reviewed changes from the last reviewed PR commit, `948417e2c`, through current main. Checked the Linux static-library build, release artifact reuse, installer glibc checks, scaffolder flag handling and bundled skill installation, Debian image updates, CI runner changes, and release version changes. Static OpenSSL, libxml2, and xmlsec archives have SHA-256 checks. The Linux build uses the Cargo lockfile. Reviewed generated Docker rules and the runtime image dependency manifests. No new runtime or generated-app authorization flaw was confirmed.
+
+Confirmed a security monitoring defect in `.github/workflows/security-daily.yml`. The scan step omitted shell error handling and treated failed SBOM creation as a warning. Failed npm version lookup, Syft, or Trivy commands could leave a successful step and metadata with only passing check states. The report loader treats missing or invalid scanner files as no findings. The runtime watcher also swallowed missing Bun notes, failed digest lookups, and invalid Rust release data. The workflow suppressed its process failures.
+
+This defect needs no attacker access to occur. A registry, network, or tool failure is sufficient. An attacker who can disrupt a scanner's data source could also reduce monitoring coverage. No direct application data access or code execution was demonstrated. These are monitoring failures, not proof of a vulnerable deployed image.
+
+Added local regression tests that execute the actual workflow shell block with scanner substitutes. Before the fix, all three failure cases returned success. OSV operational errors already stopped the step. The fix enables shell error handling and fails SBOM errors. OSV exit 1 still means completed scans with findings. Added runtime-watcher tests. Five failure assertions failed before the fix. The watcher now records source failures, continues the other source categories, writes its results, and exits nonzero. The workflow no longer suppresses that exit. Positive tests retain successful scans and security findings. No advisory threshold, ignore, or authorization control changed. Failed scan steps now stop downstream reporting; operators must use the failed job log until the scan is restored.
+
+### Current advisory results
+
+All 12 tracked supported lockfiles were scanned with current OSV data. Scan exit: 1 for findings. Existing severity gate exit: 0. This is not a clean scan. No new advisory group appeared compared with November 11 after its fixes.
+
+| Scope | Result |
+| --- | --- |
+| Production/root Cargo | 9 existing advisory groups |
+| Root Bun | No reported matches |
+| Studio build tools | minimatch 10.2.5: one advisory group |
+| Docker/build | No reported matches in three locks |
+| Search benchmark | 8 existing advisory groups |
+| Vendor-only SAML | No reported matches |
+| Shard and Swift | No reported matches in four locks |
+
+Cargo audit returned 0 with zero unsuppressed vulnerabilities, seven maintenance warnings, and two unsoundness warnings. RustSec commit: `af7b3ec33460b8e2de8d422e16d628518891a519`, updated November 12. Cargo deny passed advisories, bans, licenses, and sources. Image-lock and advisory-ignore checks passed. The inherited lockfile changes select rustix 1.1.6 and xattr 1.7.0. No further dependency change was needed for a new advisory today. The first locked benchmark build failed because its local package versions still read 0.22.69 after the main release. Cargo 1.98.1 refreshed those 17 local package entries to 0.22.70 offline. No third-party selection changed in that refresh. The final OSV scan was repeated after this lockfile change.
+
+Studio minimatch remains affected by [GHSA-g3hv-75wg-m249](https://github.com/isaacs/minimatch/security/advisories/GHSA-g3hv-75wg-m249). Upstream lists 11.0.1 as fixed. ESLint, its config-array package, and typescript-estree require version 10 in the lockfile. A major-version override was not validated. Keep build patterns trusted. A tested caller migration remains required. Existing im and sized-chunks memory-safety warnings lack fixed releases in these chains. No validated runtime mitigation was established. The RSA exception remains active. These findings are not resolved by a zero gate exit.
+
+The live runtime watcher returned 0. It reports Rust 1.98 behind stable 1.99.1 as information, not as a confirmed security update. The static Linux image pins OpenSSL 3.5.9, which is listed on the [upstream download page](https://www.openssl-library.org/source/). This source check does not replace a full native-library advisory or image scan.
+
+### Verification and limits
+
+Commands ran in the isolated worktree. Rust builds used the primary checkout's build cache. The existing Studio HTML bundle was copied for compilation. It was not rebuilt.
+
+| Command | Result |
+| --- | --- |
+| Workflow regression before fix | 3 expected failure assertions |
+| Runtime-watcher regression before fix | 5 expected failure assertions |
+| `python3 -m unittest discover -s tools -p 'test_*.py' -v` | 13 passed, including 2 Docker context integration tests; no skips |
+| `node --test packages/create-pylon/test/scaffold.test.mjs` | 19 passed |
+| `cargo test --locked -p pylon-cli commands::deploy` | 24 passed |
+| `cargo test --locked -p pylon-runtime --lib shard_wasm` | 41 passed |
+| `cargo check --locked --manifest-path benchmarks/search/Cargo.toml` | Passed after local package version refresh |
+| Manual rustix/xattr regression with exact fixed versions | 2 passed |
+| OSV scan and severity gate | Exit 1 for findings; gate exit 0 |
+| Cargo audit and Cargo deny | Exit 0 with warnings above |
+| Image-lock and advisory-ignore checks | Passed |
+| Live runtime watcher | Exit 0; Rust version notice above |
+| `cargo fmt --all -- --check` and `git diff --check` | Passed |
+
+Local evidence uses `/tmp/pylon-security-20261112-*`. No live application was tested. Full workspace tests, PostgreSQL integration, Windows/Linux release builds, complete container builds, image vulnerability scans, deployed secrets, cloud permissions, and Nix inputs were not checked. Static C libraries are not covered by the lockfile scanner. Actionlint was unavailable. No TypeScript source changed; Studio lint, type checks, and builds were not run. The Bun watcher still examines only the latest eight newer release notes from its 30-release response. Older security releases can fall outside that window. This is a remaining coverage limit. Existing compiler warnings remain.
+
+### Delivery and next review
+
+Fixes are committed locally as `a08c5a571` and `b4939b687`. The authorized HTTPS push was rejected because the GitHub OAuth credential lacks the `workflow` scope needed to update `.github/workflows/security-daily.yml`. SSH push also failed with public-key authentication denied. PR creation failed because the remote branch was not created. No PR, merge, release, or deployment resulted. Restore a credential with workflow access, then push `security/daily-review-2026-11-12` and open a PR against main. The prepared PR body is `/tmp/pylon-security-20261112-pr.md`. Existing generated Docker apps still need yesterday's recursive `.dockerignore` rules. Rebuild binaries and images with the dependency fixes. Rotate secrets if an older accessible image or cache contained them. Prior B2B, AI Studio, signed-file example, OIDC, and independent app lockfile follow-up remains in force. Today's monitoring fix needs no application handler migration.
+
+Next main area: authentication and sessions. Also follow up on Studio minimatch migration, native-library scans, and the runtime watcher's bounded release history.
+
+## 2026-11-13
+
+Reviewed main: `d294cb035`. Primary checkout: `ce9189551` on `security/daily-review-2026-11-02`. The primary checkout had no tracked edits. Its Python cache was preserved. Read SECURITY.md, both October 27 reports, daily entries through November 12, and the security workflows. HTTPS fetch passed. Main has no new commit since the last review. The existing daily task runs at 09:00 local time. Its next run is November 14. No duplicate task was created.
+
+The review worktree is `/Users/ericc59/Dev/pylon-security-20261113`. Its base is `b5a26df8a`, which includes the unshipped November 11 and 12 fixes. Those fixes were accounted for before scanning. They were not counted as new findings. Existing worktrees were preserved.
+
+### Authentication and sessions
+
+Reviewed session expiry, refresh, tenant membership checks, password-change and reset revocation, OAuth host and browser binding, TOTP enrollment, verification, backup codes, and trusted-device issuance. Sampled the SaaS password recovery forms and Expo session restoration. No TOTP handler copy was found in generated templates. The runtime owns these routes. The review does not establish complete coverage of every authentication provider or multi-replica session behavior.
+
+Confirmed a conditional second-factor bypass in `/api/auth/totp/backup-codes/regenerate`. The route required a session but did not check the supplied TOTP code. An attacker with a victim's session could replace the backup codes, then use a returned code at `/totp/verify`. With `trust_device: true`, that verification can mint a trusted-device credential. An affected app must configure the TOTP fields and use verification or trusted-device state to authorize sensitive operations. No password or authenticator secret is required for this attack. It does not grant access without a session.
+
+The production-mode HTTP regression returned 200 for an empty regeneration request before the fix. The expected result was 401. The fix requires verified enrollment and a current authenticator code. It rejects missing, empty, or unreadable stored secrets. It uses the existing per-account and per-IP login rate limiter. The rate limit is per process; multi-replica deployments still need an external limit.
+
+The final test covers anonymous access, missing and invalid codes, unchanged stored hashes after denial, successful rotation, use of a newly issued backup code, rate limiting, pending enrollment, and empty or invalid secrets. No authorization control or test was disabled.
+
+### QUIC dependency fixes
+
+Current RustSec and OSV data added three advisories to both the root and search benchmark locks. Initial Cargo audit and Cargo deny failed. OSV's existing severity gate passed because these advisories had no numeric score. That gate result did not mean the dependencies were safe.
+
+- [RUSTSEC-2026-0523](https://rustsec.org/advisories/RUSTSEC-2026-0523.html): an oversized stream ID in a MAX_STREAM_DATA frame bypasses the advertised stream limit. A peer that completes the QUIC handshake can cause excessive implicit streams. The runtime accepts bidirectional WebTransport streams before it resolves the application's hello token. The dependency also reaches the CLI and native shard client through wtransport. Exposure requires the affected QUIC transport. A full Pylon denial-of-service attack was not run.
+- [RUSTSEC-2026-0524](https://rustsec.org/advisories/RUSTSEC-2026-0524.html): an oversized Retry token can panic a client or cause a very large allocation. The attacker is a contacted server or a party that observes the first Initial packet and supplies a matching Retry first. Native outgoing WebTransport connections are relevant. Servers do not process Retry packets.
+- [RUSTSEC-2026-0538](https://rustsec.org/advisories/RUSTSEC-2026-0538.html): a truncated UDP datagram can leave the receive loop busy on affected Apple and BSD-family receive paths. The sender needs network access to the UDP socket and a datagram larger than its buffer. QUIC authentication is not required. Linux and Windows use other receive paths. Pylon-specific buffer exposure was not established.
+
+Updated `quinn-proto` from 0.11.18 to 0.11.19 and `quinn-udp` from 0.5.15 to 0.5.16 in both locks with Cargo 1.98.1. Reviewed the stream-ID validation, Initial-packet size checks, and receive-loop changes in the downloaded crate sources. No Pylon API change was required. Cargo also changed permitted Windows dependency selections. Windows was not built. Docker uses the root Cargo lockfile. Its JavaScript manifest consistency check passed.
+
+Ran the upstream bounded `max_stream_data_over_stream_limit` test in temporary copies of both protocol versions. The old version failed: it accepted index `1 << 40`. The fixed version returned STREAM_LIMIT_ERROR and passed. This test does not allocate all those streams. A separate loopback UDP probe passed on both UDP versions on this Mac. It did not reproduce the UDP defect and is not evidence of a before/after fix. The Retry allocation attack was not executed. The advisory pages were unavailable through the web tool; the current Cargo-fetched RustSec database and downloaded crate source supplied the evidence.
+
+### Remaining TOTP issue
+
+Source tracing found that backup-code consumption is not atomic. Two requests can read the same code, both remove it, and both pass the post-write absence check. Two requests using different codes can also overwrite each other's removal. The comment and documentation had incorrectly called the operation single-use under concurrency. The documentation now states the limit. A concurrent HTTP reproduction was not run.
+
+An attacker needs an authenticated session, a valid backup code, and concurrent requests. This is separate from the regeneration fix. A safe fix needs a storage operation that checks and consumes the hash atomically across SQLite and PostgreSQL, returns whether this request consumed it, and fails closed on storage errors. A process-local lock would not cover multiple replicas. That storage change and its concurrent backend tests remain required. Until then, do not use backup-code verification or trust derived from it to authorize sensitive operations. Require a current authenticator code through an application gate. This mitigation limits use; it does not repair the storage race.
+
+### Current advisory scans
+
+The final OSV scan covered all 12 tracked supported lockfiles. Exit 1 reports findings. The severity gate returned 0. The scan is not clean.
+
+| Scope | Final result |
+| --- | --- |
+| Production/root Cargo | 9 existing advisory groups; new QUIC matches removed |
+| Root Bun | No reported matches |
+| Studio build tools | minimatch 10.2.5: one existing group |
+| Docker/build | No reported matches in three locks |
+| Search benchmark | 8 existing groups; new QUIC matches removed |
+| Vendor-only SAML | No reported matches |
+| Shard and Swift | No reported matches in four locks |
+
+Final Cargo audit returned 0 with zero unsuppressed vulnerabilities, seven maintenance warnings, and two unsoundness warnings. RustSec commit: `4ef2df8e806a65e2f1ecc14f56f51249062b23d6`, updated November 13. Cargo deny passed advisories, bans, licenses, and sources. Image-lock and advisory-ignore checks passed. No ignore file changed.
+
+Studio minimatch still needs a tested migration to its fixed major version. Keep build patterns trusted. The existing im and sized-chunks memory-safety findings remain without a validated runtime mitigation. The RSA exception remains active. Prior reports describe these risks. No gate exit resolves them.
+
+### Verification and limits
+
+Rust tests used the primary checkout's build cache. The existing Studio HTML bundle was copied for compilation. It was not rebuilt.
+
+| Command | Result |
+| --- | --- |
+| `cargo test --locked -p pylon-runtime --test totp_security` before fix | Failed: empty request returned 200 instead of 401 |
+| Same test after fix, including added secret-state cases | Passed |
+| `cargo test --locked -p pylon-auth --lib` | 499 passed |
+| `cargo test --locked -p pylon-runtime --test totp_security --test bearer_cookie_fallback --test oauth_tenant_handoff --test shard_wt` | 11 passed |
+| `cargo check --locked --manifest-path benchmarks/search/Cargo.toml` | Passed |
+| Upstream protocol stream-limit regression on old/new crate copies | Old failed; fixed passed |
+| Bounded loopback UDP probe on old/new versions | Both passed; defect not reproduced |
+| `python3 -m unittest discover -s tools -p 'test_*.py' -v` in review worktree | 13 passed, including prior local monitoring tests and Docker context checks |
+| `node --test packages/create-pylon/test/scaffold.test.mjs` | 19 passed |
+| OSV scan and severity gate | Exit 1 for findings; gate exit 0 |
+| Cargo audit and Cargo deny after update | Both exit 0 with warnings above |
+| Image-lock and advisory-ignore checks | Passed |
+| `cargo fmt --all -- --check` and `git diff --check` | Passed |
+
+Local evidence uses `/tmp/pylon-security-20261113-*`. No live application was tested. Full workspace tests, PostgreSQL integration, multi-replica tests, Windows/Linux release builds, full container builds, image vulnerability scans, native C library scans, deployed secrets, cloud permissions, and Nix inputs were not checked. No TypeScript source changed. Studio and docs builds were not run. Existing compiler warnings remain. The daily monitor's bounded release-history gap remains as recorded yesterday.
+
+### Delivery and deployment follow-up
+
+The authorized HTTPS push of the inherited branch was rejected again because the OAuth credential lacks workflow scope. No remote branch was created by that attempt. The complete review branch remains local. A separate PR branch based on current main carries today's authentication and dependency fixes plus the November 11 Docker-context and rustix/xattr fixes. The November 12 monitoring workflow, watcher, and monitoring tests remain on the local review branches; they need a credential with workflow access and a separate PR. This separation does not mark those fixes delivered.
+
+Rebuild and release the runtime, CLI, native WebTransport clients, and Docker images. Update existing apps to the new runtime. Clients that regenerate backup codes must send a current TOTP code after verified enrollment. No generated template handler changed today. Existing Docker apps still need the recursive `.dockerignore` rules from November 11. Rotate secrets if an accessible old image or cache included them. Prior B2B, AI Studio, signed-file example, OIDC, and independent app lockfile follow-up still applies. No merge, release, or deployment is authorized by this run.
+
+Next main area: authorization and tenant isolation. Prioritize atomic backup-code consumption as a separate authentication follow-up.
+
+PR worktree validation: `/Users/ericc59/Dev/pylon-security-20261113-pr` contains the reviewed runtime source and lockfiles unchanged. Its five Python tests passed, including both Docker context tests. Formatting, image-lock consistency, ignore-date checks, and diff whitespace checks passed. The final source, lockfile, regression, and report diffs were inspected. The primary checkout still has only its pre-existing untracked Python cache.
+
+Delivery confirmed: commit `30a04f481` was pushed to `security/daily-review-2026-11-13-pr`. [PR #83](https://github.com/pylonsync/pylon/pull/83) is open against main. It excludes the blocked monitoring changes. Full workspace Clippy and full workspace tests were not run. No merge or deployment occurred.
+
+## 2026-11-14
+
+Reviewed main: `d294cb035fd20bed30d79a222fb764091c291fc6`. HTTPS fetch confirmed no main changes since the last review. Reviewed PR #83 at `c312aae66a74a0d041a07be3c6f8feb4c81c0a4a` in `/Users/ericc59/Dev/pylon-security-20261113-pr`. The primary checkout remains at `ce9189551` on `security/daily-review-2026-11-02`. Both checkouts had no tracked edits. Existing Python caches and other worktrees were preserved.
+
+Read SECURITY.md, both October 27 reports, daily reports through November 13, and the security workflows. The primary log stops at November 10; newer entries were read from the PR worktree before choosing the review area. The November 11 Docker and dependency fixes and the November 13 TOTP and QUIC fixes are already in PR #83. They were not counted as new findings. The November 12 monitoring fixes remain on local branches because the available push credential lacks workflow scope. The daily task already runs at 09:00 local time. No duplicate task was created.
+
+### Authorization and tenant isolation
+
+Traced row reads, filtered queries, lookup, aggregate and graph queries, nested graph targets, search gates, private-field projection, REST updates, sync writes, CRDT updates, tenant selection, and scoped admin data access. Checked that update policies run against the stored and resulting row. Checked the aggregate filter validation added by the earlier review. Graph and search requests reject row-dependent policies before bulk execution. Checked the distinction between global operators and admins with an active tenant.
+
+Reviewed the B2B membership helper and generated organization, member, and project handlers. Organization and user IDs are both used for membership lookup. Role checks remain in member management and project archiving. Sampled the AI Studio ownership checks and the signed-file examples. These checks do not establish complete coverage of all handlers or concurrent state changes.
+
+No new security issue was confirmed. No application, dependency, authorization, or advisory-ignore file changed today. This commit adds the review record only. Existing fixes remain ready for review in PR #83.
+
+### Current advisory scans
+
+Scanned all 12 tracked supported lockfiles in the primary checkout and the PR worktree. The primary checkout still contains older rustix and QUIC versions. Their matches are already fixed in PR #83. Final results below describe the PR worktree. OSV returned 1 for findings. `tools/osv-gate.py` returned 0 under the existing severity policy. The scan is not clean.
+
+| Scope | Result |
+| --- | --- |
+| Production/root Cargo | 9 existing advisory groups |
+| Root Bun | No reported matches |
+| Studio build tools | 1 existing minimatch 10.2.5 group |
+| Docker/build | No reported matches in three locks |
+| Search benchmark | 8 existing advisory groups |
+| Vendor-only SAML | No reported matches |
+| Shard and Swift | No reported matches in four locks |
+
+Cargo audit and Cargo deny returned 0 in the PR worktree. RustSec commit: `4ef2df8e806a65e2f1ecc14f56f51249062b23d6`, updated November 13. Audit reported zero unsuppressed vulnerabilities, seven maintenance warnings, and two unsoundness warnings. Cargo deny passed advisories, bans, licenses, and sources. Image-lock consistency and advisory-ignore date checks passed. No new advisory group appeared compared with the November 13 final scan.
+
+Existing minimatch, im, sized-chunks, and RSA risks remain. Minimatch needs a tested migration to fixed version 11.0.1. Keep build patterns trusted. The memory-safety findings need dependency migration and compatibility tests; no validated runtime mitigation was established. The RSA exception remains active. A passing gate does not resolve these findings.
+
+### Verification
+
+Rust tests used the primary checkout's build cache. The first HTTP build failed because the PR worktree lacked `crates/studio_api/web/dist/index.html`. Copied the existing local bundle and repeated the tests. Studio was not rebuilt. Initial template tests used installed Bun 1.3.14 and failed to load the B2B data-URL module. Repeated all four suites with pinned Bun 1.4.4 through `npx --yes bun@1.4.4`. No test was disabled or changed.
+
+| Command | Result |
+| --- | --- |
+| `cargo test --locked -p pylon-policy --lib` | 107 passed |
+| `cargo test --locked -p pylon-router --lib` | 178 passed; 1 existing test ignored |
+| `cargo test --locked -p pylon-runtime --test update_policy_scope --test admin_mutation_security --test totp_security` | 18 passed after restoring the existing Studio bundle |
+| Bun 1.4.4: member, B2B, AI Studio, signed-file example tests | 30 passed |
+| `python3 -m unittest discover -s tools -p 'test_*.py' -v` | Failed: 3 scanner tests passed; both Docker context tests timed out after 120 seconds each |
+| `node --test packages/create-pylon/test/scaffold.test.mjs` | 19 passed |
+| `python3 tools/scan-lockfiles.py` | All 12 locks scanned; exit 1 for findings |
+| `python3 tools/osv-gate.py` | Exit 0 |
+| `cargo audit --json` and `cargo deny check` | Exit 0 with existing warnings and ignores |
+| Image-lock and advisory-ignore checks | Passed |
+| `cargo fmt --all -- --check` and `git diff --check` | Passed |
+
+Both Docker context builds timed out, including the network-disabled scratch-image test. Docker exclusion behavior was not verified today. Restore the local builder and repeat `python3 -m unittest discover -s tools -p 'test_docker_context.py' -v`. No Docker rule was changed.
+
+Local evidence uses `/tmp/pylon-security-20261114-*`. No production service was tested. Full workspace tests, PostgreSQL integration, multi-replica concurrency, Windows/Linux release builds, full image builds and vulnerability scans, native C library scans, deployed secrets, cloud permissions, and Nix inputs were not checked. No source changed, so no new TypeScript type check, package build, or Studio build was run. These are validation gaps.
+
+### Remaining work and deployment steps
+
+The backup-code consumption race recorded on November 13 remains open. It requires a session, a valid backup code, and concurrent requests. Consumption must become an atomic storage operation across SQLite and PostgreSQL. A process-local lock does not protect multiple replicas. Require a current authenticator code through an application gate for sensitive operations until that fix is tested. This run did not reproduce or repair the race.
+
+The monitoring workflow and runtime-watcher fixes still need a push credential with workflow access. The runtime watcher's bounded release-history limit and native-library scan gap also remain. No failed scan is treated as clean.
+
+Today's report requires no new application migration. Prior deployment steps still apply: rebuild and release the patched runtime, CLI, native WebTransport clients, and images; send a current TOTP code when regenerating backup codes; update existing generated Docker ignore rules; apply the earlier B2B, AI Studio, and signed-file handler fixes; and scan each app's own lockfile. Rotate secrets if an accessible old image or cache included them. No merge, release, or deployment was performed.
+
+This run adds the dated report to PR #83 under the user's final commit-and-push instruction. Next main area: HTTP, CSRF, CORS, and WebSocket boundaries. Keep atomic backup-code consumption and the blocked monitoring changes on the follow-up list.
+
+## 2026-11-15
+
+Reviewed main: `d294cb035fd20bed30d79a222fb764091c291fc6`. HTTPS fetch confirmed no main changes since yesterday. Reviewed PR #83 at `7b2f68987ec7b94a1d94aface5dad5c156940a6f` in `/Users/ericc59/Dev/pylon-security-20261113-pr`. The only new PR commit since yesterday's reviewed base records that review. The primary checkout remains at `ce9189551`. Both checkouts started without tracked edits. Existing Python caches and other worktrees were preserved. This run changes the existing PR worktree only.
+
+Read SECURITY.md, both October 27 reports, prior daily reports through November 14, and the security workflows. Existing PR fixes were accounted for before review. The scheduler confirms the daily task at 09:00 local time, with the next run on November 16. No duplicate task was created.
+
+### HTTP, CSRF, CORS, and WebSocket review
+
+Traced CORS origin selection, the CSRF gate, form dispatch, cookie identity resolution, API bearer fallback, admin mutations, sync WebSocket upgrades, SSE cookie trust, and shard transport credentials. CSRF means cross-site request forgery. Sync cookies require a trusted WebSocket origin. Shard connections use explicit credentials without session cookies. Reviewed the copied Next.js API rewrites and client providers in the generated web templates. They use the runtime's HTTP controls. No template file required a change.
+
+Confirmed a conditional form-route CSRF bypass. In `crates/runtime/src/server.rs`, the early gate skips requests with any `Authorization: Bearer ...` header. Form dispatch occurs before the shared API identity check. In `crates/runtime/src/frontend.rs`, `serve_via_form_rpc` resolves identity from the cookie alone through `resolve_request_auth`. It does not validate that bearer. A false bearer can therefore bypass the form origin check while leaving cookie authentication available to the handler.
+
+An affected app must expose a state-changing `route.ts` handler. For a browser attack, the attacker must control an origin that the route or proxy permits through a credentialed CORS preflight with the Authorization header. That origin must be excluded from the CSRF allowlist. The browser must also send the victim's session cookie. Same-site origins can meet that cookie condition; cross-site use depends on cookie settings. Without preflight permission, the browser cannot send this request shape. This is not a bypass from every arbitrary website. The impact depends on the operations exposed by the application's handler.
+
+The local HTTP regression reached the stub handler and returned 200 before the fix. It expected 403. Repeated the failure with production mode, an explicit CORS allowlist, and a narrower CSRF allowlist. The test uses synthetic credentials and a recording handler. It proves the dispatch bypass, not a complete browser attack or an authenticated database mutation. Cookie identity exposure follows from the source trace above. No live system was tested.
+
+The fix requires the CSRF check for matched form routes even when a bearer header is present. API bearer authentication retains its existing behavior. The regression checks requests with a false bearer, with and without a synthetic cookie. Rejected requests must not reach the handler. A trusted-origin request with the same bearer still succeeds. Existing form checks now run in production mode with memory-only stores. No advisory suppression, authorization weakening, or test disabling was used.
+
+### Current advisory results
+
+OSV scanned all 12 tracked supported lockfiles. It returned 1 for findings. The existing severity gate returned 0. This is not a clean scan. No new advisory group appeared compared with yesterday.
+
+| Scope | Result |
+| --- | --- |
+| Production/root Cargo | 9 existing groups |
+| Root Bun | No reported matches |
+| Studio build tools | 1 existing minimatch group |
+| Docker/build | No reported matches in three locks |
+| Search benchmark | 8 existing groups |
+| Vendor-only SAML | No reported matches |
+| Shard and Swift | No reported matches in four locks |
+
+Cargo audit returned 0 with zero unsuppressed vulnerabilities, seven maintenance warnings, and two unsoundness warnings. RustSec commit: `02e2517f457a359fc6d3440ea4560c8ea188fee8`, updated November 15. Cargo deny passed advisories, bans, licenses, and sources. Image-lock consistency and advisory-ignore date checks passed. No dependency or ignore file changed.
+
+The [minimatch advisory](https://github.com/advisories/GHSA-g3hv-75wg-m249) still lists 11.0.1 as fixed. Studio needs a tested migration from version 10. Keep build patterns trusted. The im and sized-chunks memory-safety findings still need migration and compatibility tests. No validated runtime mitigation was established. The RSA exception remains active. Passing scan gates do not resolve these risks.
+
+### Verification and gaps
+
+Rust tests used the primary checkout's build cache and the existing Studio bundle. Studio was not rebuilt.
+
+| Command | Result |
+| --- | --- |
+| `cargo test --locked -p pylon-runtime --test csrf_form_route bearer_header_does_not_bypass_form_csrf` without the fix | Failed as expected: 200 instead of 403; repeated in production mode |
+| `cargo test --locked -p pylon-runtime --test csrf_form_route --test bearer_cookie_fallback --test admin_mutation_security` with the fix | 11 passed |
+| `cargo test --locked -p pylon-runtime --lib ws_origin_tests` | 3 passed |
+| `cargo test --locked -p pylon-runtime --lib upgrade_credentials_resolve_through_the_shared_rules` | 1 passed |
+| `python3 -m unittest discover -s tools -p 'test_*.py' -v` | 3 scanner tests passed; 2 Docker context tests failed because the Docker daemon was unavailable |
+| `node --test packages/create-pylon/test/scaffold.test.mjs` | 19 passed |
+| `python3 tools/scan-lockfiles.py` and `tools/osv-gate.py` | Scan exit 1; gate exit 0 |
+| `cargo audit --json` and `cargo deny check` | Exit 0 with warnings above |
+| Image-lock and advisory-ignore checks | Passed |
+| `cargo fmt --all -- --check` and `git diff --check` | Passed after formatting the test |
+
+The initial formatting check found one long test setup line. Formatting corrected it. The final checks passed. Reviewed the final runtime, test, and report diff. Local evidence uses `/tmp/pylon-security-20261115-*`.
+
+Docker context behavior remains unverified today. Start the local Docker daemon and repeat the two context tests. Full workspace tests, browser exploitation, PostgreSQL integration, multi-replica concurrency, release builds, full image builds and scans, native C library scans, deployed secrets, cloud permissions, and Nix inputs were not checked. No TypeScript source changed, so TypeScript checks and package builds were not run. Existing compiler warnings remain.
+
+### Remaining work and deployment steps
+
+The backup-code consumption race remains open as recorded on November 13. It requires a session, a valid code, and concurrent requests. It needs an atomic check-and-consume storage operation with SQLite and PostgreSQL concurrency tests. Until then, require a current authenticator code through an application gate for sensitive operations. The November 12 monitoring fixes remain local because the available push credential lacks workflow scope. Their release-history and native-library scan gaps also remain.
+
+Rebuild and release the patched runtime and images to protect existing form routes. No copied template handler change is needed for today's fix. Until deployment, keep credentialed CORS access limited to origins trusted for mutations, including route and proxy preflight settings. Prior Docker ignore, TOTP client, B2B, AI Studio, signed-file example, and independent app dependency steps still apply.
+
+This run commits and pushes the fix and report to PR #83 under the user's final instruction. No merge or deployment is performed. Next main area: files, SSRF, and path traversal. Keep atomic backup-code consumption and the blocked monitoring changes on the follow-up list.
+
+## 2026-11-16
+
+Reviewed PR #83 at `ce91c4e6d6bbf48592b0829da45db86a59275be9` in `/Users/ericc59/Dev/pylon-security-20261113-pr`. HTTPS fetch confirmed that main remains at `d294cb035fd20bed30d79a222fb764091c291fc6`. The only PR change since yesterday's reviewed base is the form-route CSRF fix. Reviewed its source and test diff as an existing fix. The primary checkout remains at `ce9189551`. Both checkouts started without tracked edits. Existing Python caches and other worktrees were preserved.
+
+Read SECURITY.md, both October 27 reports, prior daily reports through November 15, and the security workflows. The primary checkout lacks the latest daily changes, so this review used the PR worktree. Existing fixes were not reported as new issues. The daily task remains set for 09:00 local time. Its next run is November 17. No duplicate task was created.
+
+### Files, server-side requests, and path handling
+
+Traced upload initialization, confirmation, local PUT, deletion, and download dispatch. Checked owner and tenant matching, missing owner records, public visibility, scoped admin restrictions, upload limits, and response media types. Reviewed local asset ID checks and private S3 owner checks before signed redirects. Public S3 and Stack0 use different access models; these checks do not establish private-file isolation for those configurations.
+
+Reviewed signed file URL expiry, signature verification, and application authorization at the copied documentation and SDK examples. Reviewed local image path containment, remote image host and path checks, redirect revalidation, guarded DNS resolution, and response byte limits. Sampled static frontend path containment and client bundle path checks. Reviewed consumer upload URL validation and AI Studio's fixed provider host and generation ownership checks.
+
+No new issue was confirmed in this review. No application, dependency, template, or advisory-ignore file changed. This commit adds the review record only. The checks do not cover every storage configuration or concurrent filesystem mutation.
+
+### Current advisory scans
+
+OSV scanned all 12 tracked supported lockfiles in the PR worktree. It returned 1 for findings. `tools/osv-gate.py` returned 0 under the existing severity policy. The scan is not clean. No new advisory group appeared compared with November 15.
+
+| Scope | Result |
+| --- | --- |
+| Production/root Cargo | 9 existing advisory groups |
+| Root Bun | No reported matches |
+| Studio build tools | 1 existing minimatch 10.2.5 group |
+| Docker/build | No reported matches in three locks |
+| Search benchmark | 8 existing advisory groups |
+| Vendor-only SAML | No reported matches |
+| Shard and Swift | No reported matches in four locks |
+
+Cargo audit returned 0 with existing ignores. It reported zero unsuppressed vulnerabilities, seven maintenance warnings, and two unsoundness warnings. RustSec commit: `02e2517f457a359fc6d3440ea4560c8ea188fee8`, updated November 15. Cargo deny passed advisories, bans, licenses, and sources. Image-lock consistency and advisory-ignore date checks passed.
+
+The current [minimatch advisory](https://github.com/advisories/GHSA-g3hv-75wg-m249) still lists 11.0.1 as fixed. Studio's version-10 callers need a tested migration. Keep build patterns trusted. The im and sized-chunks memory-safety findings need dependency migration and compatibility tests. No validated runtime mitigation was established. The RSA exception remains active. Passing gates do not resolve these risks.
+
+### Verification and gaps
+
+Rust tests used the primary checkout's build cache and the existing Studio bundle. Studio was not rebuilt. Local evidence uses `/tmp/pylon-security-20261116-*`.
+
+| Command | Result |
+| --- | --- |
+| `cargo test --locked -p pylon-runtime --lib image_optim` | 24 passed |
+| `cargo test --locked -p pylon-runtime --test file_serving --test functions_files` | 5 passed |
+| `cargo test --locked -p pylon-kernel net_guard` | 6 passed |
+| `cargo test --locked -p pylon-storage --lib files` | 31 passed |
+| `cargo test --locked -p pylon-runtime --lib file_urls` | 4 passed |
+| `cargo test --locked -p pylon-runtime --lib resolve_safe` | 2 passed |
+| `cargo test --locked -p pylon-runtime --test functions_files --test csrf_form_route` with Bun 1.4.4 on PATH | 3 passed |
+| Bun 1.4.4: runtime-files, signed-file examples, AI Studio security | 13 passed |
+| `python3 -m unittest discover -s tools -p 'test_scan_lockfiles.py' -v` | 3 passed |
+| `python3 -m unittest discover -s tools -p 'test_docker_context.py' -v` | Both failed: Docker daemon unavailable |
+| `node --test packages/create-pylon/test/scaffold.test.mjs` | 19 passed |
+| `python3 tools/scan-lockfiles.py` and `tools/osv-gate.py` | Scan exit 1; gate exit 0 |
+| `cargo audit --json` and `cargo deny check` | Exit 0 with warnings above |
+| Image-lock and advisory-ignore checks | Passed |
+
+The initial file integration run used the installed Bun. Repeated it with pinned Bun 1.4.4. Existing compiler warnings remain. Docker exclusion behavior was not verified today. Start the local Docker daemon and repeat the two context tests. Full workspace tests, real S3 and Stack0 integration, PostgreSQL integration, multi-replica concurrency, release builds, full image builds and scans, native C library scans, deployed secrets, cloud permissions, and Nix inputs were not checked. No source changed, so TypeScript checks, formatting, and package builds were not repeated. No production service was tested.
+
+### Remaining work and deployment steps
+
+The backup-code consumption race remains open as recorded on November 13. It requires a session, a valid code, and concurrent requests. It needs an atomic storage operation with SQLite and PostgreSQL concurrency tests. Require a current authenticator code through an application gate for sensitive operations until that fix is tested. The November 12 monitoring fixes remain local because the available push credential lacks workflow scope. Their release-history and native-library scan gaps also remain.
+
+Today's report requires no new application migration. Prior deployment steps still apply. Rebuild and release the patched runtime, CLI, native WebTransport clients, and images. Update copied Docker ignore rules, B2B handlers, AI Studio handlers, and signed-file examples. Send a current TOTP code when regenerating backup codes. Scan each application's own lockfile. Keep credentialed CORS origins limited to trusted mutation origins until the form-route fix is deployed. Rotate secrets if an accessible old image or cache included them.
+
+The final report diff and whitespace check are reviewed before commit. This run commits and pushes the report to PR #83 under the user's final instruction. No merge or deployment is performed. Next main area: server functions and generated app templates. Keep atomic backup-code consumption and the blocked monitoring changes on the follow-up list.

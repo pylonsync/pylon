@@ -7879,6 +7879,64 @@ pub(crate) fn handle(
                 json_error("API_KEY_AUTH_FORBIDDEN", "Backup codes require a session"),
             ));
         }
+        // A session alone must not authorize replacement of the second factor.
+        let row = match ctx
+            .store
+            .get_by_id(&ctx.store.manifest().auth.user.entity, &user_id)
+        {
+            Ok(Some(row)) => row,
+            _ => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
+        };
+        if row.get("totpVerified").and_then(|v| v.as_bool()) != Some(true) {
+            return Some((
+                400,
+                json_error("TOTP_NOT_ENROLLED", "Verify TOTP enrollment first"),
+            ));
+        }
+        let rl = pylon_auth::rate_limit::AuthRateLimiter::shared();
+        if let pylon_auth::rate_limit::RateLimitDecision::Deny { retry_after_secs } = rl.check(
+            pylon_auth::rate_limit::AuthBucket::Login,
+            ctx.peer_ip,
+            Some(&user_id),
+        ) {
+            return Some((
+                429,
+                json_error_with_hint(
+                    "RATE_LIMITED",
+                    "Too many TOTP attempts",
+                    &format!("Try again in {retry_after_secs}s"),
+                ),
+            ));
+        }
+        let secret = row
+            .get("totpSecret")
+            .and_then(|v| v.as_str())
+            .and_then(|blob| pylon_auth::totp::unseal_secret(blob).ok())
+            .and_then(|value| pylon_auth::totp::base32_decode(&value).ok());
+        let secret = match secret {
+            Some(secret) if !secret.is_empty() => secret,
+            _ => {
+                return Some((
+                    500,
+                    json_error("TOTP_BAD_SECRET", "Stored secret is unavailable"),
+                ))
+            }
+        };
+        let data: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+        let code = data
+            .get("code")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if !pylon_auth::totp::verify_now(&secret, code) {
+            return Some((
+                401,
+                json_error(
+                    "INVALID_TOTP_CODE",
+                    "Provide a current TOTP code to replace backup codes",
+                ),
+            ));
+        }
         // 10 random codes, formatted XXXX-XXXX (8 alphanumeric chars
         // with a dash for readability — Google's standard).
         use rand::Rng;

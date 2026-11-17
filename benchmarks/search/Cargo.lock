@@ -1123,7 +1123,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3035,7 +3035,7 @@ checksum = "e0c5ccf5294c6ccd63a74f1565028353830a9c2f5eb0c682c355c471726a6e3f"
 
 [[package]]
 name = "pylon-auth"
-version = "0.22.69"
+version = "0.22.70"
 dependencies = [
  "argon2",
  "base64",
@@ -3063,7 +3063,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-cluster"
-version = "0.22.69"
+version = "0.22.70"
 dependencies = [
  "base64",
  "pylon-auth",
@@ -3079,7 +3079,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-crdt"
-version = "0.22.69"
+version = "0.22.70"
 dependencies = [
  "loro",
  "pylon-kernel",
@@ -3091,7 +3091,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-functions"
-version = "0.22.69"
+version = "0.22.70"
 dependencies = [
  "base64",
  "pylon-http",
@@ -3103,7 +3103,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-http"
-version = "0.22.69"
+version = "0.22.70"
 dependencies = [
  "pylon-kernel",
  "serde_json",
@@ -3111,7 +3111,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-kernel"
-version = "0.22.69"
+version = "0.22.70"
 dependencies = [
  "js-sys",
  "serde",
@@ -3121,7 +3121,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-migrate"
-version = "0.22.69"
+version = "0.22.70"
 dependencies = [
  "pylon-kernel",
  "serde",
@@ -3130,7 +3130,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-observability"
-version = "0.22.69"
+version = "0.22.70"
 dependencies = [
  "serde",
  "serde_json",
@@ -3139,7 +3139,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-plugin"
-version = "0.22.69"
+version = "0.22.70"
 dependencies = [
  "argon2",
  "hashlink 0.10.0",
@@ -3155,7 +3155,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-policy"
-version = "0.22.69"
+version = "0.22.70"
 dependencies = [
  "chrono",
  "pylon-auth",
@@ -3165,7 +3165,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-realtime"
-version = "0.22.69"
+version = "0.22.70"
 dependencies = [
  "base64",
  "hmac 0.12.1",
@@ -3181,11 +3181,11 @@ dependencies = [
 
 [[package]]
 name = "pylon-replication"
-version = "0.22.69"
+version = "0.22.70"
 
 [[package]]
 name = "pylon-router"
-version = "0.22.69"
+version = "0.22.70"
 dependencies = [
  "base64",
  "pylon-auth",
@@ -3204,7 +3204,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-runtime"
-version = "0.22.69"
+version = "0.22.70"
 dependencies = [
  "base64",
  "brotli",
@@ -3271,7 +3271,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-storage"
-version = "0.22.69"
+version = "0.22.70"
 dependencies = [
  "bytes",
  "chrono",
@@ -3295,7 +3295,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-studio-api"
-version = "0.22.69"
+version = "0.22.70"
 dependencies = [
  "pylon-kernel",
  "serde_json",
@@ -3303,7 +3303,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-sync"
-version = "0.22.69"
+version = "0.22.70"
 dependencies = [
  "serde",
  "serde_json",
@@ -3359,9 +3359,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.18"
+version = "0.11.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9746dbde176634f4f2f1faf2404e30a31b2bc1e9cafb5329c95d8177a18c9fc"
+checksum = "0e750cca55fe4f0439a15d0bb529da9651e79993e8e72c61a899a36d462befbe"
 dependencies = [
  "bytes",
  "getrandom 0.4.2",
@@ -3381,16 +3381,16 @@ dependencies = [
 
 [[package]]
 name = "quinn-udp"
-version = "0.5.15"
+version = "0.5.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35a133f956daabe89a61a685c2649f13d82d5aa4bd5d12d1277e1072a21c0694"
+checksum = "af66907df18639dcf4db56ca65490cabc4b27a97dbadd96f2926cca73298f016"
 dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3801,15 +3801,15 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "1.1.4"
+version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
+checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
 dependencies = [
  "bitflags",
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5298,7 +5298,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

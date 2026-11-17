@@ -20,7 +20,7 @@ All endpoints are under `/api/auth/`. Enrollment and management require a real s
 | `/totp/enroll` | POST | session | Mint a fresh TOTP secret + provisioning URL |
 | `/totp/verify` | POST | session | Confirm a TOTP code; finalize enrollment on first success |
 | `/totp/disable` | POST | session | Remove TOTP (requires a current code) |
-| `/totp/backup-codes/regenerate` | POST | session | Mint a new set of backup codes (invalidates old) |
+| `/totp/backup-codes/regenerate` | POST | session | Replace backup codes after verified enrollment (requires a current TOTP code) |
 
 The user entity in your schema needs three optional fields:
 
@@ -94,7 +94,7 @@ Failure modes:
 | 401 | `INVALID_TOTP_CODE` | Wrong code (or wrong backup code) |
 | 429 | `RATE_LIMITED` | Per-account rate limit hit; `retry_after_secs` in the response |
 | 500 | `TOTP_BAD_SECRET` | Stored seed corrupt or `PYLON_TOTP_ENCRYPTION_KEY` missing |
-| 409 | `TOTP_RACE` | Two parallel verifies tried to consume the same backup code. Only one wins |
+| 409 | `TOTP_RACE` | The post-write check detected a conflict; it does not detect every concurrent use |
 
 ## Backup codes
 
@@ -117,7 +117,7 @@ The current TOTP code is required. The response includes the plaintext codes. Py
 }
 ```
 
-Each backup code is single-use. Pylon uses a compare-and-swap check: it consumes the matching index, re-reads the row, and fails with `409 TOTP_RACE` if a parallel verify already consumed that code. This stops two concurrent verifies from consuming the same backup code.
+Backup-code consumption is not atomic. Concurrent requests can accept the same code or restore another consumed code. The current read-after-write check does not prevent these cases. Until storage-level atomic consumption is available, do not use backup codes to authorize sensitive operations. Use a current authenticator code instead.
 
 ## Disabling
 

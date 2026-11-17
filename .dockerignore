@@ -8,12 +8,14 @@ target/
 apps/web/.next/
 examples/*/web/dist/
 examples/*/uploads/
-.git/
+**/.git/
 .github/
 .claude/
 .DS_Store
 *.log
-*.db
-*.db-journal
-*.db-shm
-*.db-wal
+# Keep credentials and database state out of every build stage.
+**/.env*
+**/*.db
+**/*.db-journal
+**/*.db-shm
+**/*.db-wal
