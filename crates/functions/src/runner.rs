@@ -3243,6 +3243,7 @@ fn policy_op_for(op: DbOp) -> Option<PolicyOp> {
         | DbOp::Paginate
         | DbOp::Lookup
         | DbOp::Query
+        | DbOp::Count
         | DbOp::Search
         | DbOp::VectorSearch => Some(PolicyOp::Read),
         DbOp::Insert | DbOp::InsertMany => Some(PolicyOp::Insert),
@@ -3362,6 +3363,17 @@ fn execute_db_op(
     } else {
         None
     };
+    // A page's `serverData` reads are checked row by row after the read,
+    // because their results go to the browser. A count has no rows to check.
+    if msg.op == DbOp::Count && msg.ssr_read && !msg.unsafe_op {
+        return (
+            Err(pylon_http::DataError {
+                code: "NOT_SUPPORTED".into(),
+                message: "count() is not available on serverData; call it from a function".into(),
+            }),
+            None,
+        );
+    }
     // The many-row writes check each row as the one-row write would.
     let many = match msg.op {
         DbOp::InsertMany => Some(parse_insert_many(msg)),
@@ -3380,7 +3392,9 @@ fn execute_db_op(
     if let Some(gate) = strict_gate.filter(|_| many.is_none()) {
         if let Some(op) = policy_op_for(msg.op) {
             if op == PolicyOp::Read {
-                let access = if matches!(msg.op, DbOp::Search | DbOp::VectorSearch) {
+                // A count has no rows to check afterwards, so the caller
+                // must be allowed to read every row it can count.
+                let access = if matches!(msg.op, DbOp::Search | DbOp::VectorSearch | DbOp::Count) {
                     gate.check_read_aggregate(&msg.entity, auth)
                 } else {
                     gate.check_read_scan(&msg.entity, auth)
@@ -3550,6 +3564,14 @@ fn execute_db_op(
                     let count = rows.len();
                     (Ok(serde_json::json!(rows)), Some(count))
                 }
+                Err(e) => (Err(e), None),
+            }
+        }
+        DbOp::Count => {
+            let filter = msg.data.as_ref().cloned().unwrap_or(serde_json::json!({}));
+            crate::deps::record_read(&msg.entity, None);
+            match store.count_matching(&msg.entity, &filter) {
+                Ok(count) => (Ok(serde_json::json!({ "count": count })), None),
                 Err(e) => (Err(e), None),
             }
         }
@@ -4450,6 +4472,9 @@ mod tests {
         fn delete(&self, _: &str, _: &str) -> Result<bool, DataError> {
             Ok(true)
         }
+        fn count_matching(&self, _: &str, _: &serde_json::Value) -> Result<u64, DataError> {
+            Ok(7)
+        }
         fn lookup(
             &self,
             _: &str,
@@ -5081,6 +5106,45 @@ mod tests {
         let msg = db_msg(DbOp::Get, "Project", false);
         let (result, _) = execute_db_op(&AlwaysOkStore, &msg, Some(&gate), &auth, true);
         assert_eq!(result.unwrap_err().code, "POLICY_DENIED");
+    }
+
+    #[test]
+    fn count_returns_the_store_count() {
+        let msg = db_msg(DbOp::Count, "Note", false);
+        let (result, _) = execute_db_op(&AlwaysOkStore, &msg, None, &user_auth(), false);
+        assert_eq!(result.unwrap(), serde_json::json!({ "count": 7 }));
+    }
+
+    #[test]
+    fn strict_count_needs_the_read_policy() {
+        // A count has no rows to check afterwards, so the gate decides
+        // before the store is asked.
+        let allow = allow_gate();
+        let msg = db_msg(DbOp::Count, "Note", false);
+        let (result, _) = execute_db_op(&AlwaysOkStore, &msg, Some(&allow), &user_auth(), true);
+        assert_eq!(result.unwrap(), serde_json::json!({ "count": 7 }));
+        assert_eq!(
+            allow.calls.lock().unwrap().as_slice(),
+            &[(PolicyOp::Read, "Note".to_string(), false)]
+        );
+
+        let deny = deny_gate();
+        let (result, _) = execute_db_op(&AlwaysOkStore, &msg, Some(&deny), &user_auth(), true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn count_is_refused_on_a_page_read() {
+        // serverData results go to the browser and are checked row by row.
+        let gate = allow_gate();
+        let mut msg = db_msg(DbOp::Count, "Note", false);
+        msg.ssr_read = true;
+        for strict in [false, true] {
+            let (result, _) =
+                execute_db_op(&AlwaysOkStore, &msg, Some(&gate), &user_auth(), strict);
+            assert_eq!(result.unwrap_err().code, "NOT_SUPPORTED");
+        }
+        assert!(gate.calls.lock().unwrap().is_empty());
     }
 
     #[test]

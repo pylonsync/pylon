@@ -60,7 +60,8 @@ ctx.auth.verifyOidcToken(token)                   // actions + mutations: token 
 // ctx.db — on queries (read-only) and mutations (read + write). NOT on actions.
 ctx.db.insert(entity, data)
 ctx.db.get(entity, id)
-ctx.db.query(entity, filter?)
+ctx.db.query(entity, filter?)         // rows; stops at 10,000
+ctx.db.count(entity, filter?)         // number of matching rows, counted in the database
 ctx.db.list(entity)                   // whole entity (no filter)
 ctx.db.update(entity, id, patch)
 ctx.db.delete(entity, id)

@@ -26,8 +26,8 @@ use pylon_kernel::AppManifest;
 use crate::pg_exec::{CachedTransaction, PgConn};
 use crate::pg_search;
 use crate::postgres::{
-    aggregate_rows_to_json_pub, build_aggregate_sql_pub, build_insert_sql,
-    build_query_filtered_sql_pub, build_update_sql, quote_ident_pub, JsonParam,
+    aggregate_rows_to_json_pub, build_aggregate_sql_pub, build_count_matching_sql_pub,
+    build_insert_sql, build_query_filtered_sql_pub, build_update_sql, quote_ident_pub, JsonParam,
 };
 
 // ---------------------------------------------------------------------------
@@ -1409,6 +1409,31 @@ impl<'a> DataStore for PgTxStore<'a> {
             let params = as_pg_params(&values);
             let rows = tx.query(sql.as_str(), &params).map_err(pg_err_to_data)?;
             Ok(rows.iter().map(crate::postgres::row_to_json_pub).collect())
+        })
+    }
+
+    fn count_matching(&self, entity: &str, filter: &serde_json::Value) -> Result<u64, DataError> {
+        let ent = self
+            .manifest
+            .entities
+            .iter()
+            .find(|e| e.name == entity)
+            .ok_or_else(|| DataError {
+                code: "ENTITY_NOT_FOUND".into(),
+                message: format!("Unknown entity: \"{entity}\""),
+            })?;
+        let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
+        let (sql, values) =
+            build_count_matching_sql_pub(entity, filter, &columns).map_err(|e| DataError {
+                code: e.code,
+                message: e.message,
+            })?;
+        self.with_tx(|tx| {
+            let params = as_pg_params(&values);
+            let row = tx
+                .query_one(sql.as_str(), &params)
+                .map_err(pg_err_to_data)?;
+            Ok(row.get::<_, i64>(0).max(0) as u64)
         })
     }
 

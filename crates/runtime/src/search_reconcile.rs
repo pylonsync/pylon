@@ -541,6 +541,36 @@ mod tests {
             .query_filtered("Property", &json!({ "$search": "main" }))
             .unwrap_err();
         assert_eq!(err.code, "SEARCH_INDEX_BUILDING");
+        // A count would be of the rows indexed so far. Both the read path
+        // and the path a transaction uses refuse it.
+        let err = rt
+            .count_matching("Property", &json!({ "$search": "main" }))
+            .unwrap_err();
+        assert_eq!(err.code, "SEARCH_INDEX_BUILDING");
+        let err = {
+            let conn = rt.lock_read_conn().unwrap();
+            rt.count_matching_with_conn(&conn, "Property", &json!({ "$search": "main" }))
+                .unwrap_err()
+        };
+        assert_eq!(err.code, "SEARCH_INDEX_BUILDING");
+        // A count with no `$search` does not read the index.
+        assert_eq!(rt.count_matching("Property", &json!({})).unwrap(), 2500);
+        // The store a Postgres mutation reads through asks this runtime, not
+        // the store under it, which here has no index to build.
+        let under = Runtime::in_memory(manifest(None)).unwrap();
+        let in_mutation = crate::datastore::PgBufferedTxStore::new(&under, &rt);
+        let err = in_mutation
+            .count_matching("Property", &json!({ "$search": "main" }))
+            .unwrap_err();
+        assert_eq!(err.code, "SEARCH_INDEX_BUILDING");
+        let err = in_mutation
+            .query_filtered("Property", &json!({ "$search": "main" }))
+            .unwrap_err();
+        assert_eq!(err.code, "SEARCH_INDEX_BUILDING");
+        assert_eq!(
+            in_mutation.count_matching("Property", &json!({})).unwrap(),
+            0
+        );
 
         rt.spawn_search_index_builds();
         wait_for_builds(&rt);

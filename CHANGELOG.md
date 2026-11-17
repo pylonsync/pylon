@@ -4,6 +4,7 @@
 
 ### Features
 
+* **functions:** `ctx.db.count(entity, filter?)` counts the matching rows in the database. No row is loaded and the 10,000-row limit of `ctx.db.query` does not apply; `$order`, `$limit` and `$offset` are ignored. Before, the only way to count was `(await ctx.db.query(...)).length`, which loaded every row into the function runner and stopped at 10,000. SQLite and Postgres, inside a mutation's transaction too. Under `strictPolicies` the caller needs a read policy that allows the whole entity. Not available on a page's `serverData`.
 * **runtime:** `GET /api/files/<id>` and files in `public/` send an `ETag` (file size and modification time) and answer a matching `If-None-Match` with 304. A `Range` request whose `If-Range` names another version gets the whole file. Before, there was no validator, so a browser or CDN downloaded the whole file again each time its copy expired.
 * **runtime:** `GET /api/files/<id>` on local storage streams the file from disk. Before, each request read the whole file into memory, a range request for a few bytes of a video included.
 * **runtime:** a public file from `GET /api/files/<id>` is sent with `public, max-age=3600` (was 300). `PYLON_PUBLIC_FILE_MAX_AGE_SECS` sets the lifetime.

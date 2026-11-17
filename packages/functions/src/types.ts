@@ -213,6 +213,22 @@ export interface DbReader {
     filter: Record<string, unknown>
   ): Promise<Record<string, unknown>[]>;
 
+  /**
+   * Count the rows that match a filter, in the database. No row is loaded,
+   * and the 10,000-row limit of `query` does not apply. The filter takes
+   * the operators of `query`; `$order`, `$limit` and `$offset` are ignored.
+   *
+   * ```ts
+   * const open = await ctx.db.count("Report", { status: "open" });
+   * const all = await ctx.db.count("Report");
+   * ```
+   *
+   * Under `strictPolicies`, the caller needs a read policy that allows
+   * every row of the entity, because a count cannot be checked row by row.
+   * Not available on a page's `serverData`; call it from a function.
+   */
+  count(entity: string, filter?: Record<string, unknown>): Promise<number>;
+
   /** Execute a graph query with nested relation includes. */
   queryGraph(
     query: Record<string, unknown>

@@ -558,6 +558,7 @@ ctx.requireMember(orgId, { role })     // assert org membership/role — throws 
 ctx.db.get(entity, id)                 // => row | null
 ctx.db.list(entity)                    // => row[]
 ctx.db.query(entity, filter)           // => row[]   filter: { field: value, $gt, $lt, $in, $like, $order, $limit }
+ctx.db.count(entity, filter?)          // => number  counted in SQL, no rows loaded, no 10,000 cap ($order/$limit ignored). Use this, never `(await query(...)).length`. Not on serverData. (≥0.22.74)
 ctx.db.lookup(entity, field, value)    // => row | null
 ctx.db.search(entity, spec)            // => { hits, facetCounts, total }  (needs `.search({...})` on the entity)
 ctx.db.paginate(entity, { cursor, numItems })

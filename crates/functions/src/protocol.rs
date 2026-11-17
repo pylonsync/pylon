@@ -876,6 +876,10 @@ pub enum DbOp {
     Delete,
     Lookup,
     Query,
+    /// Count every row that matches the filter on `data`, in the database.
+    /// `$order`, `$limit` and `$offset` are ignored.
+    /// Response shape: `{ count: number }`.
+    Count,
     QueryGraph,
     Link,
     Unlink,

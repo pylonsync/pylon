@@ -446,6 +446,49 @@ fn query_filtered_supports_not_and_in() {
 }
 
 #[test]
+fn count_matching_counts_every_match_and_ignores_paging() {
+    let Some(url) = pg_url() else {
+        return;
+    };
+    let rt = fresh_runtime(&url);
+    for i in 0..12 {
+        let name = if i < 5 { Some("early") } else { None };
+        rt.insert(
+            "User",
+            &serde_json::json!({"email": format!("c{i:02}@x.com"), "name": name}),
+        )
+        .unwrap();
+    }
+    let count = |filter: serde_json::Value| rt.count_matching("User", &filter).unwrap();
+    assert_eq!(count(serde_json::json!({})), 12);
+    assert_eq!(count(serde_json::json!({"name": "early"})), 5);
+    assert_eq!(count(serde_json::json!({"name": null})), 7);
+    assert_eq!(
+        count(serde_json::json!({"email": {"$gte": "c10@x.com"}})),
+        2
+    );
+    assert_eq!(
+        count(serde_json::json!({"email": {"$in": ["c00@x.com", "c11@x.com", "x"]}})),
+        2
+    );
+    assert_eq!(count(serde_json::json!({"email": {"$in": []}})), 0);
+    // Paging and order belong to `query`. The count is of every match.
+    assert_eq!(
+        count(serde_json::json!({
+            "name": null,
+            "$limit": 2,
+            "$offset": 3,
+            "$order": {"email": "desc"},
+        })),
+        7
+    );
+    let err = rt
+        .count_matching("User", &serde_json::json!({"bad_col": "x"}))
+        .unwrap_err();
+    assert_eq!(err.code, "UNKNOWN_COLUMN");
+}
+
+#[test]
 fn aggregate_count_and_groupby_work_on_postgres() {
     let Some(url) = pg_url() else {
         return;

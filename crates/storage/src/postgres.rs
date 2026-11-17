@@ -98,6 +98,18 @@ pub fn build_query_filtered_sql_pub(
     live::LivePostgresAdapter::build_query_filtered_sql(entity, filter, valid_columns)
 }
 
+/// The `SELECT COUNT(*)` statement for every row that matches `filter`: no
+/// order, limit or offset. Same operators as
+/// [`build_query_filtered_sql_pub`].
+#[cfg(feature = "postgres-live")]
+pub fn build_count_matching_sql_pub(
+    entity: &str,
+    filter: &serde_json::Value,
+    valid_columns: &[String],
+) -> Result<(String, Vec<JsonParam>), StorageError> {
+    live::LivePostgresAdapter::build_filtered_sql(entity, filter, valid_columns, true)
+}
+
 /// Public re-export of the aggregate builder. Returns
 /// `(sql, params, column_names)` — the column_names list drives the
 /// per-row projection in `aggregate_rows_to_json_pub`.
@@ -1842,6 +1854,35 @@ pub mod live {
             filter: &serde_json::Value,
             valid_columns: &[String],
         ) -> Result<(String, Vec<JsonParam>), StorageError> {
+            Self::build_filtered_sql(entity, filter, valid_columns, false)
+        }
+
+        /// Count every row that matches `filter`. `$order`, `$limit` and
+        /// `$offset` are ignored and the query row cap does not apply.
+        pub fn count_matching(
+            &mut self,
+            entity: &str,
+            filter: &serde_json::Value,
+            valid_columns: &[String],
+        ) -> Result<u64, StorageError> {
+            let (sql, params) = Self::build_filtered_sql(entity, filter, valid_columns, true)?;
+            let pg_params = as_pg_params(&params);
+            let row = self
+                .client
+                .query_one(sql.as_str(), &pg_params)
+                .map_err(pg_err)?;
+            Ok(row.get::<_, i64>(0).max(0) as u64)
+        }
+
+        /// The statement for a filter. With `count`, it is `SELECT COUNT(*)`
+        /// over every matching row: no order, limit or offset. Otherwise it
+        /// selects the rows, ordered and bounded by the query row cap.
+        pub(crate) fn build_filtered_sql(
+            entity: &str,
+            filter: &serde_json::Value,
+            valid_columns: &[String],
+            count: bool,
+        ) -> Result<(String, Vec<JsonParam>), StorageError> {
             let empty = serde_json::Map::new();
             let obj = filter.as_object().unwrap_or(&empty);
 
@@ -2054,6 +2095,10 @@ pub mod live {
             } else {
                 format!(" WHERE {}", where_clauses.join(" AND "))
             };
+            if count {
+                let sql = format!("SELECT COUNT(*) FROM {}{}", quote_ident(entity), where_sql);
+                return Ok((sql, params));
+            }
             // Default deterministic order when the caller didn't pass
             // `$order` — matches the SQLite path. Without this,
             // identical queries return rows in different orders across

@@ -802,6 +802,17 @@ function buildReaderOps(
         ssr_read: ssrRead,
       })) as any;
     },
+    async count(entity, filter) {
+      const result = (await rpcDb(callId, {
+        type: "db",
+        op: "count",
+        entity,
+        data: filter ?? {},
+        unsafe_op: unsafeOp,
+        ssr_read: ssrRead,
+      })) as { count: number };
+      return result.count;
+    },
     async queryGraph(query) {
       return (await rpcDb(callId, {
         type: "db",

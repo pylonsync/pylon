@@ -295,6 +295,16 @@ pub trait DataStore: Send + Sync {
 
     fn unlink(&self, entity: &str, id: &str, relation: &str) -> Result<bool, DataError>;
 
+    /// Count every row that matches `filter`, in the database. `$order`,
+    /// `$limit` and `$offset` are ignored, and the query row cap does not
+    /// apply. No row is read into memory.
+    fn count_matching(&self, _entity: &str, _filter: &serde_json::Value) -> Result<u64, DataError> {
+        Err(DataError {
+            code: "NOT_SUPPORTED".into(),
+            message: "count_matching() is not implemented by this backend".into(),
+        })
+    }
+
     /// Count the bounded rows returned by query_filtered with the same filter.
     fn count_filtered(&self, entity: &str, filter: &serde_json::Value) -> Result<usize, DataError> {
         self.query_filtered(entity, filter).map(|rows| rows.len())

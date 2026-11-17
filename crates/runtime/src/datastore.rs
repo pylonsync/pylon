@@ -657,6 +657,10 @@ impl DataStore for Runtime {
         Runtime::count_filtered(self, entity, filter).map_err(into_data_error)
     }
 
+    fn count_matching(&self, entity: &str, filter: &serde_json::Value) -> Result<u64, DataError> {
+        Runtime::count_matching(self, entity, filter).map_err(into_data_error)
+    }
+
     fn query_filtered(
         &self,
         entity: &str,
@@ -3927,6 +3931,12 @@ impl<'a> DataStore for TxStore<'a> {
             .map_err(into_data_error)
     }
 
+    fn count_matching(&self, entity: &str, filter: &serde_json::Value) -> Result<u64, DataError> {
+        self.runtime
+            .count_matching_with_conn(self.conn, entity, filter)
+            .map_err(into_data_error)
+    }
+
     fn query_graph(&self, query: &serde_json::Value) -> Result<serde_json::Value, DataError> {
         self.runtime
             .query_graph_with_conn(self.conn, query)
@@ -4161,6 +4171,10 @@ impl<'a> DataStore for HookEnforcingDataStore<'a> {
 
     fn count_filtered(&self, entity: &str, filter: &serde_json::Value) -> Result<usize, DataError> {
         self.inner.count_filtered(entity, filter)
+    }
+
+    fn count_matching(&self, entity: &str, filter: &serde_json::Value) -> Result<u64, DataError> {
+        self.inner.count_matching(entity, filter)
     }
 
     fn set_op_admin(&self, admin: bool) {
@@ -4742,6 +4756,13 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
         self.inner.count_filtered(entity, filter)
     }
 
+    fn count_matching(&self, entity: &str, filter: &serde_json::Value) -> Result<u64, DataError> {
+        self.runtime
+            .refuse_search_while_index_builds(entity, filter)
+            .map_err(into_data_error)?;
+        self.inner.count_matching(entity, filter)
+    }
+
     fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, DataError> {
         self.validate_write(entity, data)?;
         let data = self.encrypt_for_write(entity, data, true)?;
@@ -4929,6 +4950,9 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
         entity: &str,
         filter: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, DataError> {
+        self.runtime
+            .refuse_search_while_index_builds(entity, filter)
+            .map_err(into_data_error)?;
         let mut rows = self.inner.query_filtered(entity, filter)?;
         for r in rows.iter_mut() {
             self.normalize(entity, r);
@@ -5101,6 +5125,10 @@ impl<'a> DataStore for AutoBroadcastStore<'a> {
 
     fn count_filtered(&self, entity: &str, filter: &serde_json::Value) -> Result<usize, DataError> {
         self.inner.count_filtered(entity, filter)
+    }
+
+    fn count_matching(&self, entity: &str, filter: &serde_json::Value) -> Result<u64, DataError> {
+        self.inner.count_matching(entity, filter)
     }
 
     fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, DataError> {

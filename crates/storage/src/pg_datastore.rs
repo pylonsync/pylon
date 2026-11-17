@@ -730,6 +730,23 @@ impl DataStore for PostgresDataStore {
             .map_err(Self::map_err)
     }
 
+    fn count_matching(&self, entity: &str, filter: &serde_json::Value) -> Result<u64, DataError> {
+        let ent = self
+            .manifest
+            .entities
+            .iter()
+            .find(|e| e.name == entity)
+            .ok_or_else(|| DataError {
+                code: "ENTITY_NOT_FOUND".into(),
+                message: format!("Unknown entity: \"{entity}\""),
+            })?;
+        let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
+
+        let mut conn = self.checkout()?;
+        conn.count_matching(entity, filter, &columns)
+            .map_err(Self::map_err)
+    }
+
     fn query_filtered(
         &self,
         entity: &str,

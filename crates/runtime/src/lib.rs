@@ -4670,6 +4670,61 @@ impl Runtime {
         })
     }
 
+    /// Count every row that matches `filter`. See
+    /// [`pylon_http::DataStore::count_matching`].
+    pub fn count_matching(
+        &self,
+        entity: &str,
+        filter: &serde_json::Value,
+    ) -> Result<u64, RuntimeError> {
+        if let Some(pg) = self.pg_backend() {
+            self.refuse_search_while_index_builds(entity, filter)?;
+            return pylon_http::DataStore::count_matching(&pg.store, entity, filter)
+                .map_err(data_err_to_runtime);
+        }
+        let conn = self.lock_read_conn()?;
+        self.count_matching_with_conn(&conn, entity, filter)
+    }
+
+    /// `$search` reads the FTS index. While the index is being built it
+    /// would miss rows, so the filter is refused.
+    pub(crate) fn refuse_search_while_index_builds(
+        &self,
+        entity: &str,
+        filter: &serde_json::Value,
+    ) -> Result<(), RuntimeError> {
+        if filter.get("$search").is_some() {
+            if let Some(e) = self.search_index_building(entity) {
+                return Err(data_err_to_runtime(e));
+            }
+        }
+        Ok(())
+    }
+
+    /// [`Runtime::count_matching`] on a given SQLite connection, so a count
+    /// inside a transaction sees that transaction's writes.
+    pub fn count_matching_with_conn(
+        &self,
+        conn: &Connection,
+        entity: &str,
+        filter: &serde_json::Value,
+    ) -> Result<u64, RuntimeError> {
+        self.refuse_search_while_index_builds(entity, filter)?;
+        let definition = self.require_entity(entity)?;
+        let (sql, values) = build_filtered_sql(entity, definition, filter, true)?;
+        let params: Vec<&dyn rusqlite::types::ToSql> =
+            values.iter().map(|value| value.as_ref()).collect();
+        let result = conn.prepare_cached(&sql).and_then(|mut statement| {
+            statement.query_row(params.as_slice(), |row| row.get::<_, i64>(0))
+        });
+        result
+            .map(|count| count.max(0) as u64)
+            .map_err(|error| RuntimeError {
+                code: "QUERY_FAILED".into(),
+                message: format!("Count failed: {error}"),
+            })
+    }
+
     /// Execute a graph-style query.
     ///
     /// Input: `{ "User": { "where": { "email": "..." }, "include": { "posts": {} } } }`
@@ -6585,6 +6640,18 @@ fn build_filtered_query_sql(
     ent: &ManifestEntity,
     filter: &serde_json::Value,
 ) -> Result<(String, Vec<Box<dyn rusqlite::types::ToSql>>), RuntimeError> {
+    build_filtered_sql(entity, ent, filter, false)
+}
+
+/// The statement for a filter. With `count`, it is `SELECT COUNT(*)` over
+/// every matching row: no order, limit or offset. Otherwise it selects the
+/// rows, ordered and bounded by the query row cap.
+fn build_filtered_sql(
+    entity: &str,
+    ent: &ManifestEntity,
+    filter: &serde_json::Value,
+    count: bool,
+) -> Result<(String, Vec<Box<dyn rusqlite::types::ToSql>>), RuntimeError> {
     let empty = serde_json::Map::new();
     let obj = filter.as_object().unwrap_or(&empty);
 
@@ -6750,6 +6817,16 @@ fn build_filtered_query_sql(
     } else {
         format!(" WHERE {}", where_clauses.join(" AND "))
     };
+
+    if count {
+        let sql = format!(
+            "SELECT COUNT(*) FROM {}{}{}",
+            quote_ident(entity),
+            join_clause,
+            where_sql
+        );
+        return Ok((sql, values));
+    }
 
     if order_clause.is_empty() {
         order_clause = if fts_order {
@@ -9881,6 +9958,60 @@ mod tests {
             .query_filtered("User", &serde_json::json!({"bad_col": "x"}))
             .unwrap_err();
         assert_eq!(err.code, "INVALID_COLUMN");
+    }
+
+    #[test]
+    fn count_matching_counts_every_match_and_ignores_paging() {
+        let rt = Runtime::in_memory(test_manifest()).unwrap();
+        for i in 0..12 {
+            rt.insert(
+                "User",
+                &serde_json::json!({
+                    "email": format!("u{i:02}@b.com"),
+                    "displayName": if i < 5 { "early" } else { "late" },
+                }),
+            )
+            .unwrap();
+        }
+        let count = |filter: serde_json::Value| rt.count_matching("User", &filter).unwrap();
+        assert_eq!(count(serde_json::json!({})), 12);
+        assert_eq!(count(serde_json::json!({"displayName": "early"})), 5);
+        assert_eq!(
+            count(serde_json::json!({"email": {"$gte": "u10@b.com"}})),
+            2
+        );
+        assert_eq!(
+            count(serde_json::json!({"email": {"$in": ["u00@b.com", "u11@b.com", "x"]}})),
+            2
+        );
+        assert_eq!(count(serde_json::json!({"displayName": "nobody"})), 0);
+        // Paging and order belong to `query`. The count is of every match.
+        assert_eq!(
+            count(serde_json::json!({
+                "displayName": "late",
+                "$limit": 2,
+                "$offset": 3,
+                "$order": {"email": "desc"},
+            })),
+            7
+        );
+        assert_eq!(
+            rt.query_filtered(
+                "User",
+                &serde_json::json!({"displayName": "late", "$limit": 2})
+            )
+            .unwrap()
+            .len(),
+            2
+        );
+        let err = rt
+            .count_matching("User", &serde_json::json!({"bad_col": "x"}))
+            .unwrap_err();
+        assert_eq!(err.code, "INVALID_COLUMN");
+        let err = rt
+            .count_matching("Nope", &serde_json::json!({}))
+            .unwrap_err();
+        assert_eq!(err.code, "ENTITY_NOT_FOUND");
     }
 
     #[test]
