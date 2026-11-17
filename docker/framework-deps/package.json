@@ -6,7 +6,7 @@
   "dependencies": {
     "@resvg/resvg-wasm": "2.6.2",
     "clsx": "2.1.1",
-    "loro-crdt": "1.17.1",
+    "loro-crdt": "1.18.0",
     "satori": "0.33.5"
   },
   "overrides": {

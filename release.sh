@@ -149,7 +149,7 @@ fi
 # list, never from `git add -A`: other sessions work in this tree at the
 # same time and their half-written files must not ride along.
 release_files() {
-	echo Cargo.toml Cargo.lock bun.lock .release-please-manifest.json
+	echo Cargo.toml Cargo.lock bun.lock docker/framework-deps/package.json docker/framework-deps/bun.lock .release-please-manifest.json
 	find crates -maxdepth 2 -name Cargo.toml
 	find packages -maxdepth 3 -name package.json -not -path '*/node_modules/*'
 }
@@ -340,6 +340,11 @@ if command -v bun >/dev/null 2>&1; then
 	bun install --silent || {
 		echo "::warning::bun install failed — bun.lock may be out of date." >&2
 	}
+	# The fresh resolution can move a package the runtime image pins. Move
+	# the image's manifest with it, then run the check CI runs, so a release
+	# commit that CI would refuse is never tagged.
+	tools/sync-image-locks.sh
+	tools/check-image-locks.sh
 fi
 
 # Refresh Cargo.lock so the workspace lockfile matches the just-bumped
