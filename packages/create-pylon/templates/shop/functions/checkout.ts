@@ -54,6 +54,15 @@ export default action<
     const secretKey = ctx.env.STRIPE_SECRET_KEY?.trim();
     const stripeOn = Boolean(secretKey);
 
+    // Validate payment redirects before reserving stock. A rejected URL
+    // must not leave a pending order without a payment session to expire it.
+    if (stripeOn) {
+      const publicUrl = ctx.env.PYLON_PUBLIC_URL || ctx.env.SITE_URL;
+      const urlOpts = { extraOrigins: ctx.env.PYLON_CORS_ORIGIN };
+      assertSafeRedirectUrl(args.successUrl, publicUrl, urlOpts);
+      assertSafeRedirectUrl(args.cancelUrl, publicUrl, urlOpts);
+    }
+
     // One id ties the cart's order lines together AND becomes the Stripe
     // session's client_reference_id, so the webhook settles them as a unit.
     const orderGroupId = crypto.randomUUID();
@@ -82,14 +91,6 @@ export default action<
 
     // Stripe is configured → open a hosted Checkout Session. `price_data` prices
     // each line inline, so there are no Stripe Price objects to pre-create.
-    // assertSafeRedirectUrl blocks an attacker-supplied success/cancel URL from
-    // pointing the post-payment redirect off to a malicious host: it allows the
-    // app's own host (PYLON_PUBLIC_URL / SITE_URL, plus localhost in dev).
-    const publicUrl = ctx.env.PYLON_PUBLIC_URL || ctx.env.SITE_URL;
-    const urlOpts = { extraOrigins: ctx.env.PYLON_CORS_ORIGIN };
-    assertSafeRedirectUrl(args.successUrl, publicUrl, urlOpts);
-    assertSafeRedirectUrl(args.cancelUrl, publicUrl, urlOpts);
-
     // If the session can't be created (bad key, network error, Stripe down) we
     // MUST release the held stock — there's no session that would ever expire to
     // do it for us, so without this the units would be stranded off the shelf.
