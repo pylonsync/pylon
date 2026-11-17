@@ -465,6 +465,7 @@ public actor SyncEngine {
                     // (WS + pull window overlap) is not applied twice.
                     // Parity with TS `enqueueApply`.
                     let fresh = changes.filter { $0.seq > self.cursor.last_seq }
+                    self.noteTouchedForReconcile(fresh)
                     let rows = fresh.isEmpty ? [] : self.store.applyChangesInMemory(fresh)
                     var advance: SyncCursor? = nil
                     if respCursor.last_seq > self.cursor.last_seq {
@@ -610,6 +611,22 @@ public actor SyncEngine {
         for w in waiters { w.resume() }
     }
 
+    /// One per reconcile fetch in flight: the ids of the entity's rows that
+    /// a change event wrote since the fetch started. The fetched rows may be
+    /// older than those events, so the reconcile leaves these rows alone.
+    /// Parity with the TS `reconcileWatches`.
+    private var reconcileWatches: [Int: (entity: String, touched: Set<String>)] = [:]
+    private var nextReconcileWatch = 0
+
+    private func noteTouchedForReconcile(_ changes: [ChangeEvent]) {
+        if reconcileWatches.isEmpty { return }
+        for change in changes {
+            for key in reconcileWatches.keys where reconcileWatches[key]?.entity == change.entity {
+                reconcileWatches[key]?.touched.insert(change.row_id)
+            }
+        }
+    }
+
     private func reconcileInner(_ entities: [String]?) async {
         let names = entities ?? Array(Set(store.entityNames()).union(observedEntities))
         if names.isEmpty { return }
@@ -618,9 +635,13 @@ public actor SyncEngine {
         let tombstoneSeq = cursor.last_seq
         let pendingKeys = await mutations.pendingRowKeys()
         for entity in names {
-            let cursorBefore = cursor.last_seq
             let sessionBefore = sessionSignature()
             let serverRows: [Row]
+            nextReconcileWatch += 1
+            let watch = nextReconcileWatch
+            reconcileWatches[watch] = (entity: entity, touched: [])
+            // Read after the fetch, with no suspension before the apply below.
+            defer { reconcileWatches[watch] = nil }
             do {
                 serverRows = try await fetchEntityRows(entity)
             } catch let err as PylonError {
@@ -631,11 +652,15 @@ public actor SyncEngine {
             } catch {
                 continue // transient — next trigger retries
             }
-            // Drift guards: a WS event advanced the cursor, or the session
-            // flipped, during the fetch. Applying a now-stale snapshot would
-            // clobber fresher state / tombstone newly-visible rows. Skip.
-            if cursor.last_seq != cursorBefore { continue }
+            // The session flipped during the fetch: the rows were read
+            // under the old session and would tombstone rows the new one
+            // can see. Skip.
             if sessionSignature() != sessionBefore { continue }
+            // Change events that arrived during the fetch. The fetch still
+            // applies; only the rows those events wrote are left alone,
+            // because the fetch may have read them before the event. An
+            // entity that changes all the time still reconciles.
+            let touched = reconcileWatches[watch]?.touched ?? []
 
             var serverIds = Set<String>()
             var upserts: [Row] = []
@@ -643,6 +668,7 @@ public actor SyncEngine {
                 guard case let .string(id)? = row["id"], !id.isEmpty else { continue }
                 serverIds.insert(id)
                 if pendingKeys.contains("\(entity)/\(id)") { continue }
+                if touched.contains(id) { continue }
                 let local = store.get(entity, id: id)
                 if local == nil || local! != row { upserts.append(row) }
             }
@@ -650,6 +676,7 @@ public actor SyncEngine {
             for local in store.list(entity) {
                 guard case let .string(id)? = local["id"] else { continue }
                 if pendingKeys.contains("\(entity)/\(id)") { continue }
+                if touched.contains(id) { continue }
                 if !serverIds.contains(id) { removalIds.append(id) }
             }
             if upserts.isEmpty && removalIds.isEmpty { continue }
@@ -1230,6 +1257,7 @@ public actor SyncEngine {
     /// write in flight instead of two per frame.
     private func applyLiveEvent(_ change: ChangeEvent) async {
         if change.seq > cursor.last_seq {
+            noteTouchedForReconcile([change])
             let rows = store.applyChangesInMemory([change])
             cursor = SyncCursor(last_seq: change.seq)
             await persistInOrder(rows, cursor: cursor, wait: false)

@@ -605,26 +605,35 @@ namespace Pylon
             }
             foreach (var entity in entities)
             {
-                for (var tries = 0; tries < 5 && !ct.IsCancellationRequested; tries++)
-                {
-                    if (await ReconcileEntityAsync(entity, ct).ConfigureAwait(SocketFactory.ContinueOnContext)) break;
-                    // A change landed during the fetch: the fetched set is stale. Fetch again.
-                    await SocketFactory.Delay(TimeSpan.FromMilliseconds(100 * (tries + 1)), ct).ConfigureAwait(SocketFactory.ContinueOnContext);
-                }
+                if (ct.IsCancellationRequested) return;
+                await ReconcileEntityAsync(entity, ct).ConfigureAwait(SocketFactory.ContinueOnContext);
             }
         }
 
-        /// <summary>One entity's sweep. False when a change landed during the fetch (try again).</summary>
-        async Task<bool> ReconcileEntityAsync(string entity, CancellationToken ct)
+        /// <summary>
+        /// One per reconcile fetch in flight: the ids of the entity's rows that a change event wrote since the
+        /// fetch started. The fetch may have read past such a row before the event, so the sweep leaves it alone.
+        /// Guarded by _gate. Parity with the TS engine's reconcileWatches.
+        /// </summary>
+        readonly List<(string Entity, HashSet<string> Ids)> _reconcileWatches = new List<(string, HashSet<string>)>();
+
+        /// <summary>
+        /// One entity's sweep. A change event that lands during the fetch does not discard it: the sweep applies,
+        /// and skips the rows such events wrote. An entity that changes all the time still reconciles.
+        /// </summary>
+        async Task ReconcileEntityAsync(string entity, CancellationToken ct)
         {
+            var watch = (Entity: entity, Ids: new HashSet<string>(StringComparer.Ordinal));
+            ulong cursorBefore;
+            int epoch;
+            lock (_gate)
             {
-                ulong cursorBefore;
-                int epoch;
-                lock (_gate)
-                {
-                    cursorBefore = _cursor;
-                    epoch = _epoch;
-                }
+                cursorBefore = _cursor;
+                epoch = _epoch;
+                _reconcileWatches.Add(watch);
+            }
+            try
+            {
                 var server = new HashSet<string>(StringComparer.Ordinal);
                 var dropAll = false;
                 try
@@ -641,7 +650,7 @@ namespace Pylon
                         }
                         after = page.HasMore ? page.NextCursor : null;
                         // A table this large is out of scope for a sweep; keep what is there.
-                        if (++pages > 200) return true;
+                        if (++pages > 200) return;
                     } while (after != null);
                 }
                 catch (PylonException e) when (e.Kind == PylonErrorKind.Http && (e.Status == 404 || e.Status == 403))
@@ -651,16 +660,17 @@ namespace Pylon
                 catch (Exception e) when (!(e is OperationCanceledException))
                 {
                     _client.Dispatcher.Post(() => _client.RaiseLiveError(e));
-                    return true;
+                    return;
                 }
                 var touched = false;
                 lock (_gate)
                 {
-                    if (epoch != _epoch) return true;
-                    if (_cursor != cursorBefore) return false;
-                    if (!_tables.TryGetValue(entity, out var table)) return true;
+                    if (epoch != _epoch) return;
+                    if (!_tables.TryGetValue(entity, out var table)) return;
                     foreach (var id in new List<string>(table.Keys))
                     {
+                        // Written by an event during the fetch: the event is the newer state.
+                        if (!dropAll && watch.Ids.Contains(id)) continue;
                         if (dropAll || !server.Contains(id))
                         {
                             RemoveLocked(entity, id, cursorBefore);
@@ -669,7 +679,10 @@ namespace Pylon
                     }
                 }
                 if (touched) Notify(new HashSet<string> { entity });
-                return true;
+            }
+            finally
+            {
+                lock (_gate) _reconcileWatches.Remove(watch);
             }
         }
 
@@ -693,6 +706,10 @@ namespace Pylon
             var kind = change["kind"].AsStringOr(null);
             var seq = change["seq"].IsNumber ? change["seq"].AsULong() : 0;
             if (entity == null || id == null || kind == null) return;
+            foreach (var watch in _reconcileWatches)
+            {
+                if (watch.Entity == entity) watch.Ids.Add(id);
+            }
             var key = entity + "\u0000" + id;
             if ((kind == "insert" || kind == "update") && _tombstones.TryGetValue(key, out var fence) && seq < fence) return;
             if (!_tables.TryGetValue(entity, out var table))

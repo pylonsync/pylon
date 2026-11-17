@@ -1861,6 +1861,13 @@ export class SyncEngine {
         if (c.seq > high) high = c.seq;
       }
     }
+    if (this.reconcileWatches.size > 0) {
+      for (const c of filtered) {
+        for (const watch of this.reconcileWatches) {
+          if (watch.entity === c.entity) watch.touched.add(c.row_id);
+        }
+      }
+    }
     // Pick the cursor target. Explicit `targetCursor` (from pull) wins
     // — pull's response carries the server's authoritative current_seq
     // even when no changes landed in this window. Otherwise derive
@@ -1949,9 +1956,25 @@ export class SyncEngine {
     tombstoneSeq: number,
     opts: { fromBroadcast?: boolean } = {},
   ): Promise<void> {
+    return this.enqueueReconcilePlan(entity, tombstoneSeq, () => ({ upserts, removalIds }), opts);
+  }
+
+  /** `enqueueReconcile`, with the rows decided when the step runs on the
+   *  apply queue, after every change event queued ahead of it. `plan`
+   *  returns null to apply nothing. */
+  private enqueueReconcilePlan(
+    entity: string,
+    tombstoneSeq: number,
+    plan: () => { upserts: Row[]; removalIds: string[] } | null,
+    opts: { fromBroadcast?: boolean } = {},
+  ): Promise<void> {
     const epoch = this.replicaEpoch;
     return this.chainApply(async () => {
       if (epoch !== this.replicaEpoch) return;
+      const planned = plan();
+      if (planned === null) return;
+      const { upserts, removalIds } = planned;
+      if (upserts.length === 0 && removalIds.length === 0) return;
       const changes = this.store.applyReconcileInMemory(
         entity, upserts, removalIds, tombstoneSeq,
       );
@@ -2811,10 +2834,15 @@ export class SyncEngine {
   private static readonly PENDING_RECONCILE_DEBOUNCE_MS = 100;
   /** At most one hinted reconcile per this interval. */
   private static readonly PENDING_RECONCILE_MIN_INTERVAL_MS = 1_000;
-  /** Backoff for entities whose fetch raced a newer change: doubling from
-   *  the base, capped. */
+  /** Backoff for entities whose fetch failed: doubling from the base,
+   *  capped. */
   private static readonly PENDING_RECONCILE_RETRY_BASE_MS = 250;
   private static readonly PENDING_RECONCILE_RETRY_MAX_MS = 10_000;
+  /** Timed retries in a row before the engine stops asking. The entities
+   *  stay pending, and the next reconcile (reconnect, the page becomes
+   *  visible, a server hint) fetches them again. Without a limit, a tab
+   *  asked a server that kept failing every 10 s for as long as it was open. */
+  private static readonly PENDING_RECONCILE_MAX_RETRIES = 8;
 
   /**
    * Keep `entities` pending until a reconcile of them completes. Used for
@@ -2822,8 +2850,8 @@ export class SyncEngine {
    * membership changed which rows this user may read, and no other event
    * will tell this replica) and for entities an earlier reconcile skipped.
    * Requests are merged, run at most once a second, and an entity whose
-   * fetch failed or raced a newer change is retried with backoff until it
-   * lands or the engine stops.
+   * fetch failed is retried with backoff, up to
+   * PENDING_RECONCILE_MAX_RETRIES times in a row.
    */
   private queuePendingReconcile(entities: string[]): void {
     for (const e of entities) this.pendingReconcile.set(e, ++this.pendingReconcileSeq);
@@ -2868,6 +2896,11 @@ export class SyncEngine {
     }
     this.pendingReconcileRetries = skipped.length > 0 ? this.pendingReconcileRetries + 1 : 0;
     if (this.pendingReconcile.size === 0) return;
+    if (this.pendingReconcileRetries >= SyncEngine.PENDING_RECONCILE_MAX_RETRIES) {
+      // Left pending for the next reconcile. That one starts a new count.
+      this.pendingReconcileRetries = 0;
+      return;
+    }
     const delay =
       skipped.length > 0
         ? Math.min(
@@ -2939,6 +2972,11 @@ export class SyncEngine {
     return batch.promise;
   }
 
+  /** One per reconcile fetch in flight: the ids of the entity's rows that a
+   *  change event wrote since the fetch started. The fetched rows may be
+   *  older than those events, so the reconcile leaves these rows alone. */
+  private reconcileWatches = new Set<{ entity: string; touched: Set<string> }>();
+
   /** Scoped reconcile batch that has not started running yet. */
   private scopedReconcileBatch: {
     entities: Set<string>;
@@ -2965,22 +3003,99 @@ export class SyncEngine {
     // the current cursor means future inserts (which have higher seqs)
     // bypass the tombstone — re-creation server-side still propagates.
     const tombstoneSeq = this.cursor.last_seq;
+    const reconcileEntity = async (entity: string, touched: Set<string>): Promise<void> => {
+      const sessionBeforeFetch = this.session.signature();
+      const epochBeforeFetch = this.replicaEpoch;
+      let serverRows: Row[];
+      let fetchTruncated: boolean;
+      try {
+        const fetched = await this.fetchEntityRows(entity);
+        serverRows = fetched.rows;
+        fetchTruncated = fetched.truncated;
+      } catch (err) {
+        // Network errors are expected (offline, transient 5xx). Skip
+        // this entity; the next reconcile trigger will retry.
+        const status = (err as { status?: number })?.status;
+        if (this.replicaEpoch !== epochBeforeFetch || this.session.signature() !== sessionBeforeFetch) {
+          return;
+        }
+        if (status === 404) {
+          // Entity removed from the manifest — definitive. Drop its rows.
+          this.reconcile403Streak.delete(entity);
+          await this.dropEntity(entity, tombstoneSeq);
+          done.push(entity);
+          return;
+        }
+        if (status === 403) {
+          // A 403 can be TRANSIENT — a bearer caught mid-refresh, a tenant
+          // flip that raced the fetch, or a momentary server-side policy
+          // blip. Nuking every local row on the first one makes the data
+          // flash away and reappear next reconcile (the "rows vanish on
+          // load" bug, on the error path this time). Two gates before we
+          // drop:
+          //   1. If the session flipped during the fetch, the 403 reflects
+          //      the OLD context — never drop; the next reconcile under the
+          //      new session decides (mirrors the success-path guard below).
+          if (this.session.signature() !== sessionBeforeFetch) {
+            return;
+          }
+          //   2. Otherwise require TWO consecutive 403s for this entity, so
+          //      a one-off blip can't wipe the cache. A successful fetch
+          //      (below) resets the streak.
+          const streak = (this.reconcile403Streak.get(entity) ?? 0) + 1;
+          if (streak < 2) {
+            this.reconcile403Streak.set(entity, streak);
+            skipped.push(entity);
+            return;
+          }
+          this.reconcile403Streak.delete(entity);
+          await this.dropEntity(entity, tombstoneSeq);
+          done.push(entity);
+          return;
+        }
+        // Not reconciled (offline, a 5xx): reported, so a server hint
+        // stays pending and retries.
+        skipped.push(entity);
+        return;
+      }
+      // Successful fetch — the entity is readable, so any prior 403 streak
+      // is broken (even if the session check below skips the apply).
+      this.reconcile403Streak.delete(entity);
+      if (this.session.signature() !== sessionBeforeFetch) {
+        // Session changed (token flipped, tenant switched, user
+        // signed out → in, etc.). The rows we fetched reflect the
+        // OLD session's policy view; applying them now would
+        // tombstone rows visible under the NEW session. Bail and let
+        // the session-changed envelope drive the next reconcile.
+        return;
+      }
+      const applied = await this.applyEntityReconcile(
+        entity,
+        serverRows,
+        tombstoneSeq,
+        fetchTruncated,
+        touched,
+        // Checked again when the apply runs: the session can flip while
+        // the apply waits behind queued change events.
+        () => this.session.signature() === sessionBeforeFetch,
+      );
+      if (applied) done.push(entity);
+    };
     // Fan out the per-entity fetches in parallel. Bootstrap reconcile
     // used to serialize 5 entities × ~60ms each → 300ms of dead time
-    // on the critical path before channels render. The per-entity
-    // drift checks (cursor + session signature) are captured inside
-    // each task's closure, so each entity still bails individually
-    // if its OWN fetch raced a WS event or a session flip — parallel
-    // fan-out doesn't weaken either guard.
+    // on the critical path before channels render. Each entity has its
+    // own watch and its own session check, so the fan-out weakens neither.
     await Promise.all(
       names.map(async (entity) => {
-        // Capture cursor + resolved session BEFORE the fetch so we can
-        // detect drift mid-reconcile. Two distinct races:
+        // Two things can change while the paginated fetch is in flight:
         //
-        //   1. Cursor moves: a WS event for this (or another) entity
-        //      landed while the page-paginated fetch was in flight. Our
-        //      snapshot is stale; applying it would clobber the fresher
-        //      WS-delivered row.
+        //   1. Change events arrive (WS, pull, another tab). A fetched row
+        //      may be older than the event that wrote it, and a row the
+        //      event inserted may be missing from the fetch. The watch
+        //      records the ids those events wrote, and the apply leaves
+        //      those rows alone (see applyEntityReconcile). The rest of the
+        //      fetch still applies, so an entity that changes all the time
+        //      (an append-only log) reconciles in one fetch.
         //
         //   2. Session flips: the resolved tenant/user changed while
         //      the fetch was in flight (e.g., the app called
@@ -2995,90 +3110,13 @@ export class SyncEngine {
         //      the session signature changed; the next reconcile
         //      (triggered by session-changed envelope) will re-fetch
         //      under the new context.
-        const cursorBeforeFetch = this.cursor.last_seq;
-        const sessionBeforeFetch = this.session.signature();
-        const epochBeforeFetch = this.replicaEpoch;
-        let serverRows: Row[];
-        let fetchTruncated: boolean;
+        const watch = { entity, touched: new Set<string>() };
+        this.reconcileWatches.add(watch);
         try {
-          const fetched = await this.fetchEntityRows(entity);
-          serverRows = fetched.rows;
-          fetchTruncated = fetched.truncated;
-        } catch (err) {
-          // Network errors are expected (offline, transient 5xx). Skip
-          // this entity; the next reconcile trigger will retry.
-          const status = (err as { status?: number })?.status;
-          if (this.replicaEpoch !== epochBeforeFetch || this.session.signature() !== sessionBeforeFetch) {
-            return;
-          }
-          if (status === 404) {
-            // Entity removed from the manifest — definitive. Drop its rows.
-            this.reconcile403Streak.delete(entity);
-            await this.dropEntity(entity, tombstoneSeq);
-            done.push(entity);
-            return;
-          }
-          if (status === 403) {
-            // A 403 can be TRANSIENT — a bearer caught mid-refresh, a tenant
-            // flip that raced the fetch, or a momentary server-side policy
-            // blip. Nuking every local row on the first one makes the data
-            // flash away and reappear next reconcile (the "rows vanish on
-            // load" bug, on the error path this time). Two gates before we
-            // drop:
-            //   1. If the session flipped during the fetch, the 403 reflects
-            //      the OLD context — never drop; the next reconcile under the
-            //      new session decides (mirrors the success-path guard below).
-            if (this.session.signature() !== sessionBeforeFetch) {
-              return;
-            }
-            //   2. Otherwise require TWO consecutive 403s for this entity, so
-            //      a one-off blip can't wipe the cache. A successful fetch
-            //      (below) resets the streak.
-            const streak = (this.reconcile403Streak.get(entity) ?? 0) + 1;
-            if (streak < 2) {
-              this.reconcile403Streak.set(entity, streak);
-              skipped.push(entity);
-              return;
-            }
-            this.reconcile403Streak.delete(entity);
-            await this.dropEntity(entity, tombstoneSeq);
-            done.push(entity);
-            return;
-          }
-          // Not reconciled (offline, a 5xx): reported, so a server hint
-          // stays pending and retries.
-          skipped.push(entity);
-          return;
+          await reconcileEntity(entity, watch.touched);
+        } finally {
+          this.reconcileWatches.delete(watch);
         }
-        // Successful fetch — the entity is readable, so any prior 403 streak
-        // is broken (even if a drift guard below makes us skip the apply).
-        this.reconcile403Streak.delete(entity);
-        if (this.cursor.last_seq !== cursorBeforeFetch) {
-          // Cursor moved during fetch — at least one WS event for this
-          // (or another) entity landed and might have a fresher value
-          // for a row our snapshot just captured. Bail out for this
-          // entity; reconcile() is triggered again on visibility-change
-          // and reconnect, and the WS event already carried the latest
-          // state for the affected row. Reported, so a server hint can
-          // retry (flushPendingReconcile).
-          skipped.push(entity);
-          return;
-        }
-        if (this.session.signature() !== sessionBeforeFetch) {
-          // Session changed (token flipped, tenant switched, user
-          // signed out → in, etc.). The rows we fetched reflect the
-          // OLD session's policy view; applying them now would
-          // tombstone rows visible under the NEW session. Bail and let
-          // the session-changed envelope drive the next reconcile.
-          return;
-        }
-        await this.applyEntityReconcile(
-          entity,
-          serverRows,
-          tombstoneSeq,
-          fetchTruncated,
-        );
-        done.push(entity);
       }),
     );
     // A full sweep that reconciled every entity matched the replica to the
@@ -3133,12 +3171,43 @@ export class SyncEngine {
     return { rows: out, truncated: true };
   }
 
+  /**
+   * Apply one entity's fetched rows. Resolves false when `stillValid` said
+   * no and nothing was applied.
+   *
+   * The diff against the replica is computed on the apply queue, behind
+   * every change event that arrived during the fetch. At that point
+   * `touched` holds the id of each row such an event wrote. Those rows are
+   * neither upserted nor removed: the fetch may have read them before the
+   * event, and the event is the newer state.
+   */
   private async applyEntityReconcile(
     entity: string,
     serverRows: Row[],
     tombstoneSeq: number,
     truncated: boolean,
-  ): Promise<void> {
+    touched: ReadonlySet<string>,
+    stillValid: () => boolean,
+  ): Promise<boolean> {
+    let applied = true;
+    await this.enqueueReconcilePlan(entity, tombstoneSeq, () => {
+      if (!stillValid()) {
+        applied = false;
+        return null;
+      }
+      return this.planEntityReconcile(entity, serverRows, truncated, touched);
+    });
+    return applied;
+  }
+
+  /** The upserts and removals that match the replica to `serverRows`. Runs
+   *  on the apply queue. */
+  private planEntityReconcile(
+    entity: string,
+    serverRows: Row[],
+    truncated: boolean,
+    touched: ReadonlySet<string>,
+  ): { upserts: Row[]; removalIds: string[] } {
     // Invariant: rows with in-flight or failed mutations are
     // off-limits to reconcile. Neither the upsert branch nor the
     // tombstone branch may touch them. A hydrated offline mutation
@@ -3154,6 +3223,7 @@ export class SyncEngine {
       if (typeof id !== "string" || id.length === 0) continue;
       serverIds.add(id);
       if (pendingKeys.has(`${entity}/${id}`)) continue;
+      if (touched.has(id)) continue;
       const local = this.store.get(entity, id);
       if (!local || rowsDiffer(local, row)) {
         upserts.push(row);
@@ -3183,13 +3253,12 @@ export class SyncEngine {
         const id = (local as { id?: unknown }).id;
         if (typeof id !== "string") continue;
         if (pendingKeys.has(`${entity}/${id}`)) continue;
+        // Inserted by an event after the fetch read past its position.
+        if (touched.has(id)) continue;
         if (!serverIds.has(id)) removalIds.push(id);
       }
     }
-    if (upserts.length === 0 && removalIds.length === 0) return;
-    // Route through the apply queue so a reconcile batch can't
-    // interleave with a fresher WS/pull change event mid-apply.
-    await this.enqueueReconcile(entity, upserts, removalIds, tombstoneSeq);
+    return { upserts, removalIds };
   }
 
   private async dropEntity(

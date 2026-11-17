@@ -1233,6 +1233,150 @@ fn sync_limit_keeps_the_NEWEST_rows() {
     );
 }
 
+/// Every page of a replication cursor fetch (`?sync=1`), as the sync
+/// engine's reconcile reads them: titles in the order received, and the
+/// number of requests.
+fn replication_fetch_titles(port: u16, token: &str, limit: usize) -> (Vec<String>, usize) {
+    let mut titles = Vec::new();
+    let mut requests = 0;
+    let mut after: Option<String> = None;
+    loop {
+        let qs = match &after {
+            Some(a) => format!("?limit={limit}&sync=1&after={a}"),
+            None => format!("?limit={limit}&sync=1"),
+        };
+        let (status, body) = http(
+            port,
+            "GET",
+            &format!("/api/entities/Note/cursor{qs}"),
+            Some(token),
+            None,
+        );
+        assert_eq!(status, 200, "cursor failed: {body}");
+        requests += 1;
+        assert!(requests <= 50, "replication fetch did not end");
+        let r: Value = serde_json::from_str(&body).unwrap();
+        for row in r["data"].as_array().unwrap() {
+            titles.push(row["title"].as_str().unwrap().to_string());
+        }
+        match (r["has_more"].as_bool(), r["next_cursor"].as_str()) {
+            (Some(true), Some(next)) => after = Some(next.to_string()),
+            _ => return (titles, requests),
+        }
+    }
+}
+
+#[test]
+fn the_reconcile_fetch_honours_the_cap() {
+    // The reconcile path applied the entity's scope and not its cap, and
+    // walked from the oldest row. An admin page that watched an entity
+    // capped at 2,000 rows downloaded every in-scope row, about 20,000, on
+    // every reconcile pass.
+    let rt = Arc::new(Runtime::in_memory(scoped_manifest("true", Some(3))).unwrap());
+    let port = start_server(rt);
+    let token = mint_guest(port);
+    for i in 0..10 {
+        insert_note(port, &token, &format!("n{i}"));
+    }
+
+    let (titles, requests) = replication_fetch_titles(port, &token, 100);
+    assert_eq!(titles, vec!["n9", "n8", "n7"], "not the newest 3 rows");
+    assert_eq!(requests, 1);
+
+    // The same set the snapshot pull gives the replica.
+    let (_, resp) = pull(port, &token, 0);
+    let mut snapshot: Vec<String> = resp["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["entity"] == "Note")
+        .map(|c| c["data"]["title"].as_str().unwrap().to_string())
+        .collect();
+    snapshot.sort();
+    let mut fetched = titles.clone();
+    fetched.sort();
+    assert_eq!(fetched, snapshot);
+}
+
+#[test]
+fn the_reconcile_fetch_pages_a_capped_entity_without_passing_the_cap() {
+    let rt = Arc::new(Runtime::in_memory(scoped_manifest("true", Some(5))).unwrap());
+    let port = start_server(rt);
+    let token = mint_guest(port);
+    for i in 0..10 {
+        insert_note(port, &token, &format!("n{i}"));
+    }
+
+    let (titles, requests) = replication_fetch_titles(port, &token, 2);
+    assert_eq!(titles, vec!["n9", "n8", "n7", "n6", "n5"]);
+    assert_eq!(requests, 3);
+}
+
+#[test]
+fn the_reconcile_fetch_cap_counts_rows_the_caller_can_see() {
+    // "mine" rows are the oldest. The newest rows are out of scope and must
+    // not use up the cap.
+    let rt =
+        Arc::new(Runtime::in_memory(scoped_manifest("data.body == \"mine\"", Some(2))).unwrap());
+    let port = start_server(rt);
+    let token = mint_guest(port);
+    for (title, body) in [
+        ("m0", "mine"),
+        ("m1", "mine"),
+        ("m2", "mine"),
+        ("t0", "theirs"),
+        ("t1", "theirs"),
+        ("t2", "theirs"),
+    ] {
+        let (status, resp) = http(
+            port,
+            "POST",
+            "/api/entities/Note",
+            Some(&token),
+            Some(&format!(r#"{{"title":"{title}","body":"{body}"}}"#)),
+        );
+        assert!(status == 200 || status == 201, "insert failed: {resp}");
+    }
+
+    let (titles, _) = replication_fetch_titles(port, &token, 100);
+    assert_eq!(titles, vec!["m2", "m1"]);
+}
+
+#[test]
+fn a_capped_entity_with_fewer_rows_than_the_cap_ends_in_one_request() {
+    let rt = Arc::new(Runtime::in_memory(scoped_manifest("true", Some(50))).unwrap());
+    let port = start_server(rt);
+    let token = mint_guest(port);
+    for i in 0..4 {
+        insert_note(port, &token, &format!("n{i}"));
+    }
+
+    let (titles, requests) = replication_fetch_titles(port, &token, 100);
+    assert_eq!(titles, vec!["n3", "n2", "n1", "n0"]);
+    assert_eq!(requests, 1);
+}
+
+#[test]
+fn a_direct_read_of_a_capped_entity_is_not_capped() {
+    let rt = Arc::new(Runtime::in_memory(scoped_manifest("true", Some(2))).unwrap());
+    let port = start_server(rt);
+    let token = mint_guest(port);
+    for i in 0..6 {
+        insert_note(port, &token, &format!("n{i}"));
+    }
+
+    let (status, body) = http(
+        port,
+        "GET",
+        "/api/entities/Note/cursor?limit=100",
+        Some(&token),
+        None,
+    );
+    assert_eq!(status, 200, "{body}");
+    let r: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(r["data"].as_array().unwrap().len(), 6);
+}
+
 #[test]
 fn a_cap_counts_rows_THIS_CALLER_can_see() {
     // The bug this nearly shipped with: `list_last(cap)` as a single fetch

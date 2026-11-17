@@ -145,7 +145,7 @@ pub fn set_snapshot_scan_budget(rows: usize) {
     SNAPSHOT_SCAN_BUDGET.store(rows, std::sync::atomic::Ordering::Relaxed);
 }
 
-fn snapshot_scan_budget() -> usize {
+pub(crate) fn snapshot_scan_budget() -> usize {
     let overridden = SNAPSHOT_SCAN_BUDGET.load(std::sync::atomic::Ordering::Relaxed);
     if overridden > 0 {
         return overridden;

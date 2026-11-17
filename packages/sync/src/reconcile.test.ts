@@ -730,25 +730,28 @@ describe("sync-reconcile hint", () => {
     engine.stop();
   });
 
-  test("keeps retrying while newer changes race the fetch, then lands", async () => {
+  test("lands in one fetch when newer changes arrive during the fetch", async () => {
     const engine = makeEngine();
-    // The first two fetches race a change event: the cursor moves.
-    const fetches = documentServer((n) => {
-      if (n <= 2) inner(engine).cursor.last_seq += 1;
+    // Every fetch races a change event, as on an entity that is written
+    // all the time. The reconcile used to discard each fetch and retry
+    // with no end.
+    let seq = 0;
+    const fetches = documentServer(() => {
+      seq += 1;
+      void (inner(engine) as unknown as { enqueueApply(c: ChangeEvent[]): Promise<void> }).enqueueApply([
+        { seq, entity: "Document", row_id: `live-${seq}`, kind: "insert", data: { id: `live-${seq}` }, timestamp: "" },
+      ]);
     });
     inner(engine).running = true;
 
     deliver(engine, { type: "sync-reconcile", entities: ["Document"] });
     await sleep(250);
     expect(fetches()).toBe(1);
-    expect(engine.store.list("Document")).toEqual([]);
-    expect([...inner(engine).pendingReconcile.keys()]).toEqual(["Document"]);
-
-    // Retries run at most once a second.
-    await sleep(2300);
-    expect(fetches()).toBe(3);
-    expect(engine.store.list("Document").map((r) => (r as { id: string }).id)).toEqual(["shared"]);
+    expect(engine.store.list("Document").map((r) => (r as { id: string }).id).sort()).toEqual(["live-1", "shared"]);
     expect(inner(engine).pendingReconcile.size).toBe(0);
+
+    await sleep(2300);
+    expect(fetches()).toBe(1);
     engine.stop();
   });
 
@@ -814,37 +817,120 @@ describe("sync-reconcile hint after a failed fetch", () => {
   });
 });
 
-// Any reconcile, not only a hinted one: an entity skipped because its fetch
-// raced a newer change is retried, so a row that became readable while the
-// page was away (a new folder, a share) still arrives.
-describe("a skipped reconcile retries", () => {
+// Change events that arrive while a reconcile fetch is in flight. The fetch
+// still applies. Only the rows those events wrote are left alone: the fetch
+// may have read them before the event.
+describe("a reconcile whose fetch raced change events", () => {
   let restore: (() => void) | null = null;
   afterEach(() => {
     restore?.();
     restore = null;
   });
 
-  test("a startup reconcile that raced a change lands on the retry", async () => {
-    const engine = makeEngine();
-    const inner = engine as unknown as { running: boolean; cursor: { last_seq: number }; pendingReconcile: Set<string> };
+  type Internals = {
+    running: boolean;
+    pendingReconcile: Map<string, number>;
+    enqueueApply(changes: ChangeEvent[]): Promise<void>;
+  };
+
+  /** A server that answers `rows` for Folder, after `during` ran. */
+  function folderServer(rows: Row[], during: () => void) {
     let fetches = 0;
     restore = installFetch(async (url) => {
       if (url.includes("/api/entities/Folder/cursor")) {
         fetches += 1;
-        if (fetches === 1) inner.cursor.last_seq += 1;
-        return { status: 200, body: { data: [{ id: "f1", name: "Team" }], next_cursor: null, has_more: false } };
+        during();
+        return { status: 200, body: { data: rows, next_cursor: null, has_more: false } };
       }
       return { status: 404, body: {} };
+    });
+    return () => fetches;
+  }
+
+  const event = (seq: number, kind: ChangeEvent["kind"], id: string, data?: Row): ChangeEvent => ({
+    seq,
+    entity: "Folder",
+    row_id: id,
+    kind,
+    data,
+    timestamp: "",
+  });
+  const names = (engine: SyncEngine) =>
+    Object.fromEntries(engine.store.list("Folder").map((r) => [(r as { id: string }).id, (r as { name?: string }).name]));
+
+  test("applies the fetch at once, with no retry", async () => {
+    const engine = makeEngine();
+    const inner = engine as unknown as Internals;
+    const fetches = folderServer([{ id: "f1", name: "Team" }], () => {
+      void inner.enqueueApply([event(1, "insert", "other", { id: "other", name: "Other" })]);
     });
     inner.running = true;
 
     await engine.reconcile(["Folder"]);
-    expect(engine.store.list("Folder")).toEqual([]);
-    expect([...inner.pendingReconcile.keys()]).toEqual(["Folder"]);
+    expect(names(engine)).toEqual({ f1: "Team", other: "Other" });
+    expect(inner.pendingReconcile.size).toBe(0);
 
     await new Promise((r) => setTimeout(r, 1300));
-    expect(fetches).toBe(2);
-    expect(engine.store.list("Folder").map((r) => (r as { id: string }).id)).toEqual(["f1"]);
+    expect(fetches()).toBe(1);
+    engine.stop();
+  });
+
+  test("a row an event updated during the fetch keeps the event's value", async () => {
+    const engine = makeEngine();
+    const inner = engine as unknown as Internals;
+    seedStore(engine, "Folder", [{ id: "f1", name: "Old" }]);
+    // The server read f1 before the update, so the fetch carries the old name.
+    folderServer([{ id: "f1", name: "Old" }, { id: "f2", name: "Second" }], () => {
+      void inner.enqueueApply([event(1, "update", "f1", { id: "f1", name: "New" })]);
+    });
+    inner.running = true;
+
+    await engine.reconcile(["Folder"]);
+    expect(names(engine)).toEqual({ f1: "New", f2: "Second" });
+    engine.stop();
+  });
+
+  test("a row an event inserted during the fetch is not removed, and a stale row is", async () => {
+    const engine = makeEngine();
+    const inner = engine as unknown as Internals;
+    seedStore(engine, "Folder", [{ id: "stale", name: "Deleted on the server" }]);
+    // The insert landed after the server read past its position.
+    folderServer([], () => {
+      void inner.enqueueApply([event(1, "insert", "fresh", { id: "fresh", name: "Fresh" })]);
+    });
+    inner.running = true;
+
+    await engine.reconcile(["Folder"]);
+    expect(names(engine)).toEqual({ fresh: "Fresh" });
+    engine.stop();
+  });
+
+  test("a row an event deleted during the fetch is not brought back", async () => {
+    const engine = makeEngine();
+    const inner = engine as unknown as Internals;
+    seedStore(engine, "Folder", [{ id: "f1", name: "Team" }]);
+    // The server read f1 before the delete.
+    folderServer([{ id: "f1", name: "Team" }], () => {
+      void inner.enqueueApply([event(1, "delete", "f1")]);
+    });
+    inner.running = true;
+
+    await engine.reconcile(["Folder"]);
+    expect(names(engine)).toEqual({});
+    engine.stop();
+  });
+
+  test("an event for another entity does not protect this entity's rows", async () => {
+    const engine = makeEngine();
+    const inner = engine as unknown as Internals;
+    seedStore(engine, "Folder", [{ id: "stale", name: "Deleted on the server" }]);
+    folderServer([{ id: "f1", name: "Team" }], () => {
+      void inner.enqueueApply([{ ...event(1, "insert", "stale", { id: "stale" }), entity: "Document" }]);
+    });
+    inner.running = true;
+
+    await engine.reconcile(["Folder"]);
+    expect(names(engine)).toEqual({ f1: "Team" });
     engine.stop();
   });
 });
@@ -892,6 +978,41 @@ describe("pending reconciles end when they should", () => {
     await sleep(1300);
     expect(fetches()).toBe(2);
     engine.stop();
+  });
+
+  test("a server that keeps failing is asked a limited number of times", async () => {
+    const statics = SyncEngine as unknown as {
+      PENDING_RECONCILE_MAX_RETRIES: number;
+      PENDING_RECONCILE_RETRY_BASE_MS: number;
+      PENDING_RECONCILE_MIN_INTERVAL_MS: number;
+    };
+    const saved = { ...statics };
+    statics.PENDING_RECONCILE_MAX_RETRIES = 3;
+    statics.PENDING_RECONCILE_RETRY_BASE_MS = 10;
+    statics.PENDING_RECONCILE_MIN_INTERVAL_MS = 10;
+    try {
+      let failing = true;
+      const fetches = server(() => (failing ? 503 : 200));
+      const engine = makeEngine();
+      const inner = engine as unknown as Internals;
+      inner.running = true;
+      await engine.reconcile(["Document"]);
+      await sleep(600);
+      // The first fetch and three timed retries. Then the engine stops asking.
+      expect(fetches()).toBe(4);
+      expect([...inner.pendingReconcile.keys()]).toEqual(["Document"]);
+
+      // The next reconcile fetches the entity again and clears it.
+      failing = false;
+      await engine.reconcile(["Document"]);
+      expect(fetches()).toBe(5);
+      expect(inner.pendingReconcile.size).toBe(0);
+      engine.stop();
+    } finally {
+      statics.PENDING_RECONCILE_MAX_RETRIES = saved.PENDING_RECONCILE_MAX_RETRIES;
+      statics.PENDING_RECONCILE_RETRY_BASE_MS = saved.PENDING_RECONCILE_RETRY_BASE_MS;
+      statics.PENDING_RECONCILE_MIN_INTERVAL_MS = saved.PENDING_RECONCILE_MIN_INTERVAL_MS;
+    }
   });
 
   test("stop cancels a retry already waiting in the queue", async () => {

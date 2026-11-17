@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Live queries: the sweep after a reconnect applies when a change event
+  arrives during its fetch, and skips only the rows such events wrote.
+  Before, it fetched again up to 5 times and then gave up, so an entity
+  that changes all the time was never swept.
 - Unity Web: sign-in, server functions, live queries, and shards run in
   browser builds over `fetch` and browser WebSockets. `ShardGame` tries
   browser WebTransport first and falls back to WebSockets, with the same

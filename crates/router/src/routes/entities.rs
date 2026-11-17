@@ -14,6 +14,127 @@ use crate::{
 };
 use pylon_http::HttpMethod;
 
+/// Prefix of the cursor a capped replication fetch hands out. The rest is
+/// `<rows emitted so far>.<id to continue below>`. Clients pass a cursor
+/// back unread, so its form is the server's own.
+const TAIL_CURSOR_PREFIX: &str = "tail.";
+
+/// Where a capped replication fetch continues: the rows earlier pages
+/// emitted, and the id to read below. Anything else starts at the newest row.
+fn parse_tail_cursor(after: Option<&str>) -> (usize, Option<String>) {
+    after
+        .and_then(|a| a.strip_prefix(TAIL_CURSOR_PREFIX))
+        .and_then(|rest| rest.split_once('.'))
+        .and_then(|(n, id)| Some((n.parse::<usize>().ok()?, id)))
+        .filter(|(_, id)| !id.is_empty())
+        .map(|(n, id)| (n, Some(id.to_string())))
+        .unwrap_or((0, None))
+}
+
+/// One page of a replication fetch (`?sync=1`) of an entity with a
+/// `sync_limit`: the newest `cap` rows the caller can see, newest first,
+/// `limit` rows per page. The same set the snapshot pull gives a replica
+/// (see the tail walk in routes/sync.rs).
+///
+/// Before this, the fetch applied the entity's scope but not its cap, and
+/// walked the table from the oldest row. A reconcile of an entity capped at
+/// 2,000 rows downloaded every in-scope row, up to the client's 20,000-row
+/// limit, on every pass.
+///
+/// `None`: the store cannot scan backwards and nothing was read.
+fn capped_replication_page(
+    ctx: &RouterContext,
+    entity_name: &str,
+    cap: usize,
+    after: Option<&str>,
+    limit: usize,
+) -> Option<(u16, String)> {
+    const RAW_CHUNK: usize = 200;
+    const FILTERED_CHUNK: usize = 1000;
+    let limit = limit.max(1);
+    let (mut emitted, mut before) = parse_tail_cursor(after);
+    let fresh_start = before.is_none();
+    let scope_filter = ctx
+        .policy_engine
+        .sync_scope_filter(entity_name, ctx.auth_ctx);
+    let chunk = match scope_filter {
+        Some(_) => FILTERED_CHUNK,
+        None => RAW_CHUNK,
+    };
+    // Rows read per request, visible or not, as the snapshot bounds them.
+    let scan_budget = crate::routes::sync::snapshot_scan_budget();
+    let manifest = ctx.store.manifest();
+    let auth_user = &manifest.auth.user;
+    let mut page: Vec<serde_json::Value> = Vec::new();
+    let mut scanned = 0usize;
+    let mut exhausted = false;
+    'walk: while emitted < cap {
+        let read = match &scope_filter {
+            Some(filter) => {
+                ctx.store
+                    .list_last_filtered(entity_name, before.as_deref(), chunk, filter)
+            }
+            None => ctx.store.list_last(entity_name, before.as_deref(), chunk),
+        };
+        let rows = match read {
+            Ok(Some(rows)) => rows,
+            Ok(None) if fresh_start && page.is_empty() => return None,
+            Ok(None) => {
+                exhausted = true;
+                break;
+            }
+            Err(e) => return Some((400, json_error(&e.code, &e.message))),
+        };
+        let last_chunk = rows.len() < chunk;
+        for row in rows {
+            let Some(row_id) = row.get("id").and_then(|v| v.as_str()).map(str::to_string) else {
+                continue;
+            };
+            before = Some(row_id);
+            scanned += 1;
+            let visible = matches!(
+                ctx.policy_engine
+                    .check_entity_read(entity_name, ctx.auth_ctx, Some(&row)),
+                pylon_policy::PolicyResult::Allowed
+            ) && matches!(
+                ctx.policy_engine
+                    .check_sync_scope(entity_name, ctx.auth_ctx, Some(&row)),
+                pylon_policy::PolicyResult::Allowed
+            );
+            if visible {
+                page.push(crate::project_row_for_replication(
+                    manifest,
+                    auth_user,
+                    entity_name,
+                    row,
+                ));
+                emitted += 1;
+                if emitted >= cap || page.len() >= limit {
+                    break 'walk;
+                }
+            }
+            if scanned >= scan_budget {
+                break 'walk;
+            }
+        }
+        if last_chunk {
+            exhausted = true;
+            break;
+        }
+    }
+    let has_more = emitted < cap && !exhausted;
+    let next_cursor = match (&before, has_more) {
+        (Some(id), true) => Some(format!("{TAIL_CURSOR_PREFIX}{emitted}.{id}")),
+        _ => None,
+    };
+    let mut response = serde_json::json!({
+        "next_cursor": next_cursor,
+        "has_more": has_more,
+    });
+    response["data"] = serde_json::Value::Array(page);
+    Some((200, response.to_string()))
+}
+
 pub(crate) fn handle(
     ctx: &RouterContext,
     method: HttpMethod,
@@ -114,6 +235,26 @@ pub(crate) fn handle(
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(20)
                     .min(limit_cap);
+
+                // A capped entity (`sync: { limit }`) replicates the newest
+                // `cap` rows the caller can see. `None` means the store
+                // cannot scan backwards: the ascending walk below answers.
+                if replication_fetch {
+                    let cap = ctx
+                        .store
+                        .manifest()
+                        .entities
+                        .iter()
+                        .find(|e| e.name == entity_name)
+                        .and_then(|e| e.sync_limit);
+                    if let Some(cap) = cap {
+                        if let Some(response) =
+                            capped_replication_page(ctx, entity_name, cap, after, limit)
+                        {
+                            return Some(response);
+                        }
+                    }
+                }
 
                 // Scan raw pages until we accumulate enough visible rows
                 // after the read-policy filter or exhaust the source.

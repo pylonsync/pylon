@@ -432,7 +432,7 @@ namespace Pylon.Tests
         }
 
         [Fact]
-        public async Task ASweepThatAChangeInvalidatesRunsAgain()
+        public async Task ASweepAppliesInOneFetchWhenAChangeLandsDuringIt()
         {
             var (client, sync, server) = Make();
             server.Seed("Note", "n1", "insert", Data("one"));
@@ -441,14 +441,36 @@ namespace Pylon.Tests
             await sync.PullAsync();
             // n1 was revoked while the socket was down; during the first sweep a change to n2 lands.
             server.Hidden.Add("n1");
+            // Every fetch races a change, as on an entity that is written all the time.
+            var fetches = 0;
+            server.BeforeCursor = () =>
+            {
+                fetches++;
+                sync.OnText(Change((ulong)(2 + fetches), "n2", "update", Data("two-v" + (1 + fetches))).ToJson());
+            };
+            await sync.ReconcileForTestAsync();
+            Assert.Equal(1, fetches);
+            Assert.False(sync.HasRow("Note", "n1"));
+            Assert.Equal("two-v2", sync.Row("Note", "n2")!["title"].AsString());
+            client.Dispose();
+        }
+
+        [Fact]
+        public async Task ASweepKeepsARowAnEventInsertedDuringTheFetch()
+        {
+            var (client, sync, server) = Make();
+            server.Seed("Note", "n1", "insert", Data("one"));
+            var q = sync.Attach("Note", new LiveQueryOptions());
+            await sync.PullAsync();
+            // n9 is inserted after the server read past its position: the fetch does not hold it.
             server.BeforeCursor = () =>
             {
                 server.BeforeCursor = null;
-                sync.OnText(Change(3, "n2", "update", Data("two-v2")).ToJson());
+                sync.OnText(Change(2, "n9", "insert", Data("nine")).ToJson());
             };
             await sync.ReconcileForTestAsync();
-            Assert.False(sync.HasRow("Note", "n1"));
-            Assert.Equal("two-v2", sync.Row("Note", "n2")!["title"].AsString());
+            Assert.True(sync.HasRow("Note", "n1"));
+            Assert.True(sync.HasRow("Note", "n9"));
             client.Dispose();
         }
 
