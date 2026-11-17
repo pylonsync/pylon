@@ -121,6 +121,13 @@ export default mutation({{
         ),
     )
     .unwrap();
+    std::fs::write(
+        fns.join("ready.ts"),
+        format!(
+            "import {{ query }} from \"{define}\";\nexport default query({{ auth: \"public\", handler: async () => ({{ ok: true }}) }});\n"
+        ),
+    )
+    .unwrap();
     fns
 }
 
@@ -192,8 +199,15 @@ fn edits_in_a_window_run_the_hook_once() {
         assert!(Instant::now() < deadline, "server never came up");
         std::thread::sleep(Duration::from_millis(100));
     }
-    // Let the functions pool load, so the first run is not a retry.
-    std::thread::sleep(Duration::from_secs(2));
+    // Wait until the functions pool answers, so the first run of the hook
+    // is not a retry. A slow machine can take longer than a window to load it.
+    loop {
+        if request(port, "POST", "/api/fn/ready", None, "{}").0 == 200 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the functions pool never loaded");
+        std::thread::sleep(Duration::from_millis(200));
+    }
 
     let first_write = now_secs();
     let (status, body) = request(
@@ -225,7 +239,7 @@ fn edits_in_a_window_run_the_hook_once() {
             .filter(|r| r["noteId"] == note.as_str())
             .count()
     };
-    let deadline = Instant::now() + Duration::from_secs(WINDOW * 2 + 20);
+    let deadline = Instant::now() + Duration::from_secs(WINDOW * 2 + 60);
     while runs(&rt) < windows {
         assert!(
             Instant::now() < deadline,

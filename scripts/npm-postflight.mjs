@@ -5,7 +5,9 @@ import { setTimeout as sleep } from 'node:timers/promises';
 // Check each version independently so propagation delays do not add together.
 export async function waitForPackages(packages, {
   registry = 'https://registry.npmjs.org',
-  timeoutMs = 600_000,
+  // A large package (the 65 MB CLI binaries) can take 25 minutes to appear
+  // after the publish succeeds.
+  timeoutMs = 1_800_000,
   intervalMs = 15_000,
   requestTimeoutMs = 10_000,
   log = console.log,
