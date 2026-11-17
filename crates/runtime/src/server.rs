@@ -1650,6 +1650,25 @@ fn file_is_public(
 
 const DEFAULT_UPLOAD_MAX_BYTES: usize = 200 * 1024 * 1024;
 
+/// Seconds a browser or shared cache may keep a public file before it asks
+/// again. A deleted or replaced public file can be served from a cache for
+/// up to this long.
+const DEFAULT_PUBLIC_FILE_MAX_AGE_SECS: u64 = 3600;
+
+fn public_file_cache_control_from(value: Option<&str>) -> String {
+    let seconds = value
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_PUBLIC_FILE_MAX_AGE_SECS);
+    format!("public, max-age={seconds}")
+}
+
+/// `Cache-Control` for a public file from `GET /api/files/<id>`.
+/// `PYLON_PUBLIC_FILE_MAX_AGE_SECS` sets the lifetime.
+fn public_file_cache_control() -> String {
+    let configured = std::env::var("PYLON_PUBLIC_FILE_MAX_AGE_SECS").ok();
+    public_file_cache_control_from(configured.as_deref())
+}
+
 /// A room member with no join, presence update, or heartbeat for this
 /// long is removed by the idle sweep.
 const ROOMS_IDLE_TIMEOUT_SECS: u64 = 120;
@@ -1784,6 +1803,16 @@ mod file_auth_tests {
             Some("u1"),
             None,
         ));
+    }
+
+    #[test]
+    fn public_file_cache_lifetime_is_configurable() {
+        use super::public_file_cache_control_from as cache;
+        assert_eq!(cache(None), "public, max-age=3600");
+        assert_eq!(cache(Some("86400")), "public, max-age=86400");
+        assert_eq!(cache(Some(" 0 ")), "public, max-age=0");
+        assert_eq!(cache(Some("-1")), "public, max-age=3600");
+        assert_eq!(cache(Some("a day")), "public, max-age=3600");
     }
 
     #[test]
@@ -7455,22 +7484,37 @@ fn start_server(
                     // Accept-Ranges. Mobile browsers range-request media
                     // before playing and refuse a 200; desktop tolerates it,
                     // which hides the problem until someone opens a phone.
+                    //
+                    // A public file is the same bytes for every reader, so
+                    // shared caches may keep it.
+                    let cache = if public_ok {
+                        public_file_cache_control()
+                    } else {
+                        "private, max-age=0, must-revalidate".to_string()
+                    };
+                    let etag = storage.entity_tag(asset_id);
+                    if crate::frontend::client_has_current_copy(&request, etag.as_deref()) {
+                        if let Some(etag) = etag.as_deref() {
+                            mt.record_request("GET", 304);
+                            crate::frontend::respond_not_modified(
+                                request,
+                                etag,
+                                &cache,
+                                &cors_origin,
+                            );
+                            return;
+                        }
+                    }
                     match storage.get(asset_id) {
                         Ok(content) => {
                             let ct = stored_content_type(storage, asset_id);
                             mt.record_request("GET", 200);
-                            // A public file is the same bytes for every
-                            // reader, so shared caches may keep it briefly.
-                            let cache = if public_ok {
-                                "public, max-age=300"
-                            } else {
-                                "private, max-age=0, must-revalidate"
-                            };
                             crate::frontend::respond_user_file(
                                 request,
                                 content,
                                 &ct,
-                                cache,
+                                &cache,
+                                etag.as_deref(),
                                 &cors_origin,
                             );
                             return;

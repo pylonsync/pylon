@@ -464,6 +464,66 @@ pub(crate) fn respond_static_file(
     );
 }
 
+/// A body `respond_static_reader` can serve.
+pub(crate) trait StaticBody: std::io::Read + std::io::Seek + Send + 'static {
+    /// `ETag` value for the body, quotes included. `None` sends no
+    /// validator, so every request gets the full body.
+    fn entity_tag(&self) -> Option<String> {
+        None
+    }
+}
+
+impl StaticBody for std::fs::File {
+    fn entity_tag(&self) -> Option<String> {
+        pylon_storage::files::entity_tag_for(&self.metadata().ok()?)
+    }
+}
+
+impl StaticBody for std::io::Cursor<Vec<u8>> {}
+
+/// Strip the weak marker from an entity tag.
+fn strong_part(tag: &str) -> &str {
+    let tag = tag.trim();
+    tag.strip_prefix("W/").unwrap_or(tag)
+}
+
+/// Whether an `If-None-Match` value names `etag` (RFC 9110 weak comparison).
+fn if_none_match_names(value: &str, etag: &str) -> bool {
+    let value = value.trim();
+    value == "*"
+        || value
+            .split(',')
+            .any(|candidate| strong_part(candidate) == strong_part(etag))
+}
+
+fn request_header<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
+    request
+        .headers()
+        .iter()
+        .find(|header| header.field.as_str().as_str().eq_ignore_ascii_case(name))
+        .map(|header| header.value.as_str())
+}
+
+/// Whether the client already holds the body `etag` names, so a 304 answers
+/// the request.
+pub(crate) fn client_has_current_copy(request: &Request, etag: Option<&str>) -> bool {
+    match (etag, request_header(request, "If-None-Match")) {
+        (Some(etag), Some(value)) => if_none_match_names(value, etag),
+        _ => false,
+    }
+}
+
+/// Answer 304 for a request whose `If-None-Match` named `etag`.
+pub(crate) fn respond_not_modified(request: Request, etag: &str, cache: &str, cors_origin: &str) {
+    let response = Response::empty(304)
+        .with_header(Header::from_bytes("ETag", etag).unwrap())
+        .with_header(Header::from_bytes("Cache-Control", cache).unwrap())
+        .with_header(
+            Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes()).unwrap(),
+        );
+    let _ = request.respond(response);
+}
+
 /// Serve an uploaded file from the app's origin. The uploader chose its
 /// bytes and declared type, so it must not be able to run script here:
 ///
@@ -481,6 +541,7 @@ pub(crate) fn respond_user_file(
     bytes: Vec<u8>,
     declared_type: &str,
     cache: &str,
+    etag: Option<&str>,
     cors_origin: &str,
 ) {
     let media = pylon_storage::files::normalize_media_type(declared_type)
@@ -507,6 +568,7 @@ pub(crate) fn respond_user_file(
         total,
         content_type,
         cache,
+        etag,
         cors_origin,
         extra,
     );
@@ -526,7 +588,7 @@ fn open_static_file(path: &Path) -> std::io::Result<(std::fs::File, usize)> {
     Ok((file, length))
 }
 
-fn respond_static_reader<R: std::io::Read + std::io::Seek + Send + 'static>(
+fn respond_static_reader<R: StaticBody>(
     request: Request,
     reader: R,
     total: usize,
@@ -534,12 +596,14 @@ fn respond_static_reader<R: std::io::Read + std::io::Seek + Send + 'static>(
     cache: &str,
     cors_origin: &str,
 ) {
+    let etag = reader.entity_tag();
     respond_reader_with_headers(
         request,
         reader,
         total,
         content_type,
         cache,
+        etag.as_deref(),
         cors_origin,
         Vec::new(),
     );
@@ -547,24 +611,39 @@ fn respond_static_reader<R: std::io::Read + std::io::Seek + Send + 'static>(
 
 /// [`respond_static_reader`] plus `extra` headers on every response,
 /// partial and unsatisfiable ones included.
+///
+/// With an `etag`, every 200 and 206 carries it, a matching `If-None-Match`
+/// gets 304, and a `Range` request whose `If-Range` names another version
+/// gets the full body (RFC 9110 section 13.1.5).
+#[allow(clippy::too_many_arguments)]
 fn respond_reader_with_headers<R: std::io::Read + std::io::Seek + Send + 'static>(
     request: Request,
     mut reader: R,
     total: usize,
     content_type: &str,
     cache: &str,
+    etag: Option<&str>,
     cors_origin: &str,
     extra: Vec<Header>,
 ) {
-    let spec = request
-        .headers()
-        .iter()
-        .find_map(|header| {
-            let field = header.field.as_str();
-            (field == "Range" || field == "range")
-                .then(|| parse_byte_range(header.value.as_str(), total as u64))
-        })
-        .unwrap_or(RangeSpec::Full);
+    if client_has_current_copy(&request, etag) {
+        if let Some(etag) = etag {
+            respond_not_modified(request, etag, cache, cors_origin);
+            return;
+        }
+    }
+    // `If-Range` takes a strong comparison, and a date never equals a tag.
+    let range_is_current = match request_header(&request, "If-Range") {
+        Some(expected) => etag.is_some_and(|etag| expected.trim() == etag),
+        None => true,
+    };
+    let spec = if range_is_current {
+        request_header(&request, "Range")
+            .map(|value| parse_byte_range(value, total as u64))
+            .unwrap_or(RangeSpec::Full)
+    } else {
+        RangeSpec::Full
+    };
     let ct = Header::from_bytes("Content-Type", content_type.as_bytes()).unwrap();
     let cors = Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes()).unwrap();
     let cache_h = Header::from_bytes("Cache-Control", cache).unwrap();
@@ -591,6 +670,11 @@ fn respond_reader_with_headers<R: std::io::Read + std::io::Seek + Send + 'static
         }
         RangeSpec::Full => (200, total, vec![ct, cors, cache_h, accept_ranges]),
     };
+    if status != 416 {
+        if let Some(etag) = etag {
+            headers.push(Header::from_bytes("ETag", etag).unwrap());
+        }
+    }
     headers.extend(extra);
     let response = Response::new(
         tiny_http::StatusCode(status),
@@ -5857,6 +5941,85 @@ mod tests {
     }
 
     #[test]
+    fn a_file_on_disk_revalidates_with_its_entity_tag() {
+        use std::io::{Read, Write};
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("hero.webp");
+        std::fs::write(&path, b"image bytes").unwrap();
+        let etag = {
+            let (file, _) = open_static_file(&path).unwrap();
+            file.entity_tag().unwrap()
+        };
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        let served = path.clone();
+        let worker = std::thread::spawn(move || {
+            for _ in 0..3 {
+                let request = server
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap()
+                    .unwrap();
+                let (file, length) = open_static_file(&served).unwrap();
+                respond_static_reader(
+                    request,
+                    file,
+                    length,
+                    "image/webp",
+                    "public, max-age=3600",
+                    "https://example.test",
+                );
+            }
+        });
+        let fetch = |header: String| {
+            let mut client = std::net::TcpStream::connect(addr).unwrap();
+            client
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            write!(
+                client,
+                "GET /hero.webp HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{header}\r\n"
+            )
+            .unwrap();
+            let mut wire = String::new();
+            client.read_to_string(&mut wire).unwrap();
+            let (head, body) = wire.split_once("\r\n\r\n").unwrap();
+            (head.to_ascii_lowercase(), body.to_string())
+        };
+
+        let (head, body) = fetch(String::new());
+        assert!(head.starts_with("http/1.1 200"), "{head}");
+        assert!(head.contains(&format!("etag: {etag}")), "{head}");
+        assert_eq!(body, "image bytes");
+
+        let (head, body) = fetch(format!("If-None-Match: {etag}\r\n"));
+        assert!(head.starts_with("http/1.1 304"), "{head}");
+        assert!(head.contains(&format!("etag: {etag}")), "{head}");
+        assert!(
+            head.contains("cache-control: public, max-age=3600"),
+            "{head}"
+        );
+        assert!(body.is_empty());
+
+        // A rewrite of the file changes the tag, so the old one gets the body.
+        std::fs::write(&path, b"new image bytes!").unwrap();
+        let (head, body) = fetch(format!("If-None-Match: {etag}\r\n"));
+        assert!(head.starts_with("http/1.1 200"), "{head}");
+        assert_eq!(body, "new image bytes!");
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn if_none_match_uses_weak_comparison() {
+        assert!(if_none_match_names("\"a\"", "\"a\""));
+        assert!(if_none_match_names("W/\"a\"", "\"a\""));
+        assert!(if_none_match_names("\"b\", \"a\"", "\"a\""));
+        assert!(if_none_match_names("*", "\"a\""));
+        assert!(!if_none_match_names("\"b\"", "\"a\""));
+        assert!(!if_none_match_names("a", "\"a\""));
+        assert!(!if_none_match_names("", "\"a\""));
+    }
+
+    #[test]
     fn a_small_range_reads_only_requested_bytes_from_a_large_file() {
         use std::io::{Read, Seek, SeekFrom, Write};
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -5876,6 +6039,7 @@ mod tests {
                 self.file.seek(position)
             }
         }
+        impl StaticBody for CountedFile {}
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("large.bin");
         let mut file = std::fs::File::create(&path).unwrap();

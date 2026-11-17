@@ -140,11 +140,34 @@ pub trait FileStorage: Send + Sync {
         None
     }
 
+    /// Validator for the bytes stored at `id`, as an HTTP `ETag` value
+    /// (quotes included). It changes when the bytes change, so
+    /// `GET /api/files/<id>` can answer a matching `If-None-Match` with 304.
+    ///
+    /// Returns `None` for backends that serve their own bytes, and for a file
+    /// that does not exist.
+    fn entity_tag(&self, _id: &str) -> Option<String> {
+        None
+    }
+
     /// Whether the router should enforce per-file owner checks against this
     /// backend. Local disk: yes. Stack0: no (its CDN auth handles access).
     fn requires_owner_check(&self) -> bool {
         false
     }
+}
+
+/// HTTP `ETag` value for a file on disk, from its size and modification
+/// time. A write that changes either one changes the tag. Returns `None`
+/// when the platform reports no modification time.
+pub fn entity_tag_for(metadata: &std::fs::Metadata) -> Option<String> {
+    let modified = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some(format!("\"{:x}-{:x}\"", metadata.len(), modified))
 }
 
 /// The error a bounded read returns for a file over its limit.
@@ -704,6 +727,12 @@ impl FileStorage for LocalFileStorage {
             return None;
         }
         Some(trimmed.to_string())
+    }
+
+    fn entity_tag(&self, id: &str) -> Option<String> {
+        validate_local_id(id).ok()?;
+        let metadata = std::fs::metadata(self.dir.join(id)).ok()?;
+        metadata.is_file().then(|| entity_tag_for(&metadata))?
     }
 
     fn requires_owner_check(&self) -> bool {
@@ -1308,6 +1337,23 @@ mod tests {
         assert_eq!(storage.content_type(&stored.id), None);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_entity_tag_changes_with_the_bytes_and_ends_with_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = LocalFileStorage::new(dir.path().to_str().unwrap(), "/api/files");
+        let stored = storage.store("a.webp", b"first", "image/webp").unwrap();
+        let first = storage.entity_tag(&stored.id).unwrap();
+        assert!(first.starts_with('"') && first.ends_with('"'), "{first}");
+        assert_eq!(storage.entity_tag(&stored.id).unwrap(), first);
+
+        storage.write_bytes(&stored.id, b"second, longer").unwrap();
+        assert_ne!(storage.entity_tag(&stored.id).unwrap(), first);
+
+        storage.delete(&stored.id).unwrap();
+        assert_eq!(storage.entity_tag(&stored.id), None);
+        assert_eq!(storage.entity_tag("../escape"), None);
     }
 
     #[test]

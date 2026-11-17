@@ -126,8 +126,12 @@ fn server() -> (u16, String) {
 }
 
 fn init(mime: &str, size: usize) -> Reply {
+    init_with_visibility(mime, size, "public")
+}
+
+fn init_with_visibility(mime: &str, size: usize, visibility: &str) -> Reply {
     let (port, token) = server();
-    let body = json!({"filename": "f", "mimeType": mime, "size": size, "visibility": "public"});
+    let body = json!({"filename": "f", "mimeType": mime, "size": size, "visibility": visibility});
     request(
         port,
         "POST",
@@ -136,6 +140,39 @@ fn init(mime: &str, size: usize) -> Reply {
         Some(&token),
         "application/json",
     )
+}
+
+/// Upload `bytes` declared as `mime` and return the file's download path.
+fn upload(mime: &str, bytes: &[u8], visibility: &str) -> String {
+    let (port, token) = server();
+    let r = init_with_visibility(mime, bytes.len(), visibility);
+    assert_eq!(r.status, 200, "init {mime}: {}", r.body);
+    let init: Value = serde_json::from_str(&r.body).unwrap();
+    let asset = init["assetId"].as_str().unwrap();
+    let upload_path = init["uploadUrl"]
+        .as_str()
+        .unwrap()
+        .trim_start_matches(&format!("http://127.0.0.1:{port}"))
+        .to_string();
+    let r = request(port, "PUT", &upload_path, bytes, Some(&token), mime);
+    assert!(r.status < 300, "put: {} {}", r.status, r.body);
+    let r = request(
+        port,
+        "POST",
+        "/api/files/confirm",
+        json!({"assetId": asset}).to_string().as_bytes(),
+        Some(&token),
+        "application/json",
+    );
+    assert_eq!(r.status, 200, "confirm: {}", r.body);
+    format!("/api/files/{asset}")
+}
+
+/// `GET path` with extra request headers, each given as `Name: value`.
+fn get_with(path: &str, token: Option<&str>, headers: &[&str]) -> Reply {
+    let (port, _) = server();
+    let extra: String = headers.iter().map(|h| format!("\r\n{h}")).collect();
+    request(port, "GET", path, b"", token, &format!("text/plain{extra}"))
 }
 
 /// Upload `bytes` declared as `mime` and return the download response.
@@ -287,4 +324,95 @@ fn a_declared_type_that_is_not_a_media_type_is_refused() {
         assert_eq!(r.status, 400, "{mime:?}: {}", r.body);
         assert!(r.body.contains("INVALID_MIME_TYPE"), "{mime:?}: {}", r.body);
     }
+}
+
+#[test]
+fn a_public_file_is_cacheable_and_revalidates_with_its_entity_tag() {
+    let path = upload("image/webp", b"RIFF....WEBP", "public");
+    let first = get_with(&path, None, &[]);
+    assert_eq!(first.status, 200);
+    assert_eq!(
+        first.headers.get("cache-control").map(String::as_str),
+        Some("public, max-age=3600")
+    );
+    let etag = first.headers.get("etag").expect("etag").clone();
+    assert!(etag.starts_with('"') && etag.ends_with('"'), "{etag}");
+
+    let again = get_with(&path, None, &[&format!("If-None-Match: {etag}")]);
+    assert_eq!(again.status, 304);
+    assert!(again.body.is_empty());
+    assert_eq!(again.headers.get("etag"), Some(&etag));
+    assert_eq!(
+        again.headers.get("cache-control").map(String::as_str),
+        Some("public, max-age=3600")
+    );
+    // A shared cache revalidates with the weak form after it compresses.
+    let weak = get_with(
+        &path,
+        None,
+        &[&format!("If-None-Match: \"other\", W/{etag}")],
+    );
+    assert_eq!(weak.status, 304);
+
+    let stale = get_with(&path, None, &["If-None-Match: \"other\""]);
+    assert_eq!(stale.status, 200);
+    assert_eq!(stale.body, "RIFF....WEBP");
+}
+
+#[test]
+fn an_entity_tag_does_not_open_a_private_file() {
+    let (_, token) = server();
+    let path = upload("image/webp", b"private bytes", "private");
+    let owner = get_with(&path, Some(&token), &[]);
+    assert_eq!(owner.status, 200);
+    assert_eq!(
+        owner.headers.get("cache-control").map(String::as_str),
+        Some("private, max-age=0, must-revalidate")
+    );
+    let etag = owner.headers.get("etag").expect("etag").clone();
+
+    let stranger = get_with(&path, None, &[&format!("If-None-Match: {etag}")]);
+    assert_eq!(stranger.status, 401);
+    let wildcard = get_with(&path, None, &["If-None-Match: *"]);
+    assert_eq!(wildcard.status, 401);
+
+    let owner_again = get_with(&path, Some(&token), &[&format!("If-None-Match: {etag}")]);
+    assert_eq!(owner_again.status, 304);
+    assert_eq!(
+        owner_again.headers.get("cache-control").map(String::as_str),
+        Some("private, max-age=0, must-revalidate")
+    );
+}
+
+#[test]
+fn a_range_request_for_another_version_gets_the_whole_file() {
+    let path = upload("image/webp", b"0123456789", "public");
+    let etag = get_with(&path, None, &[])
+        .headers
+        .get("etag")
+        .expect("etag")
+        .clone();
+
+    let current = get_with(
+        &path,
+        None,
+        &["Range: bytes=2-4", &format!("If-Range: {etag}")],
+    );
+    assert_eq!(current.status, 206);
+    assert_eq!(current.body, "234");
+    assert_eq!(current.headers.get("etag"), Some(&etag));
+
+    let replaced = get_with(&path, None, &["Range: bytes=2-4", "If-Range: \"other\""]);
+    assert_eq!(replaced.status, 200);
+    assert_eq!(replaced.body, "0123456789");
+
+    let dated = get_with(
+        &path,
+        None,
+        &[
+            "Range: bytes=2-4",
+            "If-Range: Tue, 17 Nov 2026 17:00:00 GMT",
+        ],
+    );
+    assert_eq!(dated.status, 200);
 }

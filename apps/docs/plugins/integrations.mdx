@@ -102,6 +102,21 @@ await db.insert("Post", { imageUrl: photo.url, caption });
 
 Use `"public"` for files every visitor sees, such as feed photos or listing images. Writes and deletes stay with the uploader either way. Any other value is refused with `400 INVALID_VISIBILITY`. On Stack0 and on a public bucket, `stored.url` is a CDN URL that anyone can load, whatever the visibility.
 
+### Caching
+
+`GET /api/files/<id>` sends an `ETag` and answers a matching `If-None-Match` with `304`, so a browser or CDN that holds the file does not download it again.
+
+| File | `Cache-Control` |
+| --- | --- |
+| Public | `public, max-age=3600` |
+| Private | `private, max-age=0, must-revalidate` |
+
+`PYLON_PUBLIC_FILE_MAX_AGE_SECS` sets the lifetime of public files. A deleted or replaced public file can be served from a cache for up to that long.
+
+File URLs have no file extension. A CDN that picks what to cache by extension (Cloudflare does by default) passes them through uncached until a cache rule makes `/api/files/*` eligible.
+
+Files in `public/` also send an `ETag`, with `public, max-age=3600`.
+
 ### File types
 
 `GET /api/files/<id>` serves files from the app's own domain, so a file must not be able to run script there. Raster images, audio, video, PDF and plain text display in the browser with their declared type. Any other type, including HTML, SVG, XML and JavaScript, downloads as `application/octet-stream` with `Content-Disposition: attachment`. Every file response carries `X-Content-Type-Options: nosniff`, and every type except PDF carries `Content-Security-Policy: default-src 'none'; sandbox`.
