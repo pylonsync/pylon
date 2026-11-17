@@ -1800,6 +1800,28 @@ pub fn try_handle(
                                 request,
                             );
                         }
+                        // Past its window: answer with the stored page now and
+                        // render a new one in the background. The request that
+                        // does that render skips this branch and renders live.
+                        if !is_background_revalidation()
+                            && stale_page_may_be_served(entry.age_secs, ssr_stale_max_secs())
+                        {
+                            tracing::debug!(path = %crate::metrics::request_log_path(&url), age = entry.age_secs, "SSR cache hit (stale, revalidating)");
+                            let key = crate::ssr_cache::cache_key(
+                                &matched.route.path,
+                                cache_path,
+                                &cache_vary,
+                            );
+                            revalidate_in_background(cfg, &request, cors_origin, key);
+                            return serve_cached_ssr_stale(
+                                entry,
+                                cors_origin,
+                                nav,
+                                md_request.as_ref(),
+                                "stale-while-revalidate",
+                                request,
+                            );
+                        }
                     }
                 }
                 // Bucket entry (`export const cache = "auth-bucketed"`) — keyed on
@@ -3187,6 +3209,19 @@ fn serve_via_ssr_rpc(
             render_handle,
             err_rx,
         );
+    } else if md.is_some()
+        && finished_render_supersedes_stored_page(cacheable_eligible, status, None)
+    {
+        // The markdown response handed back nothing to store: the page is
+        // gone, opted out of markdown, or answers with its own content type.
+        // The stored markdown entry must not keep answering for it. The plan
+        // of the HTML render does not decide this, so it is not consulted.
+        // A render that failed part way leaves the stored entry as the
+        // fallback, as in `maybe_cache_render`.
+        let _ = render_handle.join();
+        if err_rx.try_recv().is_err() {
+            crate::ssr_cache::remove(&matched.route.path, &path_only, &cache_vary);
+        }
     }
     Ok(())
 }
@@ -3674,6 +3709,21 @@ fn cache_write_plan(
     None
 }
 
+/// Whether a finished render shows that the page stored for anonymous
+/// visitors is out of date and must go: the visitor was anonymous, the render
+/// answered (any status under 500), and it did not earn the anonymous entry
+/// again. That covers a page that now answers 404 or a redirect, sets a
+/// cookie, or reads the session. Without this an expired entry, which is
+/// served while a new render runs, would keep answering for the old page.
+/// A 5xx is a failed render and leaves the stored page as the fallback.
+fn finished_render_supersedes_stored_page(
+    cacheable_eligible: bool,
+    status: u16,
+    plan: Option<(u64, CacheWriteLane)>,
+) -> bool {
+    cacheable_eligible && status < 500 && !matches!(plan, Some((_, CacheWriteLane::Anon)))
+}
+
 /// #277 Stage 2: persist a finished render to the on-disk ISR cache, but only
 /// when it provably earned it. Fail-closed at every gate — a render that read
 /// auth, set a cookie, returned non-200, or errored mid-body is never stored.
@@ -3698,7 +3748,23 @@ fn maybe_cache_render(
     // Which proof did the render earn, and under which key? Pure decision (see
     // `cache_write_plan`) — fail-closed, and unit-tested for the P0 where a
     // signed-in request's anon proof must NOT write the shared anon entry.
-    let (revalidate_secs, vary) = match cache_write_plan(cacheable_eligible, status, page_headers) {
+    let plan = cache_write_plan(cacheable_eligible, status, page_headers);
+    let supersedes = finished_render_supersedes_stored_page(cacheable_eligible, status, plan);
+    if plan.is_none() && !supersedes {
+        return;
+    }
+    // Wait for the render thread, then confirm it didn't error AFTER
+    // response_start: a partial/aborted body must never be cached, and a
+    // render that failed part way leaves the stored page as the fallback.
+    // respond() already drained to EOF, so the join returns immediately.
+    let _ = render_handle.join();
+    if err_rx.try_recv().is_ok() {
+        return;
+    }
+    if supersedes {
+        crate::ssr_cache::remove(route_path, pathname, anon_vary);
+    }
+    let (revalidate_secs, vary) = match plan {
         Some((s, CacheWriteLane::Bucket)) => (s, bucket_vary),
         Some((s, CacheWriteLane::Anon)) => (s, anon_vary),
         None => return,
@@ -3719,13 +3785,6 @@ fn maybe_cache_render(
             route = %route_path,
             "SSR cache write skipped: client bundle not built"
         );
-        return;
-    }
-    // Wait for the render thread, then confirm it didn't error AFTER
-    // response_start — a partial/aborted body must never be cached. respond()
-    // already drained to EOF, so the join returns immediately.
-    let _ = render_handle.join();
-    if err_rx.try_recv().is_ok() {
         return;
     }
     // Single-flight: skip if another request is already writing this key.
@@ -3876,7 +3935,7 @@ fn try_serve_stale_on_error(
                 fresh = entry.fresh,
                 "SSR render unavailable — serving cached copy (stale-on-error)"
             );
-            serve_cached_ssr_stale(entry, cors_origin, nav, md, request)
+            serve_cached_ssr_stale(entry, cors_origin, nav, md, "stale-on-error", request)
         }
         None => Err(request),
     }
@@ -3899,17 +3958,170 @@ fn stale_on_error_candidate(
     crate::ssr_cache::get(route_path, pathname, vary)
 }
 
-/// Serve a cached entry as a stale-on-error fallback. Like `serve_cached_ssr`
-/// but (1) replaces the stored long-lived `Cache-Control` with a SHORT one — a
-/// stale-error response must not be cached at the edge as if fresh, or a
-/// recovered worker's output wouldn't surface — while still letting CloudFlare
-/// absorb a thundering herd during the outage, and (2) stamps
-/// `X-Pylon-Cache: stale-on-error` for observability.
+/// Longest a page past its revalidate window is still served while a new
+/// render runs in the background (default one day;
+/// `PYLON_SSR_STALE_MAX_SECS`, 0 renders every expired page live).
+fn ssr_stale_max_secs() -> u64 {
+    static SECS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *SECS.get_or_init(|| {
+        std::env::var("PYLON_SSR_STALE_MAX_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(86_400)
+    })
+}
+
+/// Whether a stored page of this age may answer a request while a new render
+/// runs. `max_secs` of 0 turns that off.
+fn stale_page_may_be_served(age_secs: u64, max_secs: u64) -> bool {
+    max_secs > 0 && age_secs <= max_secs
+}
+
+thread_local! {
+    /// Set on the thread that renders a page for [`revalidate_in_background`].
+    static BACKGROUND_REVALIDATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn is_background_revalidation() -> bool {
+    BACKGROUND_REVALIDATION.with(|flag| flag.get())
+}
+
+/// The longest one background render keeps others of the same page from
+/// starting. The hold ends when the render ends; this bounds a render that
+/// never does.
+const REVALIDATION_HOLD: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Pages with a background render in progress, and when each started.
+fn revalidations_started(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>> {
+    static STARTED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    > = std::sync::OnceLock::new();
+    STARTED.get_or_init(Default::default)
+}
+
+/// Record that a background render of `key` starts at `now`. False when one
+/// is in progress and started within [`REVALIDATION_HOLD`], so a burst of
+/// requests for one expired page starts one render.
+fn claim_revalidation(
+    started: &mut std::collections::HashMap<String, std::time::Instant>,
+    key: String,
+    now: std::time::Instant,
+) -> bool {
+    started.retain(|_, at| now.saturating_duration_since(*at) < REVALIDATION_HOLD);
+    if started.contains_key(&key) {
+        return false;
+    }
+    started.insert(key, now);
+    true
+}
+
+/// End the hold of the render that claimed `key` at `claimed_at`. A render
+/// that ran past [`REVALIDATION_HOLD`] may find the page claimed again by a
+/// later render; that claim is left alone.
+fn release_revalidation(
+    started: &mut std::collections::HashMap<String, std::time::Instant>,
+    key: &str,
+    claimed_at: std::time::Instant,
+) {
+    if started.get(key) == Some(&claimed_at) {
+        started.remove(key);
+    }
+}
+
+/// Request headers a background render does not carry: the visitor's
+/// credentials, conditions and range, which belong to the visitor's own
+/// response, and the prefetch mark, which lets the server refuse a render.
+fn header_stays_out_of_revalidation(name: &str) -> bool {
+    [
+        "cookie",
+        "authorization",
+        "if-none-match",
+        "if-modified-since",
+        "if-range",
+        "range",
+        "x-pylon-prefetch",
+        "content-length",
+    ]
+    .iter()
+    .any(|skipped| name.eq_ignore_ascii_case(skipped))
+}
+
+/// Render the page `request` asked for again, off the request's thread, so the
+/// cache holds a new copy for the next visitor. The render goes through
+/// [`try_handle`] as a request with the same URL and headers (see
+/// [`header_stays_out_of_revalidation`]), so it is keyed, checked and stored
+/// as a visitor's render is. Its response is discarded.
+fn revalidate_in_background(
+    cfg: &FrontendConfig,
+    request: &Request,
+    cors_origin: &str,
+    key: String,
+) {
+    let claimed_at = std::time::Instant::now();
+    let claimed = {
+        let mut started = revalidations_started()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        claim_revalidation(&mut started, key.clone(), claimed_at)
+    };
+    if !claimed {
+        return;
+    }
+    let release = move |key: &str| {
+        let mut started = revalidations_started()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        release_revalidation(&mut started, key, claimed_at);
+    };
+    let mut again = tiny_http::TestRequest::new()
+        .with_method(Method::Get)
+        .with_path(request.url());
+    for header in request.headers() {
+        if !header_stays_out_of_revalidation(header.field.as_str().as_str()) {
+            again = again.with_header(header.clone());
+        }
+    }
+    let (cfg, cors_origin, render_key) = (cfg.clone(), cors_origin.to_string(), key.clone());
+    let spawned = std::thread::Builder::new()
+        .name("ssr-revalidate".into())
+        .spawn(move || {
+            BACKGROUND_REVALIDATION.with(|flag| flag.set(true));
+            // Returns after the render has ended and its result is stored.
+            let _ = try_handle(&cfg, again.into(), &cors_origin);
+            release(&render_key);
+        });
+    if let Err(e) = spawned {
+        tracing::warn!("could not start a background page render: {e}");
+        release(&key);
+    }
+}
+
+/// `Cache-Control` for a stored page served past its window. Short, so a
+/// shared cache does not keep the old page as if it were new. Private for a
+/// response a cache keyed on the URL alone could hand to the wrong reader: a
+/// navigation payload, the markdown form, or a session bucket the CDN does
+/// not key on.
+fn stale_cache_control(nav: bool, markdown: bool, private_bucket: bool) -> &'static str {
+    if nav || markdown || private_bucket {
+        "private, no-store"
+    } else {
+        "public, max-age=10, stale-while-revalidate=30"
+    }
+}
+
+/// Serve a cached entry that is past its revalidate window: as the fallback
+/// when a render fails (`stale-on-error`), or while a new render runs in the
+/// background (`stale-while-revalidate`). Like `serve_cached_ssr` but (1)
+/// replaces the stored long-lived `Cache-Control` with a SHORT one, so a
+/// shared cache does not keep the old page as if it were new, and (2) stamps
+/// `X-Pylon-Cache` with `reason` for observability.
 fn serve_cached_ssr_stale(
     entry: crate::ssr_cache::CacheEntry,
     cors_origin: &str,
     nav: bool,
     md: Option<&MarkdownRequest>,
+    reason: &str,
     request: Request,
 ) -> Result<(), Request> {
     let page_headers: std::collections::HashMap<String, String> =
@@ -3946,16 +4158,18 @@ fn serve_cached_ssr_stale(
         resp = resp.with_header(h);
     }
     // A navigation payload is never shareable: a CDN keys on URL alone and
-    // would serve this JSON to a document request.
-    let stale_cc = if nav || (is_bucket && !bucket_cdn_sharing_enabled()) {
-        "private, no-store"
-    } else {
-        "public, max-age=10, stale-while-revalidate=30"
-    };
+    // would serve this JSON to a document request. The same goes for the
+    // markdown form of a page, which a CDN that ignores `Vary: Accept` would
+    // serve to a browser.
+    let stale_cc = stale_cache_control(
+        nav,
+        md.is_some(),
+        is_bucket && !bucket_cdn_sharing_enabled(),
+    );
     if let Ok(h) = Header::from_bytes("Cache-Control", stale_cc) {
         resp = resp.with_header(h);
     }
-    if let Ok(h) = Header::from_bytes("X-Pylon-Cache", "stale-on-error") {
+    if let Ok(h) = Header::from_bytes("X-Pylon-Cache", reason) {
         resp = resp.with_header(h);
     }
     let _ = request.respond(resp);
@@ -5005,6 +5219,15 @@ fn cached_bundle_outdir() -> &'static std::sync::Mutex<Option<std::path::PathBuf
     static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<std::path::PathBuf>>> =
         std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Record `dir` as the built client bundle. For tests whose renderer is a
+/// stub: a render is stored in the page cache only when a bundle exists.
+#[doc(hidden)]
+pub fn set_client_bundle_outdir_for_test(dir: std::path::PathBuf) {
+    if let Ok(mut outdir) = cached_bundle_outdir().lock() {
+        *outdir = Some(dir);
+    }
 }
 
 /// Build the SSR client (hydration) bundle now and memoize its outdir, off
@@ -8031,6 +8254,166 @@ mod tests {
             "trusted host vs the untrusted bucket differ"
         );
         assert_eq!(k(""), k(""), "the untrusted bucket is one shared entry");
+    }
+
+    #[test]
+    fn a_finished_render_that_is_not_cacheable_removes_the_stored_page() {
+        let anon = Some((60, CacheWriteLane::Anon));
+        let bucket = Some((60, CacheWriteLane::Bucket));
+        // Earned the anonymous entry again: it is replaced, not removed.
+        assert!(!finished_render_supersedes_stored_page(true, 200, anon));
+        // The page is gone, moved, or no longer shareable.
+        assert!(finished_render_supersedes_stored_page(true, 404, None));
+        assert!(finished_render_supersedes_stored_page(true, 302, None));
+        assert!(finished_render_supersedes_stored_page(true, 200, None));
+        assert!(finished_render_supersedes_stored_page(true, 200, bucket));
+        // A failed render keeps the stored page as the fallback.
+        assert!(!finished_render_supersedes_stored_page(true, 500, None));
+        assert!(!finished_render_supersedes_stored_page(true, 503, None));
+        // A signed-in visitor's render says nothing about the anonymous page.
+        assert!(!finished_render_supersedes_stored_page(false, 404, None));
+        assert!(!finished_render_supersedes_stored_page(false, 200, bucket));
+    }
+
+    #[test]
+    fn a_stale_page_is_shared_only_as_html_for_everyone() {
+        let shared = "public, max-age=10, stale-while-revalidate=30";
+        assert_eq!(stale_cache_control(false, false, false), shared);
+        assert_eq!(stale_cache_control(true, false, false), "private, no-store");
+        assert_eq!(stale_cache_control(false, true, false), "private, no-store");
+        assert_eq!(stale_cache_control(false, false, true), "private, no-store");
+    }
+
+    #[test]
+    fn a_signed_out_render_of_a_bucketed_page_still_fills_its_bucket() {
+        // The page was cached for anonymous visitors, then became
+        // `auth-bucketed`. A signed-out visitor's render removes the old
+        // anonymous entry and stores the bucket entry.
+        let tmp = TempDir::new().unwrap();
+        std::env::set_var("PYLON_SSR_CACHE_ROOT", tmp.path());
+        std::env::set_var("PYLON_ARTIFACT_ID", "bucket-after-anon-test");
+        set_client_bundle_outdir_for_test(tmp.path().join("bundle"));
+
+        let rp = "/__bucket_after_anon__";
+        let anon_vary = [("lane".to_string(), "anon".to_string())];
+        let bucket_vary = [("lane".to_string(), "bucket".to_string())];
+        let html = vec![("content-type".to_string(), "text/html".to_string())];
+        crate::ssr_cache::put(rp, rp, &anon_vary, 200, &html, b"<html>anon</html>", 60);
+
+        let finish = |status: u16, headers: &[(&str, &str)], failed: bool| {
+            let page_headers: std::collections::HashMap<String, String> = headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            let (err_tx, err_rx) = std::sync::mpsc::channel();
+            if failed {
+                err_tx
+                    .send(("RENDER".to_string(), "failed".to_string()))
+                    .unwrap();
+            }
+            maybe_cache_render(
+                rp,
+                rp,
+                true,
+                &anon_vary,
+                &bucket_vary,
+                status,
+                &page_headers,
+                std::sync::Arc::new(std::sync::Mutex::new(b"<html>bucket</html>".to_vec())),
+                std::thread::spawn(|| {}),
+                err_rx,
+            );
+        };
+
+        // A render that failed part way changes nothing.
+        finish(200, &[("x-pylon-bucket", "60")], true);
+        assert!(crate::ssr_cache::get(rp, rp, &anon_vary).is_some());
+        assert!(crate::ssr_cache::get(rp, rp, &bucket_vary).is_none());
+        // Nor does a 5xx.
+        finish(500, &[], false);
+        assert!(crate::ssr_cache::get(rp, rp, &anon_vary).is_some());
+
+        finish(200, &[("x-pylon-bucket", "60")], false);
+        assert!(crate::ssr_cache::get(rp, rp, &anon_vary).is_none());
+        let bucket = crate::ssr_cache::get(rp, rp, &bucket_vary).expect("bucket entry");
+        assert_eq!(bucket.body, b"<html>bucket</html>");
+
+        // A later 404 leaves the bucket entry; it removes only the anonymous one.
+        crate::ssr_cache::put(rp, rp, &anon_vary, 200, &html, b"<html>anon</html>", 60);
+        finish(404, &[], false);
+        assert!(crate::ssr_cache::get(rp, rp, &anon_vary).is_none());
+
+        std::env::remove_var("PYLON_SSR_CACHE_ROOT");
+        std::env::remove_var("PYLON_ARTIFACT_ID");
+        if let Ok(mut outdir) = cached_bundle_outdir().lock() {
+            *outdir = None;
+        }
+    }
+
+    #[test]
+    fn a_stale_page_is_served_only_inside_the_limit() {
+        assert!(stale_page_may_be_served(0, 86_400));
+        assert!(stale_page_may_be_served(86_400, 86_400));
+        assert!(!stale_page_may_be_served(86_401, 86_400));
+        // 0 turns it off: every expired page renders first.
+        assert!(!stale_page_may_be_served(0, 0));
+        assert!(!stale_page_may_be_served(5, 0));
+    }
+
+    #[test]
+    fn one_background_render_starts_per_page_until_the_hold_ends() {
+        let mut started = std::collections::HashMap::new();
+        let t0 = std::time::Instant::now();
+        assert!(claim_revalidation(&mut started, "a".into(), t0));
+        assert!(!claim_revalidation(&mut started, "a".into(), t0));
+        assert!(!claim_revalidation(
+            &mut started,
+            "a".into(),
+            t0 + REVALIDATION_HOLD - std::time::Duration::from_millis(1)
+        ));
+        // Another page is not held.
+        assert!(claim_revalidation(&mut started, "b".into(), t0));
+        // After the hold a render that never ended is tried again, and the
+        // ended holds are dropped.
+        assert!(claim_revalidation(
+            &mut started,
+            "a".into(),
+            t0 + REVALIDATION_HOLD
+        ));
+        assert_eq!(started.len(), 1);
+        // The first render ends late. It does not end the second one's hold.
+        let t1 = t0 + REVALIDATION_HOLD;
+        release_revalidation(&mut started, "a", t0);
+        assert!(!claim_revalidation(&mut started, "a".into(), t1));
+        // The second render ends: the page can be rendered again at once.
+        release_revalidation(&mut started, "a", t1);
+        assert!(claim_revalidation(&mut started, "a".into(), t1));
+    }
+
+    #[test]
+    fn a_background_render_carries_no_credentials_or_conditions() {
+        for name in [
+            "Cookie",
+            "authorization",
+            "If-None-Match",
+            "If-Modified-Since",
+            "If-Range",
+            "Range",
+            "X-Pylon-Prefetch",
+        ] {
+            assert!(header_stays_out_of_revalidation(name), "{name}");
+        }
+        // What the cache key and the rendered origin depend on stays.
+        for name in [
+            "Host",
+            "X-Forwarded-Host",
+            "X-Forwarded-Proto",
+            "Accept",
+            "X-Pylon-Nav",
+            "Accept-Language",
+        ] {
+            assert!(!header_stays_out_of_revalidation(name), "{name}");
+        }
     }
 
     #[test]

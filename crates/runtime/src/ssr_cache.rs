@@ -100,8 +100,10 @@ pub struct CacheEntry {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
-    /// True when within the revalidate window. A stale entry re-renders live.
+    /// True when within the revalidate window.
     pub fresh: bool,
+    /// Seconds since the page was rendered.
+    pub age_secs: u64,
 }
 
 fn now_secs() -> u64 {
@@ -187,11 +189,67 @@ impl MemCache {
         }
     }
 
+    /// [`MemCache::put`] for an entry read from disk, unless an entry left
+    /// the disk after `generation` was read (see [`removals`]). The check is
+    /// made under the write lock, so a removal counted later takes its memory
+    /// entry out after this insert.
+    #[allow(clippy::too_many_arguments)]
+    fn promote(
+        &self,
+        key: &str,
+        status: u16,
+        headers: &[(String, String)],
+        body: &[u8],
+        rendered_at: u64,
+        revalidate_secs: u64,
+        generation: u64,
+    ) {
+        if body.len() > self.budget_bytes {
+            return;
+        }
+        let entry = Arc::new(MemEntry {
+            status,
+            headers: headers.to_vec(),
+            body: Arc::new(body.to_vec()),
+            rendered_at,
+            revalidate_secs,
+        });
+        let mut g = self.inner.write().unwrap();
+        if removals().load(std::sync::atomic::Ordering::Acquire) != generation {
+            return;
+        }
+        if let Some(old) = g.map.insert(key.to_string(), entry) {
+            g.bytes = g.bytes.saturating_sub(old.body.len());
+        }
+        g.bytes += body.len();
+        while g.bytes > self.budget_bytes {
+            match g.map.pop_front() {
+                Some((_, v)) => g.bytes = g.bytes.saturating_sub(v.body.len()),
+                None => break,
+            }
+        }
+    }
+
+    fn remove(&self, key: &str) {
+        let mut g = self.inner.write().unwrap();
+        if let Some(old) = g.map.remove(key) {
+            g.bytes = g.bytes.saturating_sub(old.body.len());
+        }
+    }
+
     fn clear(&self) {
         let mut g = self.inner.write().unwrap();
         g.map.clear();
         g.bytes = 0;
     }
+}
+
+/// Count of entries removed from disk. A read that loads an entry from disk
+/// notes the count first and copies the entry into memory only if the count
+/// is unchanged, so it cannot put back a page that was removed while it read.
+fn removals() -> &'static std::sync::atomic::AtomicU64 {
+    static REMOVALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    &REMOVALS
 }
 
 fn mem_cache() -> Option<&'static MemCache> {
@@ -229,9 +287,11 @@ pub fn get(route_path: &str, pathname: &str, vary: &[(String, String)]) -> Optio
                 headers: e.headers.clone(),
                 body: (*e.body).clone(),
                 fresh: age < e.revalidate_secs,
+                age_secs: age,
             });
         }
     }
+    let generation = removals().load(std::sync::atomic::Ordering::Acquire);
     let dir = cache_dir();
     let body = std::fs::read(dir.join(format!("{key}.html"))).ok()?;
     let meta_raw = std::fs::read(dir.join(format!("{key}.meta"))).ok()?;
@@ -241,7 +301,15 @@ pub fn get(route_path: &str, pathname: &str, vary: &[(String, String)]) -> Optio
     let status = meta.status;
     let headers = meta.headers;
     if let Some(mem) = mem_cache() {
-        mem.put(&key, status, &headers, &body, rendered_at, revalidate_secs);
+        mem.promote(
+            &key,
+            status,
+            &headers,
+            &body,
+            rendered_at,
+            revalidate_secs,
+            generation,
+        );
     }
     let age = now_secs().saturating_sub(rendered_at);
     Some(CacheEntry {
@@ -249,7 +317,32 @@ pub fn get(route_path: &str, pathname: &str, vary: &[(String, String)]) -> Optio
         headers,
         body,
         fresh: age < revalidate_secs,
+        age_secs: age,
     })
+}
+
+/// Remove a stored render, from memory and from disk. For a page that a new
+/// render showed is gone or no longer cacheable. Removing an entry that does
+/// not exist does nothing.
+pub fn remove(route_path: &str, pathname: &str, vary: &[(String, String)]) {
+    let key = cache_key(route_path, pathname, vary);
+    let dir = cache_dir();
+    // Most pages have no entry (every render of a page that is not cached
+    // asks). Those return here and do not disturb reads in progress.
+    let in_memory = mem_cache().is_some_and(|mem| mem.get(&key).is_some());
+    if !in_memory && !dir.join(format!("{key}.meta")).exists() {
+        return;
+    }
+    // The meta file first: a read needs both files, so it misses from here on.
+    let _ = std::fs::remove_file(dir.join(format!("{key}.meta")));
+    let _ = std::fs::remove_file(dir.join(format!("{key}.html")));
+    // Counted after the files are gone and before the memory entry goes. A
+    // read that loaded the files noted the count before this, so its copy
+    // into memory either is refused or lands before the removal below.
+    removals().fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    if let Some(mem) = mem_cache() {
+        mem.remove(&key);
+    }
 }
 
 /// Write a render to the cache (atomic: tmp + rename, so a reader never sees a
@@ -617,6 +710,91 @@ mod tests {
         // 64 hex chars (sha-256).
         assert_eq!(a.len(), 64);
         assert!(a.bytes().all(|x| x.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn a_read_that_raced_a_removal_does_not_put_the_page_back() {
+        let mem = fresh_mem(1024);
+        let headers = vec![("content-type".to_string(), "text/html".to_string())];
+        // The read noted the count, then an entry left the disk.
+        let noted = removals().load(std::sync::atomic::Ordering::Acquire);
+        removals().fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        mem.promote("raced", 200, &headers, b"old", 0, 60, noted);
+        assert!(mem.get("raced").is_none());
+        // With no removal in between, the entry is copied into memory.
+        let noted = removals().load(std::sync::atomic::Ordering::Acquire);
+        mem.promote("quiet", 200, &headers, b"page", 0, 60, noted);
+        assert!(mem.get("quiet").is_some());
+    }
+
+    #[test]
+    fn remove_drops_the_entry_from_memory_and_disk() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("PYLON_SSR_CACHE_ROOT", tmp.path());
+        std::env::remove_var("PYLON_ARTIFACT_ID");
+
+        // A read loads an entry from disk, the entry is removed, and then
+        // the read copies what it loaded into memory. The copy is refused,
+        // whether the read began before the removal or while it ran: the
+        // count moves only once the files are gone.
+        {
+            let headers = vec![("content-type".to_string(), "text/html".to_string())];
+            put(
+                "/__rm_race__",
+                "/__rm_race__",
+                &[],
+                200,
+                &headers,
+                b"<html>old</html>",
+                60,
+            );
+            let noted = removals().load(std::sync::atomic::Ordering::Acquire);
+            remove("/__rm_race__", "/__rm_race__", &[]);
+            assert_ne!(removals().load(std::sync::atomic::Ordering::Acquire), noted);
+            if let Some(mem) = mem_cache() {
+                let key = cache_key("/__rm_race__", "/__rm_race__", &[]);
+                mem.promote(&key, 200, &headers, b"<html>old</html>", 0, 60, noted);
+            }
+            assert!(get("/__rm_race__", "/__rm_race__", &[]).is_none());
+            // A removal of a page with no entry does not move the count.
+            let quiet = removals().load(std::sync::atomic::Ordering::Acquire);
+            remove("/__rm_never__", "/__rm_never__", &[]);
+            assert_eq!(removals().load(std::sync::atomic::Ordering::Acquire), quiet);
+        }
+        let headers = vec![("content-type".to_string(), "text/html".to_string())];
+        let vary = [("host".to_string(), "a.test".to_string())];
+        put(
+            "/__rm__",
+            "/__rm__",
+            &vary,
+            200,
+            &headers,
+            b"<html>gone</html>",
+            60,
+        );
+        put(
+            "/__rm_keep__",
+            "/__rm_keep__",
+            &vary,
+            200,
+            &headers,
+            b"<html>kept</html>",
+            60,
+        );
+        assert!(get("/__rm__", "/__rm__", &vary).is_some());
+
+        remove("/__rm__", "/__rm__", &vary);
+        assert!(get("/__rm__", "/__rm__", &vary).is_none());
+        // Not served again from disk either, once memory is empty.
+        if let Some(mem) = mem_cache() {
+            mem.clear();
+        }
+        assert!(get("/__rm__", "/__rm__", &vary).is_none());
+        assert!(get("/__rm_keep__", "/__rm_keep__", &vary).is_some());
+        // Removing what is not there is fine.
+        remove("/__rm__", "/__rm__", &vary);
+        std::env::remove_var("PYLON_SSR_CACHE_ROOT");
     }
 
     #[test]
