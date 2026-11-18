@@ -1142,3 +1142,73 @@ The backup-code consumption race from November 13 remains open. It needs an atom
 Earlier copied-handler and deployment follow-up still applies. Main now includes the prior security patches, but this review did not verify deployed versions. This run commits the fix, regression tests, and report to a new PR under the user's final instruction. No merge or deployment is performed.
 
 Next main area: secrets and deployment configuration. Retain atomic backup-code consumption, dependency migration, and the blocked monitoring changes as follow-up work.
+
+## 2026-11-18
+
+Reviewed main at `e4f35ecd8` (0.22.75). Created `security/daily-review-2026-11-18` in `/Users/ericc59/Dev/pylon-security-20261118`. The primary checkout remains at `ce9189551` with no tracked edits. Preserved its Python caches and all other worktrees. Read SECURITY.md, both October 27 reports, the security workflows, and daily findings through November 17. PR #85 has merged. Compared main with the previous review base, `c53a69bb`, and accounted for the shop fix already reviewed yesterday.
+
+Confirmed the existing daily task: `41200FED-A9A2-4F88-B1E6-2AB4C1389F25`, every day at 09:00 local time. Its next run is November 19. No duplicate task was created.
+
+### Secrets and deployment configuration
+
+Reviewed runtime production defaults, generated Docker, Compose, Fly, and systemd files, Docker build contexts and copy stages, OIDC key persistence, and builder environment and log handling. Sampled secret-related runtime logging without reading deployed secret values. The builder runs trusted application build code with temporary artifact credentials. This review did not verify the external control plane's credential scope or expiry.
+
+Reviewed the new database count operation, its strict aggregate policy gate and serverData rejection, file range and entity-tag handling, and SSR background revalidation. The new cache code strips cookies and Authorization from background requests. Selected tests cover private-file denial and the new count and cache behavior. No new runtime authorization bypass was confirmed in this scope.
+
+### Confirmed signing-key exposure and fix
+
+The Docker ignore rules excluded databases and environment files but included OIDC private signing keys. `crates/auth/src/oidc_provider.rs::default_key_path` uses `oidc-signing-key.pem`. With OIDC enabled and a data directory inside the build context, a local run can create that file before an image build. The generated app Dockerfile copies the context into the final image. The repository Dockerfile also copies the context into its build stage and copies packages into the final image.
+
+An attacker needs read access to an affected image, layer, or build cache. The key must still be trusted by a relying party for token forgery to affect that party. No application session is needed to extract the key from an accessible artifact. File mode 0600 does not prevent an image recipient from reading layer contents. This is a conditional high-impact credential exposure. No real key, production image, or relying party was accessed.
+
+Added recursive exclusions for `oidc-signing-key.pem` and `*.oidc-key.pem` to the repository and generated rules. The latter covers the name previously described in the OIDC source documentation. Corrected that stale source comment. Added operator guidance to SECURITY.md. Custom key names still require explicit exclusions or storage outside the context. Public CA certificate files remain available to the build.
+
+Extended the real Docker context tests with synthetic signing-key files at the root and in a nested package. Both tests failed before the fix because the keys entered the image. Both pass after the fix. The tests use a scratch image, no network, and no real secrets. This also closes the earlier Docker-daemon validation gap for these context rules. Full runtime image builds were not performed.
+
+### Current advisory scans
+
+OSV scanned all 12 tracked supported lockfiles in the PR worktree. Scan exit: 1 for findings. Severity gate exit: 0. The scan is not clean.
+
+| Scope | Result |
+| --- | --- |
+| Production/root Cargo | 10 existing advisory groups |
+| Root Bun | 2 picomatch groups: 2.3.2 and 4.0.7 |
+| Studio build tools | 4 groups: existing minimatch and picomatch 2.3.2, 4.0.4, 4.0.7 |
+| Docker/build | No reported matches in three locks; manifest consistency passed |
+| Search benchmark | 9 existing advisory groups |
+| Vendor-only SAML | 1 existing Chrono maintenance group |
+| Shard and Swift | No reported matches in four locks |
+
+[GHSA-fc5q-39xc-vjpf](https://github.com/advisories/GHSA-fc5q-39xc-vjpf) is newly reported by this daily scan. The advisory was updated November 17. It rates repeated-extglob denial of service as high severity and lists no patched release through picomatch 4.0.7. Lockfile tracing found Vite, tinyglobby, Parcel watcher, Jest, and Studio's single-file plugin chains. Inspected installed tinyglobby pattern compilation. No public runtime route that accepts attacker-controlled picomatch patterns was established. Exploitation requires control of a glob pattern passed to an affected caller. Keep build patterns and build configuration trusted. Bound build time and isolate build jobs. Track an upstream fix and test affected callers before upgrading. No safe version-only fix was available. No advisory was suppressed.
+
+Cargo audit and Cargo deny returned 0 in the PR worktree. RustSec commit: `472a4c9a785030434f15d7da84964d60fbe789ab`, updated November 18. Audit reported zero unsuppressed vulnerabilities, eight maintenance warnings, and two unsoundness warnings. Deny passed advisories, bans, licenses, and sources. Image-lock and advisory-ignore checks passed. Chrono, im, sized-chunks, minimatch, and the RSA exception remain unresolved as recorded previously. No dependency or ignore file changed.
+
+Initial scans also ran in the stale primary checkout. OSV returned 1; its severity gate returned 0. Cargo audit and deny returned 1. Audit reported the previously fixed quinn-proto and quinn-udp advisories there. Those stale results are not new main findings. They confirm that the primary branch must not be used as a current release source. The isolated main-based worktree includes the prior fixes. It was not necessary to overwrite the primary checkout.
+
+### Verification and gaps
+
+Used pinned Bun 1.4.4 through `npm exec --yes --package=bun@1.4.4`. The frozen root install passed. Rust tests used the primary checkout's build cache and a copy of its existing Studio bundle. Studio was not rebuilt. Local evidence uses `/tmp/pylon-security-20261118-*`.
+
+| Command | Result |
+| --- | --- |
+| Docker context regressions before fix | Both failed on included signing keys |
+| `python3 -m unittest discover -s tools -p 'test_*.py' -v` after fix | 5 passed, including both real Docker context builds |
+| `cargo test --locked -p pylon-cli commands::deploy::tests` | 11 passed |
+| `cargo test --locked -p pylon-runtime --test ssr_stale_while_revalidate --test functions_count --test file_serving` | 10 passed |
+| `cargo test --locked -p pylon-functions --lib count_` | 3 passed |
+| Bun tests: shop checkout, B2B, AI Studio, signed-file examples | 29 passed |
+| `node --test packages/create-pylon/test/scaffold.test.mjs` | 19 passed |
+| `python3 tools/scan-lockfiles.py` and `tools/osv-gate.py` | Scan exit 1; gate exit 0 |
+| Cargo audit and Cargo deny in PR worktree | Exit 0 with existing warnings |
+| Image-lock and advisory-ignore checks | Passed |
+| `cargo fmt --all -- --check` and `git diff --check` | Passed |
+
+The changed Rust generator compiled through the deployment tests. No TypeScript implementation changed, so package type checks and builds were not repeated. Full workspace tests, PostgreSQL integration, multi-replica concurrency, native clients, release builds, full image builds and vulnerability scans, native C library scans, deployed secrets, cloud permissions, and Nix inputs were not checked. Existing compiler warnings remain. No production service was tested.
+
+### Deployment steps and remaining work
+
+Existing generated Docker apps must add the key exclusions and rebuild. A CLI upgrade alone does not edit existing Docker files. Keep custom key paths outside the context or exclude them explicitly. If an accessible old image or cache included a trusted key, rotate it, update relying parties, and remove affected artifacts. Removing a key in a later image does not erase older layers.
+
+The backup-code consumption race still needs an atomic storage operation and SQLite/PostgreSQL concurrency tests. Until fixed, require a current authenticator code through an application gate for sensitive operations. The November 12 monitoring fixes remain local on their separate branch because the earlier push credential lacked workflow scope. They were not overwritten or reported as new findings. The release-history and native-library scan gaps remain. Prior copied-handler and runtime deployment steps still apply.
+
+This run commits the fix, tests, and report and pushes a PR under the user's final instruction. No merge, release, or deployment is performed. Next main area: dependency and build security. Retain the picomatch follow-up, dependency migrations, atomic backup-code consumption, and blocked monitoring changes.
