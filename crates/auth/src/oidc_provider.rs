@@ -50,7 +50,7 @@
 //!
 //! Crypto: RS256-signed id_tokens (industry default). Pylon
 //! generates a fresh RSA key on first start and stores it on disk
-//! (`PYLON_OIDC_KEY_PATH`, defaults to `<sessions.db>.oidc-key.pem`).
+//! (`PYLON_OIDC_KEY_PATH`, defaults to `oidc-signing-key.pem` in the data directory).
 //! Same key reused across restarts so issued tokens stay valid.
 //!
 //! The endpoint wiring lives in `routes/auth.rs` and uses the existing

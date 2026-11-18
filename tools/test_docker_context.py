@@ -28,11 +28,12 @@ class DockerContextTest(unittest.TestCase):
                 ".env", ".env.production", "app.db", "app.db-wal",
                 "app.db-shm", "app.db-journal", ".pylon/sessions.db",
                 ".git/config", "node_modules/private-package/.env",
+                "oidc-signing-key.pem", "sessions.db.oidc-key.pem",
             ]
             private = [prefix + name for prefix in ("", "packages/app/")
                        for name in private]
             public = ["app.ts", "package.json", "bun.lock",
-                      "packages/app/functions/hello.ts"]
+                      "packages/app/functions/hello.ts", "certs/public-ca.pem"]
             for name in private + public:
                 path = context / name
                 path.parent.mkdir(parents=True, exist_ok=True)
