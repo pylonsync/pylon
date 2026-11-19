@@ -28,6 +28,38 @@ struct RequestBuckets {
     /// most recent minute, `requests[ROLLUP_MINUTES-1]` is 59 minutes ago.
     requests: [u64; ROLLUP_MINUTES],
     errors: [u64; ROLLUP_MINUTES],
+    /// Request durations per minute, as counts per [`LATENCY_BOUNDS_MS`]
+    /// bucket. The last slot counts durations above the largest bound.
+    latency: [[u32; LATENCY_BUCKETS]; ROLLUP_MINUTES],
+}
+
+/// Upper bounds of the latency histogram buckets, in milliseconds.
+const LATENCY_BOUNDS_MS: [u32; 12] = [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000];
+const LATENCY_BUCKETS: usize = LATENCY_BOUNDS_MS.len() + 1;
+/// What a percentile reports when it falls in the bucket above the largest bound.
+const LATENCY_OVERFLOW_MS: u32 = 10_000;
+
+/// The percentile `p` (0.0 to 1.0) of a latency histogram: the upper bound of
+/// the bucket that holds it. `None` when the histogram has no samples.
+fn latency_percentile(counts: &[u32; LATENCY_BUCKETS], p: f64) -> Option<u32> {
+    let total: u64 = counts.iter().map(|c| u64::from(*c)).sum();
+    if total == 0 {
+        return None;
+    }
+    let rank = ((total as f64) * p).ceil().max(1.0) as u64;
+    let mut seen = 0u64;
+    for (i, count) in counts.iter().enumerate() {
+        seen += u64::from(*count);
+        if seen >= rank {
+            return Some(
+                LATENCY_BOUNDS_MS
+                    .get(i)
+                    .copied()
+                    .unwrap_or(LATENCY_OVERFLOW_MS),
+            );
+        }
+    }
+    Some(LATENCY_OVERFLOW_MS)
 }
 
 impl RequestBuckets {
@@ -36,6 +68,7 @@ impl RequestBuckets {
             head_minute: 0,
             requests: [0; ROLLUP_MINUTES],
             errors: [0; ROLLUP_MINUTES],
+            latency: [[0; LATENCY_BUCKETS]; ROLLUP_MINUTES],
         }
     }
 
@@ -43,7 +76,10 @@ impl RequestBuckets {
     /// clock crosses a minute boundary. Drops samples if we go more
     /// than ROLLUP_MINUTES minutes idle (sparkline shows zeros for
     /// missing slots — accurate).
-    fn record(&mut self, status: u16) {
+    ///
+    /// `duration_ms` is the wall time of the request. `None` for a request
+    /// the server does not time (`/health`, `/metrics`).
+    fn record(&mut self, status: u16, duration_ms: Option<u32>) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() / 60)
@@ -57,9 +93,11 @@ impl RequestBuckets {
             // Shift ring right by `shift` slots, zeroing the freed head.
             self.requests.rotate_right(shift);
             self.errors.rotate_right(shift);
+            self.latency.rotate_right(shift);
             for i in 0..shift {
                 self.requests[i] = 0;
                 self.errors[i] = 0;
+                self.latency[i] = [0; LATENCY_BUCKETS];
             }
             self.head_minute = now;
         }
@@ -67,10 +105,43 @@ impl RequestBuckets {
         if is_error_status(status) {
             self.errors[0] = self.errors[0].saturating_add(1);
         }
+        if let Some(ms) = duration_ms {
+            let bucket = LATENCY_BOUNDS_MS
+                .iter()
+                .position(|bound| ms <= *bound)
+                .unwrap_or(LATENCY_BUCKETS - 1);
+            self.latency[0][bucket] = self.latency[0][bucket].saturating_add(1);
+        }
     }
 
     fn snapshot(&self) -> (Vec<u64>, Vec<u64>) {
         (self.requests.to_vec(), self.errors.to_vec())
+    }
+
+    /// Latency percentiles for the whole window and for each minute.
+    /// A minute with no timed request reports `null`.
+    fn latency_snapshot(&self) -> serde_json::Value {
+        let mut window = [0u32; LATENCY_BUCKETS];
+        for minute in &self.latency {
+            for (total, count) in window.iter_mut().zip(minute) {
+                *total = total.saturating_add(*count);
+            }
+        }
+        let per_minute = |p: f64| -> Vec<Option<u32>> {
+            self.latency
+                .iter()
+                .map(|minute| latency_percentile(minute, p))
+                .collect()
+        };
+        serde_json::json!({
+            "p50": latency_percentile(&window, 0.50),
+            "p95": latency_percentile(&window, 0.95),
+            "p99": latency_percentile(&window, 0.99),
+            "p50_per_minute": per_minute(0.50),
+            "p95_per_minute": per_minute(0.95),
+            "p99_per_minute": per_minute(0.99),
+            "bucket_bounds_ms": LATENCY_BOUNDS_MS,
+        })
     }
 }
 
@@ -128,6 +199,12 @@ pub struct Metrics {
 struct CurrentRequest {
     path: String,
     started: std::time::Instant,
+    /// The signed-in caller, stamped by `set_current_request_user` once the
+    /// server resolves the session.
+    user: Option<String>,
+    /// The request is one of Studio's own: a Studio page, the admin API, or
+    /// an API call that Studio made.
+    studio: bool,
     /// Request body size in bytes — stamped by `set_current_request_bytes`
     /// after the body read in the central dispatch loop. Pre-fix the
     /// shipper hardcoded `bytes_in=0` for every event.
@@ -155,9 +232,35 @@ pub fn set_current_request(url: &str, started: std::time::Instant) {
         cell.set(Some(CurrentRequest {
             path: request_log_path(url).to_string(),
             started,
+            user: None,
+            studio: false,
             request_bytes: 0,
             response_bytes: 0,
         }))
+    });
+}
+
+/// Mark the in-flight request as one of Studio's own, before the caller is
+/// known. No-op when no request context exists.
+pub fn set_current_request_studio(studio: bool) {
+    CURRENT_REQUEST.with(|cell| {
+        if let Some(mut ctx) = cell.take() {
+            ctx.studio = studio;
+            cell.set(Some(ctx));
+        }
+    });
+}
+
+/// Record who makes the in-flight request, for the request log: the id of the
+/// signed-in caller, and whether the request is one of Studio's own. No-op
+/// when no request context exists.
+pub fn set_current_request_caller(user_id: Option<&str>, studio: bool) {
+    CURRENT_REQUEST.with(|cell| {
+        if let Some(mut ctx) = cell.take() {
+            ctx.user = user_id.map(str::to_string);
+            ctx.studio = studio;
+            cell.set(Some(ctx));
+        }
     });
 }
 
@@ -234,12 +337,6 @@ impl Metrics {
             self.requests_ok.fetch_add(1, Ordering::Relaxed);
         }
         self.requests_by_method.increment(method);
-        // Rolling sparkline buckets. Lock for the rotation + bump;
-        // contention is fine — `record_request` already serializes
-        // through one tracing::info! per call.
-        if let Ok(mut buckets) = self.request_buckets.lock() {
-            buckets.record(status);
-        }
 
         // Pull the per-request context if set. We log even without it
         // (just method + status) so callers that haven't been wired
@@ -248,12 +345,20 @@ impl Metrics {
         // `set_current_request` — they don't set the thread-local, so
         // the URL ends up "?".
         let ctx = CURRENT_REQUEST.take();
+        let duration_ms = ctx
+            .as_ref()
+            .map(|c| u32::try_from(c.started.elapsed().as_millis()).unwrap_or(u32::MAX));
+        // Rolling 60-minute buckets. Lock for the rotation + bump;
+        // contention is fine — `record_request` already serializes
+        // through one tracing::info! per call.
+        if let Ok(mut buckets) = self.request_buckets.lock() {
+            buckets.record(status, duration_ms);
+        }
         match ctx {
             Some(c) => {
-                let dur_ms = c.started.elapsed().as_millis();
-                tracing::info!("← {} {} {} in {}ms", method, c.path, status, dur_ms);
-                let cpu_ms = u32::try_from(dur_ms).unwrap_or(u32::MAX);
-                record_log_row(
+                let cpu_ms = duration_ms.unwrap_or(0);
+                tracing::info!("← {} {} {} in {}ms", method, c.path, status, cpu_ms);
+                log_row(
                     method,
                     &c.path,
                     status,
@@ -261,6 +366,8 @@ impl Metrics {
                     c.request_bytes,
                     c.response_bytes,
                     None,
+                    c.user.as_deref(),
+                    c.studio,
                 );
             }
             None => {
@@ -279,11 +386,14 @@ impl Metrics {
     /// Overview sparkline. Index 0 is the current minute (partial),
     /// index 59 is 59 minutes ago.
     pub fn snapshot(&self) -> serde_json::Value {
-        let (requests_per_min, errors_per_min) = self
+        let ((requests_per_min, errors_per_min), latency) = self
             .request_buckets
             .lock()
-            .map(|b| b.snapshot())
-            .unwrap_or((vec![0; ROLLUP_MINUTES], vec![0; ROLLUP_MINUTES]));
+            .map(|b| (b.snapshot(), b.latency_snapshot()))
+            .unwrap_or((
+                (vec![0; ROLLUP_MINUTES], vec![0; ROLLUP_MINUTES]),
+                serde_json::Value::Null,
+            ));
         serde_json::json!({
             "uptime_secs": self.uptime_secs(),
             "requests": {
@@ -293,6 +403,7 @@ impl Metrics {
                 "per_minute": requests_per_min,
                 "errors_per_minute": errors_per_min,
             },
+            "latency_ms": latency,
             "methods": {
                 "GET": self.requests_by_method.get.load(Ordering::Relaxed),
                 "POST": self.requests_by_method.post.load(Ordering::Relaxed),
@@ -362,6 +473,25 @@ pub fn record_log_row(
     bytes_out: u32,
     error: Option<&str>,
 ) {
+    log_row(
+        method, path, status, cpu_ms, bytes_in, bytes_out, error, None, false,
+    );
+}
+
+/// [`record_log_row`] with the id of the caller, which only the request path
+/// knows.
+#[allow(clippy::too_many_arguments)]
+fn log_row(
+    method: &str,
+    path: &str,
+    status: u16,
+    cpu_ms: u32,
+    bytes_in: u32,
+    bytes_out: u32,
+    error: Option<&str>,
+    user: Option<&str>,
+    studio: bool,
+) {
     let path = request_log_path(path);
     // Fire-and-forget into the shipper's background channel. `record()`
     // returns at once even on backpressure (it drops the event), so the cost
@@ -386,6 +516,10 @@ pub fn record_log_row(
             path: path.to_string(),
             status,
             cpu_ms,
+            bytes_in,
+            bytes_out,
+            user: user.map(str::to_string),
+            studio,
             error: error.map(str::to_string),
         });
     }
@@ -394,6 +528,69 @@ pub fn record_log_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn latency_percentile_is_none_with_no_samples() {
+        assert_eq!(latency_percentile(&[0; LATENCY_BUCKETS], 0.5), None);
+    }
+
+    #[test]
+    fn latency_percentiles_report_the_bucket_bound() {
+        let mut b = RequestBuckets::new();
+        for _ in 0..90 {
+            b.record(200, Some(3)); // bucket <= 5 ms
+        }
+        for _ in 0..9 {
+            b.record(200, Some(80)); // bucket <= 100 ms
+        }
+        b.record(500, Some(60_000)); // above the largest bound
+        b.record(200, None); // not timed: counted as a request only
+        let snap = b.latency_snapshot();
+        assert_eq!(snap["p50"], 5);
+        assert_eq!(snap["p95"], 100);
+        assert_eq!(snap["p99"], 100);
+        assert_eq!(snap["p50_per_minute"][0], 5);
+        assert!(snap["p50_per_minute"][1].is_null());
+        assert_eq!(b.requests[0], 101);
+        assert_eq!(
+            latency_percentile(&b.latency[0], 1.0),
+            Some(LATENCY_OVERFLOW_MS)
+        );
+    }
+
+    #[test]
+    fn a_studio_request_is_marked_before_the_caller_is_known() {
+        crate::log_ring::init_log_ring();
+        set_current_request("/admin/fn/traces?limit=50", std::time::Instant::now());
+        // The traces endpoint answers before the server resolves the caller.
+        set_current_request_studio(true);
+        Metrics::new().record_request("GET", 299);
+        let rows = log_ring().unwrap().tail_since(None);
+        let row = rows
+            .iter()
+            .rev()
+            .find(|r| r.path == "/admin/fn/traces" && r.status == 299)
+            .expect("the row is in the ring");
+        assert!(row.studio);
+    }
+
+    #[test]
+    fn the_request_log_row_carries_the_caller_and_sizes() {
+        crate::log_ring::init_log_ring();
+        set_current_request("/api/entities/Deal?token=secret", std::time::Instant::now());
+        set_current_request_caller(Some("user_42"), true);
+        set_current_request_bytes(12);
+        set_current_response_bytes(345);
+        Metrics::new().record_request("POST", 201);
+        let rows = log_ring().unwrap().tail_since(None);
+        let row = rows
+            .iter()
+            .find(|r| r.user.as_deref() == Some("user_42"))
+            .expect("the row is in the ring");
+        assert_eq!(row.path, "/api/entities/Deal");
+        assert_eq!((row.bytes_in, row.bytes_out, row.status), (12, 345, 201));
+        assert!(row.studio);
+    }
 
     #[test]
     fn request_context_discards_query_credentials() {

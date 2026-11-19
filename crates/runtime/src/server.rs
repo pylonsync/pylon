@@ -4755,6 +4755,16 @@ fn start_server(
             // thread-local to emit method/url/status/duration in one
             // line, like Next.js's `GET /login 200 in 27ms`).
             crate::metrics::set_current_request(&url, request_started_at);
+            // Mark Studio's own requests now. Some admin endpoints answer
+            // before the caller is resolved below, and the request log and
+            // Metrics leave Studio requests out of the app's numbers.
+            crate::metrics::set_current_request_studio(is_studio_request(
+                &url,
+                request
+                    .headers()
+                    .iter()
+                    .any(|h| h.field.as_str().as_str().eq_ignore_ascii_case(STUDIO_HEADER)),
+            ));
         }
 
         // --- Canonical apex↔www redirect (opt-in: PYLON_CANONICAL_HOST) ---
@@ -5452,6 +5462,214 @@ fn start_server(
             );
             let _ = request.respond(response);
             mt.record_request("GET", 200);
+            return;
+        }
+
+        // --- GET /admin/health: the health report for Studio ---
+        if url.split('?').next() == Some("/admin/health") && method == Method::Get {
+            let allowed = dev_admin_open
+                || verify_admin_or_metrics_auth(
+                    &request,
+                    admin_token.as_deref(),
+                    &cookie_config,
+                    &session_store,
+                    &account_store,
+                    runtime.as_ref(),
+                );
+            let (status, body) = if !allowed {
+                (
+                    401u16,
+                    json_error(
+                        "UNAUTHORIZED",
+                        "/admin/health requires PYLON_ADMIN_TOKEN, PYLON_METRICS_TOKEN or an admin session",
+                    ),
+                )
+            } else {
+                use crate::studio_health::Probe;
+                use pylon_http::DataStore as _;
+                // A primary-key read of a row that does not exist: it takes a
+                // connection and runs a query, and returns no data.
+                let database = match rt.manifest().entities.first() {
+                    Some(entity) => Probe::run(|| {
+                        rt.get_by_id(&entity.name, "~studio-health-probe")
+                            .map(|_| ())
+                            .map_err(|e| format!("{}: {}", e.code, e.message))
+                    })
+                    .to_json(),
+                    None => serde_json::Value::Null,
+                };
+                let functions = match fn_ops_ref.as_deref() {
+                    Some(ops) => Probe::run(|| {
+                        ops.pool.health_probe(std::time::Duration::from_millis(500))
+                    })
+                    .to_json(),
+                    None => serde_json::Value::Null,
+                };
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let (_, readiness) =
+                    readiness(DRAINING.load(Ordering::SeqCst), crate::frontend::ssr_ready());
+                (
+                    200,
+                    serde_json::json!({
+                        "status": readiness,
+                        "pylon_version": env!("CARGO_PKG_VERSION"),
+                        "app": { "name": rt.manifest().name, "version": rt.manifest().version },
+                        "uptime_secs": start_time.elapsed().as_secs(),
+                        "database": {
+                            "backend": if rt.pg_shared_pool().is_some() { "postgres" } else { "sqlite" },
+                            "probe": database,
+                        },
+                        "functions": functions,
+                        "jobs": {
+                            "stats": job_queue.stats(),
+                            "lag_secs": job_queue.oldest_due_lag_secs(now),
+                            "persistent": job_queue.is_persistent(),
+                        },
+                        "scheduler": {
+                            "leader": scheduler.is_leader(),
+                            "tasks": scheduler.list_tasks().len(),
+                        },
+                        "realtime": {
+                            "ws_connections": ws_hub.client_count(),
+                            "sse_connections": sse_hub.client_count(),
+                            "change_seq": cl.current_seq(),
+                            "changes_retained": cl.len(),
+                        },
+                        "memory": crate::memory::snapshot().map(|m| m.to_json()),
+                    })
+                    .to_string(),
+                )
+            };
+            let response = with_security_headers(
+                Response::from_string(body)
+                    .with_status_code(status)
+                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+                    .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap()),
+            );
+            let _ = request.respond(response);
+            mt.record_request("GET", status);
+            return;
+        }
+
+        // --- GET /admin/changes/stream: the operator change stream ---
+        //
+        // Server-Sent Events for Studio's Live sync page. See
+        // `crate::studio_changes`.
+        if url.split('?').next() == Some("/admin/changes/stream") && method == Method::Get {
+            let credential = verify_admin_auth(
+                &request,
+                admin_token.as_deref(),
+                &cookie_config,
+                &session_store,
+                &account_store,
+                runtime.as_ref(),
+            );
+            let header = |name: &str| {
+                request
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name))
+                    .map(|h| h.value.as_str().to_string())
+            };
+            let origin = header("Origin");
+            // A cookie is ambient, so a page on another site could open this
+            // stream with it. The browser sends `Origin` on every cross-site
+            // request; a same-origin GET can omit it. The rule is the one the
+            // sync SSE port and the sync WebSocket apply to a session cookie.
+            let cookie_origin_ok = origin.is_none()
+                || ws_cookie_origin_trusted(
+                    origin.as_deref(),
+                    &cors_allowlist,
+                    header("Host").filter(|_| is_dev).as_deref(),
+                );
+            let denial = if !dev_admin_open && credential.is_none() {
+                Some((
+                    401u16,
+                    json_error(
+                        "UNAUTHORIZED",
+                        "requires PYLON_ADMIN_TOKEN or an admin session",
+                    ),
+                ))
+            } else if credential != Some(AdminCredential::Explicit) && !cookie_origin_ok {
+                Some((
+                    403,
+                    json_error("ORIGIN_REJECTED", "request origin is not allowed"),
+                ))
+            } else {
+                None
+            };
+            let slot = match denial {
+                Some(_) => None,
+                None => crate::studio_changes::StreamSlot::acquire(),
+            };
+            let Some(slot) = slot else {
+                let (status, body) = denial.unwrap_or_else(|| {
+                    (
+                        429,
+                        json_error(
+                            "TOO_MANY_STREAMS",
+                            "Too many change streams are open. Close a Live sync tab and try again.",
+                        ),
+                    )
+                });
+                let response = with_security_headers(
+                    Response::from_string(body)
+                        .with_status_code(status)
+                        .with_header(Header::from_bytes("Content-Type", "application/json").unwrap()),
+                );
+                let _ = request.respond(response);
+                mt.record_request("GET", status);
+                return;
+            };
+            // EventSource sends the id of the last event it received when it
+            // reconnects. The stream continues after it.
+            let resume_after = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Last-Event-ID"))
+                .and_then(|h| h.value.as_str().trim().parse::<u64>().ok());
+            let log = Arc::clone(&cl);
+            let stream_runtime = Arc::clone(&runtime);
+            let stream_metrics = Arc::clone(&mt);
+            let mut body = SseBody::for_request(request, false);
+            let spawned = std::thread::Builder::new()
+                .name("pylon-studio-changes".into())
+                .stack_size(256 * 1024)
+                .spawn(move || {
+                    let _slot = slot;
+                    // No Access-Control-Allow-Origin: another origin cannot
+                    // read the stream.
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\n\
+                         Content-Type: text/event-stream\r\n\
+                         Cache-Control: no-store\r\n\
+                         {}\
+                         X-Accel-Buffering: no\r\n\
+                         X-Content-Type-Options: nosniff\r\n\
+                         X-Frame-Options: DENY\r\n\
+                         Referrer-Policy: strict-origin-when-cross-origin\r\n\
+                         \r\n",
+                        body.head_headers()
+                    );
+                    if body.write_head(&head).is_ok() {
+                        crate::studio_changes::run(
+                            &log,
+                            stream_runtime.manifest(),
+                            resume_after,
+                            |bytes| body.send(bytes),
+                        );
+                        // The terminal chunk ends the response, so the
+                        // browser sees the end and reconnects.
+                        let _ = body.finish();
+                    }
+                    stream_metrics.record_request("GET", 200);
+                });
+            if spawned.is_err() {
+                tracing::warn!("[studio] could not start a change stream thread");
+            }
             return;
         }
 
@@ -6380,6 +6598,7 @@ fn start_server(
         // hiding the invite UI from the org's own owner.
         pylon_auth::org::enrich_active_org_role(&og, &mut auth_ctx);
         let auth_ctx = auth_ctx;
+        crate::metrics::set_current_request_caller(auth_ctx.user_id.as_deref(), studio_request);
 
         // --- Test-reset endpoint — in-memory + dev mode + localhost only ---
         //
@@ -9834,6 +10053,22 @@ fn start_server(
                 true,
                 Vec::<(String, String)>::new(),
             )
+        } else if let Some(source) = url
+            .split('?')
+            .next()
+            .and_then(|path| path.strip_prefix(pylon_studio_api::STUDIO_MODULES_PATH))
+            .filter(|_| method == Method::Get)
+            .and_then(pylon_studio_api::studio_module)
+        {
+            // A shared-module shim for Studio extensions. It holds the export
+            // names of React and no data, so it needs no session.
+            (
+                200u16,
+                source.to_string(),
+                "application/javascript".into(),
+                true,
+                Vec::<(String, String)>::new(),
+            )
         } else if url == "/studio/extensions.js" && method == Method::Get {
             // Bundled `studio.entry.tsx` — produced by the CLI's
             // `bun build` pass. Same gate as /studio itself: the bundle
@@ -10640,73 +10875,115 @@ fn admin_session_user(uid: &str, accounts: &pylon_auth::AccountStore, runtime: &
     verified && email.map(|e| allow.contains(&e)).unwrap_or(false)
 }
 
+/// The frame of the Studio pages that the server renders itself: sign in, no
+/// operators, and access denied. The server refuses to serve the Studio
+/// bundle on these pages, so they are plain HTML with no script.
+///
+/// The colors are the ones the Studio bundle uses
+/// (`crates/studio_api/web/src/index.css`). `light-dark()` follows the system
+/// color scheme.
+const STUDIO_PAGE_HTML: &str = r##"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>__TITLE__</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: light-dark(oklch(0.981 0.001 270), oklch(0.13 0.003 270));
+    --panel: light-dark(oklch(1 0 0), oklch(0.155 0.003 270));
+    --fg: light-dark(oklch(0.21 0.006 270), oklch(0.93 0.003 270));
+    --muted: light-dark(oklch(0.5 0.008 270), oklch(0.66 0.008 270));
+    --border: light-dark(oklch(0.916 0.002 270), oklch(0.26 0.005 270));
+    --input: light-dark(oklch(0.86 0.003 270), oklch(0.33 0.006 270));
+    --code: light-dark(oklch(0.966 0.001 270), oklch(0.205 0.004 270));
+    --primary: light-dark(oklch(0.52 0.19 257), oklch(0.66 0.17 255));
+    --primary-fg: light-dark(oklch(0.99 0 0), oklch(0.16 0.02 255));
+    --err: light-dark(oklch(0.53 0.2 27), oklch(0.72 0.17 22));
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; background: var(--bg); color: var(--fg); font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-font-smoothing: antialiased; }
+  main { width: 100%; max-width: 360px; }
+  .brand { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; font-weight: 600; }
+  .mark { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 4px; background: var(--primary); color: var(--primary-fg); }
+  .card { padding: 20px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
+  h1 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
+  p { margin: 0 0 12px; color: var(--muted); }
+  ol { margin: 0 0 12px; padding-left: 18px; color: var(--muted); }
+  li { margin-bottom: 8px; }
+  label { display: block; margin: 12px 0 4px; font-size: 12px; font-weight: 500; }
+  input { width: 100%; height: 32px; padding: 0 8px; font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--input); border-radius: 6px; }
+  input:focus-visible, button:focus-visible, a:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+  button, a.btn { display: block; width: 100%; height: 32px; margin-top: 16px; padding: 0 12px; font: inherit; font-weight: 500; line-height: 32px; text-align: center; text-decoration: none; color: var(--primary-fg); background: var(--primary); border: 0; border-radius: 6px; cursor: default; }
+  button:hover, a.btn:hover { filter: brightness(1.08); }
+  pre { margin: 6px 0 0; padding: 8px 10px; background: var(--code); border: 1px solid var(--border); border-radius: 6px; overflow-x: auto; color: var(--fg); }
+  code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
+  .hint { margin: 16px 0 0; padding-top: 12px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); }
+  @media (max-width: 767px) { input { height: 36px; font-size: 16px; } button, a.btn { height: 36px; line-height: 36px; } }
+  .err { margin: 12px 0 0; padding: 8px 10px; border: 1px solid color-mix(in oklab, var(--err) 45%, transparent); background: color-mix(in oklab, var(--err) 10%, transparent); border-radius: 6px; color: var(--err); }
+</style>
+</head>
+<body>
+<main>
+<div class="brand"><span class="mark" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg></span>Pylon Studio</div>
+__BODY__
+</main>
+</body>
+</html>"##;
+
+/// Fill [`STUDIO_PAGE_HTML`]. `title` and `body` are trusted HTML: the caller
+/// escapes any value that comes from a request.
+fn studio_page_html(title: &str, body: &str) -> String {
+    // The body goes in last, so text inside it is never read as a placeholder.
+    STUDIO_PAGE_HTML
+        .replace("__TITLE__", title)
+        .replace("__BODY__", body)
+}
+
 /// The operator sign-in form.
 ///
-/// This is what replaced the `PYLON_ADMIN_TOKEN` paste box. The field is an
-/// operator's own password, so a compromised form yields one revocable
-/// credential rather than the deployment's superuser secret.
+/// The field is the operator's own password. A leaked form gives up one
+/// credential that can be revoked, not the superuser secret of the deployment.
 ///
-/// `any_operators` adapts the page for a Pylon that has none yet: a bare form
-/// would be a dead end, since there is nothing to sign in as and no way to
-/// create one from a browser. Creating the first operator is deliberately an
-/// act of local or token-holding authority, not something a web form offers.
-///
-/// Plain HTML, no framework, no JS — the Studio bundle is exactly what we are
-/// refusing to serve until this succeeds.
+/// `any_operators` changes the page for a Pylon that has no operator: there is
+/// nothing to sign in as, and a browser cannot create an operator. Creating
+/// the first operator takes local access or the admin token, so the page
+/// shows the command to run.
 fn studio_login_html(error: Option<&str>, any_operators: bool) -> String {
     let err_html = error
-        .map(|e| format!(r#"<div class="err">{}</div>"#, html_escape(e),))
+        .map(|e| format!(r#"<div class="err" role="alert">{}</div>"#, html_escape(e)))
         .unwrap_or_default();
     let body = if any_operators {
         r##"<form class="card" method="POST" action="/studio/login" autocomplete="off">
-  <h1>Studio</h1>
-  <p class="lead">Sign in with your operator account.</p>
+  <h1>Sign in</h1>
+  <p>Use your Studio operator account.</p>
   __ERR__
   <label for="username">Username</label>
   <input id="username" name="username" type="text" autocomplete="username" autofocus required>
   <label for="password">Password</label>
   <input id="password" name="password" type="password" autocomplete="current-password" required>
   <button type="submit">Sign in</button>
-  <div class="hint">Forgotten it? An operator with shell access can reset it with <code>pylon admin passwd &lt;username&gt;</code>.</div>
+  <p class="hint">To reset a password, run <code>pylon admin passwd &lt;username&gt;</code> in the project directory.</p>
 </form>"##
     } else {
         r##"<div class="card">
   <h1>No operators yet</h1>
-  <p class="lead">Studio needs an operator account, and this Pylon has none. Create the first one where the deployment lives:</p>
-  <pre><code>pylon admin create &lt;username&gt;</code></pre>
-  <p class="lead">Then reload this page and sign in.</p>
+  <p>Studio needs an operator account. This Pylon has none.</p>
   __ERR__
-  <div class="hint">Creating an operator requires access to the deployment itself &mdash; the project directory, or <code>PYLON_ADMIN_TOKEN</code> for a remote one. Anyone who already has either can do anything to this Pylon, so no new authority is being handed out. Apps whose admins are ordinary users can instead set <code>PYLON_ADMIN_EMAILS</code> or <code>auth.user.adminField</code> and sign in through the app.</div>
+  <ol>
+    <li>Run this command on the machine that runs Pylon:
+      <pre><code>pylon admin create &lt;username&gt;</code></pre>
+    </li>
+    <li>Reload this page and sign in.</li>
+  </ol>
+  <p class="hint">If Pylon does not run at <code>http://127.0.0.1:4321</code>, add <code>--url &lt;url&gt;</code> to the command. If Pylon runs with <code>PYLON_ADMIN_TOKEN</code>, set the same variable for the command. If the admins of the app are app users, set <code>PYLON_ADMIN_EMAILS</code> or <code>auth.user.adminField</code> and sign in through the app.</p>
 </div>"##
     };
-    format!(
-        r##"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Pylon Studio &middot; sign in</title>
-<style>
-  body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: #fafaf9; color: #1a1a1a; font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; }}
-  .card {{ width: 420px; max-width: 90vw; padding: 24px; background: #fff; border: 1px solid #e7e5e0; border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }}
-  h1 {{ margin: 0 0 4px; font-size: 18px; letter-spacing: -0.01em; }}
-  p.lead {{ margin: 0 0 16px; color: #666; font-size: 13px; }}
-  label {{ display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: #666; margin: 12px 0 6px; }}
-  input {{ width: 100%; box-sizing: border-box; padding: 8px 10px; font-size: 13px; border: 1px solid #d4d2cd; border-radius: 6px; background: #fafafa; }}
-  input:focus {{ outline: none; border-color: #2a5fdf; background: #fff; }}
-  button {{ margin-top: 16px; width: 100%; padding: 9px 12px; background: #2a5fdf; color: #fff; border: 0; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; }}
-  button:hover {{ background: #1f4cb8; }}
-  pre {{ margin: 0 0 16px; padding: 10px 12px; background: #f4f3f0; border-radius: 6px; overflow-x: auto; }}
-  code {{ font-family: ui-monospace, monospace; font-size: 12px; }}
-  .hint {{ margin-top: 16px; padding-top: 14px; border-top: 1px solid #f0efec; font-size: 11.5px; color: #888; }}
-  .err {{ margin: 12px 0; padding: 10px 12px; border: 1px solid #f4a4a4; background: #fff5f5; border-radius: 6px; color: #a40000; font-size: 13px; }}
-</style>
-</head>
-<body>
-{body}
-</body>
-</html>"##,
-        body = body.replace("__ERR__", &err_html),
+    studio_page_html(
+        "Pylon Studio &middot; sign in",
+        &body.replace("__ERR__", &err_html),
     )
 }
 
@@ -10803,7 +11080,7 @@ fn is_studio_shell_path(url: &str) -> bool {
     !matches!(
         rest.trim_end_matches('/'),
         "login" | "logout" | "extensions.js"
-    )
+    ) && !rest.starts_with("modules/")
 }
 
 #[cfg(test)]
@@ -10828,7 +11105,12 @@ mod studio_shell_path_tests {
 
     #[test]
     fn does_not_shadow_the_frameworks_own_studio_endpoints() {
-        for p in ["/studio/login", "/studio/logout", "/studio/extensions.js"] {
+        for p in [
+            "/studio/login",
+            "/studio/logout",
+            "/studio/extensions.js",
+            "/studio/modules/react.js",
+        ] {
             assert!(!is_studio_shell_path(p), "{p} must keep its own handler");
         }
     }
@@ -11233,38 +11515,19 @@ mod studio_access_tests {
     }
 }
 
-/// "You're signed in but not an admin" page. Rendered when the /studio
-/// gate sees a resolved user without is_admin — the user has a working
-/// session, so we don't bounce them back through login. Instead we tell
-/// them what's wrong and offer a logout link to switch accounts. Plain
-/// HTML so it doesn't depend on the Studio bundle (which we're refusing
-/// to serve).
+/// The page for a signed-in user who is not an admin. The session works, so
+/// the server does not send the user back to the sign-in page. The page says
+/// what is wrong and links to sign out.
 fn studio_no_access_html() -> String {
-    r##"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Pylon Studio · access denied</title>
-<style>
-  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #fafaf9; color: #1a1a1a; font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; }
-  .card { width: 420px; max-width: 90vw; padding: 24px; background: #fff; border: 1px solid #e7e5e0; border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); text-align: center; }
-  h1 { margin: 0 0 8px; font-size: 18px; letter-spacing: -0.01em; }
-  p { margin: 0 0 12px; color: #555; font-size: 13px; }
-  a.btn { display: inline-block; margin-top: 12px; padding: 8px 14px; background: #2a5fdf; color: #fff; border-radius: 6px; text-decoration: none; font-size: 13px; font-weight: 500; }
-  a.btn:hover { background: #1f4cb8; }
-  .muted { color: #888; font-size: 11.5px; margin-top: 14px; }
-</style>
-</head>
-<body>
-<div class="card">
+    studio_page_html(
+        "Pylon Studio &middot; access denied",
+        r##"<div class="card">
   <h1>Studio access denied</h1>
-  <p>Your account is signed in but doesn't have admin privileges on this Pylon.</p>
-  <a class="btn" href="/studio/logout">Sign out and try a different account</a>
-  <div class="muted">Need access? Ask whoever runs this Pylon to mark your account as admin.</div>
-</div>
-</body>
-</html>"##.to_string()
+  <p>Your account is signed in, but it is not an admin of this Pylon.</p>
+  <a class="btn" href="/studio/logout">Sign out</a>
+  <p class="hint">To get access, ask the person who runs this Pylon to make your account an admin.</p>
+</div>"##,
+    )
 }
 
 /// Tiny URL-decoder for form-encoded field values.

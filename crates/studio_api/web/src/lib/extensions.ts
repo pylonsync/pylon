@@ -27,7 +27,23 @@ export interface CustomPageProps {
 	api: <T = unknown>(path: string, opts?: unknown) => Promise<T>;
 }
 
+/** What an action handler gets. It mirrors `StudioActionContext` in the SDK. */
+export interface ActionContext {
+	entity: string;
+	rows: Record<string, unknown>[];
+	api: <T = unknown>(path: string, opts?: unknown) => Promise<T>;
+	toast: {
+		success: (title: string, opts?: { description?: string }) => void;
+		error: (title: string, opts?: { description?: string }) => void;
+		info: (title: string, opts?: { description?: string }) => void;
+	};
+	refresh: () => Promise<void>;
+}
+
+export type ActionHandler = (ctx: ActionContext) => unknown;
+
 export interface ExtensionRegistry {
+	actions?: Record<string, ActionHandler>;
 	renderers?: Record<string, ComponentType<CellRendererProps>>;
 	pages?: Record<string, ComponentType<CustomPageProps>>;
 	layouts?: {
@@ -37,6 +53,7 @@ export interface ExtensionRegistry {
 }
 
 const REGISTRY: ExtensionRegistry = {
+	actions: {},
 	renderers: {},
 	pages: {},
 	layouts: {},
@@ -60,6 +77,7 @@ export function loadExtensions(hasExtensions: boolean): Promise<void> {
 				/* @vite-ignore */ `${apiBase()}/studio/extensions.js`
 			)) as { default?: ExtensionRegistry } & Partial<ExtensionRegistry>;
 			const registry: ExtensionRegistry = mod.default ?? mod;
+			Object.assign(REGISTRY.actions!, registry.actions ?? {});
 			Object.assign(REGISTRY.renderers!, registry.renderers ?? {});
 			Object.assign(REGISTRY.pages!, registry.pages ?? {});
 			Object.assign(REGISTRY.layouts!, registry.layouts ?? {});
@@ -81,6 +99,11 @@ export function getExtensionRenderer(
 	id: string,
 ): ComponentType<CellRendererProps> | undefined {
 	return REGISTRY.renderers?.[id];
+}
+
+/** The handler an extension registered for a `kind: "custom"` action id. */
+export function getExtensionAction(id: string): ActionHandler | undefined {
+	return REGISTRY.actions?.[id];
 }
 
 export function getExtensionPage(

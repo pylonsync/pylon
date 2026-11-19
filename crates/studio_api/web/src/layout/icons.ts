@@ -1,10 +1,9 @@
-// Icon name → lucide component lookup.
+// Icon name to lucide component.
 //
-// Users reference icons in `studio.config.ts` by string name (kebab or
-// camel — we accept both, normalized to kebab here). Anything not in
-// this allow-list falls back to the default. The allow-list is curated
-// — no `import * as Icons from "lucide-react"` because that drags every
-// icon into the bundle (~2 MB).
+// `studio.config.ts` names an icon with a string, in kebab case or camel
+// case. A name that is not in this table gets the fallback icon. The table
+// lists each icon by hand: `import * as Icons from "lucide-react"` puts every
+// icon in the bundle (about 2 MB).
 
 import {
 	Activity,
@@ -28,6 +27,7 @@ import {
 	FileText,
 	Files,
 	Folder,
+	Gauge,
 	Globe,
 	Grid2x2,
 	Inbox,
@@ -36,6 +36,7 @@ import {
 	LayoutDashboard,
 	LifeBuoy,
 	Link as LinkIcon,
+	ListChecks,
 	Lock,
 	Mail,
 	MessagesSquare,
@@ -44,7 +45,9 @@ import {
 	Play,
 	Receipt,
 	Radio,
+	Route,
 	RefreshCw,
+	ScrollText,
 	Send,
 	Settings,
 	Share2,
@@ -52,6 +55,7 @@ import {
 	ShieldCheck,
 	ShoppingCart,
 	Star,
+	Table2,
 	Tag,
 	Terminal,
 	Trash2,
@@ -60,6 +64,7 @@ import {
 	UserCheck,
 	UserCog,
 	Wand2,
+	Workflow,
 	X,
 	Zap,
 } from "lucide-react";
@@ -88,6 +93,7 @@ const TABLE: Record<string, IconComponent> = {
 	"file-text": FileText,
 	files: Files,
 	folder: Folder,
+	gauge: Gauge,
 	globe: Globe,
 	grid: Grid2x2,
 	inbox: Inbox,
@@ -96,6 +102,7 @@ const TABLE: Record<string, IconComponent> = {
 	"layout-dashboard": LayoutDashboard,
 	"life-buoy": LifeBuoy,
 	link: LinkIcon,
+	"list-checks": ListChecks,
 	lock: Lock,
 	mail: Mail,
 	"messages-square": MessagesSquare,
@@ -104,8 +111,10 @@ const TABLE: Record<string, IconComponent> = {
 	play: Play,
 	receipt: Receipt,
 	radio: Radio,
+	route: Route,
 	refresh: RefreshCw,
 	"refresh-cw": RefreshCw,
+	"scroll-text": ScrollText,
 	send: Send,
 	settings: Settings,
 	share: Share2,
@@ -113,6 +122,7 @@ const TABLE: Record<string, IconComponent> = {
 	"shield-check": ShieldCheck,
 	"shopping-cart": ShoppingCart,
 	star: Star,
+	table: Table2,
 	tag: Tag,
 	terminal: Terminal,
 	trash: Trash2,
@@ -122,6 +132,7 @@ const TABLE: Record<string, IconComponent> = {
 	"user-check": UserCheck,
 	"user-cog": UserCog,
 	"wand-2": Wand2,
+	workflow: Workflow,
 	x: X,
 	zap: Zap,
 };

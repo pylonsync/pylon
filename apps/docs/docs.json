@@ -133,6 +133,7 @@
               "operations/build",
               "operations/vercel",
               "operations/cli",
+              "operations/studio",
               "operations/agent-handoff",
               "operations/sst",
               "operations/sizing",

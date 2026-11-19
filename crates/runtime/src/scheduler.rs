@@ -24,6 +24,8 @@ use crate::leader::{AlwaysLeader, Leadership};
 struct ScheduledTask {
     name: String,
     cron: CronExpr,
+    /// The cron expression as it was registered, for display.
+    schedule: String,
     handler: JobHandler,
     enabled: bool,
     /// Unix timestamp of the last time this task was enqueued.
@@ -40,6 +42,22 @@ pub struct TaskInfo {
     pub name: String,
     pub enabled: bool,
     pub last_run: Option<u64>,
+    /// The cron expression of the task.
+    pub schedule: String,
+    /// Unix time of the next minute the expression matches. `None` when the
+    /// task is disabled or nothing matches in the next [`NEXT_RUN_HORIZON_DAYS`].
+    pub next_run: Option<u64>,
+}
+
+/// How far ahead `list_tasks` looks for the next run.
+const NEXT_RUN_HORIZON_DAYS: u64 = 8;
+
+/// The start of the first minute after `now` that `cron` matches.
+fn next_run_after(cron: &CronExpr, now: u64) -> Option<u64> {
+    let first = (now / 60 + 1) * 60;
+    (0..NEXT_RUN_HORIZON_DAYS * 24 * 60)
+        .map(|i| first + i * 60)
+        .find(|t| cron.matches(*t))
 }
 
 // ---------------------------------------------------------------------------
@@ -83,6 +101,7 @@ impl Scheduler {
         self.tasks.lock().unwrap().push(ScheduledTask {
             name: name.to_string(),
             cron,
+            schedule: cron_expr.trim().to_string(),
             handler,
             enabled: true,
             last_run: None,
@@ -161,6 +180,10 @@ impl Scheduler {
 
     /// List all scheduled tasks.
     pub fn list_tasks(&self) -> Vec<TaskInfo> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         self.tasks
             .lock()
             .unwrap()
@@ -169,8 +192,16 @@ impl Scheduler {
                 name: t.name.clone(),
                 enabled: t.enabled,
                 last_run: t.last_run,
+                schedule: t.schedule.clone(),
+                next_run: t.enabled.then(|| next_run_after(&t.cron, now)).flatten(),
             })
             .collect()
+    }
+
+    /// Whether this machine runs the cron tick. Always true on one machine.
+    /// With several machines on Postgres, one of them holds the lock.
+    pub fn is_leader(&self) -> bool {
+        self.leadership.is_leader()
     }
 
     /// Enable or disable a task by name. Returns true if the task was found.
@@ -235,6 +266,34 @@ impl SchedulerHandle {
 mod tests {
     use super::*;
     use crate::jobs::JobResult;
+
+    #[test]
+    fn list_tasks_reports_the_schedule_and_the_next_run() {
+        let q = Arc::new(JobQueue::new(100));
+        let sched = Scheduler::new(Arc::clone(&q));
+        sched
+            .schedule("cleanup", " */5 * * * * ", Arc::new(|_| JobResult::Success))
+            .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let task = &sched.list_tasks()[0];
+        assert_eq!(task.schedule, "*/5 * * * *");
+        let next = task.next_run.expect("a next run");
+        assert!(next > now && next <= now + 5 * 60, "{next} vs {now}");
+        assert_eq!(next % 300, 0);
+
+        sched.set_enabled("cleanup", false);
+        assert_eq!(sched.list_tasks()[0].next_run, None);
+    }
+
+    #[test]
+    fn next_run_is_none_when_nothing_matches_in_the_horizon() {
+        // 30 February never comes.
+        let cron = CronExpr::parse("0 0 30 2 *").unwrap();
+        assert_eq!(next_run_after(&cron, 1_795_000_000), None);
+    }
 
     #[test]
     fn schedule_registers_handler() {

@@ -1,19 +1,12 @@
 import { Lock } from "lucide-react";
+
 import { Button } from "@/components/ui/button";
-import {
-	Card,
-	CardContent,
-	CardDescription,
-	CardHeader,
-	CardTitle,
-} from "@/components/ui/card";
 
 /**
- * "You can't see this" panel.
+ * The content of a page that the signed-in account cannot see.
  *
- * The action is a plain link, not a sign-in dialog. Studio has no credential
- * of its own to collect — access comes from being signed in to the app as an
- * admin — so the only useful thing to offer is a way back to that sign-in.
+ * The action is a link. Studio collects no credential: access comes from a
+ * Studio operator session or an admin session of the app.
  */
 export function LockedPage({
 	title,
@@ -25,21 +18,15 @@ export function LockedPage({
 	action?: { label: string; href: string };
 }) {
 	return (
-		<Card className="mx-auto max-w-md text-center">
-			<CardHeader>
-				<div className="mx-auto flex size-12 items-center justify-center rounded-full bg-muted">
-					<Lock className="size-5 text-muted-foreground" />
-				</div>
-				<CardTitle className="mt-3">{title}</CardTitle>
-				<CardDescription>{description}</CardDescription>
-			</CardHeader>
+		<div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-1 px-4 py-14 text-center">
+			<Lock className="mb-1 size-4 text-muted-foreground" />
+			<h2 className="text-[13px] font-medium">{title}</h2>
+			<p className="max-w-sm text-xs text-muted-foreground">{description}</p>
 			{action && (
-				<CardContent>
-					<Button asChild>
-						<a href={action.href}>{action.label}</a>
-					</Button>
-				</CardContent>
+				<Button className="mt-2" render={<a href={action.href} />}>
+					{action.label}
+				</Button>
 			)}
-		</Card>
+		</div>
 	);
 }

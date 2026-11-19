@@ -182,6 +182,33 @@ pub(crate) fn handle(
         }
     }
 
+    // POST /api/jobs/<id>/cancel: cancel a job that has not started.
+    if let Some(job_id) = url
+        .strip_prefix("/api/jobs/")
+        .map(|rest| rest.split('?').next().unwrap_or(rest))
+        .and_then(|rest| rest.strip_suffix("/cancel"))
+    {
+        if method == HttpMethod::Post && !job_id.is_empty() && !job_id.contains('/') {
+            if let Some(err) = require_admin(ctx) {
+                return Some(err);
+            }
+            return Some(match ctx.jobs.cancel(job_id) {
+                Ok(true) => (
+                    200,
+                    serde_json::json!({"cancelled": true, "id": job_id}).to_string(),
+                ),
+                Ok(false) => (
+                    409,
+                    json_error(
+                        "JOB_NOT_PENDING",
+                        "The job is not in the queue. It runs, it is finished, or the id is unknown.",
+                    ),
+                ),
+                Err(e) => (500, json_error("JOB_CANCEL_FAILED", &e)),
+            });
+        }
+    }
+
     if let Some(job_id) = url.strip_prefix("/api/jobs/") {
         let job_id = job_id.split('?').next().unwrap_or(job_id);
         if method == HttpMethod::Get && !job_id.is_empty() && job_id != "stats" && job_id != "dead"

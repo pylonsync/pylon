@@ -1,17 +1,19 @@
 import { useCallback, useEffect, useState } from "react";
-import { ArrowLeft, Loader2, Square, UserX } from "lucide-react";
-import { toast } from "sonner";
+import { Square, UserX } from "lucide-react";
+
+import { useAuth } from "@/auth/auth";
+import { ConfirmDialog } from "@/components/confirm-dialog";
+import { Page, PageScroll, Section } from "@/components/page";
+import { Dash } from "@/components/renderers";
+import {
+	EmptyState,
+	ErrorBanner,
+	ErrorState,
+	LoadingRows,
+} from "@/components/states";
+import { Stat, StatStrip } from "@/components/stat-strip";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-	Dialog,
-	DialogContent,
-	DialogDescription,
-	DialogFooter,
-	DialogHeader,
-	DialogTitle,
-} from "@/components/ui/dialog";
 import {
 	Table,
 	TableBody,
@@ -20,7 +22,9 @@ import {
 	TableHeader,
 	TableRow,
 } from "@/components/ui/table";
-import { useAuth } from "@/auth/AuthContext";
+import { toast } from "@/lib/toast";
+import { useQuery } from "@/hooks/use-query";
+import { errorText, plural } from "@/lib/format";
 import { ApiError, api } from "@/lib/pylon";
 import { LockedPage } from "./Locked";
 
@@ -71,12 +75,7 @@ function bytes(v: number) {
 	return `${(v / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function errorText(e: unknown) {
-	if (e instanceof ApiError) return `${e.code}: ${e.message}`;
-	return e instanceof Error ? e.message : String(e);
-}
-
-/** The shard shown in detail lives in `?shard=`, so a detail view links. */
+/** The shard in the detail view is `?shard=` in the URL, so the view has a link. */
 function useSelectedShard(): [string | null, (id: string | null) => void] {
 	const read = () => new URLSearchParams(window.location.search).get("shard");
 	const [selected, setSelected] = useState<string | null>(read);
@@ -101,10 +100,12 @@ export function ShardsPage() {
 
 	if (!me?.is_admin) {
 		return (
-			<LockedPage
-				title="Shards require admin"
-				description="Shard numbers, stopping shards, and kicking subscribers are admin-only."
-			/>
+			<Page title="Shards">
+				<LockedPage
+					title="Shards are for admins"
+					description="Sign in with an admin account to see shard numbers, stop a shard, or kick a subscriber."
+				/>
+			</Page>
 		);
 	}
 	return selected ? (
@@ -115,174 +116,150 @@ export function ShardsPage() {
 }
 
 function StatusBadge({ shard }: { shard: Shard }) {
-	if (shard.error) return <Badge variant="destructive">failed</Badge>;
+	if (shard.error) return <Badge variant="red">failed</Badge>;
 	return shard.running ? (
-		<Badge variant="secondary">running</Badge>
+		<Badge variant="green" dot>
+			running
+		</Badge>
 	) : (
-		<Badge variant="outline">stopped</Badge>
+		<Badge variant="gray">stopped</Badge>
 	);
 }
 
 function ShardList({ onOpen }: { onOpen: (id: string) => void }) {
-	const [shards, setShards] = useState<Shard[] | null>(null);
-	const [err, setErr] = useState<string | null>(null);
-
-	useEffect(() => {
-		let live = true;
-		const load = async () => {
-			try {
-				const list = await api<Shard[]>("/api/shards");
-				if (live) {
-					setShards(list);
-					setErr(null);
-				}
-			} catch (e) {
-				if (live) setErr(errorText(e));
-			}
-		};
-		void load();
-		const timer = window.setInterval(load, POLL_MS);
-		return () => {
-			live = false;
-			window.clearInterval(timer);
-		};
-	}, []);
+	const {
+		data: shards,
+		error: err,
+		reload,
+	} = useQuery("shards", async () => (await api<Shard[]>("/api/shards")) ?? [], {
+		pollMs: POLL_MS,
+	});
 
 	return (
-		<div className="space-y-4">
-			{err && (
-				<div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
-					{err}
-				</div>
-			)}
-			<Card>
-				<CardHeader>
-					<CardTitle>Shards</CardTitle>
-				</CardHeader>
-				<CardContent>
-					{shards === null ? (
-						<Loader2 className="size-4 animate-spin text-muted-foreground" />
-					) : shards.length === 0 ? (
-						<p className="text-sm text-muted-foreground">
-							No shards are running. Functions start them with{" "}
-							<code>ctx.shards.create</code>.
-						</p>
+		<Page
+			title="Shards"
+			meta={shards ? plural(shards.length, "shard") : undefined}
+		>
+			<PageScroll>
+				{err && shards !== null && (
+					<ErrorBanner>
+						Studio could not refresh the shards: {err}. The table shows the last
+						good response.
+					</ErrorBanner>
+				)}
+				{shards === null ? (
+					err ? (
+						<ErrorState
+							title="Studio could not load the shards"
+							message={err}
+							onRetry={reload}
+						/>
 					) : (
-						<Table>
-							<TableHeader>
-								<TableRow>
-									<TableHead>Shard</TableHead>
-									<TableHead>Kind</TableHead>
-									<TableHead>Status</TableHead>
-									<TableHead className="text-right">Subscribers</TableHead>
-									<TableHead className="text-right">Tick p50 / p99 (ms)</TableHead>
-									<TableHead className="text-right">Overruns</TableHead>
-									<TableHead className="text-right">Bytes per tick p99</TableHead>
-									<TableHead className="text-right">Dropped frames</TableHead>
-									<TableHead className="text-right">Dropped inputs</TableHead>
+						<LoadingRows />
+					)
+				) : shards.length === 0 ? (
+					<EmptyState
+						title="No shards"
+						description={
+							<>
+								A function starts a shard with <code>ctx.shards.create</code>.
+							</>
+						}
+					/>
+				) : (
+					<Table aria-label="Shards">
+						<TableHeader>
+							<tr>
+								<TableHead>Shard</TableHead>
+								<TableHead>Kind</TableHead>
+								<TableHead>Status</TableHead>
+								<TableHead className="text-right">Subscribers</TableHead>
+								<TableHead className="text-right">Tick p50 / p99 (ms)</TableHead>
+								<TableHead className="text-right">Overruns</TableHead>
+								<TableHead className="text-right">Bytes per tick p99</TableHead>
+								<TableHead className="text-right">Dropped frames</TableHead>
+								<TableHead className="text-right">Dropped inputs</TableHead>
+							</tr>
+						</TableHeader>
+						<TableBody>
+							{shards.map((s) => (
+								<TableRow
+									key={s.id}
+									tabIndex={0}
+									className="cursor-default"
+									onClick={() => onOpen(s.id)}
+									onKeyDown={(e) => {
+										if (e.key !== "Enter" && e.key !== " ") return;
+										e.preventDefault();
+										onOpen(s.id);
+									}}
+								>
+									<TableCell className="font-mono text-xs">{s.id}</TableCell>
+									<TableCell>{s.kind ?? <Dash />}</TableCell>
+									<TableCell>
+										<StatusBadge shard={s} />
+									</TableCell>
+									<TableCell className="text-right">{s.subscribers}</TableCell>
+									<TableCell className="text-right">
+										{ms(s.stats.tick_ms.p50)} / {ms(s.stats.tick_ms.p99)}
+									</TableCell>
+									<TableCell className="text-right">{s.stats.overruns}</TableCell>
+									<TableCell className="text-right">
+										{bytes(s.stats.bytes_per_tick.p99)}
+									</TableCell>
+									<TableCell className="text-right">
+										{s.stats.dropped_frames_total}
+									</TableCell>
+									<TableCell className="text-right">
+										{s.stats.dropped_inputs_total.queue_full +
+											s.stats.dropped_inputs_total.rate_limited}
+									</TableCell>
 								</TableRow>
-							</TableHeader>
-							<TableBody>
-								{shards.map((s) => (
-									<TableRow
-										key={s.id}
-										className="cursor-pointer"
-										onClick={() => onOpen(s.id)}
-									>
-										<TableCell className="font-mono text-xs">{s.id}</TableCell>
-										<TableCell>{s.kind ?? "—"}</TableCell>
-										<TableCell>
-											<StatusBadge shard={s} />
-										</TableCell>
-										<TableCell className="text-right font-mono">{s.subscribers}</TableCell>
-										<TableCell className="text-right font-mono">
-											{ms(s.stats.tick_ms.p50)} / {ms(s.stats.tick_ms.p99)}
-										</TableCell>
-										<TableCell className="text-right font-mono">{s.stats.overruns}</TableCell>
-										<TableCell className="text-right font-mono">
-											{bytes(s.stats.bytes_per_tick.p99)}
-										</TableCell>
-										<TableCell className="text-right font-mono">
-											{s.stats.dropped_frames_total}
-										</TableCell>
-										<TableCell className="text-right font-mono">
-											{s.stats.dropped_inputs_total.queue_full +
-												s.stats.dropped_inputs_total.rate_limited}
-										</TableCell>
-									</TableRow>
-								))}
-							</TableBody>
-						</Table>
-					)}
-				</CardContent>
-			</Card>
-		</div>
-	);
-}
-
-function Stat({ label, value, note }: { label: string; value: React.ReactNode; note?: string }) {
-	return (
-		<Card>
-			<CardContent className="p-4">
-				<p className="text-xs text-muted-foreground">{label}</p>
-				<p className="mt-1 font-mono text-xl font-semibold">{value}</p>
-				{note && <p className="mt-1 text-xs text-muted-foreground">{note}</p>}
-			</CardContent>
-		</Card>
+							))}
+						</TableBody>
+					</Table>
+				)}
+			</PageScroll>
+		</Page>
 	);
 }
 
 function ShardDetailView({ id, onBack }: { id: string; onBack: () => void }) {
-	const [shard, setShard] = useState<ShardDetail | null>(null);
-	const [err, setErr] = useState<string | null>(null);
 	const [confirmStop, setConfirmStop] = useState(false);
-	const [busy, setBusy] = useState(false);
-	/** The shard no longer exists (stopped, or removed when idle). */
+	/** The shard does not exist: it stopped, or the server removed it when idle. */
 	const [gone, setGone] = useState(false);
 	const path = `/api/shards/${encodeURIComponent(id)}`;
 
-	const [reloads, setReloads] = useState(0);
-	const reload = useCallback(() => setReloads((n) => n + 1), []);
-
-	useEffect(() => {
-		let live = true;
-		let timer: number | undefined;
-		const load = async () => {
+	const {
+		data: shard,
+		error: err,
+		reload,
+	} = useQuery(
+		`shard:${id}`,
+		async () => {
 			try {
-				const detail = await api<ShardDetail>(path);
-				if (!live) return;
-				setShard(detail);
-				setErr(null);
+				return await api<ShardDetail>(path);
 			} catch (e) {
-				if (!live) return;
 				if (e instanceof ApiError && e.code === "SHARD_NOT_FOUND") {
 					setGone(true);
-					setShard(null);
-					window.clearInterval(timer);
-					return;
+					return null;
 				}
-				setErr(errorText(e));
+				throw e;
 			}
-		};
-		void load();
-		timer = window.setInterval(load, POLL_MS);
-		return () => {
-			live = false;
-			window.clearInterval(timer);
-		};
-	}, [path, reloads]);
+		},
+		{ pollMs: gone ? 0 : POLL_MS },
+	);
 
 	const stop = async () => {
-		setBusy(true);
 		try {
 			await api(`${path}/stop`, { method: "POST", body: "{}" });
-			toast.success(`Stopped ${id}`);
+			toast.success(`The shard ${id} is stopped`);
 			setConfirmStop(false);
 			onBack();
 		} catch (e) {
-			toast.error(errorText(e));
-		} finally {
-			setBusy(false);
+			toast.error("Studio could not stop the shard", {
+				description: errorText(e),
+			});
 		}
 	};
 
@@ -292,81 +269,135 @@ function ShardDetailView({ id, onBack }: { id: string; onBack: () => void }) {
 				method: "POST",
 				body: JSON.stringify({ subscriber }),
 			});
-			toast.success(`Kicked ${subscriber}`);
+			toast.success(`The subscriber ${subscriber} is disconnected`);
 			reload();
 		} catch (e) {
-			toast.error(errorText(e));
+			toast.error("Studio could not kick the subscriber", {
+				description: errorText(e),
+			});
 		}
 	};
 
 	const s = shard?.stats;
 	return (
-		<div className="space-y-4">
-			<div className="flex items-center justify-between gap-2">
-				<Button size="sm" variant="ghost" onClick={onBack}>
-					<ArrowLeft className="size-3.5" />
-					All shards
-				</Button>
-				<Button
-					size="sm"
-					variant="destructive"
-					onClick={() => setConfirmStop(true)}
-					disabled={!shard || gone}
+		<Page
+			parent={
+				<button
+					type="button"
+					className="cursor-default rounded hover:text-foreground"
+					onClick={onBack}
 				>
-					<Square className="size-3.5" />
-					Stop shard
-				</Button>
-			</div>
-
-			{err && (
-				<div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
-					{err}
-				</div>
-			)}
-
-			{gone && (
-				<p className="text-sm text-muted-foreground">
-					Shard <code>{id}</code> is not running any more.
-				</p>
-			)}
-
-			{shard && s && (
-				<>
-					<div className="flex items-center gap-3">
-						<h2 className="font-mono text-lg font-semibold">{shard.id}</h2>
+					Shards
+				</button>
+			}
+			title={<span className="font-mono">{id}</span>}
+			meta={
+				shard && (
+					<span className="inline-flex items-center gap-1.5">
 						{shard.kind && <Badge variant="outline">{shard.kind}</Badge>}
 						<StatusBadge shard={shard} />
-					</div>
-					{shard.error && (
-						<div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 font-mono text-xs text-destructive">
-							{shard.error}
-						</div>
-					)}
-
-					<div className="grid gap-4 md:grid-cols-4">
-						<Stat label="Tick" value={shard.tick.toLocaleString()} />
-						<Stat label="Subscribers" value={shard.subscribers} />
-						<Stat label="Input queue" value={shard.input_queue} />
-						<Stat
-							label="Overruns"
-							value={s.overruns}
-							note="Ticks skipped because the loop fell behind."
+					</span>
+				)
+			}
+			actions={
+				<Button
+					variant="destructive"
+					disabled={!shard || gone}
+					onClick={() => setConfirmStop(true)}
+				>
+					<Square />
+					Stop shard
+				</Button>
+			}
+		>
+			<PageScroll>
+				{err && shard && (
+					<ErrorBanner>
+						Studio could not refresh the shard: {err}. The numbers show the last
+						good response.
+					</ErrorBanner>
+				)}
+				{gone ? (
+					<EmptyState
+						title="The shard does not run"
+						description={`The shard ${id} stopped, or the server removed it.`}
+						action={
+							<Button variant="outline" onClick={onBack}>
+								Go to all shards
+							</Button>
+						}
+					/>
+				) : !shard || !s ? (
+					err ? (
+						<ErrorState
+							title="Studio could not load the shard"
+							message={err}
+							onRetry={reload}
 						/>
-					</div>
+					) : (
+						<LoadingRows />
+					)
+				) : (
+					<>
+						{shard.error && (
+							<ErrorBanner>
+								<span className="font-mono">{shard.error}</span>
+							</ErrorBanner>
+						)}
+						<StatStrip>
+							<Stat label="Tick" value={shard.tick.toLocaleString()} />
+							<Stat label="Subscribers" value={shard.subscribers} />
+							<Stat label="Input queue" value={shard.input_queue} />
+							<Stat
+								label="Overruns"
+								value={s.overruns}
+								tone={s.overruns > 0 ? "warn" : "default"}
+								note="Ticks the loop skipped"
+							/>
+						</StatStrip>
+						<StatStrip>
+							<Stat
+								label="Bytes per tick"
+								value={`${bytes(s.bytes_per_tick.p50)} / ${bytes(s.bytes_per_tick.p99)}`}
+								note="p50 / p99, all subscribers"
+							/>
+							<Stat
+								label="Bytes per subscriber"
+								value={`${bytes(s.bytes_per_subscriber.p50)} / ${bytes(s.bytes_per_subscriber.p99)}`}
+								note="p50 / p99, for each tick"
+							/>
+							<Stat
+								label="Dropped frames"
+								value={s.dropped_frames_total}
+								tone={s.dropped_frames_total > 0 ? "warn" : "default"}
+								note="Subscriber queue was full"
+							/>
+							<Stat
+								label="Dropped inputs"
+								value={
+									s.dropped_inputs_total.queue_full +
+									s.dropped_inputs_total.rate_limited
+								}
+								tone={
+									s.dropped_inputs_total.queue_full +
+										s.dropped_inputs_total.rate_limited >
+									0
+										? "warn"
+										: "default"
+								}
+								note={`${s.dropped_inputs_total.queue_full} queue full, ${s.dropped_inputs_total.rate_limited} rate limited`}
+							/>
+						</StatStrip>
 
-					<Card>
-						<CardHeader>
-							<CardTitle>Tick time (ms, last minute of ticks)</CardTitle>
-						</CardHeader>
-						<CardContent>
-							<Table>
-								<TableHeader>
-									<TableRow>
+						<Section title="Tick time in ms, last minute of ticks">
+							<Table aria-label="Tick time by phase" className="border-t">
+								<TableHeader className="static">
+									<tr>
 										<TableHead>Phase</TableHead>
 										<TableHead className="text-right">p50</TableHead>
 										<TableHead className="text-right">p99</TableHead>
 										<TableHead className="text-right">Max</TableHead>
-									</TableRow>
+									</tr>
 								</TableHeader>
 								<TableBody>
 									{(
@@ -381,63 +412,43 @@ function ShardDetailView({ id, onBack }: { id: string; onBack: () => void }) {
 									).map(([label, q]) => (
 										<TableRow key={label}>
 											<TableCell>{label}</TableCell>
-											<TableCell className="text-right font-mono">{ms(q.p50)}</TableCell>
-											<TableCell className="text-right font-mono">{ms(q.p99)}</TableCell>
-											<TableCell className="text-right font-mono">{ms(q.max)}</TableCell>
+											<TableCell className="text-right">{ms(q.p50)}</TableCell>
+											<TableCell className="text-right">{ms(q.p99)}</TableCell>
+											<TableCell className="text-right">{ms(q.max)}</TableCell>
 										</TableRow>
 									))}
 								</TableBody>
 							</Table>
-						</CardContent>
-					</Card>
+						</Section>
 
-					<div className="grid gap-4 md:grid-cols-4">
-						<Stat
-							label="Bytes per tick"
-							value={`${bytes(s.bytes_per_tick.p50)} / ${bytes(s.bytes_per_tick.p99)}`}
-							note="p50 / p99, all subscribers"
-						/>
-						<Stat
-							label="Bytes per subscriber"
-							value={`${bytes(s.bytes_per_subscriber.p50)} / ${bytes(s.bytes_per_subscriber.p99)}`}
-							note="p50 / p99, per tick"
-						/>
-						<Stat
-							label="Dropped frames"
-							value={s.dropped_frames_total}
-							note="From full subscriber queues."
-						/>
-						<Stat
-							label="Dropped inputs"
-							value={s.dropped_inputs_total.queue_full + s.dropped_inputs_total.rate_limited}
-							note={`${s.dropped_inputs_total.queue_full} queue full, ${s.dropped_inputs_total.rate_limited} rate limited`}
-						/>
-					</div>
-
-					<Card>
-						<CardHeader>
-							<CardTitle>Subscribers</CardTitle>
-						</CardHeader>
-						<CardContent>
+						<Section title="Subscribers" aside={shard.subscriber_ids.length}>
 							{shard.subscriber_ids.length === 0 ? (
-								<p className="text-sm text-muted-foreground">No subscribers.</p>
+								<p className="px-3 pb-3 text-xs text-muted-foreground">
+									The shard has no subscribers.
+								</p>
 							) : (
-								<Table>
-									<TableHeader>
-										<TableRow>
+								<Table aria-label="Subscribers" className="border-t">
+									<TableHeader className="static">
+										<tr>
 											<TableHead>Subscriber</TableHead>
 											<TableHead className="text-right">Connections</TableHead>
-											<TableHead />
-										</TableRow>
+											<TableHead className="w-px">
+												<span className="sr-only">Actions</span>
+											</TableHead>
+										</tr>
 									</TableHeader>
 									<TableBody>
 										{shard.subscriber_ids.map((sub) => (
 											<TableRow key={sub.id}>
 												<TableCell className="font-mono text-xs">{sub.id}</TableCell>
-												<TableCell className="text-right font-mono">{sub.connections}</TableCell>
+												<TableCell className="text-right">{sub.connections}</TableCell>
 												<TableCell className="text-right">
-													<Button size="sm" variant="outline" onClick={() => kick(sub.id)}>
-														<UserX className="size-3.5" />
+													<Button
+														size="sm"
+														variant="outline"
+														onClick={() => kick(sub.id)}
+													>
+														<UserX />
 														Kick
 													</Button>
 												</TableCell>
@@ -446,31 +457,20 @@ function ShardDetailView({ id, onBack }: { id: string; onBack: () => void }) {
 									</TableBody>
 								</Table>
 							)}
-						</CardContent>
-					</Card>
-				</>
-			)}
+						</Section>
+					</>
+				)}
+			</PageScroll>
 
-			<Dialog open={confirmStop} onOpenChange={setConfirmStop}>
-				<DialogContent>
-					<DialogHeader>
-						<DialogTitle>Stop {id}?</DialogTitle>
-						<DialogDescription>
-							The shard stops ticking and every subscriber's connection closes. Its
-							state is gone unless the game saves it.
-						</DialogDescription>
-					</DialogHeader>
-					<DialogFooter>
-						<Button variant="ghost" onClick={() => setConfirmStop(false)}>
-							Cancel
-						</Button>
-						<Button variant="destructive" onClick={stop} disabled={busy}>
-							{busy && <Loader2 className="size-3.5 animate-spin" />}
-							Stop shard
-						</Button>
-					</DialogFooter>
-				</DialogContent>
-			</Dialog>
-		</div>
+			<ConfirmDialog
+				open={confirmStop}
+				title={`Stop the shard ${id}?`}
+				description="The shard stops its ticks and closes the connection of every subscriber. The state of the shard is lost unless the game saves it."
+				confirmLabel="Stop shard"
+				destructive
+				onCancel={() => setConfirmStop(false)}
+				onConfirm={stop}
+			/>
+		</Page>
 	);
 }

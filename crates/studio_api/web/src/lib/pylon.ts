@@ -16,6 +16,8 @@ export type ManifestEntity = {
 	fields: ManifestField[];
 	indexes?: { name: string; fields: string[]; unique: boolean }[];
 	crdt?: boolean;
+	/** The search index of the entity, when it declares one. */
+	search?: unknown;
 };
 
 export type ManifestPolicy = {
@@ -91,10 +93,8 @@ export type ApiOptions = RequestInit;
  * ApiError. Returns the parsed JSON body, or `null` for empty 2xx responses.
  *
  * Auth rides on cookies (`credentials: "include"`): the Studio operator
- * cookie, or the app's session cookie for an app admin.
- * Studio holds no credential of its own: it used to keep a `PYLON_ADMIN_TOKEN`
- * in localStorage and send it as a Bearer header, which put a long-lived
- * shared superuser secret somewhere any XSS on this origin could read it.
+ * cookie, or the app's session cookie for an app admin. Studio holds no
+ * credential of its own, so a script on this origin has no token to read.
  */
 export async function api<T = unknown>(
 	path: string,

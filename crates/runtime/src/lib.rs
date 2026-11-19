@@ -95,6 +95,8 @@ mod sqlite_row_filter;
 pub mod sse;
 pub mod ssr_cache;
 pub mod stream_hub;
+mod studio_changes;
+mod studio_health;
 pub mod sync_relay;
 pub mod tenant_hosts;
 pub mod tinybird_logger;

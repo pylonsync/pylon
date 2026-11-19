@@ -1,74 +1,80 @@
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { displayName, useAuth } from "@/auth/auth";
+import { Fact, Facts } from "@/components/facts";
+import { Page, PageScroll, Section } from "@/components/page";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { displayName, useAuth } from "@/auth/AuthContext";
+import { Select } from "@/components/ui/select";
+import { usePreference } from "@ui-sdk/react/preferences";
 import { API_BASE, MANIFEST } from "@/lib/pylon";
+import { colorScheme, type ColorSchemeChoice } from "@/lib/theme";
 
 export function SettingsPage() {
-	const { me, user } = useAuth();
-	const account = displayName(user, me);
+	const auth = useAuth();
+	const { me } = auth;
+	const { value: scheme } = usePreference(colorScheme);
 	return (
-		<div className="grid gap-4 md:grid-cols-2">
-			<Card>
-				<CardHeader>
-					<CardTitle>Session</CardTitle>
-				</CardHeader>
-				<CardContent className="space-y-3 text-sm">
-					<Row label="Signed in as" value={account} />
-					<Row
-						label="User id"
-						value={<code className="text-xs">{me?.user_id ?? "anonymous"}</code>}
-					/>
-					<Row
-						label="Admin"
-						value={
-							<Badge variant={me?.is_admin ? "default" : "outline"}>
+		<Page title="Settings">
+			<PageScroll>
+				<Section title="Session">
+					<Facts className="max-w-xl">
+						<Fact label="Signed in as">{displayName(auth)}</Fact>
+						<Fact label="Account type">
+							{auth.operator ? "Studio operator" : "App user"}
+						</Fact>
+						<Fact label="User id">
+							<code className="text-xs">{me?.user_id ?? "none"}</code>
+						</Fact>
+						<Fact label="Admin">
+							<Badge variant={me?.is_admin ? "green" : "gray"}>
 								{me?.is_admin ? "Yes" : "No"}
 							</Badge>
-						}
-					/>
-					{me?.tenant_id && (
-						<Row
-							label="Active tenant"
-							value={<code className="text-xs">{me.tenant_id}</code>}
-						/>
-					)}
-					<div className="pt-2">
-						<Button variant="outline" size="sm" asChild>
-							<a href="/studio/logout">Sign out</a>
-						</Button>
-					</div>
-				</CardContent>
-			</Card>
-
-			<Card>
-				<CardHeader>
-					<CardTitle>Server</CardTitle>
-				</CardHeader>
-				<CardContent className="space-y-3 text-sm">
-					<Row
-						label="API base"
-						value={<code className="text-xs">{API_BASE || "(same origin)"}</code>}
-					/>
-					<Row label="App" value={<code className="text-xs">{MANIFEST.name}</code>} />
-					<Row label="Version" value={<code className="text-xs">{MANIFEST.version}</code>} />
-					<Row
-						label="Manifest version"
-						value={
+						</Fact>
+						{me?.tenant_id && (
+							<Fact label="Tenant">
+								<code className="text-xs">{me.tenant_id}</code>
+							</Fact>
+						)}
+						<Fact label="">
+							<Button variant="outline" render={<a href="/studio/logout" />}>
+								Sign out
+							</Button>
+						</Fact>
+					</Facts>
+				</Section>
+				<Section title="Appearance">
+					<Facts className="max-w-xl">
+						<Fact label="Theme">
+							<Select
+								aria-label="Theme"
+								className="w-40"
+								value={scheme}
+								onValueChange={(v) => colorScheme.set(v as ColorSchemeChoice)}
+								options={[
+									{ value: "system", label: "System" },
+									{ value: "light", label: "Light" },
+									{ value: "dark", label: "Dark" },
+								]}
+							/>
+						</Fact>
+					</Facts>
+				</Section>
+				<Section title="Server">
+					<Facts className="max-w-xl">
+						<Fact label="API base">
+							<code className="text-xs">{API_BASE || "same origin"}</code>
+						</Fact>
+						<Fact label="App">
+							<code className="text-xs">{MANIFEST.name}</code>
+						</Fact>
+						<Fact label="App version">
+							<code className="text-xs">{MANIFEST.version}</code>
+						</Fact>
+						<Fact label="Manifest version">
 							<code className="text-xs">{MANIFEST.manifest_version}</code>
-						}
-					/>
-				</CardContent>
-			</Card>
-		</div>
-	);
-}
-
-function Row({ label, value }: { label: string; value: React.ReactNode }) {
-	return (
-		<div className="flex items-center justify-between gap-4">
-			<span className="text-muted-foreground">{label}</span>
-			<span>{value}</span>
-		</div>
+						</Fact>
+					</Facts>
+				</Section>
+			</PageScroll>
+		</Page>
 	);
 }

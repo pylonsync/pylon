@@ -1,92 +1,46 @@
-import {
-	createContext,
-	useCallback,
-	useContext,
-	useEffect,
-	useMemo,
-	useState,
-} from "react";
+import { useMemo } from "react";
+
+import { AuthCtx, type AuthState } from "@/auth/auth";
+import { useQuery } from "@/hooks/use-query";
 import { type AuthMe, type StudioUser, api } from "@/lib/pylon";
 
-// Studio authenticates as a person, using whatever session the app itself
-// issued — the same cookie the rest of the app runs on. There is no Studio
-// credential to obtain, paste, or store.
+// Studio authenticates as a person. The session is a Studio operator session
+// or the session of an app admin, and the cookie carries it. Studio holds no
+// credential.
 //
-// The server already refused to serve this bundle to anyone who isn't a
-// signed-in admin (see `studio_access` in crates/runtime/src/server.rs), so by
-// the time this provider runs the answer is known to be "an admin". We still
-// resolve it client-side, for two reasons: the UI shows *who* you are, and a
-// session that expires while the tab is open should surface as a locked state
-// rather than a page of failing fetches.
+// The server serves Studio to a signed-in admin only, so the answer here is
+// "an admin" on load. The provider still asks, for two reasons: the sidebar
+// shows who is signed in, and a session that ends while the tab is open must
+// show as a signed-out state.
 //
-// `/api/auth/session` returns the auth context AND the User row in one
-// round-trip, so the sidebar can show an email without a second request.
-
-type AuthState = {
-	/** Resolved auth context. `null` while the first request is in flight. */
-	me: AuthMe | null;
-	/** The signed-in User row, minus server-only fields. `null` if anonymous. */
-	user: StudioUser | null;
-	loading: boolean;
-	refresh: () => Promise<void>;
-};
+// `/api/auth/session` returns the auth context and the User row in one
+// request.
 
 type SessionResponse = {
 	session?: AuthMe | null;
 	user?: StudioUser | null;
+	operator?: { username?: string } | null;
 };
 
 const ANONYMOUS: AuthMe = { user_id: null, is_admin: false, roles: [] };
 
-const AuthCtx = createContext<AuthState | null>(null);
-
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-	const [me, setMe] = useState<AuthMe | null>(null);
-	const [user, setUser] = useState<StudioUser | null>(null);
-	const [loading, setLoading] = useState(true);
-
-	const refresh = useCallback(async () => {
-		setLoading(true);
-		try {
-			const resp = await api<SessionResponse>("/api/auth/session");
-			setMe(resp?.session ?? ANONYMOUS);
-			setUser(resp?.user ?? null);
-		} catch {
-			// A failure here means the session went away underneath us (or the
-			// network did). Either way the honest answer is "not signed in" —
-			// claiming otherwise just produces a UI whose every panel errors.
-			setMe(ANONYMOUS);
-			setUser(null);
-		} finally {
-			setLoading(false);
-		}
-	}, []);
-
-	useEffect(() => {
-		void refresh();
-	}, [refresh]);
-
-	const value = useMemo<AuthState>(
-		() => ({ me, user, loading, refresh }),
-		[me, user, loading, refresh],
+	const { data, error, loading, reload } = useQuery("session", () =>
+		api<SessionResponse>("/api/auth/session"),
 	);
 
+	const value = useMemo<AuthState>(() => {
+		// A failed request means the session or the network is gone. Both
+		// show as "not signed in".
+		const failed = error !== null;
+		return {
+			me: failed ? ANONYMOUS : data ? (data.session ?? ANONYMOUS) : null,
+			user: failed ? null : (data?.user ?? null),
+			operator: failed ? null : (data?.operator?.username ?? null),
+			loading: loading && !data && !failed,
+			refresh: reload,
+		};
+	}, [data, error, loading, reload]);
+
 	return <AuthCtx.Provider value={value}>{children}</AuthCtx.Provider>;
-}
-
-export function useAuth(): AuthState {
-	const ctx = useContext(AuthCtx);
-	if (!ctx) throw new Error("useAuth must be used inside <AuthProvider>");
-	return ctx;
-}
-
-/** Display name for the signed-in admin. Falls back through the usual fields. */
-export function displayName(user: StudioUser | null, me: AuthMe | null): string {
-	if (user) {
-		for (const key of ["name", "email", "username"] as const) {
-			const v = user[key];
-			if (typeof v === "string" && v.trim()) return v.trim();
-		}
-	}
-	return me?.user_id ?? "Signed in";
 }

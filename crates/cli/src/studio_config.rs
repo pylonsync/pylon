@@ -136,9 +136,23 @@ pub fn load_config(config_path: &Path) -> Result<StudioConfig, Diagnostic> {
     })
 }
 
+/// The tsconfig for the extension bundle: the app's own config, when it has
+/// one, with the automatic JSX runtime from `react`.
+fn jsx_tsconfig(app_tsconfig: Option<&Path>) -> String {
+    let mut config = serde_json::json!({
+        "compilerOptions": { "jsx": "react-jsx", "jsxImportSource": "react" }
+    });
+    if let Some(path) = app_tsconfig {
+        config["extends"] = serde_json::Value::String(path.display().to_string());
+    }
+    serde_json::to_string_pretty(&config).unwrap_or_default()
+}
+
 /// Bundle `studio.entry.tsx` to a single ESM file via `bun build`.
-/// `react`, `react-dom`, and `react/jsx-runtime` are marked external —
-/// the Studio HTML provides them through an import map.
+/// `react`, `react-dom`, `react-dom/client`, `react/jsx-runtime` and
+/// `react/jsx-dev-runtime` are external. The import map in the Studio HTML
+/// points each of them at a shim under `/studio/modules/` that re-exports the
+/// React instance Studio runs on.
 pub fn bundle_entry(entry_path: &Path, out_file: &Path) -> Result<(), Diagnostic> {
     if let Some(parent) = out_file.parent() {
         std::fs::create_dir_all(parent).map_err(|e| Diagnostic {
@@ -150,14 +164,34 @@ pub fn bundle_entry(entry_path: &Path, out_file: &Path) -> Result<(), Diagnostic
         })?;
     }
 
+    // The bundle must use the automatic JSX runtime: Studio provides
+    // `react/jsx-runtime`, and no `React` global. An app's tsconfig can ask for
+    // the classic runtime (`"jsx": "react"`), so the bundle gets a tsconfig
+    // that extends the app's and sets the runtime.
+    let tsconfig = out_file.with_file_name("studio.tsconfig.json");
+    let app_tsconfig = entry_path
+        .parent()
+        .map(|dir| dir.join("tsconfig.json"))
+        .filter(|p| p.exists())
+        .and_then(|p| p.canonicalize().ok());
+    std::fs::write(&tsconfig, jsx_tsconfig(app_tsconfig.as_deref())).map_err(|e| Diagnostic {
+        severity: Severity::Error,
+        code: "STUDIO_ENTRY_TSCONFIG".into(),
+        message: format!("Could not write {}: {e}", tsconfig.display()),
+        span: None,
+        hint: None,
+    })?;
+
     let output = std::process::Command::new("bun")
         .arg("build")
         .arg(entry_path)
         .arg("--target=browser")
         .arg("--format=esm")
+        .arg(format!("--tsconfig-override={}", tsconfig.display()))
         .arg("--external=react")
         .arg("--external=react-dom")
         .arg("--external=react/jsx-runtime")
+        .arg("--external=react/jsx-dev-runtime")
         .arg("--external=react-dom/client")
         .arg("--outfile")
         .arg(out_file)
@@ -272,6 +306,20 @@ pub fn build_artefacts(entry_file: &str, data_dir: &Path) -> Result<StudioConfig
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_bundle_tsconfig_sets_the_automatic_jsx_runtime() {
+        let alone: serde_json::Value = serde_json::from_str(&super::jsx_tsconfig(None)).unwrap();
+        assert_eq!(alone["compilerOptions"]["jsx"], "react-jsx");
+        assert_eq!(alone["compilerOptions"]["jsxImportSource"], "react");
+        assert!(alone.get("extends").is_none());
+
+        let app = std::path::Path::new("/app/tsconfig.json");
+        let extended: serde_json::Value =
+            serde_json::from_str(&super::jsx_tsconfig(Some(app))).unwrap();
+        assert_eq!(extended["extends"], "/app/tsconfig.json");
+        assert_eq!(extended["compilerOptions"]["jsx"], "react-jsx");
+    }
+
     use super::*;
 
     #[test]

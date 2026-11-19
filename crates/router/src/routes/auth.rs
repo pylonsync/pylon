@@ -1430,6 +1430,8 @@ pub(crate) fn handle(
     //   TS `getMe` function and call it alongside this endpoint.
     // - Returns `user: null` when the caller is anonymous, a guest,
     //   or the User row was deleted out from under the session.
+    // - Adds `operator: { username }` when the session belongs to a Studio
+    //   operator.
     if url == "/api/auth/session" && method == HttpMethod::Get {
         let auth_cfg = &ctx.store.manifest().auth;
         let user_entity = &auth_cfg.user.entity;
@@ -1447,6 +1449,20 @@ pub(crate) fn handle(
             })
             .unwrap_or(serde_json::Value::Null);
         body.insert("user".into(), user_value);
+        // A Studio operator has no User row. The response names the operator
+        // so Studio can show who is signed in. Only the operator's own
+        // session gets it.
+        if let Some(operator) = ctx
+            .auth_ctx
+            .user_id
+            .as_deref()
+            .and_then(|uid| pylon_auth::operator::find_by_user_id(ctx.account_store, uid))
+        {
+            body.insert(
+                "operator".into(),
+                serde_json::json!({ "username": operator.username }),
+            );
+        }
         body.insert(
             "avatar_url".into(),
             avatar_url_for_user(ctx, ctx.auth_ctx.user_id.as_deref())

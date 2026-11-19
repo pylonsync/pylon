@@ -1,31 +1,45 @@
-import { useCallback, useEffect, useState } from "react";
-import { Loader2, Play, RefreshCw } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
+import { useState } from "react";
+import { Play, RefreshCw } from "lucide-react";
+
+import { useAuth } from "@/auth/auth";
+import { CodeBlock } from "@/components/code-block";
+import { Page } from "@/components/page";
+import { Dash } from "@/components/renderers";
 import {
-	Card,
-	CardContent,
-	CardDescription,
-	CardHeader,
-	CardTitle,
-} from "@/components/ui/card";
+	EmptyState,
+	ErrorState,
+	LoadingRows,
+	Spinner,
+} from "@/components/states";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import {
-	Tabs,
-	TabsContent,
-	TabsList,
-	TabsTrigger,
-} from "@/components/ui/tabs";
+	Table,
+	TableBody,
+	TableCell,
+	TableHead,
+	TableHeader,
+	TableRow,
+} from "@/components/ui/table";
+import { Tabs, TabsList, TabsPanel, TabsTab } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
+import { Tooltip } from "@/components/ui/tooltip";
+import { useQuery } from "@/hooks/use-query";
+import { errorText, formatTime, parseDate } from "@/lib/format";
 import { ApiError, api } from "@/lib/pylon";
-import { toast } from "sonner";
+import { cn } from "@/lib/utils";
 import { LockedPage } from "./Locked";
-import { useAuth } from "@/auth/AuthContext";
+
+type ArgSchema = { type?: string; optional?: boolean; table?: string };
 
 type FnDef = {
 	name: string;
 	fn_type?: string;
+	auth?: string;
+	internal?: boolean;
+	args_schema?: Record<string, ArgSchema>;
 };
 
 type Trace = {
@@ -36,232 +50,322 @@ type Trace = {
 	error?: string | null;
 };
 
+type Result = { ok: boolean; status: number; data: unknown };
+
+const POLL_MS = 5000;
+
+/** A JSON body with one placeholder for each required argument. */
+function argsTemplate(fn: FnDef): string {
+	const out: Record<string, string> = {};
+	for (const [name, arg] of Object.entries(fn.args_schema ?? {})) {
+		if (arg.optional) continue;
+		out[name] = `<${arg.type === "id" && arg.table ? `id(${arg.table})` : (arg.type ?? "value")}>`;
+	}
+	return JSON.stringify(out, null, 2);
+}
+
+function signature(fn: FnDef): string {
+	return Object.entries(fn.args_schema ?? {})
+		.map(
+			([name, arg]) =>
+				`${name}${arg.optional ? "?" : ""}: ${arg.type === "id" && arg.table ? `id(${arg.table})` : (arg.type ?? "unknown")}`,
+		)
+		.join(", ");
+}
+
 export function FunctionsPage() {
 	const { me } = useAuth();
-	const [fns, setFns] = useState<FnDef[]>([]);
-	const [traces, setTraces] = useState<Trace[]>([]);
-	const [loading, setLoading] = useState(false);
-	const [name, setName] = useState("");
-	const [argsJson, setArgsJson] = useState("{}");
-	const [result, setResult] = useState<{ status: number; data: unknown } | null>(
-		null,
-	);
-	const [invoking, setInvoking] = useState(false);
-
-	const reload = useCallback(async () => {
-		setLoading(true);
-		try {
+	const isAdmin = !!me?.is_admin;
+	const { data, error, loading, reload } = useQuery(
+		"functions",
+		async () => {
 			const [fnsData, tracesData] = await Promise.all([
 				api<FnDef[] | { data?: FnDef[] }>("/api/fn"),
 				api<Trace[] | { data?: Trace[] }>("/api/fn/traces"),
 			]);
-			setFns(Array.isArray(fnsData) ? fnsData : fnsData.data ?? []);
-			setTraces(Array.isArray(tracesData) ? tracesData : tracesData.data ?? []);
-		} catch (err) {
-			if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
-				// Locked page handles this; don't toast.
-			} else if (err instanceof ApiError) {
-				toast.error(`${err.code}: ${err.message}`);
-			} else {
-				toast.error(err instanceof Error ? err.message : String(err));
-			}
-		} finally {
-			setLoading(false);
-		}
-	}, []);
+			return {
+				fns: Array.isArray(fnsData) ? fnsData : (fnsData?.data ?? []),
+				traces: Array.isArray(tracesData)
+					? tracesData
+					: (tracesData?.data ?? []),
+			};
+		},
+		{ pollMs: POLL_MS, enabled: isAdmin },
+	);
+	const fns = data?.fns ?? null;
+	const traces = data?.traces ?? [];
+	const [name, setName] = useState("");
+	const [argsJson, setArgsJson] = useState("{}");
+	const [result, setResult] = useState<Result | null>(null);
+	const [tab, setTab] = useState("registered");
 
-	useEffect(() => {
-		if (!me?.is_admin) return;
-		void reload();
-		const id = window.setInterval(reload, 5000);
-		return () => window.clearInterval(id);
-	}, [reload, me?.is_admin]);
-
-	if (!me?.is_admin) {
+	if (!isAdmin) {
 		return (
-			<LockedPage
-				title="Functions require admin"
-				description="Registered functions and traces are admin-only. Sign in with an admin account to view them."
-			/>
+			<Page title="Functions">
+				<LockedPage
+					title="Functions are for admins"
+					description="Sign in with an admin account to see the functions and their traces."
+				/>
+			</Page>
 		);
 	}
 
 	const invoke = async () => {
-		if (!name.trim()) return;
-		setInvoking(true);
+		const fn = name.trim();
+		if (!fn) return;
+		let args: unknown;
 		try {
-			const args = argsJson.trim() ? JSON.parse(argsJson) : {};
-			const data = await api(`/api/fn/${name.trim()}`, {
+			args = argsJson.trim() ? JSON.parse(argsJson) : {};
+		} catch (err) {
+			setResult({
+				ok: false,
+				status: 0,
+				data: { error: `The arguments are not valid JSON: ${errorText(err)}` },
+			});
+			return;
+		}
+		try {
+			const data = await api(`/api/fn/${encodeURIComponent(fn)}`, {
 				method: "POST",
 				body: JSON.stringify(args),
 			});
-			setResult({ status: 200, data });
-			toast.success(`Called ${name}`);
+			setResult({ ok: true, status: 200, data });
 			void reload();
 		} catch (err) {
-			if (err instanceof ApiError) {
-				setResult({ status: err.status, data: { code: err.code, message: err.message } });
-			} else {
-				setResult({
-					status: 0,
-					data: { error: err instanceof Error ? err.message : String(err) },
-				});
-			}
-		} finally {
-			setInvoking(false);
+			setResult(
+				err instanceof ApiError
+					? {
+							ok: false,
+							status: err.status,
+							data: { code: err.code, message: err.message },
+						}
+					: { ok: false, status: 0, data: { error: errorText(err) } },
+			);
 		}
 	};
 
 	return (
-		<div className="space-y-4">
-			<Tabs defaultValue="registered">
-				<div className="flex items-center justify-between">
-					<TabsList>
-						<TabsTrigger value="registered">Registered ({fns.length})</TabsTrigger>
-						<TabsTrigger value="traces">Traces ({traces.length})</TabsTrigger>
-					</TabsList>
-					<Button variant="outline" size="sm" onClick={reload} disabled={loading}>
-						{loading ? (
-							<Loader2 className="size-3.5 animate-spin" />
-						) : (
-							<RefreshCw className="size-3.5" />
-						)}
-						Refresh
+		<Page
+			title="Functions"
+			actions={
+				<Tooltip label="Load the functions and traces again">
+					<Button
+						variant="ghost"
+						size="icon"
+						aria-label="Refresh"
+						disabled={loading}
+						onClick={reload}
+					>
+						{loading ? <Spinner /> : <RefreshCw />}
 					</Button>
-				</div>
+				</Tooltip>
+			}
+		>
+			<Tabs value={tab} onValueChange={(v) => v && setTab(v)} className="flex-1">
+				<TabsList aria-label="Function views">
+					<TabsTab value="registered">
+						Registered
+						<span className="text-xs text-muted-foreground tabular-nums">
+							{fns?.length ?? 0}
+						</span>
+					</TabsTab>
+					<TabsTab value="traces">
+						Traces
+						<span className="text-xs text-muted-foreground tabular-nums">
+							{traces.length}
+						</span>
+					</TabsTab>
+				</TabsList>
 
-				<TabsContent value="registered" className="grid gap-4 md:grid-cols-2">
-					<Card>
-						<CardHeader>
-							<CardTitle>Registered functions</CardTitle>
-							<CardDescription>
-								TypeScript functions discovered in your <code>functions/</code> dir.
-							</CardDescription>
-						</CardHeader>
-						<CardContent className="space-y-1">
-							{fns.length === 0 ? (
-								<p className="text-sm text-muted-foreground">
-									No functions registered. Add files to{" "}
-									<code className="rounded bg-muted px-1 py-0.5">./functions/</code>{" "}
-									and restart.
-								</p>
-							) : (
-								fns.map((f) => (
-									<div
-										key={f.name}
-										className="flex items-center justify-between rounded-md border px-3 py-2"
-									>
-										<div className="flex items-center gap-2">
-											<code className="text-xs">{f.name}</code>
-											{f.fn_type && (
-												<Badge variant="secondary" className="text-[10px]">
-													{f.fn_type}
-												</Badge>
-											)}
-										</div>
-										<Button
-											size="sm"
-											variant="ghost"
+				<TabsPanel
+					value="registered"
+					className="flex min-h-0 flex-col lg:flex-row"
+				>
+					<div className="min-h-0 min-w-0 flex-1 overflow-auto max-lg:max-h-[45%] max-lg:border-b lg:border-r">
+						{error && fns === null ? (
+							<ErrorState
+								title="Studio could not load the functions"
+								message={error}
+								onRetry={reload}
+							/>
+						) : fns === null ? (
+							<LoadingRows />
+						) : fns.length === 0 ? (
+							<EmptyState
+								title="The app has no functions"
+								description={
+									<>
+										Add a file to the <code>functions/</code> directory and
+										start the server again.
+									</>
+								}
+							/>
+						) : (
+							<Table aria-label="Registered functions">
+								<TableHeader>
+									<tr>
+										<TableHead className="w-64">Name</TableHead>
+										<TableHead className="w-24">Type</TableHead>
+										<TableHead className="w-20">Auth</TableHead>
+										<TableHead>Arguments</TableHead>
+									</tr>
+								</TableHeader>
+								<TableBody>
+									{fns.map((f) => (
+										<TableRow
+											key={f.name}
+											tabIndex={0}
+											data-current={f.name === name}
+											className="cursor-default"
 											onClick={() => {
 												setName(f.name);
-												setArgsJson("{}");
+												setArgsJson(argsTemplate(f));
 												setResult(null);
 											}}
+											onKeyDown={(e) => {
+												if (e.key !== "Enter" && e.key !== " ") return;
+												e.preventDefault();
+												e.currentTarget.click();
+											}}
 										>
-											<Play className="size-3.5" /> Invoke
-										</Button>
-									</div>
-								))
-							)}
-						</CardContent>
-					</Card>
+											<TableCell className="font-mono text-xs">
+												{f.name}
+												{f.internal && (
+													<Badge variant="outline" className="ml-2">
+														internal
+													</Badge>
+												)}
+											</TableCell>
+											<TableCell>
+												{f.fn_type ? (
+													<Badge
+														variant={
+															f.fn_type === "query"
+																? "blue"
+																: f.fn_type === "mutation"
+																	? "green"
+																	: "amber"
+														}
+													>
+														{f.fn_type}
+													</Badge>
+												) : (
+													<Dash />
+												)}
+											</TableCell>
+											<TableCell className="text-muted-foreground">
+												{f.auth ?? <Dash />}
+											</TableCell>
+											<TableCell className="font-mono text-xs text-muted-foreground">
+												{signature(f) || <Dash />}
+											</TableCell>
+										</TableRow>
+									))}
+								</TableBody>
+							</Table>
+						)}
+					</div>
 
-					<Card>
-						<CardHeader>
-							<CardTitle>Invoke</CardTitle>
-							<CardDescription>POST to /api/fn/&lt;name&gt; with the JSON body below.</CardDescription>
-						</CardHeader>
-						<CardContent className="space-y-3">
-							<div className="space-y-1.5">
-								<Label htmlFor="fn-name">Function name</Label>
-								<Input
-									id="fn-name"
-									className="font-mono"
-									placeholder="myFunction"
-									value={name}
-									onChange={(e) => setName(e.target.value)}
-								/>
-							</div>
-							<div className="space-y-1.5">
-								<Label htmlFor="fn-args">Arguments (JSON)</Label>
-								<Textarea
-									id="fn-args"
-									className="font-mono text-xs"
-									rows={6}
-									value={argsJson}
-									onChange={(e) => setArgsJson(e.target.value)}
-								/>
-							</div>
-							<Button onClick={invoke} disabled={!name.trim() || invoking}>
-								{invoking && <Loader2 className="size-3.5 animate-spin" />}
+					<form
+						className="flex min-h-0 w-full shrink-0 flex-col gap-3 overflow-auto p-3 lg:w-[380px]"
+						onSubmit={(e) => {
+							e.preventDefault();
+						}}
+					>
+						<h2 className="text-xs font-semibold">Call a function</h2>
+						<div className="space-y-1">
+							<Label htmlFor="fn-name">Function</Label>
+							<Input
+								id="fn-name"
+								name="function"
+								className="font-mono text-xs"
+								placeholder="Select a function from the list"
+								value={name}
+								onChange={(e) => setName(e.target.value)}
+							/>
+						</div>
+						<div className="space-y-1">
+							<Label htmlFor="fn-args">Arguments (JSON)</Label>
+							<Textarea
+								id="fn-args"
+								name="arguments"
+								className="font-mono text-xs leading-relaxed"
+								rows={7}
+								spellCheck={false}
+								value={argsJson}
+								onChange={(e) => setArgsJson(e.target.value)}
+							/>
+						</div>
+						<div>
+							<Button type="button" disabled={!name.trim()} onClick={invoke}>
+								<Play />
 								Call
 							</Button>
-							{result && (
-								<div className="space-y-1.5">
-									<div className="flex items-center gap-2 text-xs">
-										<Badge
-											variant={
-												result.status >= 200 && result.status < 300
-													? "default"
-													: "destructive"
-											}
-										>
-											{result.status || "ERR"}
-										</Badge>
-									</div>
-									<pre className="max-h-64 overflow-auto rounded-md border bg-muted/30 p-3 text-xs">
-										{JSON.stringify(result.data, null, 2)}
-									</pre>
-								</div>
-							)}
-						</CardContent>
-					</Card>
-				</TabsContent>
+						</div>
+						{result && (
+							<div className="space-y-1.5">
+								<Badge variant={result.ok ? "green" : "red"}>
+									{result.status
+										? `${result.status} ${result.ok ? "OK" : "Error"}`
+										: "Error"}
+								</Badge>
+								<CodeBlock
+									className="max-h-72"
+									value={JSON.stringify(result.data, null, 2) ?? "null"}
+								/>
+							</div>
+						)}
+					</form>
+				</TabsPanel>
 
-				<TabsContent value="traces">
-					<Card>
-						<CardContent className="p-0">
-							{traces.length === 0 ? (
-								<div className="py-16 text-center text-sm text-muted-foreground">
-									No traces yet. Invoke a function to see one here.
-								</div>
-							) : (
-								<div className="divide-y">
-									{traces.map((t, i) => (
-										<details key={i} className="group">
-											<summary className="flex cursor-pointer items-center justify-between gap-2 px-4 py-2.5 hover:bg-accent/40">
-												<div className="flex items-center gap-2">
-													<code className="text-xs">{t.fn_name ?? t.name}</code>
-													<Badge variant={t.error ? "destructive" : "default"}>
-														{t.error ? "error" : "ok"}
-													</Badge>
-												</div>
-												<span className="text-xs text-muted-foreground">
-													{t.duration_ms != null ? `${t.duration_ms}ms` : ""}
-													{t.timestamp ? ` · ${new Date(t.timestamp).toLocaleTimeString()}` : ""}
-												</span>
-											</summary>
-											<pre className="max-h-64 overflow-auto bg-muted/30 px-4 py-3 text-xs">
-												{JSON.stringify(t, null, 2)}
-											</pre>
-										</details>
-									))}
-								</div>
-							)}
-						</CardContent>
-					</Card>
-				</TabsContent>
+				<TabsPanel value="traces" className="overflow-auto">
+					{error && (
+						<ErrorState
+							title="Studio could not load the traces"
+							message={error}
+							onRetry={reload}
+						/>
+					)}
+					{!error && traces.length === 0 && (
+						<EmptyState
+							title="No traces"
+							description="Call a function to record a trace."
+						/>
+					)}
+					{!error &&
+						traces.map((t, i) => {
+							const at = parseDate(t.timestamp);
+							return (
+								<details key={i} className="group border-b">
+									<summary
+										className={cn(
+											"flex h-8 cursor-default list-none items-center gap-3 px-3 hover:bg-muted [&::-webkit-details-marker]:hidden",
+										)}
+									>
+										<Badge variant={t.error ? "red" : "green"}>
+											{t.error ? "error" : "ok"}
+										</Badge>
+										<code className="min-w-0 flex-1 truncate text-xs">
+											{t.fn_name ?? t.name}
+										</code>
+										<span className="text-xs text-muted-foreground tabular-nums">
+											{t.duration_ms != null ? `${t.duration_ms} ms` : ""}
+										</span>
+										<span className="w-20 text-right text-xs text-muted-foreground tabular-nums">
+											{at ? formatTime(at) : ""}
+										</span>
+									</summary>
+									<div className="border-t bg-muted/40 p-3">
+										<CodeBlock
+											className="max-h-72 bg-background"
+											value={JSON.stringify(t, null, 2)}
+										/>
+									</div>
+								</details>
+							);
+						})}
+				</TabsPanel>
 			</Tabs>
-		</div>
+		</Page>
 	);
 }

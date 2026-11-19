@@ -1,9 +1,23 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en">
 	<head>
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-		<title>__PYLON_NAME__ — Pylon Studio</title>
+		<title>__PYLON_NAME__ · Pylon Studio</title>
+		<!-- Studio extensions import React by name. Each name maps to a module
+		     that re-exports the React that Studio runs on. The map must come
+		     before the first module script. See src/lib/module-shims.ts. -->
+		<script type="importmap">
+			{
+				"imports": {
+					"react": "/studio/modules/react.js",
+					"react-dom": "/studio/modules/react-dom.js",
+					"react-dom/client": "/studio/modules/react-dom-client.js",
+					"react/jsx-runtime": "/studio/modules/react-jsx-runtime.js",
+					"react/jsx-dev-runtime": "/studio/modules/react-jsx-dev-runtime.js"
+				}
+			}
+		</script>
 		<script>
 			// Injected by the Rust handler. The escape helpers in
 			// crates/studio_api/src/lib.rs make these XSS-safe inside this

@@ -1,25 +1,23 @@
 {
-  "name": "web",
+  "name": "pylon-studio",
   "private": true,
   "version": "0.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && NODE_ENV=production bun scripts/build-shims.ts",
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "bun test"
   },
   "dependencies": {
-    "@radix-ui/react-slot": "^1.2.4",
+    "@ui-sdk/core": "0.1.0-beta.12",
+    "@ui-sdk/react": "0.1.0-beta.12",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.11.0",
-    "next-themes": "^0.4.6",
-    "radix-ui": "^1.4.3",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
-    "sonner": "^2.0.7",
     "tailwind-merge": "^3.5.0"
   },
   "devDependencies": {

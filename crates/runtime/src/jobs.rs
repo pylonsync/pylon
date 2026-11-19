@@ -835,6 +835,31 @@ impl JobQueue {
         None
     }
 
+    /// How long the most overdue pending job has waited past the time it was
+    /// due (its creation time plus its delay), in seconds, over the whole
+    /// queue. `None` when no pending job is due at `now`.
+    pub fn oldest_due_lag_secs(&self, now: u64) -> Option<u64> {
+        if let Some(store) = self.pg_store() {
+            return match store.oldest_due_at(now) {
+                Ok(due) => due.map(|due| now.saturating_sub(due)),
+                Err(e) => {
+                    tracing::warn!("[jobs] Postgres oldest-due query failed: {e}");
+                    None
+                }
+            };
+        }
+        let pending = self.pending.lock().unwrap();
+        pending
+            .iter()
+            .filter_map(|j| {
+                let created = j.created_at.trim_end_matches('Z').parse::<u64>().ok()?;
+                Some(created.saturating_add(j.delay_secs))
+            })
+            .filter(|due| *due <= now)
+            .map(|due| now - due)
+            .max()
+    }
+
     /// Get queue statistics.
     pub fn stats(&self) -> QueueStats {
         let handler_names: Vec<String> = self.handlers.lock().unwrap().keys().cloned().collect();

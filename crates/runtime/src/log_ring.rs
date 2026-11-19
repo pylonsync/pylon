@@ -42,6 +42,17 @@ pub struct RingEntry {
     pub path: String,
     pub status: u16,
     pub cpu_ms: u32,
+    /// Request and response body sizes in bytes.
+    pub bytes_in: u32,
+    pub bytes_out: u32,
+    /// The id of the signed-in caller. Omitted for an anonymous request and
+    /// for a request that ended before the server resolved the session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    /// The request is one of Studio's own: a Studio page, the admin API, or
+    /// an API call that Studio made. A log view can leave these out.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub studio: bool,
     /// Why the request or connection failed. Omitted when it did not fail.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -140,6 +151,10 @@ mod tests {
             path: "/x".into(),
             status,
             cpu_ms: 1,
+            bytes_in: 0,
+            bytes_out: 0,
+            user: None,
+            studio: false,
             error: None,
         }
     }

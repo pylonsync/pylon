@@ -1,0 +1,126 @@
+---
+title: Studio
+description: "The admin UI at /studio: rows, logs, metrics, jobs, workflows, and how to extend it."
+---
+
+Studio is the admin UI that every Pylon app serves at `/studio`. An operator uses it to read and change rows and to see what the server does.
+
+## Sign in
+
+Studio needs a signed-in admin. There are two kinds:
+
+- A **Studio operator**: an account for the deployment, with no row in your User entity. Create one with the CLI:
+
+  ```bash
+  pylon admin create <username>
+  ```
+
+  Add `--url <url>` when Pylon does not run at `http://127.0.0.1:4321`. A Pylon that runs with `PYLON_ADMIN_TOKEN` needs the same variable set for the command. A local dev server with no token needs none.
+
+- An **app admin**: a user of your app that `auth.user.adminField` or `PYLON_ADMIN_EMAILS` marks as an admin. Sign in through the app, then open `/studio`.
+
+An operator session counts only in Studio and on the admin API. It does not sign anyone in to the app.
+
+## Pages
+
+| Group | Page | What it shows |
+| --- | --- | --- |
+| (top) | Overview | The home page, at `/studio`. Requests, error rate, latency and clients, with links to the pages below. |
+| Data | One page for each entity | The rows, 50 to a page. Sort on a column header. Filter a field with "contains" or "is equal to". A click on a row opens it in a panel to edit. |
+| App | Functions | The registered functions, and a form to call one. |
+| App | Policies, Routes, Manifest, Roles | What the manifest declares. |
+| Runtime | Logs | The last 1,000 requests with a live tail, the recent function calls, the audit events, and the sessions. |
+| Runtime | Metrics | Request rate, error rate and p50, p95 and p99 latency for the last 60 minutes, by route and by function. |
+| Runtime | Jobs | The queue by state, the dead-letter queue, the cron schedules and the handlers. Cancel a job that has not started, retry a dead job, run a schedule now. |
+| Runtime | Workflows | The runs by state and the steps of each run. Cancel a run. |
+| Runtime | Live sync | Each insert, update and delete as the server records it. |
+| Runtime | Health | Checks for the database, the functions runtime, the job queue, the scheduler, realtime clients, errors, latency and memory. |
+| Runtime | Shards | The running shards and their tick times. |
+| Runtime | System tables | The auth and operations tables of the framework, read-only. |
+
+The request log is in memory. It holds the last 1,000 requests and starts empty after a restart. It keeps the path with no query string, and no headers and no bodies.
+
+Live sync never shows the value of a `serverOnly` or `encrypted` field. It shows `[redacted]`.
+
+## Configure
+
+Put a `studio.config.ts` next to `app.ts`:
+
+```ts
+import { defineStudioConfig } from "@pylonsync/sdk";
+
+export default defineStudioConfig({
+  brand: { name: "Dealbook" },
+  theme: { accent: "violet" },
+  resources: {
+    Deal: {
+      list: {
+        defaultSort: { field: "value", order: "desc" },
+        columns: [
+          { field: "title", sortable: true },
+          { field: "stage", renderer: { kind: "badge", variants: { won: "green" } } },
+          { field: "value", renderer: { kind: "number", style: "currency" } },
+        ],
+        rowActions: [
+          // Calls the function `moveDeal` with the row.
+          { id: "win", label: "Mark won", kind: "action", action: "moveDeal",
+            input: { dealId: "{row.id}", stage: "won" }, display: "button" },
+          // Calls the handler `archive` from studio.entry.tsx.
+          { id: "archive", label: "Archive", kind: "custom" },
+        ],
+        bulkActions: [{ id: "archive", label: "Archive", kind: "custom" }],
+      },
+    },
+  },
+});
+```
+
+With no config, Studio shows every entity with one column for each field.
+
+## Extend
+
+Put a `studio.entry.tsx` next to `app.ts` to add your own React components and action handlers:
+
+```tsx
+import { defineStudioExtensions } from "@pylonsync/sdk";
+
+function Margin({ value }: { value: unknown }) {
+  return <strong>{Number(value).toFixed(1)}%</strong>;
+}
+
+export default defineStudioExtensions({
+  // A column with renderer: { kind: "custom", componentId: "margin" }
+  renderers: { margin: Margin },
+  // A page at /studio/report
+  pages: { report: () => <p>Report</p> },
+  // Slots in the Studio frame
+  layouts: { footer: () => <span>Support: ops@example.com</span> },
+  // Handlers for kind: "custom" actions, by action id
+  actions: {
+    archive: async ({ rows, api, toast, refresh }) => {
+      for (const row of rows) {
+        await api(`/api/fn/archiveDeal`, {
+          method: "POST",
+          body: JSON.stringify({ id: row.id }),
+        });
+      }
+      toast.success(`Archived ${rows.length} deals`);
+      await refresh();
+    },
+  },
+});
+```
+
+The CLI bundles the file when the server starts. The bundle runs on the React instance that Studio runs on: import `react` as usual, and do not bundle your own copy.
+
+A handler gets:
+
+| Field | Value |
+| --- | --- |
+| `entity` | The entity of the list. |
+| `rows` | One row for a row action. The selected rows for a bulk action. |
+| `api` | The API client of Studio. It sends the Studio session. |
+| `toast` | `success`, `error` and `info`. |
+| `refresh` | Loads the list again. |
+
+A `kind: "custom"` action with no handler is disabled. Its tooltip names the handler id that is missing.

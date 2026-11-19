@@ -1,140 +1,154 @@
+import { CodeBlock } from "@/components/code-block";
+import { Page } from "@/components/page";
+import { Dash } from "@/components/renderers";
+import { EmptyState } from "@/components/states";
+import { Stat, StatStrip } from "@/components/stat-strip";
 import { Badge } from "@/components/ui/badge";
 import {
-	Card,
-	CardContent,
-	CardDescription,
-	CardHeader,
-	CardTitle,
-} from "@/components/ui/card";
-import {
-	Tabs,
-	TabsContent,
-	TabsList,
-	TabsTrigger,
-} from "@/components/ui/tabs";
-import { MANIFEST } from "@/lib/pylon";
+	Table,
+	TableBody,
+	TableCell,
+	TableHead,
+	TableHeader,
+	TableRow,
+} from "@/components/ui/table";
+import { Tabs, TabsList, TabsPanel, TabsTab } from "@/components/ui/tabs";
+import { onLinkClick } from "@/lib/navigation";
+import { MANIFEST, type ManifestField } from "@/lib/pylon";
+import { routeToPath } from "@/lib/route";
 
 export function ManifestPage() {
 	return (
-		<div className="space-y-4">
-			<div className="grid gap-4 md:grid-cols-4">
+		<Page title="Manifest">
+			<StatStrip>
 				<Stat label="Entities" value={MANIFEST.entities.length} />
 				<Stat label="Queries" value={MANIFEST.queries.length} />
 				<Stat label="Actions" value={MANIFEST.actions.length} />
 				<Stat label="Routes" value={MANIFEST.routes.length} />
-			</div>
-
-			<Tabs defaultValue="entities">
-				<TabsList>
-					<TabsTrigger value="entities">Entities</TabsTrigger>
-					<TabsTrigger value="queries">Queries</TabsTrigger>
-					<TabsTrigger value="actions">Actions</TabsTrigger>
-					<TabsTrigger value="raw">Raw JSON</TabsTrigger>
+			</StatStrip>
+			<Tabs defaultValue="entities" className="flex-1">
+				<TabsList aria-label="Manifest parts">
+					<TabsTab value="entities">Entities</TabsTab>
+					<TabsTab value="queries">Queries</TabsTab>
+					<TabsTab value="actions">Actions</TabsTab>
+					<TabsTab value="raw">JSON</TabsTab>
 				</TabsList>
-
-				<TabsContent value="entities" className="space-y-3">
-					{MANIFEST.entities.map((e) => (
-						<Card key={e.name}>
-							<CardHeader>
-								<CardTitle className="flex items-center gap-2">
-									<code>{e.name}</code>
-									{e.crdt && <Badge variant="secondary">CRDT</Badge>}
-								</CardTitle>
-								<CardDescription>
-									{e.fields.length} field{e.fields.length === 1 ? "" : "s"}
-									{e.indexes && e.indexes.length > 0
-										? ` · ${e.indexes.length} index${e.indexes.length === 1 ? "" : "es"}`
-										: ""}
-								</CardDescription>
-							</CardHeader>
-							<CardContent>
-								<div className="flex flex-wrap gap-1.5">
-									{e.fields.map((f) => (
-										<code
-											key={f.name}
-											className="rounded bg-muted px-2 py-0.5 text-xs"
-										>
-											{f.name}
-											{f.optional && "?"}: {f.type}
-										</code>
-									))}
-								</div>
-							</CardContent>
-						</Card>
-					))}
-				</TabsContent>
-
-				<TabsContent value="queries">
-					<Card>
-						<CardContent className="p-0">
-							{MANIFEST.queries.length === 0 ? (
-								<div className="py-12 text-center text-sm text-muted-foreground">
-									No custom queries.
-								</div>
-							) : (
-								<div className="divide-y">
-									{MANIFEST.queries.map((q) => (
-										<div key={q.name} className="px-4 py-3">
-											<code className="text-sm">{q.name}</code>
-											{q.input.length > 0 && (
-												<span className="ml-2 text-xs text-muted-foreground">
-													({q.input.map((f) => `${f.name}: ${f.type}`).join(", ")})
+				<TabsPanel value="entities" className="overflow-auto">
+					{MANIFEST.entities.length === 0 ? (
+						<EmptyState
+							title="The app has no entities"
+							description={
+								<>
+									Declare an entity with <code>entity()</code> in{" "}
+									<code>app.ts</code>.
+								</>
+							}
+						/>
+					) : (
+						<Table aria-label="Entity fields">
+							<TableHeader>
+								<tr>
+									<TableHead className="w-64">Entity</TableHead>
+									<TableHead className="w-64">Field</TableHead>
+									<TableHead className="w-64">Type</TableHead>
+									<TableHead>Flags</TableHead>
+								</tr>
+							</TableHeader>
+							<TableBody>
+								{MANIFEST.entities.flatMap((e) => {
+									const url = routeToPath({ kind: "resource", entity: e.name });
+									return e.fields.map((f, i) => (
+										<TableRow key={`${e.name}.${f.name}`}>
+											<TableCell className={i > 0 ? "text-transparent" : "font-medium"}>
+												{i === 0 ? (
+													<span className="inline-flex items-center gap-2">
+														<a
+															href={url}
+															className="text-link underline-offset-2 hover:underline"
+															onClick={(ev) => onLinkClick(ev, url)}
+														>
+															{e.name}
+														</a>
+														{e.crdt && <Badge variant="blue">CRDT</Badge>}
+													</span>
+												) : (
+													<span aria-hidden="true">{e.name}</span>
+												)}
+											</TableCell>
+											<TableCell className="font-mono text-xs">{f.name}</TableCell>
+											<TableCell className="font-mono text-xs text-muted-foreground">
+												{f.type}
+											</TableCell>
+											<TableCell>
+												<span className="inline-flex gap-1">
+													{f.optional && <Badge variant="outline">optional</Badge>}
+													{f.unique && <Badge variant="outline">unique</Badge>}
+													{!f.optional && !f.unique && <Dash />}
 												</span>
-											)}
-										</div>
-									))}
-								</div>
-							)}
-						</CardContent>
-					</Card>
-				</TabsContent>
-
-				<TabsContent value="actions">
-					<Card>
-						<CardContent className="p-0">
-							{MANIFEST.actions.length === 0 ? (
-								<div className="py-12 text-center text-sm text-muted-foreground">
-									No custom actions.
-								</div>
-							) : (
-								<div className="divide-y">
-									{MANIFEST.actions.map((a) => (
-										<div key={a.name} className="px-4 py-3">
-											<code className="text-sm">{a.name}</code>
-											{a.input.length > 0 && (
-												<span className="ml-2 text-xs text-muted-foreground">
-													({a.input.map((f) => `${f.name}: ${f.type}`).join(", ")})
-												</span>
-											)}
-										</div>
-									))}
-								</div>
-							)}
-						</CardContent>
-					</Card>
-				</TabsContent>
-
-				<TabsContent value="raw">
-					<Card>
-						<CardContent className="p-0">
-							<pre className="max-h-[70vh] overflow-auto p-4 text-xs">
-								{JSON.stringify(MANIFEST, null, 2)}
-							</pre>
-						</CardContent>
-					</Card>
-				</TabsContent>
+											</TableCell>
+										</TableRow>
+									));
+								})}
+							</TableBody>
+						</Table>
+					)}
+				</TabsPanel>
+				<TabsPanel value="queries" className="overflow-auto">
+					<SignatureTable
+						label="Queries"
+						items={MANIFEST.queries}
+						empty="The app has no custom queries"
+					/>
+				</TabsPanel>
+				<TabsPanel value="actions" className="overflow-auto">
+					<SignatureTable
+						label="Actions"
+						items={MANIFEST.actions}
+						empty="The app has no custom actions"
+					/>
+				</TabsPanel>
+				<TabsPanel value="raw" className="overflow-auto p-3">
+					<CodeBlock value={JSON.stringify(MANIFEST, null, 2)} />
+				</TabsPanel>
 			</Tabs>
-		</div>
+		</Page>
 	);
 }
 
-function Stat({ label, value }: { label: string; value: number }) {
+function SignatureTable({
+	label,
+	items,
+	empty,
+}: {
+	label: string;
+	items: { name: string; input: ManifestField[] }[];
+	empty: string;
+}) {
+	if (items.length === 0) return <EmptyState title={empty} />;
 	return (
-		<Card>
-			<CardContent className="p-4">
-				<p className="text-xs text-muted-foreground">{label}</p>
-				<p className="mt-1 font-mono text-2xl font-semibold">{value}</p>
-			</CardContent>
-		</Card>
+		<Table aria-label={label}>
+			<TableHeader>
+				<tr>
+					<TableHead className="w-80">Name</TableHead>
+					<TableHead>Input</TableHead>
+				</tr>
+			</TableHeader>
+			<TableBody>
+				{items.map((item) => (
+					<TableRow key={item.name}>
+						<TableCell className="font-mono text-xs">{item.name}</TableCell>
+						<TableCell className="max-w-none font-mono text-xs text-muted-foreground">
+							{item.input.length > 0 ? (
+								item.input
+									.map((f) => `${f.name}${f.optional ? "?" : ""}: ${f.type}`)
+									.join(", ")
+							) : (
+								<Dash />
+							)}
+						</TableCell>
+					</TableRow>
+				))}
+			</TableBody>
+		</Table>
 	);
 }

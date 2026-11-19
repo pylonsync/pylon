@@ -1,210 +1,335 @@
-import { useCallback, useEffect, useState } from "react";
-import { Loader2, RefreshCw } from "lucide-react";
+import { RefreshCw } from "lucide-react";
+
+import { useAuth } from "@/auth/auth";
+import { Fact, Facts } from "@/components/facts";
+import { Page, PageScroll, Section } from "@/components/page";
+import { ErrorBanner, Spinner } from "@/components/states";
+import { Stat, StatStrip } from "@/components/stat-strip";
+import { Badge, type BadgeProps } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
-	Card,
-	CardContent,
-	CardHeader,
-	CardTitle,
-} from "@/components/ui/card";
-import { ApiError, api } from "@/lib/pylon";
+	Table,
+	TableBody,
+	TableCell,
+	TableHead,
+	TableHeader,
+	TableRow,
+} from "@/components/ui/table";
+import { Tooltip } from "@/components/ui/tooltip";
+import { fetchMetrics } from "@/hooks/use-metrics";
+import { useQuery } from "@/hooks/use-query";
+import { formatBytes, formatDuration, formatUptime } from "@/lib/format";
+import { onLinkClick } from "@/lib/navigation";
+import { api } from "@/lib/pylon";
+import { routeToPath } from "@/lib/route";
 import { LockedPage } from "./Locked";
-import { useAuth } from "@/auth/AuthContext";
 
-type Health = {
-	status?: string;
-	version?: string;
-	uptime_secs?: number;
-	uptime?: number;
+type Probe = { ok: boolean; latency_ms: number; error: string | null };
+
+/** The answer of `GET /admin/health`. */
+type HealthReport = {
+	/** `ready`, `warming` (the first page render is not done) or `draining`. */
+	status: string;
+	pylon_version: string;
+	app: { name: string; version: string };
+	uptime_secs: number;
+	database: { backend: string; probe: Probe | null };
+	functions: Probe | null;
+	jobs: {
+		stats: { pending: number; running: number; failed: number; dead: number };
+		lag_secs: number | null;
+		persistent: boolean;
+	};
+	scheduler: { leader: boolean; tasks: number };
+	realtime: {
+		ws_connections: number;
+		sse_connections: number;
+		change_seq: number;
+		changes_retained: number;
+	};
+	memory: {
+		total_bytes: number;
+		available_bytes: number;
+		process_rss_bytes: number;
+		children_rss_bytes: number;
+		children: number;
+	} | null;
 };
 
-type Metrics = {
-	total_requests?: number;
-	error_count?: number;
-	avg_response_ms?: number;
-	active_connections?: number;
-	by_method?: Record<string, number>;
-	[k: string]: unknown;
+type State = "ok" | "warn" | "bad" | "none";
+
+type Check = {
+	name: string;
+	state: State;
+	detail: string;
+	/** The page that shows the detail. */
+	page?: string;
 };
 
-function formatUptime(s: number) {
-	const h = Math.floor(s / 3600);
-	const m = Math.floor((s % 3600) / 60);
-	const sec = Math.floor(s % 60);
-	return `${h}h ${m}m ${sec}s`;
+const CHECK_BADGE: Record<State, { variant: BadgeProps["variant"]; label: string }> = {
+	ok: { variant: "green", label: "ok" },
+	warn: { variant: "amber", label: "warning" },
+	bad: { variant: "red", label: "problem" },
+	none: { variant: "gray", label: "no data" },
+};
+
+const POLL_MS = 10_000;
+
+function probeCheck(name: string, probe: Probe | null, absent: string, slowMs: number): Check {
+	if (!probe) return { name, state: "none", detail: absent };
+	if (!probe.ok) return { name, state: "bad", detail: probe.error ?? "The probe failed" };
+	return {
+		name,
+		state: probe.latency_ms > slowMs ? "warn" : "ok",
+		detail: `Answered in ${formatDuration(probe.latency_ms)}`,
+	};
 }
 
 export function HealthPage() {
 	const { me } = useAuth();
-	const [health, setHealth] = useState<Health | null>(null);
-	const [metrics, setMetrics] = useState<Metrics | null>(null);
-	const [loading, setLoading] = useState(false);
-	const [err, setErr] = useState<string | null>(null);
+	const isAdmin = !!me?.is_admin;
+	const { data, error, loading, reload } = useQuery(
+		"health",
+		async () => {
+			const report = await api<HealthReport>("/admin/health");
+			// The report answered. When the metrics request fails, the page
+			// shows the report with no request numbers.
+			const metrics = await fetchMetrics().catch(() => null);
+			return { report, metrics };
+		},
+		{ pollMs: POLL_MS, enabled: isAdmin },
+	);
 
-	const reload = useCallback(async () => {
-		setLoading(true);
-		try {
-			const h = await api<Health>("/health");
-			setHealth(h);
-			setErr(null);
-			try {
-				const m = await api<Metrics>("/metrics");
-				setMetrics(m);
-			} catch {
-				// /metrics is admin-gated and may also be Prometheus text — fine to be null.
-				setMetrics(null);
-			}
-		} catch (e) {
-			if (e instanceof ApiError) setErr(`${e.code}: ${e.message}`);
-			else setErr(e instanceof Error ? e.message : String(e));
-		} finally {
-			setLoading(false);
-		}
-	}, []);
-
-	useEffect(() => {
-		void reload();
-		const id = window.setInterval(reload, 10_000);
-		return () => window.clearInterval(id);
-	}, [reload]);
-
-	if (!me?.is_admin) {
+	if (!isAdmin) {
 		return (
-			<LockedPage
-				title="Health requires admin"
-				description="Server health and metrics are admin-only. Sign in with an admin account to view them."
-			/>
+			<Page title="Health">
+				<LockedPage
+					title="Health is for admins"
+					description="Sign in with an admin account to see the server health."
+				/>
+			</Page>
 		);
 	}
 
-	const uptimeSec = health?.uptime_secs ?? health?.uptime;
+	const report = data?.report ?? null;
+	const metrics = data?.metrics ?? null;
 
-	return (
-		<div className="space-y-4">
-			<div className="flex items-center justify-end">
-				<Button size="sm" variant="outline" onClick={reload} disabled={loading}>
-					{loading ? (
-						<Loader2 className="size-3.5 animate-spin" />
-					) : (
-						<RefreshCw className="size-3.5" />
-					)}
-					Refresh
-				</Button>
-			</div>
+	const recent = (metrics?.requests.per_minute ?? []).reduce((a, b) => a + b, 0);
+	const recentErrors = (metrics?.requests.errors_per_minute ?? []).reduce((a, b) => a + b, 0);
+	const errorRate = recent > 0 ? (recentErrors / recent) * 100 : 0;
+	const p95 = metrics?.latency_ms?.p95 ?? null;
+	const jobs = report?.jobs;
 
-			{err && (
-				<div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
-					{err}
-				</div>
-			)}
-
-			<div className="grid gap-4 md:grid-cols-3">
-				<Stat
-					label="Status"
-					value={
-						<span
-							className={
-								health?.status === "ok" || health?.status === "healthy"
-									? "text-emerald-500"
-									: "text-amber-500"
-							}
-						>
-							{health?.status ?? "—"}
-						</span>
-					}
-				/>
-				<Stat
-					label="Uptime"
-					value={uptimeSec != null ? formatUptime(uptimeSec) : "—"}
-					mono
-				/>
-				<Stat label="Version" value={health?.version ?? "—"} mono />
-			</div>
-
-			{metrics && (
-				<>
-					<div className="grid gap-4 md:grid-cols-4">
-						{metrics.total_requests != null && (
-							<Stat
-								label="Total requests"
-								value={metrics.total_requests.toLocaleString()}
-								mono
-							/>
-						)}
-						{metrics.active_connections != null && (
-							<Stat
-								label="Active connections"
-								value={metrics.active_connections}
-								mono
-							/>
-						)}
-						{metrics.error_count != null && (
-							<Stat
-								label="Errors"
-								value={
-									<span className="text-destructive">{metrics.error_count}</span>
-								}
-								mono
-							/>
-						)}
-						{metrics.avg_response_ms != null && (
-							<Stat
-								label="Avg response"
-								value={`${metrics.avg_response_ms}ms`}
-								mono
-							/>
-						)}
-					</div>
-
-					{metrics.by_method && (
-						<Card>
-							<CardHeader>
-								<CardTitle>Requests by method</CardTitle>
-							</CardHeader>
-							<CardContent>
-								<div className="grid gap-2 sm:grid-cols-2 md:grid-cols-3">
-									{Object.entries(metrics.by_method).map(([m, c]) => (
-										<div
-											key={m}
-											className="flex items-center justify-between rounded-md border px-3 py-2"
-										>
-											<code className="text-xs">{m}</code>
-											<span className="font-mono text-sm">
-												{typeof c === "number" ? c.toLocaleString() : String(c)}
-											</span>
-										</div>
-									))}
-								</div>
-							</CardContent>
-						</Card>
-					)}
-				</>
-			)}
-		</div>
+	const database = probeCheck(
+		"Database",
+		report?.database.probe ?? null,
+		"The app has no entities, so there is no table to read",
+		250,
 	);
-}
+	const checks: Check[] = report
+		? [
+				{
+					name: "Readiness",
+					state: report.status === "ready" ? "ok" : report.status === "draining" ? "bad" : "warn",
+					detail:
+						report.status === "ready"
+							? "The server takes traffic (GET /health/ready answers 200)"
+							: report.status === "draining"
+								? "The server shuts down and takes no new requests"
+								: "The server starts. The first page render is not done",
+				},
+				{
+					...database,
+					detail: `${report.database.backend}. ${database.detail}`,
+				},
+				{
+					...probeCheck(
+						"Functions runtime",
+						report.functions,
+						"The app has no functions runtime",
+						250,
+					),
+					page: "functions",
+				},
+				{
+					name: "Job queue",
+					page: "jobs",
+					state:
+						(jobs?.stats.dead ?? 0) > 0 || (jobs?.lag_secs ?? 0) > 300
+							? "bad"
+							: (jobs?.stats.failed ?? 0) > 0 || (jobs?.lag_secs ?? 0) > 30
+								? "warn"
+								: "ok",
+					detail: `${
+						jobs?.lag_secs == null
+							? "No job waits past its time"
+							: `The oldest due job waits ${formatDuration(jobs.lag_secs * 1000)}`
+					}. ${jobs?.stats.pending ?? 0} pending, ${jobs?.stats.running ?? 0} running, ${jobs?.stats.failed ?? 0} failed, ${jobs?.stats.dead ?? 0} in the dead-letter queue. ${
+						jobs?.persistent ? "The queue is stored" : "The queue is in memory only"
+					}`,
+				},
+				{
+					name: "Scheduler",
+					page: "jobs",
+					state: report.scheduler.leader ? "ok" : "none",
+					detail: report.scheduler.leader
+						? `This machine runs the cron schedules (${report.scheduler.tasks} tasks)`
+						: `Another machine runs the cron schedules (${report.scheduler.tasks} tasks)`,
+				},
+				{
+					name: "Realtime",
+					page: "sync",
+					state: "ok",
+					detail: `${report.realtime.ws_connections} WebSocket clients, ${report.realtime.sse_connections} SSE clients. Change sequence ${report.realtime.change_seq.toLocaleString()}`,
+				},
+				{
+					name: "Request errors",
+					page: "logs",
+					state: !metrics ? "none" : errorRate > 5 ? "bad" : recentErrors > 0 ? "warn" : "ok",
+					detail: metrics
+						? `${recentErrors.toLocaleString()} of ${recent.toLocaleString()} requests failed in the last 60 minutes (${errorRate.toFixed(1)}%)`
+						: "Metrics are not loaded",
+				},
+				{
+					name: "Latency",
+					page: "metrics",
+					state: p95 === null ? "none" : p95 > 2500 ? "bad" : p95 > 500 ? "warn" : "ok",
+					detail:
+						p95 === null
+							? "No timed request in the last 60 minutes"
+							: `p95 is ${formatDuration(p95)} in the last 60 minutes`,
+				},
+			]
+		: [];
+	const problems = checks.filter((c) => c.state === "bad").length;
+	const warnings = checks.filter((c) => c.state === "warn").length;
+	const memory = report?.memory ?? null;
 
-function Stat({
-	label,
-	value,
-	mono,
-}: {
-	label: string;
-	value: React.ReactNode;
-	mono?: boolean;
-}) {
 	return (
-		<Card>
-			<CardContent className="p-4">
-				<p className="text-xs text-muted-foreground">{label}</p>
-				<p
-					className={`mt-1 text-xl font-semibold ${
-						mono ? "font-mono" : ""
-					}`}
-				>
-					{value}
-				</p>
-			</CardContent>
-		</Card>
+		<Page
+			title="Health"
+			actions={
+				<Tooltip label="Run the checks again">
+					<Button
+						variant="ghost"
+						size="icon"
+						aria-label="Refresh"
+						disabled={loading}
+						onClick={reload}
+					>
+						{loading ? <Spinner /> : <RefreshCw />}
+					</Button>
+				</Tooltip>
+			}
+		>
+			<PageScroll>
+				{error && (
+					<ErrorBanner>
+						Studio could not load the health report: {error}. Make sure the server
+						runs, then refresh.
+					</ErrorBanner>
+				)}
+				<StatStrip>
+					<Stat
+						label="Checks"
+						value={
+							!report
+								? "–"
+								: problems > 0
+									? `${problems} ${problems === 1 ? "problem" : "problems"}`
+									: warnings > 0
+										? `${warnings} ${warnings === 1 ? "warning" : "warnings"}`
+										: "All ok"
+						}
+						tone={!report ? "default" : problems > 0 ? "bad" : warnings > 0 ? "warn" : "good"}
+					/>
+					<Stat
+						label="State"
+						value={report?.status ?? "–"}
+						tone={!report ? "default" : report.status === "ready" ? "good" : "warn"}
+					/>
+					<Stat label="Uptime" value={report ? formatUptime(report.uptime_secs) : "–"} />
+					<Stat label="Pylon version" value={report?.pylon_version ?? "–"} />
+					<Stat
+						label="App version"
+						value={report?.app.version ?? "–"}
+						note={report?.app.name}
+					/>
+				</StatStrip>
+
+				<Section title="Checks">
+					{checks.length === 0 ? (
+						<p className="px-3 pb-3 text-xs text-muted-foreground">
+							{error ? "The checks did not run." : "Loading"}
+						</p>
+					) : (
+						<Table aria-label="Checks" className="border-t">
+							<TableHeader className="static">
+								<tr>
+									<TableHead className="w-24">Result</TableHead>
+									<TableHead className="w-48">Check</TableHead>
+									<TableHead>Detail</TableHead>
+								</tr>
+							</TableHeader>
+							<TableBody>
+								{checks.map((c) => {
+									const url = c.page ? routeToPath({ kind: "page", id: c.page }) : null;
+									return (
+										<TableRow key={c.name}>
+											<TableCell>
+												<Badge variant={CHECK_BADGE[c.state].variant}>
+													{CHECK_BADGE[c.state].label}
+												</Badge>
+											</TableCell>
+											<TableCell>
+												{url ? (
+													<a
+														href={url}
+														className="text-link underline-offset-2 hover:underline"
+														onClick={(e) => onLinkClick(e, url)}
+													>
+														{c.name}
+													</a>
+												) : (
+													c.name
+												)}
+											</TableCell>
+											<TableCell className="max-w-none whitespace-normal text-muted-foreground">
+												{c.detail}
+											</TableCell>
+										</TableRow>
+									);
+								})}
+							</TableBody>
+						</Table>
+					)}
+				</Section>
+
+				<Section title="Memory">
+					{memory ? (
+						<Facts className="max-w-xl">
+							<Fact label="Machine">
+								{formatBytes(memory.total_bytes - memory.available_bytes)} of{" "}
+								{formatBytes(memory.total_bytes)} in use
+							</Fact>
+							<Fact label="Pylon process">{formatBytes(memory.process_rss_bytes)}</Fact>
+							<Fact label="Function runners">
+								{formatBytes(memory.children_rss_bytes)} in {memory.children}{" "}
+								{memory.children === 1 ? "process" : "processes"}
+							</Fact>
+						</Facts>
+					) : (
+						<p className="px-3 pb-3 text-xs text-muted-foreground">
+							{report
+								? "The server cannot read memory numbers on this platform."
+								: "Loading"}
+						</p>
+					)}
+					<p className="px-3 pb-3 text-xs text-muted-foreground">
+						The server does not measure disk space.
+					</p>
+				</Section>
+			</PageScroll>
+		</Page>
 	);
 }

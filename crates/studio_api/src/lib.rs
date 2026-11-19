@@ -13,6 +13,29 @@ use pylon_kernel::{AppManifest, StudioConfig};
 /// To rebuild Studio: `cd crates/studio_api/web && bun run build`.
 const STUDIO_HTML: &str = include_str!("../web/dist/index.html");
 
+/// The URL prefix of the shared-module shims. The import map in the Studio
+/// HTML points `react` and its entry points here.
+pub const STUDIO_MODULES_PATH: &str = "/studio/modules/";
+
+/// The source of one shared-module shim, by file name.
+///
+/// A Studio extension (`studio.entry.tsx`) imports React by name. Each shim
+/// is an ES module that re-exports the React instance Studio loaded, so the
+/// extension and Studio share one React. The Studio build writes the files
+/// (`web/scripts/build-shims.ts`). They hold export names only.
+pub fn studio_module(file: &str) -> Option<&'static str> {
+    Some(match file {
+        "react.js" => include_str!("../web/dist/modules/react.js"),
+        "react-dom.js" => include_str!("../web/dist/modules/react-dom.js"),
+        "react-dom-client.js" => include_str!("../web/dist/modules/react-dom-client.js"),
+        "react-jsx-runtime.js" => include_str!("../web/dist/modules/react-jsx-runtime.js"),
+        "react-jsx-dev-runtime.js" => {
+            include_str!("../web/dist/modules/react-jsx-dev-runtime.js")
+        }
+        _ => return None,
+    })
+}
+
 /// Generate the Studio inspector HTML.
 ///
 /// Pass an empty/default [`StudioConfig`] when the project doesn't have
@@ -147,6 +170,54 @@ mod tests {
 
     fn empty_config() -> StudioConfig {
         StudioConfig::default()
+    }
+
+    #[test]
+    fn the_import_map_comes_before_the_module_script_and_names_every_shim() {
+        let html = generate_studio_html(&test_manifest(), &empty_config(), "");
+        let map = html
+            .find(r#"<script type="importmap">"#)
+            .expect("import map");
+        let module = html
+            .find(r#"<script type="module""#)
+            .expect("module script");
+        assert!(map < module, "the import map must come first");
+        for file in [
+            "react.js",
+            "react-dom.js",
+            "react-dom-client.js",
+            "react-jsx-runtime.js",
+            "react-jsx-dev-runtime.js",
+        ] {
+            assert!(
+                html.contains(&format!("{STUDIO_MODULES_PATH}{file}")),
+                "the import map has no entry for {file}"
+            );
+            assert!(studio_module(file).is_some(), "no shim for {file}");
+        }
+        assert!(studio_module("../index.html").is_none());
+    }
+
+    #[test]
+    fn the_shims_re_export_the_react_that_studio_loaded() {
+        let react = studio_module("react.js").unwrap();
+        assert!(react.contains("__PYLON_STUDIO_MODULES__[\"react\"]"));
+        for name in ["useState", "useEffect", "createElement", "createContext"] {
+            assert!(react.contains(name), "react.js does not export {name}");
+        }
+        let jsx = studio_module("react-jsx-runtime.js").unwrap();
+        for name in ["Fragment", "jsx", "jsxs"] {
+            assert!(
+                jsx.contains(name),
+                "react-jsx-runtime.js does not export {name}"
+            );
+        }
+        assert!(studio_module("react-dom-client.js")
+            .unwrap()
+            .contains("createRoot"));
+        assert!(studio_module("react-jsx-dev-runtime.js")
+            .unwrap()
+            .contains("jsxDEV"));
     }
 
     #[test]

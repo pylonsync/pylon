@@ -354,6 +354,12 @@ pub trait JobOps: Send + Sync {
         limit: usize,
     ) -> serde_json::Value;
     fn get_job(&self, id: &str) -> Option<serde_json::Value>;
+    /// Cancel a job that has not started. `Ok(false)` when the id is unknown
+    /// or the job runs or is finished. A queue with no cancel support
+    /// returns an error.
+    fn cancel(&self, _id: &str) -> Result<bool, String> {
+        Err("this job queue cannot cancel a job".into())
+    }
 }
 
 /// Scheduler operations used by the router.
@@ -1836,6 +1842,7 @@ pub(crate) fn handle_list(ctx: &RouterContext, entity: &str, url: &str) -> (u16,
     // Two parameter shapes are accepted:
     //   ?limit=&offset=         legacy
     //   ?page=&per_page=        Studio + Refine convention
+    // Filters: filter[<field>]=<value> (equals) and contains[<field>]=<text>.
     // When `page` is supplied the response is an envelope with
     // `data` + `total` + `page` + `per_page`; otherwise we return the
     // legacy `{data, count, offset, limit}` shape so existing clients
@@ -1872,6 +1879,22 @@ pub(crate) fn handle_list(ctx: &RouterContext, entity: &str, url: &str) -> (u16,
             }
             let parsed = parse_query_value(v);
             filter.insert(field.to_string(), parsed);
+        }
+    }
+    // contains[<field>]=<text>: the rows whose field holds the text. It maps
+    // to the storage `$like` operator, which matches a substring on SQLite
+    // and Postgres. On a field that also has `filter[...]`, this one wins.
+    for (k, v) in &qp {
+        if let Some(field) = k
+            .strip_prefix("contains[")
+            .and_then(|s| s.strip_suffix(']'))
+        {
+            if let Err(error) = require_public_field(store.manifest(), entity, field) {
+                return error;
+            }
+            if !v.is_empty() {
+                filter.insert(field.to_string(), serde_json::json!({ "$like": v }));
+            }
         }
     }
 
@@ -3998,6 +4021,9 @@ mod auth_gate_tests {
         fn get_job(&self, _id: &str) -> Option<serde_json::Value> {
             None
         }
+        fn cancel(&self, id: &str) -> Result<bool, String> {
+            Ok(id == "pending-job")
+        }
     }
     impl SchedulerOps for StubScheduler {
         fn list_tasks(&self) -> serde_json::Value {
@@ -4763,6 +4789,46 @@ mod auth_gate_tests {
                 None,
             );
             assert_eq!(status, 201);
+        });
+    }
+
+    #[test]
+    fn auth_session_names_the_operator_for_an_operator_session_only() {
+        let anon = AuthContext::anonymous();
+        with_ctx(false, &anon, |ctx| {
+            let operator =
+                pylon_auth::operator::create(ctx.account_store, "eric", "a-long-test-password")
+                    .expect("create operator");
+
+            let as_operator = AuthContext::authenticated(operator.user_id.clone());
+            let operator_ctx = RouterContext {
+                auth_ctx: &as_operator,
+                response_headers: Default::default(),
+                ..*ctx
+            };
+            let (status, body, _ct) = route(
+                &operator_ctx,
+                HttpMethod::Get,
+                "/api/auth/session",
+                "",
+                None,
+            );
+            assert_eq!(status, 200);
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(v["operator"]["username"], "eric");
+
+            // Another caller gets no operator name.
+            let as_user = AuthContext::authenticated("user_1".into());
+            let user_ctx = RouterContext {
+                auth_ctx: &as_user,
+                response_headers: Default::default(),
+                ..*ctx
+            };
+            let (status, body, _ct) =
+                route(&user_ctx, HttpMethod::Get, "/api/auth/session", "", None);
+            assert_eq!(status, 200);
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert!(v.get("operator").is_none(), "{body}");
         });
     }
 
@@ -7517,6 +7583,40 @@ mod auth_gate_tests {
     /// enumeration would be nicer but the route list lives in
     /// `route_inner` as a chain of if-blocks; until that's reified
     /// into data, this table is the gate.
+    #[test]
+    fn job_cancel_is_admin_only_and_reports_the_outcome() {
+        matrix_check(
+            HttpMethod::Post,
+            "/api/jobs/pending-job/cancel",
+            "",
+            Expect::Rejected,
+            Expect::Rejected,
+            Expect::Rejected,
+        );
+        let admin = AuthContext::admin();
+        with_ctx(false, &admin, |ctx| {
+            let (status, body, _) = route(
+                ctx,
+                HttpMethod::Post,
+                "/api/jobs/pending-job/cancel",
+                "",
+                None,
+            );
+            assert_eq!(status, 200, "{body}");
+            assert!(body.contains("\"cancelled\":true"), "{body}");
+
+            let (status, body, _) = route(
+                ctx,
+                HttpMethod::Post,
+                "/api/jobs/running-job/cancel",
+                "",
+                None,
+            );
+            assert_eq!(status, 409, "{body}");
+            assert!(body.contains("JOB_NOT_PENDING"), "{body}");
+        });
+    }
+
     #[test]
     fn matrix_admin_get_routes_audit() {
         let admin_get_routes: &[(&str, &str)] = &[

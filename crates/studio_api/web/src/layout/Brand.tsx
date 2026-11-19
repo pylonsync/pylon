@@ -1,22 +1,41 @@
-import { Bolt, ChevronsUpDown, PanelLeft } from "lucide-react";
-import { useSidebar } from "@/components/ui/sidebar";
+import { Bolt, ChevronsUpDown } from "lucide-react";
 import {
-	DropdownMenu,
-	DropdownMenuContent,
-	DropdownMenuItem,
-	DropdownMenuLabel,
-	DropdownMenuSeparator,
-	DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+	Menu,
+	MenuContent,
+	MenuGroup,
+	MenuGroupLabel,
+	MenuItem,
+	MenuTrigger,
+} from "@/components/ui/menu";
+import { onLinkClick } from "@/lib/navigation";
+import { STUDIO_BASE } from "@/lib/route";
 import type { BrandConfig, SidebarConfig } from "@/lib/studio-config";
 
-/// Resolves the logo source. Treats short strings as glyph (emoji or
-/// single grapheme) and longer strings as URL/path/data-URL.
+/** A short string without path characters is a glyph. Anything else is an image URL. */
 function isGlyph(s: string): boolean {
-	// Glyphs are typically 1-4 chars and don't contain `/`, `.`, `:`.
-	return s.length <= 4 && !/[\/.:]/.test(s);
+	return s.length <= 4 && !/[/.:]/.test(s);
 }
 
+function Logo({ logo }: { logo: string | undefined }) {
+	return (
+		<span className="flex size-5 shrink-0 items-center justify-center rounded bg-primary text-primary-foreground">
+			{logo ? (
+				isGlyph(logo) ? (
+					<span className="text-[11px] leading-none font-semibold">{logo}</span>
+				) : (
+					<img src={logo} alt="" className="size-3.5 object-contain" />
+				)
+			) : (
+				<Bolt className="size-3" />
+			)}
+		</span>
+	);
+}
+
+/**
+ * The app name and version at the top of the sidebar. It links to the Studio
+ * home page, unless the config gives it an organization menu.
+ */
 export function Brand({
 	brand,
 	sidebar,
@@ -28,77 +47,50 @@ export function Brand({
 	manifestName: string;
 	manifestVersion: string;
 }) {
-	const { toggleSidebar } = useSidebar();
 	const name = brand?.name ?? manifestName;
 	const subtitle = brand?.subtitle ?? `v${manifestVersion}`;
-	const logo = brand?.logo;
 	const orgs = sidebar?.orgSwitcher?.items;
-	const showCollapse = sidebar?.collapsible !== false;
 
-	const Logo = (
-		<div className="flex size-9 items-center justify-center rounded-md bg-primary text-primary-foreground shrink-0">
-			{logo ? (
-				isGlyph(logo) ? (
-					<span className="text-base font-semibold leading-none">{logo}</span>
-				) : (
-					<img src={logo} alt="" className="size-5 object-contain" />
-				)
-			) : (
-				<Bolt className="size-4" />
-			)}
-		</div>
+	const identity = (
+		<>
+			<Logo logo={brand?.logo} />
+			<span className="min-w-0 flex-1 truncate text-[13px] font-semibold">
+				{name}
+			</span>
+			<span className="shrink-0 truncate text-[11px] text-muted-foreground tabular-nums">
+				{subtitle}
+			</span>
+		</>
 	);
 
-	return (
-		<div className="flex items-center gap-2 px-2 py-2">
-			{orgs && orgs.length > 0 ? (
-				<DropdownMenu>
-					<DropdownMenuTrigger asChild>
-						<button
-							type="button"
-							className="flex flex-1 items-center gap-2 rounded-md px-1.5 py-1 hover:bg-sidebar-accent text-left"
-						>
-							{Logo}
-							<div className="flex flex-col leading-tight min-w-0 flex-1">
-								<span className="text-sm font-semibold truncate">{name}</span>
-								<span className="text-xs text-muted-foreground truncate">
-									{subtitle}
-								</span>
-							</div>
-							<ChevronsUpDown className="size-3.5 text-muted-foreground" />
-						</button>
-					</DropdownMenuTrigger>
-					<DropdownMenuContent align="start" className="min-w-56">
-						<DropdownMenuLabel className="text-xs text-muted-foreground">
-							Organizations
-						</DropdownMenuLabel>
-						<DropdownMenuSeparator />
+	if (orgs && orgs.length > 0) {
+		return (
+			<Menu>
+				<MenuTrigger className="flex h-7 w-full cursor-default items-center gap-2 rounded-md px-1.5 text-left hover:bg-accent">
+					{identity}
+					<ChevronsUpDown className="size-3 shrink-0 text-muted-foreground" />
+				</MenuTrigger>
+				<MenuContent align="start" className="min-w-48">
+					<MenuGroup>
+						<MenuGroupLabel>Organizations</MenuGroupLabel>
 						{orgs.map((o) => (
-							<DropdownMenuItem key={o.id}>{o.label}</DropdownMenuItem>
+							<MenuItem key={o.id} value={o.id}>
+								{o.label}
+							</MenuItem>
 						))}
-					</DropdownMenuContent>
-				</DropdownMenu>
-			) : (
-				<div className="flex flex-1 items-center gap-2 px-1.5 py-1 min-w-0">
-					{Logo}
-					<div className="flex flex-col leading-tight min-w-0">
-						<span className="text-sm font-semibold truncate">{name}</span>
-						<span className="text-xs text-muted-foreground truncate">
-							{subtitle}
-						</span>
-					</div>
-				</div>
-			)}
-			{showCollapse && (
-				<button
-					type="button"
-					onClick={toggleSidebar}
-					title="Collapse sidebar"
-					className="rounded-md p-1.5 text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
-				>
-					<PanelLeft className="size-4" />
-				</button>
-			)}
-		</div>
+					</MenuGroup>
+				</MenuContent>
+			</Menu>
+		);
+	}
+
+	return (
+		<a
+			href={STUDIO_BASE}
+			onClick={(e) => onLinkClick(e, STUDIO_BASE)}
+			className="flex h-7 items-center gap-2 rounded-md px-1.5 text-foreground no-underline hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring"
+		>
+			{identity}
+		</a>
 	);
 }

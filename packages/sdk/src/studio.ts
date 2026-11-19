@@ -487,8 +487,38 @@ export interface StudioPageProps {
   api: <T = unknown>(path: string, opts?: unknown) => Promise<T>;
 }
 
+/**
+ * What Studio passes to an action handler: the rows the action runs on and
+ * the tools to act on them.
+ */
+export interface StudioActionContext {
+  /** The entity of the list. */
+  entity: string;
+  /** One row for a row action. The selected rows for a bulk action. */
+  rows: Record<string, unknown>[];
+  /** The API client of Studio. It sends the Studio session. */
+  api: <T = unknown>(path: string, opts?: unknown) => Promise<T>;
+  /** Show a message. */
+  toast: {
+    success: (title: string, opts?: { description?: string }) => void;
+    error: (title: string, opts?: { description?: string }) => void;
+    info: (title: string, opts?: { description?: string }) => void;
+  };
+  /** Load the list again. */
+  refresh: () => Promise<void>;
+}
+
+/**
+ * The handler of a `kind: "custom"` row action or bulk action. The key in
+ * `actions` is the `id` of the action in `studio.config.ts`. A returned
+ * Promise keeps the button pending until it settles.
+ */
+export type StudioActionHandler = (ctx: StudioActionContext) => unknown;
+
 /** Registry shape — what `studio.entry.tsx` exports / registers. */
 export interface StudioExtensions {
+  /** Handlers for `kind: "custom"` actions, by action id. */
+  actions?: Record<string, StudioActionHandler>;
   renderers?: Record<string, unknown /* (p: StudioCellRendererProps) => ReactNode */>;
   pages?: Record<string, unknown /* (p: StudioPageProps) => ReactNode */>;
   layouts?: {

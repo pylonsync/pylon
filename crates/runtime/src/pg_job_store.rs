@@ -271,6 +271,20 @@ impl PgJobStore {
         })
     }
 
+    /// The earliest time (unix seconds) that a pending job became due, over
+    /// the whole queue. `None` when no pending job is due at `now`.
+    pub fn oldest_due_at(&self, now: u64) -> Result<Option<u64>, String> {
+        let now = now.min(i64::MAX as u64) as i64;
+        self.pool.with_client(|client| {
+            let row = client.query_one(
+                "SELECT MIN(ready_at) FROM _pylon_jobs
+                 WHERE status IN ('pending','retrying') AND ready_at <= $1",
+                &[&now],
+            )?;
+            Ok(row.get::<_, Option<i64>>(0).map(|v| v.max(0) as u64))
+        })
+    }
+
     pub fn retry_dead(&self, id: &str) -> Result<bool, String> {
         self.pool.with_client(|client| {
             client

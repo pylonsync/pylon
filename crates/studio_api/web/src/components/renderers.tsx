@@ -1,16 +1,30 @@
-import { ExternalLink } from "lucide-react";
+import { createElement } from "react";
+import { Check, ExternalLink } from "lucide-react";
+
+import { Badge } from "@/components/ui/badge";
+import { CopyButton } from "@/components/copy-button";
+import {
+	getExtensionRenderer,
+	type CellRendererProps,
+} from "@/lib/extensions";
+import {
+	formatBytes,
+	formatDateTime,
+	jsonPreview,
+	parseDate,
+	relativeTime,
+	shortId,
+} from "@/lib/format";
+import { onLinkClick, rowUrl } from "@/lib/navigation";
 import type {
 	BadgeVariant,
 	ColumnConfig,
 	ColumnRenderer,
 } from "@/lib/studio-config";
-import {
-	getExtensionRenderer,
-	type CellRendererProps,
-} from "@/lib/extensions";
+import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
-// Cell renderer dispatcher
+// Configured cells: a column with a `renderer` in studio.config.ts
 // ---------------------------------------------------------------------------
 
 export function CellRenderer({
@@ -19,7 +33,7 @@ export function CellRenderer({
 	column,
 }: CellRendererProps): React.ReactNode {
 	const r = column.renderer;
-	if (!r) return <TextCell value={value} truncate={80} />;
+	if (!r) return <TextCell value={value} />;
 
 	switch (r.kind) {
 		case "text":
@@ -29,50 +43,162 @@ export function CellRenderer({
 		case "badge":
 			return <BadgeCell value={value} renderer={r} />;
 		case "date":
-			return <DateCell value={value} renderer={r} />;
+			return <DateCell value={value} format={r.format ?? "relative"} />;
 		case "link":
 			return <LinkCell value={value} row={row} renderer={r} />;
 		case "boolean":
-			return <BoolCell value={value} renderer={r} />;
+			return (
+				<BoolCell
+					value={value}
+					trueLabel={r.trueLabel}
+					falseLabel={r.falseLabel}
+				/>
+			);
 		case "number":
 			return <NumberCell value={value} renderer={r} />;
 		case "json":
-			return <JsonCell value={value} truncate={r.truncate ?? 60} />;
+			return <JsonCell value={value} truncate={r.truncate} />;
 		case "custom": {
-			const Custom = getExtensionRenderer(r.componentId);
-			if (Custom) return <Custom value={value} row={row} column={column} />;
+			const custom = getExtensionRenderer(r.componentId);
+			if (custom) return createElement(custom, { value, row, column });
 			return <UnknownRenderer id={r.componentId} />;
 		}
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Built-in renderers
+// Automatic cells: a column with no renderer, shown by its manifest type
 // ---------------------------------------------------------------------------
+
+export interface AutoCellProps {
+	value: unknown;
+	/** The manifest type of the field, such as `string` or `id(Company)`. */
+	type: string | undefined;
+	/** The field is the row id. */
+	isId?: boolean;
+	/** The entity the value points to, when the field is a reference. */
+	refEntity?: string | null;
+	/** The display value of the row the value points to, when it is known. */
+	refLabel?: string | null;
+}
+
+export function AutoCell({
+	value,
+	type,
+	isId,
+	refEntity,
+	refLabel,
+}: AutoCellProps): React.ReactNode {
+	if (isEmpty(value)) return <Dash />;
+	if (isId && typeof value === "string") return <IdCell id={value} />;
+	if (refEntity && typeof value === "string") {
+		return <RefCell entity={refEntity} id={value} label={refLabel} />;
+	}
+	switch (type) {
+		case "bool":
+			return <BoolCell value={value} />;
+		case "datetime":
+			return <DateCell value={value} format="datetime" />;
+		case "int":
+		case "float":
+			return <NumberCell value={value} renderer={{ kind: "number" }} />;
+		case "json":
+			return <JsonCell value={value} />;
+	}
+	if (typeof value === "boolean") return <BoolCell value={value} />;
+	if (typeof value === "number") {
+		return <NumberCell value={value} renderer={{ kind: "number" }} />;
+	}
+	if (typeof value === "object") return <JsonCell value={value} />;
+	return <TextCell value={value} />;
+}
+
+// ---------------------------------------------------------------------------
+// Cells
+// ---------------------------------------------------------------------------
+
+function isEmpty(value: unknown): boolean {
+	return value === null || value === undefined || value === "";
+}
+
+/** The mark for a cell with no value. */
+export function Dash() {
+	return (
+		<span className="text-subtle-foreground" aria-label="No value">
+			–
+		</span>
+	);
+}
+
+/**
+ * An id: the first 8 characters in monospace. The full id is the tooltip, and
+ * a copy button shows while the pointer is on the row or focus is in the cell.
+ */
+export function IdCell({ id, className }: { id: string; className?: string }) {
+	return (
+		<span className={cn("group/id inline-flex items-center gap-1", className)}>
+			<span className="font-mono text-xs text-muted-foreground" title={id}>
+				{shortId(id)}
+			</span>
+			<CopyButton
+				value={id}
+				label="Copy the id"
+				className="opacity-0 group-hover/row:opacity-100 group-focus-within/id:opacity-100 focus-visible:opacity-100"
+			/>
+		</span>
+	);
+}
+
+/** A reference to a row of another entity, as a link that opens that row. */
+export function RefCell({
+	entity,
+	id,
+	label,
+}: {
+	entity: string;
+	id: string;
+	label?: string | null;
+}) {
+	const url = rowUrl(entity, id);
+	return (
+		<a
+			href={url}
+			title={`${entity} ${id}`}
+			className={cn(
+				"text-link underline-offset-2 hover:underline",
+				!label && "font-mono text-xs",
+			)}
+			onClick={(e) => {
+				e.stopPropagation();
+				onLinkClick(e, url);
+			}}
+		>
+			{label ?? shortId(id)}
+		</a>
+	);
+}
 
 function TextCell({
 	value,
-	truncate = 80,
+	truncate,
 	mono = false,
 }: {
 	value: unknown;
 	truncate?: number;
 	mono?: boolean;
 }) {
-	if (value === null || value === undefined)
-		return <span className="text-muted-foreground">—</span>;
-	let str = typeof value === "string" ? value : String(value);
-	let truncated = false;
-	if (str.length > truncate) {
-		str = str.slice(0, truncate) + "…";
-		truncated = true;
-	}
+	if (isEmpty(value)) return <Dash />;
+	const full = typeof value === "string" ? value : jsonPreview(value);
+	// The cell clips long text to one line with CSS. A configured `truncate`
+	// also cuts the text to that many characters.
+	const text =
+		truncate && full.length > truncate ? `${full.slice(0, truncate)}…` : full;
 	return (
 		<span
-			className={mono ? "font-mono text-xs" : "text-sm"}
-			title={truncated ? String(value) : undefined}
+			className={mono ? "font-mono text-xs" : undefined}
+			title={full.length > 40 ? full : undefined}
 		>
-			{str}
+			{text}
 		</span>
 	);
 }
@@ -95,55 +221,37 @@ function AvatarCell({
 	const subtitle = renderer.subtitleField
 		? String(row[renderer.subtitleField] ?? "")
 		: "";
-	const initials = name
-		.split(/\s+/)
-		.filter(Boolean)
-		.slice(0, 2)
-		.map((p) => p.charAt(0).toUpperCase())
-		.join("") || "?";
+	const initials =
+		name
+			.split(/\s+/)
+			.filter(Boolean)
+			.slice(0, 2)
+			.map((p) => p.charAt(0).toUpperCase())
+			.join("") || "?";
 
 	return (
-		<div className="flex items-center gap-3">
-			<div className="relative flex size-8 items-center justify-center overflow-hidden rounded-full bg-secondary text-xs font-semibold text-secondary-foreground shrink-0">
+		<span className="inline-flex max-w-full items-center gap-2 align-middle">
+			<span className="relative flex size-5 shrink-0 items-center justify-center overflow-hidden rounded-full bg-accent text-[9px] font-semibold">
 				{image ? (
 					<img
 						src={image}
 						alt=""
 						className="size-full object-cover"
 						onError={(e) => {
-							(e.currentTarget as HTMLImageElement).style.display = "none";
+							e.currentTarget.style.display = "none";
 						}}
 					/>
 				) : (
-					<span>{initials}</span>
+					initials
 				)}
-			</div>
-			<div className="flex flex-col leading-tight min-w-0">
-				<span className="text-sm font-medium truncate">{name || "—"}</span>
-				{subtitle && (
-					<span className="text-xs text-muted-foreground truncate">
-						{subtitle}
-					</span>
-				)}
-			</div>
-		</div>
+			</span>
+			<span className="truncate font-medium">{name || <Dash />}</span>
+			{subtitle && (
+				<span className="truncate text-xs text-muted-foreground">{subtitle}</span>
+			)}
+		</span>
 	);
 }
-
-const BADGE_CLASSES: Record<BadgeVariant, string> = {
-	green: "bg-status-green-bg text-status-green-fg",
-	red: "bg-status-red-bg text-status-red-fg",
-	amber: "bg-status-amber-bg text-status-amber-fg",
-	blue: "bg-status-blue-bg text-status-blue-fg",
-	gray: "bg-status-gray-bg text-status-gray-fg",
-};
-const DOT_CLASSES: Record<BadgeVariant, string> = {
-	green: "bg-status-green-fg",
-	red: "bg-status-red-fg",
-	amber: "bg-status-amber-fg",
-	blue: "bg-status-blue-fg",
-	gray: "bg-status-gray-fg",
-};
 
 function BadgeCell({
 	value,
@@ -152,38 +260,33 @@ function BadgeCell({
 	value: unknown;
 	renderer: Extract<ColumnRenderer, { kind: "badge" }>;
 }) {
-	if (value === null || value === undefined)
-		return <span className="text-muted-foreground">—</span>;
+	if (isEmpty(value)) return <Dash />;
 	const key = String(value);
 	const variant: BadgeVariant =
 		renderer.variants?.[key] ?? renderer.variants?.["*"] ?? "gray";
-	const dot = renderer.dot !== false;
 	return (
-		<span
-			className={`inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs font-medium ${BADGE_CLASSES[variant]}`}
-		>
-			{dot && <span className={`size-1.5 rounded-full ${DOT_CLASSES[variant]}`} />}
+		<Badge variant={variant} dot={renderer.dot !== false}>
 			{key}
-		</span>
+		</Badge>
 	);
 }
 
 function DateCell({
 	value,
-	renderer,
+	format,
 }: {
 	value: unknown;
-	renderer: Extract<ColumnRenderer, { kind: "date" }>;
+	format: "relative" | "absolute" | "iso" | "datetime";
 }) {
-	if (value === null || value === undefined)
-		return <span className="text-muted-foreground">—</span>;
+	if (isEmpty(value)) return <Dash />;
 	const d = parseDate(value);
-	if (!d) return <TextCell value={value} truncate={40} mono />;
-	const fmt = renderer.format ?? "relative";
-	if (fmt === "iso") return <span className="text-xs font-mono">{d.toISOString()}</span>;
-	if (fmt === "absolute")
+	if (!d) return <TextCell value={value} mono />;
+	const iso = d.toISOString();
+	if (format === "iso") return <span className="font-mono text-xs">{iso}</span>;
+	if (format === "relative") return <span title={iso}>{relativeTime(d)}</span>;
+	if (format === "absolute") {
 		return (
-			<span className="text-sm" title={d.toISOString()}>
+			<span title={iso}>
 				{d.toLocaleDateString(undefined, {
 					year: "numeric",
 					month: "short",
@@ -191,11 +294,8 @@ function DateCell({
 				})}
 			</span>
 		);
-	return (
-		<span className="text-sm" title={d.toLocaleString()}>
-			{relativeTime(d)}
-		</span>
-	);
+	}
+	return <span title={iso}>{formatDateTime(d)}</span>;
 }
 
 function LinkCell({
@@ -207,8 +307,7 @@ function LinkCell({
 	row: Record<string, unknown>;
 	renderer: Extract<ColumnRenderer, { kind: "link" }>;
 }) {
-	if (value === null || value === undefined)
-		return <span className="text-muted-foreground">—</span>;
+	if (isEmpty(value)) return <Dash />;
 	const href = interpolate(renderer.href, value, row);
 	const external = renderer.external ?? /^https?:\/\//.test(href);
 	return (
@@ -217,7 +316,7 @@ function LinkCell({
 			target={external ? "_blank" : undefined}
 			rel={external ? "noreferrer" : undefined}
 			onClick={(e) => e.stopPropagation()}
-			className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
+			className="inline-flex items-center gap-1 text-link underline-offset-2 hover:underline"
 		>
 			{String(value)}
 			{external && <ExternalLink className="size-3" />}
@@ -225,19 +324,26 @@ function LinkCell({
 	);
 }
 
+/** A check for true and a dash for false. Configured labels replace both. */
 function BoolCell({
 	value,
-	renderer,
+	trueLabel,
+	falseLabel,
 }: {
 	value: unknown;
-	renderer: Extract<ColumnRenderer, { kind: "boolean" }>;
+	trueLabel?: string;
+	falseLabel?: string;
 }) {
-	if (value === null || value === undefined)
-		return <span className="text-muted-foreground">—</span>;
+	if (value === null || value === undefined) return <Dash />;
 	const truthy = !!value;
-	return (
-		<span className="text-sm">
-			{truthy ? renderer.trueLabel ?? "Yes" : renderer.falseLabel ?? "No"}
+	if (trueLabel || falseLabel) {
+		return <span>{truthy ? (trueLabel ?? "Yes") : (falseLabel ?? "No")}</span>;
+	}
+	return truthy ? (
+		<Check className="inline size-3.5" aria-label="True" />
+	) : (
+		<span className="text-subtle-foreground" aria-label="False">
+			–
 		</span>
 	);
 }
@@ -249,12 +355,11 @@ function NumberCell({
 	value: unknown;
 	renderer: Extract<ColumnRenderer, { kind: "number" }>;
 }) {
-	if (value === null || value === undefined)
-		return <span className="text-muted-foreground">—</span>;
+	if (isEmpty(value)) return <Dash />;
 	const n = typeof value === "number" ? value : Number(value);
-	if (Number.isNaN(n)) return <TextCell value={value} truncate={40} />;
+	if (Number.isNaN(n)) return <TextCell value={value} />;
 	const style = renderer.style ?? "decimal";
-	if (style === "bytes") return <span className="text-sm tabular-nums">{formatBytes(n)}</span>;
+	if (style === "bytes") return <span>{formatBytes(n)}</span>;
 	const opts: Intl.NumberFormatOptions = {};
 	if (style === "currency") {
 		opts.style = "currency";
@@ -262,74 +367,33 @@ function NumberCell({
 	} else if (style === "percent") {
 		opts.style = "percent";
 	}
-	const fmt = new Intl.NumberFormat(renderer.locale, opts);
-	return <span className="text-sm tabular-nums">{fmt.format(n)}</span>;
+	return <span>{new Intl.NumberFormat(renderer.locale, opts).format(n)}</span>;
 }
 
-function JsonCell({ value, truncate }: { value: unknown; truncate: number }) {
-	if (value === null || value === undefined)
-		return <span className="text-muted-foreground">—</span>;
-	let s: string;
-	try {
-		s = JSON.stringify(value);
-	} catch {
-		s = String(value);
-	}
-	const trunc = s.length > truncate ? `${s.slice(0, truncate)}…` : s;
+function JsonCell({ value, truncate }: { value: unknown; truncate?: number }) {
+	if (value === null || value === undefined) return <Dash />;
+	const full = jsonPreview(value);
+	const text =
+		truncate && full.length > truncate ? `${full.slice(0, truncate)}…` : full;
 	return (
-		<span className="font-mono text-xs text-muted-foreground" title={s}>
-			{trunc}
+		<span
+			className="font-mono text-xs text-muted-foreground"
+			title={full.length > 2000 ? `${full.slice(0, 2000)}…` : full}
+		>
+			{text}
 		</span>
 	);
 }
 
 function UnknownRenderer({ id }: { id: string }) {
 	return (
-		<span className="text-xs text-status-amber-fg" title={`Renderer "${id}" not registered`}>
+		<span
+			className="text-xs text-status-amber-fg"
+			title={`The renderer "${id}" is not registered in studio.entry.tsx.`}
+		>
 			?{id}
 		</span>
 	);
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function parseDate(v: unknown): Date | null {
-	if (v instanceof Date) return v;
-	if (typeof v === "number") return new Date(v);
-	if (typeof v === "string") {
-		const d = new Date(v);
-		return Number.isNaN(d.getTime()) ? null : d;
-	}
-	return null;
-}
-
-function relativeTime(d: Date): string {
-	const now = Date.now();
-	const delta = (now - d.getTime()) / 1000;
-	const past = delta >= 0;
-	const abs = Math.abs(delta);
-	const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
-	const sign = past ? -1 : 1;
-	if (abs < 60) return rtf.format(sign * Math.round(abs), "second");
-	if (abs < 3600) return rtf.format(sign * Math.round(abs / 60), "minute");
-	if (abs < 86_400) return rtf.format(sign * Math.round(abs / 3600), "hour");
-	if (abs < 86_400 * 30) return rtf.format(sign * Math.round(abs / 86_400), "day");
-	if (abs < 86_400 * 365)
-		return rtf.format(sign * Math.round(abs / (86_400 * 30)), "month");
-	return rtf.format(sign * Math.round(abs / (86_400 * 365)), "year");
-}
-
-function formatBytes(n: number): string {
-	const units = ["B", "KB", "MB", "GB", "TB", "PB"];
-	let u = 0;
-	let v = n;
-	while (v >= 1024 && u < units.length - 1) {
-		v /= 1024;
-		u++;
-	}
-	return `${v.toFixed(u === 0 ? 0 : 1)} ${units[u]}`;
 }
 
 function interpolate(
@@ -339,7 +403,7 @@ function interpolate(
 ): string {
 	return template
 		.replace(/\{value\}/g, encodeURIComponent(String(value ?? "")))
-		.replace(/\{row\.([\w.]+)\}/g, (_, path) => {
+		.replace(/\{row\.([\w.]+)\}/g, (_, path: string) => {
 			let v: unknown = row;
 			for (const seg of path.split(".")) {
 				if (v && typeof v === "object" && seg in (v as Record<string, unknown>)) {
@@ -352,5 +416,4 @@ function interpolate(
 		});
 }
 
-// Re-export for ResourceList
 export type { ColumnConfig };

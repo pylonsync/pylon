@@ -1,34 +1,27 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, Loader2, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
+import { useMemo, useRef, useState } from "react";
+import { MoreHorizontal, Plus, RefreshCw } from "lucide-react";
+
+import { useAuth } from "@/auth/auth";
+import { ConfirmDialog } from "@/components/confirm-dialog";
+import { Page, Toolbar } from "@/components/page";
+import { AutoCell } from "@/components/renderers";
+import { RowEditor, type Row } from "@/components/RowEditor";
+import {
+	EmptyState,
+	ErrorState,
+	LoadingRows,
+	Spinner,
+} from "@/components/states";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { JsonFieldEditor } from "@/components/RowEditor";
 import {
-	Card,
-	CardContent,
-	CardDescription,
-	CardHeader,
-	CardTitle,
-} from "@/components/ui/card";
-import {
-	Dialog,
-	DialogContent,
-	DialogDescription,
-	DialogFooter,
-	DialogHeader,
-	DialogTitle,
-} from "@/components/ui/dialog";
-import { Label } from "@/components/ui/label";
-import {
-	Select,
-	SelectContent,
-	SelectGroup,
-	SelectItem,
-	SelectLabel,
-	SelectSeparator,
-	SelectTrigger,
-	SelectValue,
-} from "@/components/ui/select";
+	Menu,
+	MenuContent,
+	MenuItem,
+	MenuSeparator,
+	MenuTrigger,
+} from "@/components/ui/menu";
+import { Select } from "@/components/ui/select";
 import {
 	Table,
 	TableBody,
@@ -37,677 +30,349 @@ import {
 	TableHeader,
 	TableRow,
 } from "@/components/ui/table";
-import { Textarea } from "@/components/ui/textarea";
-import { toast } from "sonner";
-import { ApiError, MANIFEST, type ManifestEntity, api } from "@/lib/pylon";
+import { toast } from "@/lib/toast";
+import { Tooltip } from "@/components/ui/tooltip";
+import { useQuery } from "@/hooks/use-query";
+import { errorText, plural, shortId } from "@/lib/format";
+import { MANIFEST, type ManifestEntity, api } from "@/lib/pylon";
+import { refTarget } from "@/lib/refs";
+import { LockedPage } from "./Locked";
 
-type Row = Record<string, unknown> & { id?: string };
-
-function emptyJsonForEntity(entity: ManifestEntity): string {
-	const obj: Record<string, string> = {};
-	for (const f of entity.fields) {
-		if (f.optional) continue;
-		obj[f.name] = `<${f.type}>`;
-	}
-	return JSON.stringify(obj, null, 2);
-}
-
-/// Framework-internal auth tables. These don't appear in the manifest
-/// (and shouldn't be exposed via /api/entities) but operators want to
-/// inspect them from Studio for debugging "did the OAuth callback
-/// actually create an account row" / "is there a stuck session." The
-/// Rust side at /api/admin/auth/<key> handles read + redaction.
+/// Auth tables of the framework. They are not in the manifest and
+/// `/api/entities` does not serve them. `/api/admin/auth/<key>` returns
+/// their rows with the secrets removed.
 const AUTH_TABLES = [
 	{ key: "accounts", label: "_pylon_accounts" },
 	{ key: "sessions", label: "_pylon_sessions" },
 	{ key: "magic_codes", label: "_pylon_magic_codes" },
 	{ key: "oauth_state", label: "_pylon_oauth_state" },
 ] as const;
-const AUTH_TABLE_PREFIX = "auth:";
+const AUTH_PREFIX = "auth:";
 
-/// Framework-internal operational tables. Same pattern as AUTH_TABLES
-/// — read-only views over the job queue, workflow engine, scheduler,
-/// and search-index registry. Surfaces in /api/admin/ops/<key>.
+/// Operations tables of the framework: the job queue, the workflow engine,
+/// the scheduler and the search indexes. `/api/admin/ops/<key>` serves them.
 const OPS_TABLES = [
 	{ key: "jobs", label: "Jobs" },
 	{ key: "workflows", label: "Workflows" },
 	{ key: "scheduler", label: "Scheduled tasks" },
 	{ key: "search_indexes", label: "Search indexes" },
 ] as const;
-const OPS_TABLE_PREFIX = "ops:";
+const OPS_PREFIX = "ops:";
 
-function isAuthTable(selected: string): boolean {
-	return selected.startsWith(AUTH_TABLE_PREFIX);
+/**
+ * Whether a column of a framework table holds a time. The framework tables
+ * have no manifest types. Their time columns end in `_at` or `_run` and hold
+ * a Unix time.
+ */
+function isTimeColumn(name: string, value: unknown): boolean {
+	if (!/(_at|_run)$/.test(name)) return false;
+	return typeof value === "number"
+		? value > 1_000_000_000
+		: typeof value === "string" && /^\d{9,13}Z?$/.test(value);
 }
 
-function authTableKey(selected: string): string {
-	return selected.slice(AUTH_TABLE_PREFIX.length);
+function tablePath(selected: string): string {
+	if (selected.startsWith(AUTH_PREFIX)) {
+		return `/api/admin/auth/${selected.slice(AUTH_PREFIX.length)}`;
+	}
+	if (selected.startsWith(OPS_PREFIX)) {
+		return `/api/admin/ops/${selected.slice(OPS_PREFIX.length)}`;
+	}
+	return `/api/entities/${encodeURIComponent(selected)}`;
 }
 
-function isOpsTable(selected: string): boolean {
-	return selected.startsWith(OPS_TABLE_PREFIX);
-}
-
-function opsTableKey(selected: string): string {
-	return selected.slice(OPS_TABLE_PREFIX.length);
-}
-
+/**
+ * Every table as the server stores it: the auth and operations tables of the
+ * framework (read-only), and the unpaged rows of each app entity.
+ */
 export function EntitiesPage() {
+	const { me } = useAuth();
 	const entities = MANIFEST.entities;
-	const [selected, setSelected] = useState<string>(entities[0]?.name ?? "");
-	const [rows, setRows] = useState<Row[]>([]);
-	const [loading, setLoading] = useState(false);
-	const [insertOpen, setInsertOpen] = useState(false);
-	const [insertJson, setInsertJson] = useState("{}");
-	const [inspectRow, setInspectRow] = useState<Row | null>(null);
-
-	const isAuth = isAuthTable(selected);
-	const isOps = isOpsTable(selected);
-	const isFrameworkTable = isAuth || isOps;
-	const entity = useMemo<ManifestEntity | undefined>(
-		() =>
-			isFrameworkTable
-				? undefined
-				: entities.find((e) => e.name === selected),
-		[entities, selected, isFrameworkTable],
+	const [selected, setSelected] = useState<string>(
+		`${AUTH_PREFIX}${AUTH_TABLES[0].key}`,
 	);
+	const [openRow, setOpenRow] = useState<Row | null>(null);
+	const [creating, setCreating] = useState(false);
+	const [deleting, setDeleting] = useState<Row | null>(null);
+	const lastOpened = useRef<HTMLElement | null>(null);
 
-	const load = useCallback(async () => {
-		if (!selected) return;
-		setLoading(true);
-		try {
-			let path: string;
-			if (isAuth) {
-				path = `/api/admin/auth/${authTableKey(selected)}`;
-			} else if (isOps) {
-				path = `/api/admin/ops/${opsTableKey(selected)}`;
-			} else {
-				path = `/api/entities/${selected}`;
-			}
-			const data = await api<Row[] | { data?: Row[] }>(path);
-			setRows(Array.isArray(data) ? data : data?.data ?? []);
-		} catch (err) {
-			if (err instanceof ApiError) {
-				toast.error(`${err.code}: ${err.message}`);
-			} else {
-				toast.error(err instanceof Error ? err.message : String(err));
-			}
-			setRows([]);
-		} finally {
-			setLoading(false);
-		}
-	}, [selected, isAuth, isOps]);
+	const framework =
+		selected.startsWith(AUTH_PREFIX) || selected.startsWith(OPS_PREFIX);
+	const entity = useMemo<ManifestEntity | undefined>(
+		() => (framework ? undefined : entities.find((e) => e.name === selected)),
+		[entities, selected, framework],
+	);
+	const isAdmin = !!me?.is_admin;
 
-	useEffect(() => {
-		void load();
-	}, [load]);
+	const query = useQuery(
+		selected,
+		async () => {
+			const data = await api<Row[] | { data?: Row[] }>(tablePath(selected));
+			return {
+				table: selected,
+				rows: Array.isArray(data) ? data : (data?.data ?? []),
+			};
+		},
+		{ enabled: isAdmin },
+	);
+	// The rows of the table that was selected before are not shown.
+	const rows = query.data?.table === selected ? query.data.rows : null;
+	const { error, loading, reload: load } = query;
 
-	const onInsert = async () => {
-		try {
-			const data = JSON.parse(insertJson);
-			await api(`/api/entities/${selected}`, {
-				method: "POST",
-				body: JSON.stringify(data),
-			});
-			toast.success(`Inserted into ${selected}`);
-			setInsertOpen(false);
-			setInsertJson("{}");
-			void load();
-		} catch (err) {
-			if (err instanceof ApiError) {
-				toast.error(`${err.code}: ${err.message}`);
-			} else {
-				toast.error(err instanceof Error ? err.message : String(err));
-			}
-		}
-	};
-
-	const onDelete = async (row: Row) => {
-		if (!row.id) return;
-		try {
-			await api(`/api/entities/${selected}/${row.id}`, { method: "DELETE" });
-			toast.success(`Deleted ${row.id}`);
-			void load();
-		} catch (err) {
-			if (err instanceof ApiError) {
-				toast.error(`${err.code}: ${err.message}`);
-			} else {
-				toast.error(err instanceof Error ? err.message : String(err));
-			}
-		}
-	};
-
+	// The framework tables have no manifest entry, so the columns are the
+	// keys of the rows in the order they first appear.
 	const columns = useMemo(() => {
-		if (rows.length === 0) {
-			// Auth tables — column shape comes from the row schema, not
-			// the manifest. We don't pre-render a header; empty-state
-			// just says "no rows."
+		if (!rows || rows.length === 0) {
 			return entity ? ["id", ...entity.fields.map((f) => f.name)] : [];
 		}
 		const seen = new Set<string>();
-		const out: string[] = [];
-		for (const r of rows) {
-			for (const k of Object.keys(r)) {
-				if (!seen.has(k)) {
-					seen.add(k);
-					out.push(k);
-				}
-			}
-		}
-		return out;
+		for (const r of rows) for (const k of Object.keys(r)) seen.add(k);
+		return [...seen];
 	}, [rows, entity]);
 
-	const selectedLabel = isAuth
-		? AUTH_TABLES.find((t) => t.key === authTableKey(selected))?.label ??
-		  selected
-		: isOps
-			? OPS_TABLES.find((t) => t.key === opsTableKey(selected))?.label ??
-			  selected
-			: selected;
-
-	if (entities.length === 0) {
+	if (!isAdmin) {
 		return (
-			<Card>
-				<CardHeader>
-					<CardTitle>No entities defined</CardTitle>
-					<CardDescription>
-						Define entities in your Pylon manifest with{" "}
-						<code className="rounded bg-muted px-1 py-0.5">entity()</code>{" "}
-						to populate this page.
-					</CardDescription>
-				</CardHeader>
-			</Card>
+			<Page title="System tables">
+				<LockedPage
+					title="System tables are for admins"
+					description="Sign in with an admin account to see the tables of the framework."
+				/>
+			</Page>
 		);
 	}
 
-	return (
-		<div className="space-y-4">
-			<div className="flex flex-wrap items-center gap-2">
-				<Select value={selected} onValueChange={setSelected}>
-					<SelectTrigger className="w-full sm:w-[260px]">
-						<SelectValue>{selectedLabel}</SelectValue>
-					</SelectTrigger>
-					<SelectContent>
-						<SelectGroup>
-							<SelectLabel className="text-xs text-muted-foreground">
-								App entities
-							</SelectLabel>
-							{entities.map((e) => (
-								<SelectItem key={e.name} value={e.name}>
-									{e.name}
-								</SelectItem>
-							))}
-						</SelectGroup>
-						<SelectSeparator />
-						<SelectGroup>
-							<SelectLabel className="text-xs text-muted-foreground">
-								Auth tables (framework, read-only)
-							</SelectLabel>
-							{AUTH_TABLES.map((t) => (
-								<SelectItem
-									key={t.key}
-									value={`${AUTH_TABLE_PREFIX}${t.key}`}
-								>
-									<span className="font-mono text-xs">{t.label}</span>
-								</SelectItem>
-							))}
-						</SelectGroup>
-						<SelectSeparator />
-						<SelectGroup>
-							<SelectLabel className="text-xs text-muted-foreground">
-								Operations (framework, read-only)
-							</SelectLabel>
-							{OPS_TABLES.map((t) => (
-								<SelectItem
-									key={t.key}
-									value={`${OPS_TABLE_PREFIX}${t.key}`}
-								>
-									{t.label}
-								</SelectItem>
-							))}
-						</SelectGroup>
-					</SelectContent>
-				</Select>
-				<Button variant="outline" size="sm" onClick={load} disabled={loading}>
-					{loading ? (
-						<Loader2 className="size-3.5 animate-spin" />
-					) : (
-						<RefreshCw className="size-3.5" />
-					)}
-					Refresh
-				</Button>
-				<div className="ml-auto flex items-center gap-2">
-					<span className="text-xs text-muted-foreground">
-						{rows.length} row{rows.length === 1 ? "" : "s"}
-					</span>
-					{!isFrameworkTable && (
-						<Button
-							size="sm"
-							onClick={() => {
-								setInsertJson(entity ? emptyJsonForEntity(entity) : "{}");
-								setInsertOpen(true);
-							}}
-						>
-							<Plus className="size-3.5" /> Insert
-						</Button>
-					)}
-				</div>
-			</div>
-
-			<Card>
-				<CardContent className="p-0">
-					{loading && rows.length === 0 ? (
-						<div className="flex items-center justify-center py-16 text-muted-foreground">
-							<Loader2 className="size-4 animate-spin" />
-						</div>
-					) : rows.length === 0 ? (
-						<div className="py-16 text-center">
-							<p className="text-sm font-medium">
-								No rows in {selected} yet.
-							</p>
-							<p className="mt-1 text-xs text-muted-foreground">
-								Insert one above to get started.
-							</p>
-						</div>
-					) : (
-						<Table>
-							<TableHeader>
-								<TableRow>
-									{columns.map((c) => (
-										<TableHead key={c}>{c}</TableHead>
-									))}
-									<TableHead className="w-[1%]" />
-								</TableRow>
-							</TableHeader>
-							<TableBody>
-								{rows.map((row, i) => (
-									<TableRow
-										key={(row.id as string) ?? i}
-										className="cursor-pointer"
-										onClick={() => setInspectRow(row)}
-									>
-										{columns.map((c) => (
-											<TableCell key={c} className="font-mono text-xs">
-												{formatCell(row[c])}
-											</TableCell>
-										))}
-										<TableCell className="text-right">
-											{!isFrameworkTable && (
-												<Button
-													variant="ghost"
-													size="sm"
-													onClick={(e) => {
-														e.stopPropagation();
-														void onDelete(row);
-													}}
-												>
-													<Trash2 className="size-3.5" />
-												</Button>
-											)}
-										</TableCell>
-									</TableRow>
-								))}
-							</TableBody>
-						</Table>
-					)}
-				</CardContent>
-			</Card>
-
-			<Dialog open={insertOpen} onOpenChange={setInsertOpen}>
-				<DialogContent className="sm:max-w-[600px]">
-					<DialogHeader>
-						<DialogTitle>Insert into {selected}</DialogTitle>
-						<DialogDescription>
-							Paste a JSON object. Pre-filled with required fields from the
-							schema.
-						</DialogDescription>
-					</DialogHeader>
-					<div className="space-y-3">
-						{entity && (
-							<div className="rounded-md border bg-muted/30 p-3">
-								<Label className="text-xs">Schema</Label>
-								<div className="mt-1 flex flex-wrap gap-1.5">
-									{entity.fields.map((f) => (
-										<code
-											key={f.name}
-											className="rounded bg-background px-1.5 py-0.5 text-xs"
-										>
-											{f.name}
-											{f.optional && "?"}: {f.type}
-										</code>
-									))}
-								</div>
-							</div>
-						)}
-						<div className="space-y-1.5">
-							<Label htmlFor="insert-json">Body</Label>
-							<Textarea
-								id="insert-json"
-								className="font-mono text-xs"
-								rows={10}
-								value={insertJson}
-								onChange={(e) => setInsertJson(e.target.value)}
-							/>
-						</div>
-					</div>
-					<DialogFooter>
-						<Button variant="ghost" onClick={() => setInsertOpen(false)}>
-							Cancel
-						</Button>
-						<Button onClick={onInsert}>Insert</Button>
-					</DialogFooter>
-				</DialogContent>
-			</Dialog>
-
-			<RowEditorDialog
-				row={inspectRow}
-				entity={entity}
-				readOnly={isFrameworkTable}
-				onClose={() => setInspectRow(null)}
-				onSaved={() => {
-					setInspectRow(null);
-					void load();
-				}}
-				selected={selected}
-			/>
-		</div>
-	);
-}
-
-// ---------------------------------------------------------------------------
-// Row editor — per-field inputs with type-aware widgets, plus a
-// collapsible raw-JSON view for power users.
-//
-// PATCHes /api/entities/<entity>/<id> with only the fields the user
-// changed. Read-only for framework tables (auth/ops) — those panels
-// expose a JSON view but no Save button. Field types come from the
-// manifest; unknown types fall back to a text input that round-trips
-// the value through JSON.parse for non-string types when possible.
-// ---------------------------------------------------------------------------
-function RowEditorDialog({
-	row,
-	entity,
-	readOnly,
-	selected,
-	onClose,
-	onSaved,
-}: {
-	row: Row | null;
-	entity: ManifestEntity | undefined;
-	readOnly: boolean;
-	selected: string;
-	onClose: () => void;
-	onSaved: () => void;
-}) {
-	const [draft, setDraft] = useState<Record<string, unknown>>({});
-	const [showJson, setShowJson] = useState(false);
-	const [saving, setSaving] = useState(false);
-
-	// Reset the draft whenever a different row is opened. Keying on
-	// row.id avoids stale draft state when the user clicks a second
-	// row without closing the dialog first.
-	useEffect(() => {
-		if (row) setDraft(row);
-	}, [row?.id]);
-
-	if (!row) return null;
-
-	const editableFields = entity
-		? entity.fields.filter(
-				(f) => f.name !== "id" && !f.name.startsWith("_"),
-			)
-		: [];
-
-	const dirtyKeys = Object.keys(draft).filter((k) => {
-		const before = (row as Record<string, unknown>)[k];
-		const after = draft[k];
-		return JSON.stringify(before) !== JSON.stringify(after);
-	});
-
-	const onChange = (name: string, value: unknown) => {
-		setDraft((prev) => ({ ...prev, [name]: value }));
-	};
-
-	const onSave = async () => {
-		if (!row.id || dirtyKeys.length === 0) return;
-		setSaving(true);
+	const remove = async (row: Row) => {
+		if (!row.id || framework) return;
 		try {
-			const patch: Record<string, unknown> = {};
-			for (const k of dirtyKeys) patch[k] = draft[k];
-			await api(`/api/entities/${selected}/${row.id}`, {
-				method: "PATCH",
-				body: JSON.stringify(patch),
+			await api(`${tablePath(selected)}/${encodeURIComponent(row.id)}`, {
+				method: "DELETE",
 			});
-			toast.success(`Saved ${row.id}`);
-			onSaved();
+			toast.success("The row is deleted");
+			if (openRow?.id === row.id) setOpenRow(null);
+			void load();
 		} catch (err) {
-			if (err instanceof ApiError) {
-				toast.error(`${err.code}: ${err.message}`);
-			} else {
-				toast.error(err instanceof Error ? err.message : String(err));
-			}
-		} finally {
-			setSaving(false);
+			toast.error("Studio could not delete the row", {
+				description: errorText(err),
+			});
 		}
 	};
 
 	return (
-		<Dialog open onOpenChange={(o) => !o && onClose()}>
-			<DialogContent className="sm:max-w-[640px]">
-				<DialogHeader>
-					<DialogTitle>
-						{readOnly ? "Inspect row" : "Edit row"}
-					</DialogTitle>
-					<DialogDescription className="font-mono text-xs">
-						{(row.id as string) ?? "—"}
-					</DialogDescription>
-				</DialogHeader>
-
-				{!readOnly && entity ? (
-					<div className="max-h-[60vh] space-y-4 overflow-auto pr-1">
-						{editableFields.map((f) => (
-							<FieldEditor
-								key={f.name}
-								name={f.name}
-								type={f.type}
-								optional={Boolean(f.optional)}
-								value={draft[f.name]}
-								onChange={(v) => onChange(f.name, v)}
-							/>
-						))}
-
-						<button
-							type="button"
-							onClick={() => setShowJson((s) => !s)}
-							className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-						>
-							{showJson ? (
-								<ChevronDown className="size-3" />
-							) : (
-								<ChevronRight className="size-3" />
-							)}
-							{showJson ? "Hide" : "Show"} raw JSON
-						</button>
-						{showJson && (
-							<pre className="max-h-[200px] overflow-auto rounded-md border bg-muted/30 p-3 text-xs">
-								{JSON.stringify(draft, null, 2)}
-							</pre>
-						)}
-					</div>
-				) : (
-					<pre className="max-h-[60vh] overflow-auto rounded-md border bg-muted/30 p-3 text-xs">
-						{JSON.stringify(row, null, 2)}
-					</pre>
-				)}
-
-				<DialogFooter className="gap-2 sm:gap-2">
-					<Button variant="ghost" onClick={onClose}>
-						{readOnly ? "Close" : "Cancel"}
-					</Button>
-					{!readOnly && (
+		<Page
+			title="System tables"
+			meta={rows ? plural(rows.length, "row") : undefined}
+			actions={
+				<>
+					<Tooltip label="Load the rows again">
 						<Button
-							onClick={onSave}
-							disabled={saving || dirtyKeys.length === 0}
+							variant="ghost"
+							size="icon"
+							aria-label="Refresh"
+							disabled={loading}
+							onClick={load}
 						>
-							{saving ? (
-								<Loader2 className="size-3.5 animate-spin" />
-							) : (
-								<Save className="size-3.5" />
-							)}
-							{dirtyKeys.length > 0
-								? `Save ${dirtyKeys.length} change${dirtyKeys.length === 1 ? "" : "s"}`
-								: "No changes"}
+							{loading ? <Spinner /> : <RefreshCw />}
+						</Button>
+					</Tooltip>
+					{!framework && (
+						<Button
+							onClick={() => {
+								setOpenRow(null);
+								setCreating(true);
+							}}
+						>
+							<Plus />
+							Insert row
 						</Button>
 					)}
-				</DialogFooter>
-			</DialogContent>
-		</Dialog>
-	);
-}
+				</>
+			}
+		>
+			<Toolbar>
+				<Select
+					aria-label="Table"
+					className="w-full sm:w-64"
+					value={selected}
+					onValueChange={(next) => {
+						setSelected(next);
+						setOpenRow(null);
+						setCreating(false);
+					}}
+					options={[
+						{
+							label: "Auth tables",
+							options: AUTH_TABLES.map((t) => ({
+								value: `${AUTH_PREFIX}${t.key}`,
+								label: t.label,
+							})),
+						},
+						{
+							label: "Operations",
+							options: OPS_TABLES.map((t) => ({
+								value: `${OPS_PREFIX}${t.key}`,
+								label: t.label,
+							})),
+						},
+						...(entities.length > 0
+							? [
+									{
+										label: "App entities",
+										options: entities.map((e) => ({
+											value: e.name,
+											label: e.name,
+										})),
+									},
+								]
+							: []),
+					]}
+				/>
+				{framework && <Badge variant="outline">Read-only</Badge>}
+			</Toolbar>
 
-function FieldEditor({
-	name,
-	type,
-	optional,
-	value,
-	onChange,
-}: {
-	name: string;
-	type: string;
-	optional: boolean;
-	value: unknown;
-	onChange: (v: unknown) => void;
-}) {
-	const isNullable = optional && value === null;
-
-	const labelEl = (
-		<div className="flex items-baseline justify-between">
-			<Label htmlFor={`field-${name}`} className="text-xs">
-				{name}
-				{optional && <span className="text-muted-foreground"> (optional)</span>}
-			</Label>
-			<code className="text-[10px] text-muted-foreground">{type}</code>
-		</div>
-	);
-
-	if (type === "bool") {
-		return (
-			<div className="space-y-1.5">
-				{labelEl}
-				<label className="inline-flex items-center gap-2 text-sm">
-					<input
-						id={`field-${name}`}
-						type="checkbox"
-						checked={value === true}
-						onChange={(e) => onChange(e.target.checked)}
-						className="size-4 rounded border-input"
+			<div className="min-h-0 flex-1 overflow-auto">
+				{error && rows === null ? (
+					<ErrorState
+						title="Studio could not load the table"
+						message={error}
+						onRetry={load}
 					/>
-					<span className="text-muted-foreground">
-						{value === true ? "true" : value === false ? "false" : "(unset)"}
-					</span>
-				</label>
-			</div>
-		);
-	}
-
-	if (type === "int" || type === "float") {
-		return (
-			<div className="space-y-1.5">
-				{labelEl}
-				<Input
-					id={`field-${name}`}
-					type="number"
-					step={type === "int" ? "1" : "any"}
-					value={value === null || value === undefined ? "" : String(value)}
-					onChange={(e) => {
-						const raw = e.target.value;
-						if (raw === "") {
-							onChange(optional ? null : undefined);
-							return;
+				) : rows === null ? (
+					<LoadingRows rows={10} />
+				) : rows.length === 0 ? (
+					<EmptyState
+						title="The table has no rows"
+						action={
+							!framework && (
+								<Button variant="outline" onClick={() => setCreating(true)}>
+									<Plus />
+									Insert row
+								</Button>
+							)
 						}
-						const n = type === "int" ? parseInt(raw, 10) : parseFloat(raw);
-						onChange(Number.isFinite(n) ? n : raw);
-					}}
-				/>
+					/>
+				) : (
+					<Table aria-label="Rows">
+						<TableHeader>
+							<tr>
+								{columns.map((c) => (
+									<TableHead key={c} className="font-mono normal-case">
+										{c}
+									</TableHead>
+								))}
+								{!framework && (
+									<TableHead className="w-px px-1">
+										<span className="sr-only">Actions</span>
+									</TableHead>
+								)}
+							</tr>
+						</TableHeader>
+						<TableBody>
+							{rows.map((row, i) => (
+								<TableRow
+									key={row.id ?? i}
+									tabIndex={0}
+									data-current={openRow !== null && openRow === row}
+									className="cursor-default"
+									onClick={(e) => {
+										lastOpened.current = e.currentTarget;
+										setCreating(false);
+										setOpenRow(row);
+									}}
+									onKeyDown={(e) => {
+										if (e.target !== e.currentTarget) return;
+										if (e.key !== "Enter" && e.key !== " ") return;
+										e.preventDefault();
+										e.currentTarget.click();
+									}}
+								>
+									{columns.map((c) => (
+										<TableCell key={c}>
+											<AutoCell
+												value={row[c]}
+												type={
+													entity
+														? entity.fields.find((f) => f.name === c)?.type
+														: isTimeColumn(c, row[c])
+															? "datetime"
+															: undefined
+												}
+												isId={c === "id" && !framework}
+												refEntity={
+													framework ? null : refTarget(MANIFEST, entity, c)
+												}
+											/>
+										</TableCell>
+									))}
+									{!framework && (
+										<TableCell
+											className="w-px px-1"
+											onClick={(e) => e.stopPropagation()}
+										>
+											<Menu>
+												<MenuTrigger
+													aria-label="Row actions"
+													className="flex size-6 cursor-default items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground data-open:bg-accent"
+												>
+													<MoreHorizontal className="size-3.5" />
+												</MenuTrigger>
+												<MenuContent align="end">
+													<MenuItem onSelect={() => setOpenRow(row)}>Open</MenuItem>
+													<MenuSeparator />
+													<MenuItem
+														destructive
+														disabled={!row.id}
+														onSelect={() => setDeleting(row)}
+													>
+														Delete
+													</MenuItem>
+												</MenuContent>
+											</Menu>
+										</TableCell>
+									)}
+								</TableRow>
+							))}
+						</TableBody>
+					</Table>
+				)}
 			</div>
-		);
-	}
 
-	if (type === "datetime") {
-		// HTML datetime-local needs the `YYYY-MM-DDTHH:mm` shape; our
-		// manifest stores ISO 8601 with seconds + Z. Trim/expand on
-		// each side of the input so round-tripping works.
-		const isoToLocal = (v: unknown): string => {
-			if (typeof v !== "string") return "";
-			const m = v.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})/);
-			return m?.[1] ?? "";
-		};
-		return (
-			<div className="space-y-1.5">
-				{labelEl}
-				<Input
-					id={`field-${name}`}
-					type="datetime-local"
-					value={isoToLocal(value)}
-					onChange={(e) => {
-						const v = e.target.value;
-						if (!v) {
-							onChange(optional ? null : "");
-							return;
-						}
-						// Append seconds + Z to match the canonical shape.
-						onChange(`${v}:00Z`);
-					}}
-				/>
-			</div>
-		);
-	}
-
-	if (type === "json") {
-		return (
-			<JsonFieldEditor
-				name={name}
-				value={value}
-				onChange={onChange}
-				labelEl={labelEl}
-			/>
-		);
-	}
-
-	// Default: string-ish (string, richtext, id(X), or anything else).
-	// `id(X)` rendered as a plain text input — could be upgraded to a
-	// row-picker later, but text covers the common ops case (paste an
-	// id from another row).
-	return (
-		<div className="space-y-1.5">
-			{labelEl}
-			<Input
-				id={`field-${name}`}
-				type="text"
-				value={
-					value === null || value === undefined
-						? ""
-						: typeof value === "string"
-							? value
-							: JSON.stringify(value)
+			<RowEditor
+				open={creating || openRow !== null}
+				mode={creating ? "create" : framework ? "view" : "edit"}
+				row={creating ? null : openRow}
+				entity={entity}
+				entityName={
+					framework
+						? ([...AUTH_TABLES, ...OPS_TABLES].find(
+								(t) => selected === `${AUTH_PREFIX}${t.key}` || selected === `${OPS_PREFIX}${t.key}`,
+							)?.label ?? selected)
+						: selected
 				}
-				onChange={(e) => {
-					const v = e.target.value;
-					if (v === "" && optional) {
-						onChange(null);
-						return;
-					}
-					onChange(v);
+				returnFocus={() => lastOpened.current}
+				onClose={() => {
+					setCreating(false);
+					setOpenRow(null);
 				}}
-				placeholder={isNullable ? "(null)" : ""}
+				onDelete={framework ? undefined : setDeleting}
+				onSaved={(saved) => {
+					setCreating(false);
+					setOpenRow(saved && !creating ? saved : null);
+					void load();
+				}}
 			/>
-		</div>
-	);
-}
 
-function formatCell(v: unknown): string {
-	if (v === null || v === undefined) return "—";
-	if (typeof v === "string") return v.length > 80 ? `${v.slice(0, 80)}…` : v;
-	if (typeof v === "object") return JSON.stringify(v);
-	return String(v);
+			<ConfirmDialog
+				open={deleting !== null}
+				title="Delete the row?"
+				description={`This deletes the ${selected} row ${shortId(String(deleting?.id ?? ""))}. You cannot undo this.`}
+				confirmLabel="Delete row"
+				destructive
+				onCancel={() => setDeleting(null)}
+				onConfirm={async () => {
+					if (deleting) await remove(deleting);
+					setDeleting(null);
+				}}
+			/>
+		</Page>
+	);
 }

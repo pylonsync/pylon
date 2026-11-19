@@ -1,19 +1,18 @@
 import { useEffect } from "react";
-import { ThemeProvider as NextThemes } from "next-themes";
+import { Preferences } from "@ui-sdk/react/preferences";
 import type { ThemeAccent, ThemeConfig } from "@/lib/studio-config";
+import { colorScheme } from "@/lib/theme";
 
 const ACCENTS: ThemeAccent[] = ["emerald", "blue", "violet", "rose", "amber"];
 
 /**
- * Wraps `next-themes` and adds the accent-palette swap. Two
- * orthogonal axes: appearance (light/dark/system, handled by
- * next-themes via the `class` attribute on `<html>`) and accent
- * (one of five built-ins, applied via `data-accent` on `<html>`).
+ * Applies the theme to <html>.
  *
- * `theme.primary` (custom hex) is applied as an inline style on
- * `<html>` that re-points `--primary` and `--ring`. Best-effort —
- * we don't recompute foreground contrast, so very light hexes
- * may need their own foreground override via CSS.
+ * The color scheme (`data-color-scheme`) is the operator's choice. The accent
+ * (`data-accent`) and the optional custom primary color come from
+ * studio.config.ts. A custom primary color is written as an inline style, so
+ * it wins over the accent. Its text color is not derived from it: a very
+ * light custom color needs its own `--primary-foreground`.
  */
 export function ThemeProvider({
 	theme,
@@ -24,36 +23,15 @@ export function ThemeProvider({
 }) {
 	const accent: ThemeAccent =
 		theme?.accent && ACCENTS.includes(theme.accent) ? theme.accent : "blue";
-	const defaultTheme = theme?.appearance ?? "light";
 
 	useEffect(() => {
-		if (typeof document === "undefined") return;
 		const root = document.documentElement;
 		root.setAttribute("data-accent", accent);
-
-		// Custom primary override — re-point CSS vars inline so the
-		// override survives accent class changes.
-		if (theme?.primary) {
-			root.style.setProperty("--primary", theme.primary);
-			root.style.setProperty("--ring", theme.primary);
-			root.style.setProperty("--sidebar-primary", theme.primary);
-			root.style.setProperty("--sidebar-ring", theme.primary);
-		} else {
-			root.style.removeProperty("--primary");
-			root.style.removeProperty("--ring");
-			root.style.removeProperty("--sidebar-primary");
-			root.style.removeProperty("--sidebar-ring");
+		for (const name of ["--primary", "--ring", "--link"]) {
+			if (theme?.primary) root.style.setProperty(name, theme.primary);
+			else root.style.removeProperty(name);
 		}
 	}, [accent, theme?.primary]);
 
-	return (
-		<NextThemes
-			attribute="class"
-			defaultTheme={defaultTheme}
-			enableSystem={defaultTheme === "system"}
-			disableTransitionOnChange
-		>
-			{children}
-		</NextThemes>
-	);
+	return <Preferences preferences={[colorScheme]}>{children}</Preferences>;
 }

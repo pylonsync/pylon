@@ -2688,6 +2688,10 @@ impl pylon_router::JobOps for JobQueue {
     fn get_job(&self, id: &str) -> Option<serde_json::Value> {
         JobQueue::get_job(self, id).map(|j| to_json(j))
     }
+
+    fn cancel(&self, id: &str) -> Result<bool, String> {
+        JobQueue::cancel_pending(self, id)
+    }
 }
 
 // ---------------------------------------------------------------------------

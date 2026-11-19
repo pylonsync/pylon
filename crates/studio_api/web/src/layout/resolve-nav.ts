@@ -24,8 +24,8 @@ export interface ResolvedNavSection {
 	defaultOpen: boolean;
 }
 
-/// Built-in page ids the layout recognises. Custom ids resolve through
-/// the extensions registry — see `extensions.ts`.
+/// The ids of the built-in pages. Any other id is looked up in the
+/// extensions registry (`extensions.ts`).
 export const BUILT_IN_PAGES = new Set([
 	"overview",
 	"manifest",
@@ -37,24 +37,24 @@ export const BUILT_IN_PAGES = new Set([
 	"shards",
 	"settings",
 	"roles",
+	"entities",
+	"logs",
+	"metrics",
+	"jobs",
+	"workflows",
 ]);
 
 /**
- * Build the sidebar nav from the user's config when present, or
- * fall back to a manifest-derived default that mirrors the
- * Refine-style screenshot:
+ * Build the sidebar groups.
  *
- *   DASHBOARD
- *     • Overview
- *   RESOURCES
- *     • <every entity in manifest, except hidden>
- *   SETTINGS
- *     • Roles & Permissions
+ * `sidebar.sections` from studio.config.ts wins when it has entries. With no
+ * config the groups come from the manifest:
  *
- * The default flow keeps existing pages reachable (Health / Sync /
- * Manifest / Functions / Policies / Routes / Settings) under a
- * "FRAMEWORK" section so the operator never loses access to admin
- * surfaces just because they didn't write a studio.config.ts yet.
+ *   (none)   Overview, the home page of Studio
+ *   Data     one item for each entity that is not hidden
+ *   App      Functions, Policies, Routes, Manifest, Roles
+ *   Runtime  Logs, Metrics, Jobs, Workflows, Live sync, Health, Shards,
+ *            System tables
  */
 export function resolveNav(
 	config: StudioConfig,
@@ -117,22 +117,20 @@ function defaultSidebar(
 	manifest: Manifest,
 	config: StudioConfig,
 ): ResolvedNavSection[] {
-	const sections: ResolvedNavSection[] = [];
-
-	sections.push({
-		label: "DASHBOARD",
-		defaultOpen: true,
-		items: [
-			{ kind: "page", id: "overview", label: "Overview", icon: "grid" },
-		],
-	});
+	const sections: ResolvedNavSection[] = [
+		{
+			label: "",
+			defaultOpen: true,
+			items: [{ kind: "page", id: "overview", label: "Overview", icon: "bar-chart" }],
+		},
+	];
 
 	const visibleEntities = manifest.entities.filter(
 		(e) => !config.resources?.[e.name]?.hidden,
 	);
 	if (visibleEntities.length > 0) {
 		sections.push({
-			label: "RESOURCES",
+			label: "Data",
 			defaultOpen: true,
 			items: visibleEntities.map((e) => {
 				const meta = config.resources?.[e.name];
@@ -140,22 +138,16 @@ function defaultSidebar(
 					kind: "resource",
 					entity: e.name,
 					label: meta?.label ?? meta?.pluralLabel ?? e.name,
-					icon: meta?.icon ?? "layers",
+					icon: meta?.icon ?? "table",
 				};
 			}),
 		});
 	}
 
 	sections.push({
-		label: "FRAMEWORK",
+		label: "App",
 		defaultOpen: true,
 		items: [
-			{
-				kind: "page",
-				id: "manifest",
-				label: "Manifest",
-				icon: "file-text",
-			},
 			{
 				kind: "page",
 				id: "functions",
@@ -164,8 +156,27 @@ function defaultSidebar(
 				requiresAdmin: true,
 			},
 			{ kind: "page", id: "policies", label: "Policies", icon: "shield-check" },
-			{ kind: "page", id: "routes", label: "Routes", icon: "box" },
-			{ kind: "page", id: "sync", label: "Live sync", icon: "radio" },
+			{ kind: "page", id: "routes", label: "Routes", icon: "route" },
+			{ kind: "page", id: "manifest", label: "Manifest", icon: "file-text" },
+			{ kind: "page", id: "roles", label: "Roles", icon: "user-cog" },
+		],
+	});
+
+	sections.push({
+		label: "Runtime",
+		defaultOpen: true,
+		items: [
+			{ kind: "page", id: "logs", label: "Logs", icon: "scroll-text", requiresAdmin: true },
+			{ kind: "page", id: "metrics", label: "Metrics", icon: "gauge", requiresAdmin: true },
+			{ kind: "page", id: "jobs", label: "Jobs", icon: "list-checks", requiresAdmin: true },
+			{
+				kind: "page",
+				id: "workflows",
+				label: "Workflows",
+				icon: "workflow",
+				requiresAdmin: true,
+			},
+			{ kind: "page", id: "sync", label: "Live sync", icon: "radio", requiresAdmin: true },
 			{
 				kind: "page",
 				id: "health",
@@ -180,33 +191,20 @@ function defaultSidebar(
 				icon: "boxes",
 				requiresAdmin: true,
 			},
-		],
-	});
-
-	sections.push({
-		label: "SETTINGS",
-		defaultOpen: true,
-		items: [
-			{ kind: "page", id: "settings", label: "Settings", icon: "settings" },
+			{
+				kind: "page",
+				id: "entities",
+				label: "System tables",
+				icon: "database",
+				requiresAdmin: true,
+			},
 		],
 	});
 
 	return sections;
 }
 
-/// Default footer card (matches the screenshot's "Used space" pattern)
-/// when the user hasn't configured one. The progress value is a
-/// placeholder — the real numeric ratio comes from server metrics
-/// when available, otherwise we render the description text only.
-export function defaultFooter(config: SidebarConfig | undefined) {
-	if (config?.footer === null) return null; // explicit opt-out
-	return (
-		config?.footer ?? {
-			type: "card" as const,
-			title: "Pylon Studio",
-			description:
-				"Configure brand, resources, and theme via studio.config.ts",
-			action: { label: "Read the docs", href: "https://docs.pylonsync.com" },
-		}
-	);
+/** The footer from studio.config.ts. With no config the sidebar has no footer. */
+export function resolveFooter(config: SidebarConfig | undefined) {
+	return config?.footer ?? null;
 }

@@ -1,43 +1,49 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
 	ArrowDown,
 	ArrowUp,
+	ChevronLeft,
+	ChevronRight,
 	ChevronsUpDown,
-	Filter as FilterIcon,
-	Loader2,
+	ListFilter,
 	MoreHorizontal,
 	Plus,
 	RefreshCw,
 	Search,
-	Trash2,
+	X,
 } from "lucide-react";
-import { toast } from "sonner";
+
+import { ConfirmDialog } from "@/components/confirm-dialog";
+import { Page, Toolbar } from "@/components/page";
+import { AutoCell, CellRenderer } from "@/components/renderers";
+import { RowEditor, type Row } from "@/components/RowEditor";
+import { EmptyState, ErrorState, LoadingRows, Spinner } from "@/components/states";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
 	Dialog,
+	DialogBody,
 	DialogContent,
-	DialogDescription,
 	DialogFooter,
 	DialogHeader,
 	DialogTitle,
 } from "@/components/ui/dialog";
-import {
-	DropdownMenu,
-	DropdownMenuContent,
-	DropdownMenuItem,
-	DropdownMenuLabel,
-	DropdownMenuSeparator,
-	DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
-	Select,
-	SelectContent,
-	SelectItem,
-	SelectTrigger,
-	SelectValue,
-} from "@/components/ui/select";
+	Menu,
+	MenuContent,
+	MenuItem,
+	MenuSeparator,
+	MenuTrigger,
+} from "@/components/ui/menu";
+import {
+	Popover,
+	PopoverContent,
+	PopoverTitle,
+	PopoverTrigger,
+} from "@/components/ui/popover";
+import { Select } from "@/components/ui/select";
 import {
 	Table,
 	TableBody,
@@ -47,11 +53,22 @@ import {
 	TableRow,
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
-import { Label } from "@/components/ui/label";
-import { RowEditor } from "@/components/RowEditor";
-import { CellRenderer } from "@/components/renderers";
-import { resolveIcon } from "@/layout/icons";
-import { ApiError, MANIFEST, type ManifestEntity, api } from "@/lib/pylon";
+import { toast } from "@/lib/toast";
+import { Tooltip } from "@/components/ui/tooltip";
+import { Icon } from "@/layout/icon";
+import { setCount } from "@/lib/counts";
+import { getExtensionAction } from "@/lib/extensions";
+import { useQuery } from "@/hooks/use-query";
+import {
+	clip,
+	errorText,
+	humanize,
+	isNumericType,
+	plural,
+	shortId,
+} from "@/lib/format";
+import { MANIFEST, type ManifestEntity, api } from "@/lib/pylon";
+import { forgetLabels, loadLabels, refTarget } from "@/lib/refs";
 import {
 	buildActionInput,
 	copyToClipboard,
@@ -62,26 +79,52 @@ import {
 import type {
 	BulkAction,
 	ColumnConfig,
+	ResourceListConfig,
 	RowAction,
 	StudioConfig,
 } from "@/lib/studio-config";
+import { cn } from "@/lib/utils";
 
-type Row = Record<string, unknown> & { id?: string };
+const DEFAULT_PAGE_SIZES = [25, 50, 100, 250];
+const DEFAULT_PAGE_SIZE = 50;
 
-const DEFAULT_PAGE_SIZES = [10, 25, 50, 100];
-
-/// Server response shape. The /api/entities/{Name} endpoint may return
-/// either a bare array (legacy / small tables) or an envelope with
-/// total/page/per_page; we accept both. The web shell does its own
-/// client-side paging when the server gives us the full array.
+/// The list endpoint returns an envelope with the total when the request
+/// has `page`. A server without pagination returns a bare array, and the
+/// page then sorts, filters and pages the rows in the browser.
 type ListResponse =
 	| Row[]
-	| {
-			data: Row[];
-			total?: number;
-			page?: number;
-			per_page?: number;
-	  };
+	| { data: Row[]; total?: number | null; page?: number; per_page?: number };
+
+type Sort = { field: string; order: "asc" | "desc" };
+
+/** What the list shows: the page, and how the rows are narrowed and ordered. */
+/** One filter on a field. `contains` matches a part of a text value. */
+type FieldFilter = { op: "eq" | "contains"; value: string };
+
+type View = {
+	page: number;
+	pageSize: number;
+	search: string;
+	sort: Sort | null;
+	filters: Record<string, FieldFilter>;
+};
+
+/** A column of the table, with what the manifest says about its field. */
+type Column = ColumnConfig & {
+	/** The manifest type of the field, when the field is in the manifest. */
+	type?: string;
+	isId: boolean;
+	/** The entity the field points to, when the field is a reference. */
+	ref: string | null;
+};
+
+type Confirm = {
+	title: string;
+	description?: string;
+	label: string;
+	destructive?: boolean;
+	run: () => unknown;
+};
 
 export function ResourceListPage({
 	entity,
@@ -94,159 +137,284 @@ export function ResourceListPage({
 	const resourceCfg = config.resources?.[entity];
 	const listCfg = resourceCfg?.list;
 
-	const columns = useMemo<ColumnConfig[]>(
+	const columns = useMemo(
 		() => resolveColumns(manifestEntity, listCfg),
 		[manifestEntity, listCfg],
 	);
-	const visibleColumns = columns.filter((c) => !c.hidden);
-	const pluralLabel =
-		resourceCfg?.pluralLabel ??
-		resourceCfg?.label ??
-		`${entity}${entity.endsWith("s") ? "" : "s"}`;
+	const visibleColumns = useMemo(() => columns.filter((c) => !c.hidden), [columns]);
+	// The page title is the name the sidebar shows for the entity.
+	const pluralLabel = resourceCfg?.label ?? resourceCfg?.pluralLabel ?? entity;
 
 	const pageSizes = listCfg?.pageSizes ?? DEFAULT_PAGE_SIZES;
-	const [pageSize, setPageSize] = useState(
-		listCfg?.defaultPageSize ?? pageSizes[0],
-	);
-	const [page, setPage] = useState(1);
-	const [search, setSearch] = useState("");
-	const [sort, setSort] = useState<{ field: string; order: "asc" | "desc" } | null>(
-		listCfg?.defaultSort ?? null,
-	);
-	const [filters, setFilters] = useState<Record<string, string>>({});
-
-	const [rows, setRows] = useState<Row[]>([]);
-	const [total, setTotal] = useState<number | null>(null);
-	const [serverPaged, setServerPaged] = useState(false);
-	const [loading, setLoading] = useState(false);
+	const [view, setView] = useState<View>(() => ({
+		page: 1,
+		pageSize:
+			listCfg?.defaultPageSize ??
+			(pageSizes.includes(DEFAULT_PAGE_SIZE) ? DEFAULT_PAGE_SIZE : pageSizes[0]),
+		search: "",
+		sort: listCfg?.defaultSort ?? null,
+		filters: {},
+	}));
+	const { page, pageSize, search, sort, filters } = view;
+	const [searchText, setSearchText] = useState("");
 	const [selected, setSelected] = useState<Set<string>>(new Set());
-	const [insertOpen, setInsertOpen] = useState(false);
-	const [insertJson, setInsertJson] = useState("{}");
-	const [inspectRow, setInspectRow] = useState<Row | null>(null);
+	const [confirm, setConfirm] = useState<Confirm | null>(null);
 
-	const load = useCallback(async () => {
-		setLoading(true);
-		try {
-			const params = new URLSearchParams();
-			params.set("page", String(page));
-			params.set("per_page", String(pageSize));
-			if (sort) {
-				params.set("sort", sort.field);
-				params.set("order", sort.order);
-			}
-			if (search.trim()) params.set("q", search.trim());
-			for (const [k, v] of Object.entries(filters)) {
-				if (v) params.set(`filter[${k}]`, v);
-			}
-			const data = await api<ListResponse>(
-				`/api/entities/${entity}?${params.toString()}`,
-			);
-			if (Array.isArray(data)) {
-				// Legacy / non-paginated server. Apply client-side paging.
-				setServerPaged(false);
-				const filtered = clientFilter(data, search, filters, columns);
-				const sorted = sort ? clientSort(filtered, sort) : filtered;
-				setTotal(sorted.length);
-				setRows(
-					sorted.slice((page - 1) * pageSize, page * pageSize),
-				);
-			} else {
-				setServerPaged(true);
-				setRows(data.data ?? []);
-				setTotal(data.total ?? null);
-			}
-		} catch (err) {
-			if (err instanceof ApiError) toast.error(`${err.code}: ${err.message}`);
-			else toast.error(err instanceof Error ? err.message : String(err));
-			setRows([]);
-			setTotal(0);
-		} finally {
-			setLoading(false);
+	/** Change the sort, the filters, the search or the page size. The list goes to page 1. */
+	const changeView = useCallback((patch: Partial<Omit<View, "page">>) => {
+		setView((v) => ({ ...v, ...patch, page: 1 }));
+		setSelected(new Set());
+	}, []);
+	const goToPage = (next: number) => {
+		setView((v) => ({ ...v, page: next }));
+		setSelected(new Set());
+	};
+
+	// The entity declares a search index, so the server answers `q`. Without
+	// one the box filters the rows of the current page in the browser.
+	const serverSearch = Boolean(manifestEntity?.search);
+
+	// Typing waits a moment before the list changes.
+	useEffect(() => {
+		const t = window.setTimeout(() => {
+			const next = searchText.trim();
+			setView((v) => (v.search === next ? v : { ...v, search: next, page: 1 }));
+		}, 250);
+		return () => window.clearTimeout(t);
+	}, [searchText]);
+
+	const params = new URLSearchParams();
+	params.set("page", String(page));
+	params.set("per_page", String(pageSize));
+	if (sort) {
+		params.set("sort", sort.field);
+		params.set("order", sort.order);
+	}
+	if (serverSearch && search) params.set("q", search);
+	for (const [k, f] of Object.entries(filters)) {
+		params.set(`${f.op === "contains" ? "contains" : "filter"}[${k}]`, f.value);
+	}
+	const listUrl = `/api/entities/${encodeURIComponent(entity)}?${params.toString()}`;
+	const unfiltered = !search && Object.keys(filters).length === 0;
+
+	const {
+		data,
+		error,
+		loading,
+		reload: load,
+	} = useQuery(listUrl, async (): Promise<{ rows: Row[]; total: number | null }> => {
+		const res = await api<ListResponse>(listUrl);
+		if (Array.isArray(res)) {
+			const filtered = clientFilter(res, filters);
+			const sorted = sort ? clientSort(filtered, sort) : filtered;
+			return {
+				rows: sorted.slice((page - 1) * pageSize, page * pageSize),
+				total: sorted.length,
+			};
 		}
-	}, [entity, page, pageSize, sort, search, filters, columns]);
+		const total = typeof res.total === "number" ? res.total : null;
+		if (unfiltered && total !== null) setCount(entity, total);
+		return { rows: res.data ?? [], total };
+	});
+	const rows = data?.rows ?? null;
+	const total = data?.total ?? null;
+
+	// ---- Rows on screen -----------------------------------------------
+
+	const shownRows = useMemo(() => {
+		if (!rows) return [];
+		if (serverSearch || !search) return rows;
+		const q = search.toLowerCase();
+		return rows.filter((r) =>
+			visibleColumns.some((c) => {
+				const v = getRowField(r, c.field);
+				return (
+					v != null &&
+					(typeof v === "object" ? JSON.stringify(v) : String(v))
+						.toLowerCase()
+						.includes(q)
+				);
+			}),
+		);
+	}, [rows, search, serverSearch, visibleColumns]);
+
+	// ---- Display values of referenced rows ------------------------------
+
+	const [labels, setLabels] = useState<
+		Record<string, Map<string, string | null>>
+	>({});
+	useEffect(() => {
+		if (!rows || rows.length === 0) return;
+		let live = true;
+		const byTarget = new Map<string, string[]>();
+		for (const col of columns) {
+			if (!col.ref) continue;
+			const ids = byTarget.get(col.ref) ?? [];
+			for (const r of rows) {
+				const v = getRowField(r, col.field);
+				if (typeof v === "string" && v) ids.push(v);
+			}
+			byTarget.set(col.ref, ids);
+		}
+		for (const [target, ids] of byTarget) {
+			if (ids.length === 0) continue;
+			void loadLabels(MANIFEST, target, ids).then((map) => {
+				if (live) setLabels((prev) => ({ ...prev, [target]: new Map(map) }));
+			});
+		}
+		return () => {
+			live = false;
+		};
+	}, [rows, columns]);
+	const labelOf = useCallback(
+		(target: string, id: string) => labels[target]?.get(id),
+		[labels],
+	);
+
+	// ---- The row panel --------------------------------------------------
+	//
+	// The open row is `?row=<id>` in the URL, so a row has a link and a
+	// reference cell in another table can open it.
+
+	const [openId, setOpenId] = useState<string | null>(readRowParam);
+	const [fetchedRow, setFetchedRow] = useState<Row | null>(null);
+	const [creating, setCreating] = useState(false);
+	const tableRef = useRef<HTMLDivElement>(null);
+	const lastOpenId = useRef<string | null>(null);
 
 	useEffect(() => {
+		const onPop = () => setOpenId(readRowParam());
+		window.addEventListener("popstate", onPop);
+		return () => window.removeEventListener("popstate", onPop);
+	}, []);
+
+	const openRow = useCallback((id: string | null) => {
+		const url = new URL(window.location.href);
+		if (id) url.searchParams.set("row", id);
+		else url.searchParams.delete("row");
+		window.history.replaceState(null, "", url);
+		if (id) {
+			lastOpenId.current = id;
+			setCreating(false);
+		}
+		setOpenId(id);
+	}, []);
+
+	const rowOnPage = openId
+		? (rows?.find((r) => r.id === openId) ?? null)
+		: null;
+	// A row that is not on the current page is fetched by id.
+	useEffect(() => {
+		if (!openId || rowOnPage || rows === null) return;
+		if (fetchedRow?.id === openId) return;
+		let live = true;
+		api<Row>(
+			`/api/entities/${encodeURIComponent(entity)}/${encodeURIComponent(openId)}`,
+		)
+			.then((r) => {
+				if (live && r) setFetchedRow(r);
+			})
+			.catch((err) => {
+				if (!live) return;
+				toast.error(`Studio could not open the row ${shortId(openId)}`, {
+					description: errorText(err),
+				});
+				openRow(null);
+			});
+		return () => {
+			live = false;
+		};
+	}, [openId, rowOnPage, rows, fetchedRow, entity, openRow]);
+	const panelRow =
+		rowOnPage ?? (fetchedRow && fetchedRow.id === openId ? fetchedRow : null);
+
+	const returnFocus = useCallback(() => {
+		const id = lastOpenId.current;
+		if (!id) return null;
+		return (
+			tableRef.current?.querySelector<HTMLElement>(
+				`[data-row-id="${CSS.escape(id)}"]`,
+			) ?? null
+		);
+	}, []);
+
+	// ---- Delete, insert, bulk actions ------------------------------------
+
+	const path = `/api/entities/${encodeURIComponent(entity)}`;
+
+	const afterWrite = () => {
+		forgetLabels(entity);
 		void load();
-		setSelected(new Set());
-	}, [load]);
+	};
 
-	useEffect(() => {
-		setPage(1);
-		setSelected(new Set());
-	}, [entity, search, filters, sort, pageSize]);
-
-	const onDelete = async (row: Row) => {
+	const deleteRow = async (row: Row) => {
 		if (!row.id) return;
 		try {
-			await api(`/api/entities/${entity}/${row.id}`, { method: "DELETE" });
-			toast.success(`Deleted ${row.id}`);
-			void load();
+			await api(`${path}/${encodeURIComponent(row.id)}`, { method: "DELETE" });
+			toast.success("The row is deleted");
+			if (openId === row.id) openRow(null);
+			afterWrite();
 		} catch (err) {
-			if (err instanceof ApiError) toast.error(`${err.code}: ${err.message}`);
-			else toast.error(err instanceof Error ? err.message : String(err));
-		}
-	};
-
-	const onInsert = async () => {
-		try {
-			const data = JSON.parse(insertJson);
-			await api(`/api/entities/${entity}`, {
-				method: "POST",
-				body: JSON.stringify(data),
+			toast.error("Studio could not delete the row", {
+				description: errorText(err),
 			});
-			toast.success(`Inserted into ${entity}`);
-			setInsertOpen(false);
-			setInsertJson("{}");
-			void load();
-		} catch (err) {
-			if (err instanceof ApiError) toast.error(`${err.code}: ${err.message}`);
-			else toast.error(err instanceof Error ? err.message : String(err));
 		}
 	};
 
-	// Bulk-confirm dialog state. Destructive actions (anything that
-	// would call DELETE) flow through this rather than firing on the
-	// click; the prior `window.confirm()` fallback wasn't even invoked
-	// for the default delete path because no `confirm` string was set.
-	// Result: clicking Actions deleted everything you'd selected with
-	// zero ack. Now Actions always opens this dialog for destructive
-	// kinds; non-destructive (export, custom) run inline.
-	const [pendingBulk, setPendingBulk] = useState<BulkAction | null>(null);
+	const askDeleteRow = (row: Row) =>
+		setConfirm({
+			title: "Delete the row?",
+			description: `This deletes the ${entity} row ${shortId(String(row.id ?? ""))}. You cannot undo this.`,
+			label: "Delete row",
+			destructive: true,
+			run: () => deleteRow(row),
+		});
 
-	const isDestructive = (action: BulkAction): boolean =>
-		action.kind === "delete" || action.id === "delete";
+	const isDelete = (a: { kind?: string; id: string }) =>
+		a.kind === "delete" || a.id === "delete";
 
-	const onBulk = (action: BulkAction): void => {
-		const ids = Array.from(selected);
-		if (ids.length === 0) return;
-		if (isDestructive(action)) {
-			setPendingBulk(action);
-			return;
+	// One bulk action runs at a time. The bulk buttons are disabled while it
+	// runs, so a second press cannot start the same writes again.
+	const [bulkRunning, setBulkRunning] = useState(false);
+
+	const runBulk = async (action: BulkAction) => {
+		if (bulkRunning) return;
+		setBulkRunning(true);
+		try {
+			await runBulkAction(action);
+		} finally {
+			setBulkRunning(false);
 		}
-		void runBulk(action);
 	};
 
-	const runBulk = async (action: BulkAction): Promise<void> => {
+	const runBulkAction = async (action: BulkAction) => {
 		const ids = Array.from(selected);
 		if (ids.length === 0) return;
-
-		if (action.kind === "delete" || action.id === "delete") {
+		if (isDelete(action)) {
 			let ok = 0;
+			let firstError: string | null = null;
 			for (const id of ids) {
 				try {
-					await api(`/api/entities/${entity}/${id}`, { method: "DELETE" });
+					await api(`${path}/${encodeURIComponent(id)}`, { method: "DELETE" });
 					ok++;
-				} catch {
-					/* surface aggregate count below */
+				} catch (err) {
+					firstError ??= errorText(err);
 				}
 			}
-			toast.success(`Deleted ${ok}/${ids.length} rows`);
+			if (ok === ids.length) {
+				toast.success(`${plural(ok, "row")} deleted`);
+			} else {
+				toast.error(`${ok} of ${plural(ids.length, "row")} deleted`, {
+					description: firstError ?? undefined,
+				});
+			}
+			if (openId && ids.includes(openId)) openRow(null);
 			setSelected(new Set());
-			void load();
+			afterWrite();
 			return;
 		}
 		if (action.kind === "export" || action.id === "export") {
-			const subset = rows.filter((r) => selected.has(String(r.id ?? "")));
+			const subset = (rows ?? []).filter((r) => selected.has(String(r.id ?? "")));
 			const blob = new Blob([JSON.stringify(subset, null, 2)], {
 				type: "application/json",
 			});
@@ -258,19 +426,49 @@ export function ResourceListPage({
 			URL.revokeObjectURL(url);
 			return;
 		}
-		toast.info(`Custom action "${action.id}" — wire via studio.entry.tsx`);
+		await runCustom(action, (rows ?? []).filter((r) => selected.has(String(r.id ?? ""))));
 	};
 
-	// --- Row actions ---------------------------------------------------
-	//
-	// `kind: "action"` POSTs the row through a server function. That's the
-	// whole point of the feature: without it the only way to run one
-	// against a specific row was to link out of Studio to a page you wrote
-	// yourself.
-	const [pendingRowAction, setPendingRowAction] = useState<{
-		action: RowAction;
-		row: Row;
-	} | null>(null);
+	/** Run the handler that studio.entry.tsx registered for a custom action. */
+	const runCustom = async (action: { id: string; label: string }, onRows: Row[]) => {
+		const handler = getExtensionAction(action.id);
+		if (!handler) return;
+		try {
+			await handler({
+				entity,
+				rows: onRows,
+				api: api as <T>(p: string, o?: unknown) => Promise<T>,
+				toast,
+				refresh: async () => {
+					forgetLabels(entity);
+					await load();
+				},
+			});
+		} catch (err) {
+			toast.error(`${action.label} failed`, { description: errorText(err) });
+		}
+	};
+
+	const onBulk = (action: BulkAction) => {
+		const n = selected.size;
+		if (n === 0) return;
+		if (isDelete(action) || action.confirm) {
+			setConfirm({
+				title: isDelete(action) ? `Delete ${plural(n, "row")}?` : action.label,
+				description:
+					action.confirm ??
+					`This deletes ${plural(n, `${entity} row`)}. You cannot undo this.`,
+				label: isDelete(action) ? `Delete ${plural(n, "row")}` : action.label,
+				destructive: isDelete(action),
+				run: () => runBulk(action),
+			});
+			return;
+		}
+		void runBulk(action);
+	};
+
+	// ---- Row actions from studio.config.ts --------------------------------
+
 	const [runningAction, setRunningAction] = useState<string | null>(null);
 	const [resultDialog, setResultDialog] = useState<{
 		title: string;
@@ -290,15 +488,15 @@ export function ResourceListPage({
 		}
 		if (mode === "copy") {
 			if (!text) {
-				toast.info(`${action.label}: nothing to copy`);
+				toast.info(`${action.label}: there is nothing to copy`);
 				return;
 			}
 			if (await copyToClipboard(text)) {
-				toast.success("Copied to clipboard", { description: clip(text, 120) });
+				toast.success("Copied to the clipboard", { description: clip(text, 120) });
 			} else {
-				// No clipboard access (Studio over plain http on a LAN
-				// address). Show it instead of failing silently.
-				setResultDialog({ title: `${action.label} — copy manually`, text });
+				// The clipboard is not available over plain http on a LAN
+				// address. The dialog shows the value to select and copy.
+				setResultDialog({ title: action.label, text });
 			}
 			return;
 		}
@@ -308,597 +506,579 @@ export function ResourceListPage({
 	};
 
 	const runRowAction = async (action: RowAction, row: Row) => {
-		if (action.kind === "delete" || action.id === "delete") {
-			await onDelete(row);
+		if (isDelete(action)) {
+			await deleteRow(row);
 			return;
 		}
 		if (action.kind === "view" || action.kind === "edit") {
-			setInspectRow(row);
+			if (row.id) openRow(row.id);
 			return;
 		}
 		if (action.kind !== "action") {
-			toast.info(`"${action.label}" — wire a custom handler in studio.entry.tsx`);
+			setRunningAction(runKey(action, row));
+			try {
+				await runCustom(action, [row]);
+			} finally {
+				setRunningAction(null);
+			}
 			return;
 		}
-		// `action` names the function; falling back to `id` lets the common
-		// case stay a single name instead of repeating it twice.
+		// `action` names the function. With no `action`, the `id` is the name.
 		const fnName = action.action ?? action.id;
 		setRunningAction(runKey(action, row));
 		try {
-			const value = await api<unknown>(
-				`/api/fn/${encodeURIComponent(fnName)}`,
-				{ method: "POST", body: JSON.stringify(buildActionInput(action, row)) },
-			);
+			const value = await api<unknown>(`/api/fn/${encodeURIComponent(fnName)}`, {
+				method: "POST",
+				body: JSON.stringify(buildActionInput(action, row)),
+			});
 			await presentResult(action, value);
-			if (action.refresh !== false) void load();
+			if (action.refresh !== false) afterWrite();
 		} catch (err) {
-			if (err instanceof ApiError) toast.error(`${err.code}: ${err.message}`);
-			else toast.error(err instanceof Error ? err.message : String(err));
+			toast.error(`${action.label} failed`, { description: errorText(err) });
 		} finally {
 			setRunningAction(null);
 		}
 	};
 
 	const onRowAction = (action: RowAction, row: Row) => {
-		if (action.confirm) {
-			setPendingRowAction({ action, row });
+		if (action.confirm || isDelete(action)) {
+			const destructive = action.variant === "destructive" || isDelete(action);
+			setConfirm({
+				title: action.confirm ? action.label : "Delete the row?",
+				description:
+					action.confirm ??
+					`This deletes the ${entity} row ${shortId(String(row.id ?? ""))}. You cannot undo this.`,
+				label: action.label,
+				destructive,
+				run: () => runRowAction(action, row),
+			});
 			return;
 		}
 		void runRowAction(action, row);
 	};
+
+	if (!manifestEntity) {
+		return (
+			<Page title={entity}>
+				<EmptyState
+					title={`The entity "${entity}" is not in the manifest`}
+					description="Select an entity from the sidebar."
+				/>
+			</Page>
+		);
+	}
 
 	const rowActions = listCfg?.rowActions ?? [];
 	const buttonActions = rowActions.filter((a) => a.display === "button");
 	const menuActions = rowActions.filter((a) => a.display !== "button");
 
 	const totalPages = total !== null ? Math.max(1, Math.ceil(total / pageSize)) : 1;
-	const recordsLabel = useMemo(() => {
-		if (total === null) return `${rows.length} record${rows.length === 1 ? "" : "s"}`;
-		const suffix = serverPaged
-			? "server-side pagination, sorting & filtering"
-			: "client-side pagination, sorting & filtering";
-		return `${total} record${total === 1 ? "" : "s"} — ${suffix}`;
-	}, [total, rows.length, serverPaged]);
-
-	if (!manifestEntity) {
-		return (
-			<div className="rounded-lg border bg-card p-8 text-center">
-				<h2 className="text-lg font-semibold">Unknown entity</h2>
-				<p className="mt-1 text-sm text-muted-foreground">
-					Entity <code className="font-mono">{entity}</code> isn't declared
-					in the manifest.
-				</p>
-			</div>
-		);
-	}
-
+	const selectable = shownRows.filter((r) => r.id).map((r) => String(r.id));
 	const allSelected =
-		rows.length > 0 &&
-		rows.every((r) => r.id && selected.has(String(r.id)));
+		selectable.length > 0 && selectable.every((id) => selected.has(id));
+	const someSelected = selectable.some((id) => selected.has(id));
 
 	const filterableColumns = visibleColumns.filter((c) => c.filterable);
 	const showFilters =
 		(listCfg?.filterable ?? filterableColumns.length > 0) &&
 		filterableColumns.length > 0;
 	const showSearch =
-		listCfg?.searchable ?? visibleColumns.some((c) => c.searchable);
+		listCfg?.searchable ?? (serverSearch || visibleColumns.some((c) => c.searchable));
+	const activeFilters = Object.entries(filters);
+	const narrowed = activeFilters.length > 0 || Boolean(search);
+
+	const first = total === 0 ? 0 : (page - 1) * pageSize + 1;
+	const last = (page - 1) * pageSize + (rows?.length ?? 0);
 
 	return (
-		<div className="space-y-6">
-			<div>
-				<h1 className="text-2xl font-semibold tracking-tight">{pluralLabel}</h1>
-				<p className="mt-1 text-sm text-muted-foreground">{recordsLabel}</p>
-			</div>
-
-			<div className="flex flex-wrap items-center gap-2">
-				<DropdownMenu>
-					<DropdownMenuTrigger asChild>
+		<Page
+			title={pluralLabel}
+			meta={total !== null ? plural(total, "row") : undefined}
+			actions={
+				<>
+					<Tooltip label="Load the rows again">
 						<Button
-							size="sm"
-							disabled={selected.size === 0}
-							variant="default"
+							variant="ghost"
+							size="icon"
+							aria-label="Refresh"
+							disabled={loading}
+							onClick={load}
 						>
-							Actions ({selected.size})
-							<ChevronsUpDown className="size-3.5 opacity-70" />
+							{loading ? <Spinner /> : <RefreshCw />}
 						</Button>
-					</DropdownMenuTrigger>
-					<DropdownMenuContent align="start">
-						{(listCfg?.bulkActions ?? []).map((a) => (
-							<DropdownMenuItem
-								key={a.id}
-								onClick={() => onBulk(a)}
-								disabled={selected.size === 0}
-								className={
-									a.kind === "delete" || a.id === "delete"
-										? "text-destructive focus:text-destructive"
-										: undefined
-								}
-							>
-								{a.label}
-							</DropdownMenuItem>
-						))}
-						{(listCfg?.bulkActions ?? []).length > 0 && (
-							<DropdownMenuSeparator />
-						)}
-						<DropdownMenuItem
-							onClick={() =>
-								onBulk({ id: "export", label: "Export JSON", kind: "export" })
-							}
-							disabled={selected.size === 0}
-						>
-							Export JSON
-						</DropdownMenuItem>
-						<DropdownMenuItem
-							onClick={() =>
-								onBulk({ id: "delete", label: "Delete", kind: "delete" })
-							}
-							disabled={selected.size === 0}
-							className="text-destructive focus:text-destructive"
-						>
-							Delete…
-						</DropdownMenuItem>
-					</DropdownMenuContent>
-				</DropdownMenu>
-
-				{showSearch && (
-					// Full width on a phone, fixed once there's room: a hard w-72
-					// is wider than half a 390px screen and pushed the toolbar
-					// into a horizontal scroll.
-					<div className="relative w-full sm:w-72">
-						<Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-						<Input
-							value={search}
-							onChange={(e) => setSearch(e.target.value)}
-							placeholder={`Search ${pluralLabel.toLowerCase()}...`}
-							className="h-9 w-full pl-8"
-						/>
-					</div>
-				)}
-
-				{showFilters && (
-					<DropdownMenu>
-						<DropdownMenuTrigger asChild>
-							<Button size="sm" variant="outline">
-								<FilterIcon className="size-3.5" />
-								Filters
-							</Button>
-						</DropdownMenuTrigger>
-						<DropdownMenuContent className="w-72">
-							<DropdownMenuLabel>Filters</DropdownMenuLabel>
-							<DropdownMenuSeparator />
-							{filterableColumns.map((col) => (
-								<div key={col.field} className="px-2 py-1.5 space-y-1">
-									<Label className="text-xs">{labelFor(col)}</Label>
-									{typeof col.filterable === "object" &&
-									col.filterable.options ? (
-										<Select
-											value={filters[col.field] ?? ""}
-											onValueChange={(v) =>
-												setFilters((f) => ({ ...f, [col.field]: v }))
-											}
-										>
-											<SelectTrigger className="h-8">
-												<SelectValue placeholder="Any" />
-											</SelectTrigger>
-											<SelectContent>
-												<SelectItem value="">Any</SelectItem>
-												{col.filterable.options.map((o) => (
-													<SelectItem
-														key={String(o.value)}
-														value={String(o.value)}
-													>
-														{o.label}
-													</SelectItem>
-												))}
-											</SelectContent>
-										</Select>
-									) : (
-										<Input
-											value={filters[col.field] ?? ""}
-											onChange={(e) =>
-												setFilters((f) => ({
-													...f,
-													[col.field]: e.target.value,
-												}))
-											}
-											className="h-8"
-											placeholder="Filter..."
-										/>
-									)}
-								</div>
-							))}
-							{Object.values(filters).some(Boolean) && (
-								<>
-									<DropdownMenuSeparator />
-									<DropdownMenuItem onClick={() => setFilters({})}>
-										Clear filters
-									</DropdownMenuItem>
-								</>
-							)}
-						</DropdownMenuContent>
-					</DropdownMenu>
-				)}
-
-				{/* `ml-auto` only once the toolbar is on one line — when it wraps,
-				    an auto margin would strand these two buttons on the right of
-				    their own row instead of aligning them under the search. */}
-				<div className="flex items-center gap-2 sm:ml-auto">
-					<Button variant="outline" size="sm" onClick={load} disabled={loading}>
-						{loading ? (
-							<Loader2 className="size-3.5 animate-spin" />
-						) : (
-							<RefreshCw className="size-3.5" />
-						)}
-						Refresh
-					</Button>
+					</Tooltip>
 					<Button
-						size="sm"
 						onClick={() => {
-							setInsertJson(emptyJson(manifestEntity));
-							setInsertOpen(true);
+							openRow(null);
+							setCreating(true);
 						}}
 					>
-						<Plus className="size-3.5" /> Insert
+						<Plus />
+						Insert row
 					</Button>
-				</div>
-			</div>
-
-			<Card>
-				<CardContent className="p-0">
-					{loading && rows.length === 0 ? (
-						<div className="flex items-center justify-center py-16 text-muted-foreground">
-							<Loader2 className="size-4 animate-spin" />
-						</div>
-					) : rows.length === 0 ? (
-						<div className="py-16 text-center">
-							<p className="text-sm font-medium">No rows in {entity} yet.</p>
-							<p className="mt-1 text-xs text-muted-foreground">
-								Insert one above to get started.
-							</p>
-						</div>
+				</>
+			}
+		>
+			{(showSearch || showFilters || selected.size > 0) && (
+				<Toolbar>
+					{selected.size > 0 ? (
+						<>
+							<span className="px-1 text-[13px] font-medium tabular-nums">
+								{selected.size} selected
+							</span>
+							{(listCfg?.bulkActions ?? []).map((a) => {
+								const missing = missingHandler(a);
+								const button = (
+									<Button
+										key={a.id}
+										size="sm"
+										variant={isDelete(a) ? "destructive" : "outline"}
+										disabled={missing !== null || bulkRunning}
+										focusableWhenDisabled
+										onClick={() => onBulk(a)}
+									>
+										{a.label}
+									</Button>
+								);
+								return missing ? (
+									<Tooltip key={a.id} label={missing}>
+										{button}
+									</Tooltip>
+								) : (
+									button
+								);
+							})}
+							<Button
+								size="sm"
+								variant="outline"
+								disabled={bulkRunning}
+								onClick={() =>
+									onBulk({ id: "export", label: "Export JSON", kind: "export" })
+								}
+							>
+								Export JSON
+							</Button>
+							{!(listCfg?.bulkActions ?? []).some(isDelete) && (
+								<Button
+									size="sm"
+									variant="outline"
+									className="text-destructive"
+									disabled={bulkRunning}
+									onClick={() =>
+										onBulk({ id: "delete", label: "Delete", kind: "delete" })
+									}
+								>
+									Delete
+								</Button>
+							)}
+							<Button
+								size="sm"
+								variant="ghost"
+								className="ml-auto"
+								onClick={() => setSelected(new Set())}
+							>
+								Clear selection
+							</Button>
+						</>
 					) : (
-						<Table>
-							<TableHeader>
-								<TableRow>
-									<TableHead className="w-10">
-										<input
-											type="checkbox"
-											className="size-4 cursor-pointer accent-primary"
-											checked={allSelected}
-											onChange={(e) => {
-												if (e.target.checked) {
-													setSelected(
-														new Set(
-															rows.map((r) => String(r.id ?? "")).filter(Boolean),
-														),
-													);
-												} else {
-													setSelected(new Set());
-												}
-											}}
+						<>
+							{showSearch && (
+								<div className="relative min-w-0 flex-1 sm:w-64 sm:flex-none">
+									<Search className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+									<Input
+										type="search"
+										name="search"
+										aria-label={serverSearch ? "Search" : "Find in this page"}
+										placeholder={serverSearch ? "Search" : "Find in this page"}
+										value={searchText}
+										onChange={(e) => setSearchText(e.target.value)}
+										className="pl-7"
+									/>
+								</div>
+							)}
+							{showFilters && (
+								<FilterAdd
+									columns={filterableColumns}
+									onAdd={(field, filter) =>
+										changeView({ filters: { ...filters, [field]: filter } })
+									}
+								/>
+							)}
+							{activeFilters.map(([field, { op, value }]) => (
+								<span
+									key={field}
+									className="inline-flex h-6 items-center gap-1 rounded-md border bg-muted pr-0.5 pl-2 text-xs"
+								>
+									<span className="text-muted-foreground">
+										{labelFor(columns.find((c) => c.field === field), field)}
+										{op === "contains" ? " contains" : " ="}
+									</span>
+									<span className="max-w-40 truncate font-medium">{value}</span>
+									<button
+										type="button"
+										aria-label={`Remove the ${field} filter`}
+										className="flex size-5 cursor-default items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+										onClick={() => {
+											const next = { ...filters };
+											delete next[field];
+											changeView({ filters: next });
+										}}
+									>
+										<X className="size-3" />
+									</button>
+								</span>
+							))}
+							{activeFilters.length > 1 && (
+								<Button size="sm" variant="ghost" onClick={() => changeView({ filters: {} })}>
+									Clear filters
+								</Button>
+							)}
+						</>
+					)}
+				</Toolbar>
+			)}
+
+			<div ref={tableRef} className="min-h-0 flex-1 overflow-auto">
+				{error && (rows === null || !loading) ? (
+					<ErrorState
+						title={`Studio could not load the ${entity} rows`}
+						message={error}
+						onRetry={load}
+					/>
+				) : rows === null ? (
+					<LoadingRows rows={12} />
+				) : shownRows.length === 0 ? (
+					narrowed ? (
+						<EmptyState
+							title="No rows match"
+							description={
+								serverSearch
+									? "Change the search text or remove a filter."
+									: "The box finds text in the rows of this page only. Add a filter to search every row."
+							}
+							action={
+								<Button
+									variant="outline"
+									onClick={() => {
+										setSearchText("");
+										changeView({ search: "", filters: {} });
+									}}
+								>
+									Clear search and filters
+								</Button>
+							}
+						/>
+					) : (
+						<EmptyState
+							title={`${entity} has no rows`}
+							action={
+								<Button variant="outline" onClick={() => setCreating(true)}>
+									<Plus />
+									Insert row
+								</Button>
+							}
+						/>
+					)
+				) : (
+					<Table aria-label={pluralLabel} aria-busy={loading}>
+						<TableHeader>
+							<tr>
+								<TableHead className="z-30 px-0 sm:sticky sm:left-0">
+									<div className="flex w-9 justify-center">
+										<Checkbox
+											aria-label="Select all rows on this page"
+											checked={
+												allSelected ? true : someSelected ? "indeterminate" : false
+											}
+											onCheckedChange={(checked) =>
+												setSelected(checked === true ? new Set(selectable) : new Set())
+											}
 										/>
-									</TableHead>
-									{visibleColumns.map((col) => {
-										const sortActive = sort?.field === col.field;
-										const SortIcon = sortActive
-											? sort?.order === "asc"
-												? ArrowUp
-												: ArrowDown
-											: ChevronsUpDown;
-										return (
-											<TableHead
-												key={col.field}
-												style={col.width ? { width: col.width } : undefined}
-												className={
-													col.align === "right"
-														? "text-right"
-														: col.align === "center"
-															? "text-center"
-															: undefined
-												}
-											>
+									</div>
+								</TableHead>
+								{visibleColumns.map((col, i) => {
+									const active = sort?.field === col.field;
+									const SortIcon = active
+										? sort?.order === "asc"
+											? ArrowUp
+											: ArrowDown
+										: ChevronsUpDown;
+									const align = alignOf(col);
+									return (
+										<TableHead
+											key={col.field}
+											style={col.width ? { width: col.width } : undefined}
+											aria-sort={
+												active
+													? sort?.order === "asc"
+														? "ascending"
+														: "descending"
+													: undefined
+											}
+											className={cn(
+												align === "right" && "text-right",
+												align === "center" && "text-center",
+												i === 0 &&
+													"z-30 border-r sm:sticky sm:left-9",
+											)}
+										>
+											{col.sortable ? (
 												<button
 													type="button"
-													disabled={!col.sortable}
-													onClick={() =>
-														col.sortable && toggleSort(col.field, sort, setSort)
-													}
-													className={
-														col.sortable
-															? "inline-flex items-center gap-1 hover:text-foreground"
-															: "inline-flex items-center gap-1"
-													}
+													className={cn(
+														"group/sort -mx-1 inline-flex h-6 cursor-default items-center gap-1 rounded px-1 hover:bg-accent hover:text-foreground",
+														align === "right" && "flex-row-reverse",
+														active && "text-foreground",
+													)}
+													onClick={() => changeView({ sort: nextSort(col.field, sort) })}
 												>
 													{labelFor(col)}
-													{col.sortable && (
-														<SortIcon className="size-3 opacity-70" />
-													)}
+													<SortIcon
+														className={cn(
+															"size-3",
+															!active && "opacity-0 group-hover/sort:opacity-60",
+														)}
+													/>
 												</button>
-											</TableHead>
-										);
-									})}
-									{/* Trailing controls. `w-px` so the column shrinks to
-									    its content — inline action buttons are wider
-									    than the old fixed `…` slot. */}
-									<TableHead className="w-px" />
-								</TableRow>
-							</TableHeader>
-							<TableBody>
-								{rows.map((row, i) => {
-									const id = String(row.id ?? "");
-									const checked = !!id && selected.has(id);
-									return (
-										<TableRow
-											key={id || i}
-											data-state={checked ? "selected" : undefined}
-											className="cursor-pointer"
-											onClick={() => setInspectRow(row)}
+											) : (
+												labelFor(col)
+											)}
+										</TableHead>
+									);
+								})}
+								<TableHead className="w-px px-1 sm:sticky sm:right-0">
+									<span className="sr-only">Actions</span>
+								</TableHead>
+							</tr>
+						</TableHeader>
+						<TableBody>
+							{shownRows.map((row, index) => {
+								const id = String(row.id ?? "");
+								const checked = !!id && selected.has(id);
+								return (
+									<TableRow
+										key={id || index}
+										tabIndex={0}
+										data-row-id={id || undefined}
+										data-selected={checked}
+										data-current={!!id && id === openId}
+										className="cursor-default"
+										onClick={() => id && openRow(id)}
+										onKeyDown={(e) => {
+											if (e.target !== e.currentTarget) return;
+											if (e.key === "Enter" || e.key === " ") {
+												e.preventDefault();
+												if (id) openRow(id);
+											} else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+												e.preventDefault();
+												const sibling =
+													e.key === "ArrowDown"
+														? e.currentTarget.nextElementSibling
+														: e.currentTarget.previousElementSibling;
+												if (sibling instanceof HTMLElement) sibling.focus();
+											}
+										}}
+									>
+										<TableCell
+											className="z-10 px-0 sm:sticky sm:left-0"
+											onClick={(e) => e.stopPropagation()}
 										>
-											<TableCell
-												className="w-10"
-												onClick={(e) => e.stopPropagation()}
-											>
-												<input
-													type="checkbox"
-													className="size-4 cursor-pointer accent-primary"
+											<div className="flex w-9 justify-center">
+												<Checkbox
+													aria-label="Select the row"
 													checked={checked}
 													disabled={!id}
-													onChange={(e) => {
+													onCheckedChange={(next) =>
 														setSelected((prev) => {
-															const next = new Set(prev);
-															if (e.target.checked) next.add(id);
-															else next.delete(id);
-															return next;
-														});
-													}}
+															const out = new Set(prev);
+															if (next === true) out.add(id);
+															else out.delete(id);
+															return out;
+														})
+													}
 												/>
-											</TableCell>
-											{visibleColumns.map((col) => (
+											</div>
+										</TableCell>
+										{visibleColumns.map((col, i) => {
+											const value = getRowField(row, col.field);
+											const align = alignOf(col);
+											return (
 												<TableCell
 													key={col.field}
-													className={
-														col.align === "right"
-															? "text-right"
-															: col.align === "center"
-																? "text-center"
-																: undefined
-													}
+													className={cn(
+														align === "right" && "text-right",
+														align === "center" && "text-center",
+														i === 0 && "z-10 border-r sm:sticky sm:left-9",
+													)}
 												>
-													<CellRenderer
-														value={getField(row, col.field)}
-														row={row}
-														column={col}
-													/>
-												</TableCell>
-											))}
-											<TableCell
-												className="whitespace-nowrap text-right"
-												onClick={(e) => e.stopPropagation()}
-											>
-												<div className="flex items-center justify-end gap-1">
-													{buttonActions.map((a) => (
-														<RowActionButton
-															key={a.id}
-															action={a}
-															running={runningAction === runKey(a, row)}
-															disabled={runningAction !== null}
-															onRun={() => onRowAction(a, row)}
+													{col.renderer ? (
+														<CellRenderer value={value} row={row} column={col} />
+													) : (
+														<AutoCell
+															value={value}
+															type={col.type}
+															isId={col.isId}
+															refEntity={col.ref}
+															refLabel={
+																col.ref && typeof value === "string"
+																	? labelOf(col.ref, value)
+																	: undefined
+															}
 														/>
-													))}
-													{rowActions.length === 0 ? (
-														<Button
-															variant="ghost"
-															size="sm"
-															onClick={() => void onDelete(row)}
-														>
-															<Trash2 className="size-3.5" />
-														</Button>
-													) : menuActions.length > 0 ? (
-														<RowActionsMenu
+													)}
+												</TableCell>
+											);
+										})}
+										<TableCell
+											className="z-10 w-px px-1 sm:sticky sm:right-0"
+											onClick={(e) => e.stopPropagation()}
+										>
+											<div className="flex items-center justify-end gap-1">
+												{buttonActions.map((a) => (
+													<RowActionButton
+														key={a.id}
+														action={a}
+														running={runningAction === runKey(a, row)}
+														disabled={runningAction !== null}
+														onRun={() => onRowAction(a, row)}
+													/>
+												))}
+												{rowActions.length === 0 ? (
+													<DefaultRowMenu
+														row={row}
+														onOpen={() => id && openRow(id)}
+														onDelete={() => askDeleteRow(row)}
+													/>
+												) : (
+													menuActions.length > 0 && (
+														<ConfiguredRowMenu
 															actions={menuActions}
 															onRun={(a) => onRowAction(a, row)}
 														/>
-													) : null}
-												</div>
-											</TableCell>
-										</TableRow>
-									);
-								})}
-							</TableBody>
-						</Table>
-					)}
-				</CardContent>
-			</Card>
-
-			<div className="flex flex-wrap items-center justify-between gap-3 px-1 text-sm">
-				<div className="flex items-center gap-2">
-					<span className="text-muted-foreground">Rows per page</span>
-					<Select
-						value={String(pageSize)}
-						onValueChange={(v) => setPageSize(Number(v))}
-					>
-						<SelectTrigger className="h-8 w-[120px]">
-							<SelectValue>{pageSize} / page</SelectValue>
-						</SelectTrigger>
-						<SelectContent>
-							{pageSizes.map((s) => (
-								<SelectItem key={s} value={String(s)}>
-									{s} / page
-								</SelectItem>
-							))}
-						</SelectContent>
-					</Select>
-				</div>
-				<div className="flex items-center gap-2 text-muted-foreground">
-					Page {page} of {totalPages}
-					<Button
-						size="sm"
-						variant="outline"
-						disabled={page <= 1 || loading}
-						onClick={() => setPage((p) => Math.max(1, p - 1))}
-					>
-						Previous
-					</Button>
-					<Button
-						size="sm"
-						variant="outline"
-						disabled={page >= totalPages || loading}
-						onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-					>
-						Next
-					</Button>
-				</div>
+													)
+												)}
+											</div>
+										</TableCell>
+									</TableRow>
+								);
+							})}
+						</TableBody>
+					</Table>
+				)}
 			</div>
 
-			<Dialog open={insertOpen} onOpenChange={setInsertOpen}>
-				<DialogContent className="sm:max-w-[600px]">
-					<DialogHeader>
-						<DialogTitle>Insert into {entity}</DialogTitle>
-						<DialogDescription>
-							Paste a JSON object. Pre-filled with required fields from the
-							schema.
-						</DialogDescription>
-					</DialogHeader>
-					<div className="space-y-3">
-						<div className="rounded-md border bg-muted/30 p-3">
-							<Label className="text-xs">Schema</Label>
-							<div className="mt-1 flex flex-wrap gap-1.5">
-								{manifestEntity.fields.map((f) => (
-									<code
-										key={f.name}
-										className="rounded bg-background px-1.5 py-0.5 text-xs"
-									>
-										{f.name}
-										{f.optional && "?"}: {f.type}
-									</code>
-								))}
-							</div>
-						</div>
-						<div className="space-y-1.5">
-							<Label htmlFor="insert-json">Body</Label>
-							<Textarea
-								id="insert-json"
-								className="font-mono text-xs"
-								rows={10}
-								value={insertJson}
-								onChange={(e) => setInsertJson(e.target.value)}
-							/>
-						</div>
-					</div>
-					<DialogFooter>
-						<Button variant="ghost" onClick={() => setInsertOpen(false)}>
-							Cancel
-						</Button>
-						<Button onClick={onInsert}>Insert</Button>
-					</DialogFooter>
-				</DialogContent>
-			</Dialog>
+			<footer className="flex min-h-9 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-t px-3 py-1 text-xs text-muted-foreground tabular-nums">
+				<span>
+					{rows === null
+						? "Loading"
+						: total === null
+							? plural(rows.length, "row")
+							: total === 0
+								? "0 rows"
+								: `${first.toLocaleString()}–${last.toLocaleString()} of ${total.toLocaleString()}`}
+				</span>
+				<div className="ml-auto flex items-center gap-1.5">
+					<Select
+						aria-label="Rows per page"
+						className="h-6 text-xs"
+						value={String(pageSize)}
+						onValueChange={(v) => changeView({ pageSize: Number(v) })}
+						options={pageSizes.map((s) => ({
+							value: String(s),
+							label: `${s} per page`,
+						}))}
+					/>
+					<span className="px-1">
+						Page {page} of {totalPages}
+					</span>
+					<Button
+						variant="outline"
+						size="icon-sm"
+						aria-label="Previous page"
+						disabled={page <= 1 || loading}
+						onClick={() => goToPage(Math.max(1, page - 1))}
+					>
+						<ChevronLeft />
+					</Button>
+					<Button
+						variant="outline"
+						size="icon-sm"
+						aria-label="Next page"
+						disabled={page >= totalPages || loading}
+						onClick={() => goToPage(Math.min(totalPages, page + 1))}
+					>
+						<ChevronRight />
+					</Button>
+				</div>
+			</footer>
 
 			<RowEditor
-				row={inspectRow}
+				open={creating || (openId !== null && panelRow !== null)}
+				mode={creating ? "create" : "edit"}
+				row={creating ? null : panelRow}
 				entity={manifestEntity}
 				entityName={entity}
-				onClose={() => setInspectRow(null)}
-				onSaved={() => {
-					setInspectRow(null);
-					void load();
+				refLabels={labelOf}
+				returnFocus={returnFocus}
+				onClose={() => {
+					setCreating(false);
+					openRow(null);
+				}}
+				onDelete={askDeleteRow}
+				onSaved={(saved) => {
+					if (creating) {
+						setCreating(false);
+						if (saved?.id) lastOpenId.current = saved.id;
+					} else if (saved && saved.id === openId) {
+						setFetchedRow(saved);
+					}
+					afterWrite();
 				}}
 			/>
 
-			<Dialog
-				open={pendingBulk !== null}
-				onOpenChange={(o) => !o && setPendingBulk(null)}
-			>
-				<DialogContent className="sm:max-w-[480px]">
-					<DialogHeader>
-						<DialogTitle>
-							Delete {selected.size} {selected.size === 1 ? "row" : "rows"}?
-						</DialogTitle>
-						<DialogDescription>
-							{pendingBulk?.confirm ??
-								`This will permanently delete ${selected.size} ${entity} ${selected.size === 1 ? "row" : "rows"}. This action can't be undone.`}
-						</DialogDescription>
-					</DialogHeader>
-					<DialogFooter>
-						<Button variant="ghost" onClick={() => setPendingBulk(null)}>
-							Cancel
-						</Button>
-						<Button
-							variant="destructive"
-							onClick={() => {
-								const action = pendingBulk;
-								setPendingBulk(null);
-								if (action) void runBulk(action);
-							}}
-						>
-							Delete {selected.size}
-						</Button>
-					</DialogFooter>
-				</DialogContent>
-			</Dialog>
-
-			<Dialog
-				open={pendingRowAction !== null}
-				onOpenChange={(o) => !o && setPendingRowAction(null)}
-			>
-				<DialogContent className="sm:max-w-[480px]">
-					<DialogHeader>
-						<DialogTitle>{pendingRowAction?.action.label}</DialogTitle>
-						<DialogDescription>
-							{pendingRowAction?.action.confirm}
-						</DialogDescription>
-					</DialogHeader>
-					<DialogFooter>
-						<Button variant="ghost" onClick={() => setPendingRowAction(null)}>
-							Cancel
-						</Button>
-						<Button
-							variant={
-								// A delete is destructive whether or not the config
-								// bothered to say so.
-								pendingRowAction &&
-								(pendingRowAction.action.variant === "destructive" ||
-									pendingRowAction.action.kind === "delete" ||
-									pendingRowAction.action.id === "delete")
-									? "destructive"
-									: "default"
-							}
-							onClick={() => {
-								const pending = pendingRowAction;
-								setPendingRowAction(null);
-								if (pending) void runRowAction(pending.action, pending.row);
-							}}
-						>
-							{pendingRowAction?.action.label}
-						</Button>
-					</DialogFooter>
-				</DialogContent>
-			</Dialog>
+			<ConfirmDialog
+				open={confirm !== null}
+				title={confirm?.title ?? ""}
+				description={confirm?.description}
+				confirmLabel={confirm?.label ?? ""}
+				destructive={confirm?.destructive}
+				onCancel={() => setConfirm(null)}
+				onConfirm={async () => {
+					const pending = confirm;
+					if (pending) await pending.run();
+					setConfirm(null);
+				}}
+			/>
 
 			<Dialog
 				open={resultDialog !== null}
 				onOpenChange={(o) => !o && setResultDialog(null)}
 			>
-				<DialogContent className="sm:max-w-[600px]">
+				<DialogContent className="max-w-xl">
 					<DialogHeader>
 						<DialogTitle>{resultDialog?.title}</DialogTitle>
 					</DialogHeader>
-					<Textarea
-						readOnly
-						rows={8}
-						className="font-mono text-xs"
-						value={resultDialog?.text ?? ""}
-						onFocus={(e) => e.currentTarget.select()}
-					/>
+					<DialogBody>
+						<Textarea
+							readOnly
+							rows={8}
+							aria-label="Result"
+							className="font-mono text-xs"
+							value={resultDialog?.text ?? ""}
+							onFocus={(e) => e.currentTarget.select()}
+						/>
+					</DialogBody>
 					<DialogFooter>
 						<Button
 							variant="outline"
-							onClick={() => {
-								const text = resultDialog?.text ?? "";
-								void copyToClipboard(text).then((ok) => {
-									if (ok) toast.success("Copied to clipboard");
-									else toast.error("Clipboard unavailable — select and copy");
-								});
+							onClick={async () => {
+								if (await copyToClipboard(resultDialog?.text ?? "")) {
+									toast.success("Copied to the clipboard");
+								} else {
+									toast.error("The clipboard is not available", {
+										description: "Select the text and copy it.",
+									});
+								}
 							}}
 						>
 							Copy
@@ -907,27 +1087,140 @@ export function ResourceListPage({
 					</DialogFooter>
 				</DialogContent>
 			</Dialog>
-		</div>
+		</Page>
 	);
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Parts
 // ---------------------------------------------------------------------------
 
-/** Unique key for "this action, on this row" — drives the running spinner. */
-function runKey(action: RowAction, row: Row): string {
-	// NUL as the separator, written as an escape: an action id or a row
-	// id could contain any printable character, and this key is compared
-	// for equality, so the join must not be ambiguous.
-	return `${action.id}\u0000${String(row.id ?? "")}`;
+/** The Filter button: pick a field, give a value, add the filter. */
+function FilterAdd({
+	columns,
+	onAdd,
+}: {
+	columns: Column[];
+	onAdd: (field: string, filter: FieldFilter) => void;
+}) {
+	const [open, setOpen] = useState(false);
+	const [field, setField] = useState(columns[0]?.field ?? "");
+	const [op, setOp] = useState<FieldFilter["op"]>("contains");
+	const [value, setValue] = useState("");
+	const column = columns.find((c) => c.field === field) ?? columns[0];
+	// A part of a value can match only in a text field.
+	const text = column !== undefined && isTextColumn(column);
+	const effectiveOp = text ? op : "eq";
+	const options =
+		typeof column?.filterable === "object" && column.filterable.options
+			? column.filterable.options.map((o) => ({
+					value: String(o.value),
+					label: o.label,
+				}))
+			: column?.type === "bool"
+				? [
+						{ value: "true", label: "true" },
+						{ value: "false", label: "false" },
+					]
+				: null;
+
+	return (
+		<Popover open={open} onOpenChange={setOpen}>
+			<PopoverTrigger
+				render={
+					<Button variant="outline">
+						<ListFilter />
+						Filter
+					</Button>
+				}
+			/>
+			<PopoverContent align="start" className="w-72">
+				<PopoverTitle className="sr-only">Add a filter</PopoverTitle>
+				<form
+					className="space-y-2.5"
+					onSubmit={(e) => {
+						e.preventDefault();
+						if (!column || !value) return;
+						onAdd(column.field, { op: effectiveOp, value });
+						setValue("");
+						setOpen(false);
+					}}
+				>
+					<div className="space-y-1">
+						<Label htmlFor="filter-field">Field</Label>
+						<Select
+							id="filter-field"
+							className="w-full"
+							value={column?.field ?? null}
+							onValueChange={(next) => {
+								setField(next);
+								setValue("");
+							}}
+							options={columns.map((c) => ({
+								value: c.field,
+								label: labelFor(c),
+							}))}
+						/>
+					</div>
+					<div className="space-y-1">
+						<Label htmlFor="filter-op">Condition</Label>
+						<Select
+							id="filter-op"
+							className="w-full"
+							value={effectiveOp}
+							disabled={!text}
+							onValueChange={(next) => setOp(next as FieldFilter["op"])}
+							options={[
+								{ value: "contains", label: "Contains", disabled: !text },
+								{ value: "eq", label: "Is equal to" },
+							]}
+						/>
+					</div>
+					<div className="space-y-1">
+						<Label htmlFor="filter-value">Value</Label>
+						{options ? (
+							<Select
+								id="filter-value"
+								className="w-full"
+								placeholder="Select a value"
+								value={value || null}
+								onValueChange={setValue}
+								options={options}
+							/>
+						) : (
+							<Input
+								id="filter-value"
+								name="value"
+								value={value}
+								autoFocus
+								onChange={(e) => setValue(e.target.value)}
+							/>
+						)}
+					</div>
+					<div className="flex justify-end">
+						<Button type="submit" disabled={!value}>
+							Add filter
+						</Button>
+					</div>
+				</form>
+			</PopoverContent>
+		</Popover>
+	);
 }
 
-function clip(s: string, max: number): string {
-	return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+/**
+ * Why a custom action cannot run, or `null` when it can. A `kind: "custom"`
+ * action runs the handler that studio.entry.tsx registers under its id.
+ */
+function missingHandler(action: { id: string; kind?: string }): string | null {
+	const builtIn = ["delete", "export", "edit", "view", "action"];
+	if (builtIn.includes(action.kind ?? "") || builtIn.includes(action.id)) return null;
+	return getExtensionAction(action.id)
+		? null
+		: `No handler "${action.id}" is registered in studio.entry.tsx.`;
 }
 
-/** An action rendered inline in the row rather than behind the `…` menu. */
+/** A row action that shows as a button in the row. */
 function RowActionButton({
 	action,
 	running,
@@ -939,26 +1232,83 @@ function RowActionButton({
 	disabled: boolean;
 	onRun: () => void;
 }) {
-	const Icon = action.icon ? resolveIcon(action.icon) : null;
-	return (
+	const missing = missingHandler(action);
+	const button = (
 		<Button
 			size="sm"
-			variant={action.variant ?? "outline"}
-			className="h-7"
-			disabled={disabled}
+			variant={action.variant === "default" ? "default" : (action.variant ?? "outline")}
+			disabled={disabled || missing !== null}
+			focusableWhenDisabled={missing !== null}
 			onClick={onRun}
 		>
-			{running ? (
-				<Loader2 className="size-3.5 animate-spin" />
-			) : Icon ? (
-				<Icon className="size-3.5" />
-			) : null}
+			{running ? <Spinner /> : action.icon ? <Icon name={action.icon} /> : null}
 			{action.label}
 		</Button>
 	);
+	return missing ? <Tooltip label={missing}>{button}</Tooltip> : button;
 }
 
-function RowActionsMenu({
+function RowMenuTrigger() {
+	return (
+		<MenuTrigger
+			aria-label="Row actions"
+			className="flex size-6 cursor-default items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground data-open:bg-accent data-open:text-foreground"
+		>
+			<MoreHorizontal className="size-3.5" />
+		</MenuTrigger>
+	);
+}
+
+/** The row menu of an entity with no `rowActions` in studio.config.ts. */
+function DefaultRowMenu({
+	row,
+	onOpen,
+	onDelete,
+}: {
+	row: Row;
+	onOpen: () => void;
+	onDelete: () => void;
+}) {
+	return (
+		<Menu>
+			<RowMenuTrigger />
+			<MenuContent align="end">
+				<MenuItem onSelect={onOpen}>Open</MenuItem>
+				<MenuItem
+					disabled={!row.id}
+					onSelect={async () => {
+						if (await copyToClipboard(String(row.id ?? ""))) {
+							toast.success("Copied the id");
+						} else {
+							toast.error("The clipboard is not available", {
+								description: String(row.id ?? ""),
+							});
+						}
+					}}
+				>
+					Copy the id
+				</MenuItem>
+				<MenuItem
+					onSelect={async () => {
+						if (await copyToClipboard(JSON.stringify(row, null, 2))) {
+							toast.success("Copied the row as JSON");
+						} else {
+							toast.error("The clipboard is not available");
+						}
+					}}
+				>
+					Copy as JSON
+				</MenuItem>
+				<MenuSeparator />
+				<MenuItem destructive disabled={!row.id} onSelect={onDelete}>
+					Delete
+				</MenuItem>
+			</MenuContent>
+		</Menu>
+	);
+}
+
+function ConfiguredRowMenu({
 	actions,
 	onRun,
 }: {
@@ -966,148 +1316,136 @@ function RowActionsMenu({
 	onRun: (action: RowAction) => void;
 }) {
 	return (
-		<DropdownMenu>
-			<DropdownMenuTrigger asChild>
-				<Button variant="ghost" size="sm">
-					<MoreHorizontal className="size-3.5" />
-				</Button>
-			</DropdownMenuTrigger>
-			<DropdownMenuContent align="end">
+		<Menu>
+			<RowMenuTrigger />
+			<MenuContent align="end">
 				{actions.map((a) => (
-					<DropdownMenuItem
+					<MenuItem
 						key={a.id}
-						onClick={() => onRun(a)}
-						className={
-							a.kind === "delete" || a.id === "delete"
-								? "text-destructive focus:text-destructive"
-								: undefined
-						}
+						destructive={a.kind === "delete" || a.id === "delete"}
+						disabled={missingHandler(a) !== null}
+						title={missingHandler(a) ?? undefined}
+						onSelect={() => onRun(a)}
 					>
+						{a.icon && <Icon name={a.icon} />}
 						{a.label}
-					</DropdownMenuItem>
+					</MenuItem>
 				))}
-			</DropdownMenuContent>
-		</DropdownMenu>
+			</MenuContent>
+		</Menu>
 	);
 }
 
-function toggleSort(
-	field: string,
-	current: { field: string; order: "asc" | "desc" } | null,
-	setSort: (s: { field: string; order: "asc" | "desc" } | null) => void,
-) {
-	if (!current || current.field !== field) {
-		setSort({ field, order: "asc" });
-		return;
-	}
-	if (current.order === "asc") {
-		setSort({ field, order: "desc" });
-		return;
-	}
-	setSort(null);
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function readRowParam(): string | null {
+	return new URLSearchParams(window.location.search).get("row");
 }
 
-function resolveColumns(
-	entity: ManifestEntity | undefined,
-	listCfg:
-		| import("@/lib/studio-config").ResourceListConfig
-		| undefined,
-): ColumnConfig[] {
-	if (listCfg?.columns && listCfg.columns.length > 0) {
-		return [...listCfg.columns].sort(
-			(a, b) => (a.order ?? 0) - (b.order ?? 0),
-		);
-	}
-	if (!entity) return [];
-	return [
-		{ field: "id", label: "ID", renderer: { kind: "text", mono: true } },
-		...entity.fields.map((f) => ({
-			field: f.name,
-			label: humanize(f.name),
-			searchable: f.type === "string" || f.type === "richtext",
-			sortable: !f.optional && (f.type === "string" || f.type === "datetime"),
-			renderer: defaultRendererFor(f.type),
-		})),
-	];
+/** A key for one action on one row. It selects the button that shows a spinner. */
+function runKey(action: RowAction, row: Row): string {
+	// NUL separates the parts: an action id or a row id can hold any
+	// printable character.
+	return `${action.id}\u0000${String(row.id ?? "")}`;
 }
 
-function defaultRendererFor(type: string): ColumnConfig["renderer"] {
-	if (type === "datetime") return { kind: "date", format: "relative" };
-	if (type === "bool") return { kind: "boolean" };
-	if (type === "int" || type === "float") return { kind: "number" };
-	if (type === "richtext") return { kind: "text", truncate: 80 };
-	if (type === "json") return { kind: "json", truncate: 80 };
-	return { kind: "text" };
+function nextSort(field: string, current: Sort | null): Sort | null {
+	if (!current || current.field !== field) return { field, order: "asc" };
+	if (current.order === "asc") return { field, order: "desc" };
+	return null;
 }
 
-function labelFor(col: ColumnConfig): string {
+function alignOf(col: Column): "left" | "center" | "right" {
+	if (col.align) return col.align;
+	if (col.renderer?.kind === "number") return "right";
+	return !col.renderer && !col.ref && isNumericType(col.type) ? "right" : "left";
+}
+
+function labelFor(col: ColumnConfig | undefined, fallback = ""): string {
+	if (!col) return humanize(fallback);
 	return col.label ?? humanize(col.field);
 }
 
-function humanize(s: string): string {
-	const out = s
-		.replace(/[_-]/g, " ")
-		.replace(/([a-z])([A-Z])/g, "$1 $2")
-		.toLowerCase();
-	return out.charAt(0).toUpperCase() + out.slice(1);
+const FILTERABLE_TYPES = new Set(["string", "richtext", "bool", "int", "float"]);
+
+/**
+ * The columns of the table. Columns from studio.config.ts win. With no
+ * config, the table has the id and one column for each manifest field.
+ */
+function resolveColumns(
+	entity: ManifestEntity | undefined,
+	listCfg: ResourceListConfig | undefined,
+): Column[] {
+	const typeOf = (field: string) =>
+		entity?.fields.find((f) => f.name === field)?.type;
+
+	if (listCfg?.columns && listCfg.columns.length > 0) {
+		return [...listCfg.columns]
+			.sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+			.map((c) => ({
+				...c,
+				type: typeOf(c.field),
+				isId: c.field === "id",
+				ref: refTarget(MANIFEST, entity, c.field),
+			}));
+	}
+	if (!entity) return [];
+	return [
+		{ field: "id", label: "ID", isId: true, ref: null },
+		...entity.fields
+			.filter((f) => !f.name.startsWith("_"))
+			.map((f) => {
+				const ref = refTarget(MANIFEST, entity, f.name);
+				return {
+					field: f.name,
+					label: humanize(ref ? f.name.replace(/_?[iI]d$/, "") || f.name : f.name),
+					type: f.type,
+					isId: false,
+					ref,
+					searchable: f.type === "string" || f.type === "richtext",
+					sortable: f.type !== "json",
+					filterable: FILTERABLE_TYPES.has(f.type) || ref !== null,
+				};
+			}),
+	];
 }
 
-const getField = getRowField;
-
-function clientFilter(
-	rows: Row[],
-	search: string,
-	filters: Record<string, string>,
-	columns: ColumnConfig[],
-): Row[] {
+function clientFilter(rows: Row[], filters: Record<string, FieldFilter>): Row[] {
 	let out = rows;
-	if (search.trim()) {
-		const q = search.trim().toLowerCase();
-		const fields = columns.filter((c) => c.searchable).map((c) => c.field);
-		const fallback = fields.length > 0 ? fields : columns.map((c) => c.field);
-		out = out.filter((r) =>
-			fallback.some((f) => {
-				const v = getField(r, f);
-				return v != null && String(v).toLowerCase().includes(q);
-			}),
-		);
-	}
-	for (const [k, v] of Object.entries(filters)) {
-		if (!v) continue;
+	for (const [k, { op, value }] of Object.entries(filters)) {
+		const want = value.toLowerCase();
 		out = out.filter((r) => {
-			const cell = getField(r, k);
-			return cell != null && String(cell).toLowerCase() === v.toLowerCase();
+			const cell = getRowField(r, k);
+			if (cell == null) return false;
+			const have = String(cell).toLowerCase();
+			return op === "contains" ? have.includes(want) : have === want;
 		});
 	}
 	return out;
 }
 
-function clientSort(
-	rows: Row[],
-	sort: { field: string; order: "asc" | "desc" },
-): Row[] {
+/** Whether a column holds text, so a filter can match a part of its value. */
+function isTextColumn(col: Column): boolean {
+	if (col.ref || col.isId) return false;
+	if (typeof col.filterable === "object" && col.filterable.options) return false;
+	return col.type === undefined || col.type === "string" || col.type === "richtext";
+}
+
+function clientSort(rows: Row[], sort: Sort): Row[] {
 	const out = [...rows];
 	out.sort((a, b) => {
-		const av = getField(a, sort.field);
-		const bv = getField(b, sort.field);
+		const av = getRowField(a, sort.field);
+		const bv = getRowField(b, sort.field);
 		if (av == null && bv == null) return 0;
 		if (av == null) return 1;
 		if (bv == null) return -1;
-		if (typeof av === "number" && typeof bv === "number")
+		if (typeof av === "number" && typeof bv === "number") {
 			return sort.order === "asc" ? av - bv : bv - av;
-		const as = String(av);
-		const bs = String(bv);
-		const cmp = as.localeCompare(bs);
+		}
+		const cmp = String(av).localeCompare(String(bv));
 		return sort.order === "asc" ? cmp : -cmp;
 	});
 	return out;
-}
-
-function emptyJson(entity: ManifestEntity): string {
-	const obj: Record<string, string> = {};
-	for (const f of entity.fields) {
-		if (f.optional) continue;
-		obj[f.name] = `<${f.type}>`;
-	}
-	return JSON.stringify(obj, null, 2);
 }
