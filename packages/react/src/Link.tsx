@@ -34,7 +34,7 @@
 // Disable client-side nav for a specific link with `prefetch={false}`
 // (HTML still prefetches) or by setting `target="_blank"`.
 
-import React, { useEffect, useRef } from "react";
+import React, { useCallback, useEffect, useRef } from "react";
 import { watchLinkIntent } from "./linkIntent";
 
 declare global {
@@ -89,6 +89,11 @@ export interface LinkProps
    * has somewhere to show).
    */
   seed?: unknown;
+  /**
+   * A ref to the anchor element. A component that renders through this link,
+   * such as a button with a `render` prop, passes one.
+   */
+  ref?: React.Ref<HTMLAnchorElement>;
   children?: React.ReactNode;
 }
 
@@ -96,10 +101,33 @@ export function Link({
   href,
   prefetch = true,
   seed,
+  ref: callerRef,
   children,
   ...rest
 }: LinkProps) {
   const ref = useRef<HTMLAnchorElement>(null);
+
+  // The anchor goes to both the caller's ref and this component's, which the
+  // effects below read.
+  const setRef = useCallback(
+    (el: HTMLAnchorElement | null) => {
+      ref.current = el;
+      if (typeof callerRef === "function") {
+        const cleanup = callerRef(el);
+        return () => {
+          ref.current = null;
+          if (typeof cleanup === "function") cleanup();
+          else callerRef(null);
+        };
+      }
+      if (callerRef) callerRef.current = el;
+      return () => {
+        ref.current = null;
+        if (callerRef) callerRef.current = null;
+      };
+    },
+    [callerRef],
+  );
 
   // Register the seed keyed by this anchor element so the runtime's global
   // click handler can find it and hand it to navigate(). A WeakMap keeps it
@@ -181,7 +209,7 @@ export function Link({
 
   return (
     <a
-      ref={ref}
+      ref={setRef}
       href={href}
       data-pylon-link=""
       {...rest}
