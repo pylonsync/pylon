@@ -55,6 +55,7 @@
 ### Removed
 
 * **cli:** `pylon init` is removed. `npm create @pylonsync/pylon@latest <name>` is the one way to make a project. `pylon init` prints that command and exits with a usage error. The quickstart uses the scaffolder.
+* **create-pylon:** the `web`, `vite` and `mac` platforms and their template folders are removed, with `packages/ui` and the per-platform copies of `barebones`, `chat`, `todo` and `b2b`. No template could reach them: `--platforms` already applied only to `mobile` (`expo`) and `consumer` (`ios`, `expo`). A platform name other than `ios` or `expo` is an error for those two templates.
 
 ### Bug Fixes
 

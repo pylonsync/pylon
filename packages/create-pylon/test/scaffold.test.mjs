@@ -204,11 +204,11 @@ test("consumer with only non-native platforms stays the single SSR app", () => {
 	}
 });
 
-test("consumer rejects mixing a native app with a platform it has no native app for", () => {
+test("consumer rejects a platform that does not exist next to a native app", () => {
 	const dir = mkdtempSync(join(tmpdir(), "cp-consumer-bad-"));
 	const res = runScaffold({ name: "myapp", template: "consumer", cwd: dir, platforms: "web,ios" });
 	assert.notEqual(res.status, 0, "expected a non-zero exit");
-	assert.match(res.stderr, /doesn't support platform\(s\): web/);
+	assert.match(res.stderr, /unknown platform\(s\): web/);
 });
 
 test("the imessage template scaffolds the app, both transports, and the relay", () => {

@@ -44,32 +44,20 @@ node --check "$SCRIPT"
 # Combos to scaffold + verify. Add a row when you add a template or
 # platform — the loop body covers everything else.
 COMBOS=(
-	# The default you get with no --template, first.
-	"barebones|web"
-	"barebones|ios"
-	"barebones|mac"
-	"barebones|expo"
-	"barebones|web,ios,mac,expo"
-	"todo|web"
-	"todo|ios"
-	"todo|mac"
-	"todo|expo"
-	"todo|web,ios,mac,expo"
-	"consumer|web"
-	# ios / expo scaffold the native apps on backend/consumer; mac is
-	# ignored (unified app), and mixing it with a native app is rejected.
+	# The default you get with no --template, first. A single-app template
+	# ignores --platforms, so one row covers it.
+	"barebones|"
+	"todo|"
+	"chat|"
+	# The starter people reach for to build a product, and the biggest
+	# template in the set.
+	"saas|"
+	# consumer is a single app with no platforms; ios and expo scaffold the
+	# native apps on backend/consumer.
+	"consumer|"
 	"consumer|ios"
-	"consumer|mac"
 	"consumer|expo"
 	"consumer|ios,expo"
-	"chat|web"
-	"chat|ios"
-	"chat|mac"
-	"chat|expo"
-	"chat|web,ios,mac,expo"
-	# The starter people reach for to build a product — biggest template
-	# in the set, and until now the only one with no smoke coverage.
-	"saas|web"
 	# The App Store-ready Expo app + backend. Native bundling is covered
 	# by tools/smoke-mobile-bundle.sh; this gate covers the scaffold.
 	"mobile|expo"
@@ -92,7 +80,7 @@ for combo in "${COMBOS[@]}"; do
 		node "$OLDPWD/$SCRIPT" smoke-app \
 			--bun --skip-install \
 			--template "$template" \
-			--platforms "$platforms" </dev/null > "$project_dir/scaffold.log" 2>&1
+			${platforms:+--platforms "$platforms"} </dev/null > "$project_dir/scaffold.log" 2>&1
 	) || {
 		echo "::error::scaffold failed for $combo"
 		cat "$project_dir/scaffold.log" >&2

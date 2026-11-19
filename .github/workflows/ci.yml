@@ -353,7 +353,7 @@ jobs:
       - run: node --test scripts/npm-postflight.test.mjs
       - run: bun run check
       - name: Function authorization and image security regressions
-        run: bun test packages/functions/src/b2b-template-security.test.ts packages/functions/src/ai-studio-template-security.test.ts packages/functions/src/member.test.ts packages/functions/src/ssr-og-image.test.ts
+        run: bun test packages/functions/src/ai-studio-template-security.test.ts packages/functions/src/member.test.ts packages/functions/src/ssr-og-image.test.ts
       # The TS package tests ran nowhere until now — `check` is typecheck only,
       # so packages/sync's 200 sync tests and packages/react's mounted hook
       # tests were local-only and could rot unnoticed. Scoped to the two
