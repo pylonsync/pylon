@@ -158,6 +158,13 @@ const PRIORITIES = [
   { id: 4, label: "Low" },
 ];
 
+const STATE_ITEMS = STATES.map((s) => ({ value: s.id, label: s.label }));
+
+const PRIORITY_ITEMS = PRIORITIES.map((p) => ({
+  value: String(p.id),
+  label: p.label,
+}));
+
 // Pre-set label palette for the creation UI.
 const LABEL_COLORS = [
   "#ef4444",
@@ -388,7 +395,7 @@ function Workspace({
         open={!!openIssueId}
         onOpenChange={(o) => !o && setOpenIssueId(null)}
       >
-        <SheetContent className="w-full max-w-3xl sm:max-w-3xl">
+        <SheetContent aria-label="Issue" className="w-full max-w-3xl sm:max-w-3xl">
           {openIssueId && (
             <IssueDrawer
               issueId={openIssueId}
@@ -1054,15 +1061,19 @@ function IssueDrawer({
         <aside className="flex flex-col gap-3 overflow-y-auto border-l bg-card/40 p-5">
           <SideField label="Status">
             <Select
+              items={STATE_ITEMS}
               value={issue.state}
               onValueChange={(v) => void update({ state: v })}
             >
-              <SelectTrigger className="h-8 text-xs">
-                <SelectValue />
+              <SelectTrigger aria-label="Status" className="h-8 text-xs">
+                <span className="flex min-w-0 items-center gap-2">
+                  <StateIcon state={issue.state} />
+                  <SelectValue />
+                </span>
               </SelectTrigger>
               <SelectContent>
                 {STATES.map((s) => (
-                  <SelectItem key={s.id} value={s.id}>
+                  <SelectItem key={s.id} value={s.id} label={s.label}>
                     <div className="flex items-center gap-2">
                       <StateIcon state={s.id} />
                       {s.label}
@@ -1075,10 +1086,11 @@ function IssueDrawer({
 
           <SideField label="Priority">
             <Select
+              items={PRIORITY_ITEMS}
               value={String(issue.priority)}
               onValueChange={(v) => void update({ priority: parseInt(v, 10) })}
             >
-              <SelectTrigger className="h-8 text-xs">
+              <SelectTrigger aria-label="Priority" className="h-8 text-xs">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -1416,10 +1428,14 @@ function AssigneePicker({
   const { data: users } = db.useQuery<UserRow>("User");
   return (
     <Select
+      items={[
+        { value: "__none__", label: "Unassigned" },
+        ...(users ?? []).map((u) => ({ value: u.id, label: u.displayName })),
+      ]}
       value={issue.assigneeId ?? "__none__"}
       onValueChange={(v) => onChange(v === "__none__" ? null : v)}
     >
-      <SelectTrigger className="h-8 text-xs">
+      <SelectTrigger aria-label="Assignee" className="h-8 text-xs">
         <SelectValue />
       </SelectTrigger>
       <SelectContent>
@@ -1554,10 +1570,11 @@ function NewIssueModal({
         <div className="grid grid-cols-2 gap-3">
           <FormField label="Team">
             <Select
+              items={teams.map((t) => ({ value: t.id, label: t.name }))}
               value={form.teamId}
               onValueChange={(v) => setForm({ ...form, teamId: v })}
             >
-              <SelectTrigger>
+              <SelectTrigger aria-label="Team">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -1571,12 +1588,13 @@ function NewIssueModal({
           </FormField>
           <FormField label="Priority">
             <Select
+              items={PRIORITY_ITEMS}
               value={String(form.priority)}
               onValueChange={(v) =>
                 setForm({ ...form, priority: parseInt(v, 10) })
               }
             >
-              <SelectTrigger>
+              <SelectTrigger aria-label="Priority">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -1591,15 +1609,19 @@ function NewIssueModal({
         </div>
         <FormField label="Status">
           <Select
+            items={STATE_ITEMS}
             value={form.state}
             onValueChange={(v) => setForm({ ...form, state: v as StateId })}
           >
-            <SelectTrigger>
-              <SelectValue />
+            <SelectTrigger aria-label="Status">
+              <span className="flex min-w-0 items-center gap-2">
+                <StateIcon state={form.state} />
+                <SelectValue />
+              </span>
             </SelectTrigger>
             <SelectContent>
               {STATES.map((s) => (
-                <SelectItem key={s.id} value={s.id}>
+                <SelectItem key={s.id} value={s.id} label={s.label}>
                   <div className="flex items-center gap-2">
                     <StateIcon state={s.id} />
                     {s.label}

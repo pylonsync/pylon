@@ -59,11 +59,11 @@ COPY --chown=pylon:pylon apps/site/public /app/public
 # public/ instead of keeping a hand-synced duplicate current.
 COPY --chown=pylon:pylon skills/pylon/SKILL.md /app/public/pylon-skill.md
 
-# Install frontend deps (react, react-dom, radix, lucide, next-themes,
+# Install frontend deps (react, react-dom, ui-sdk, lucide, next-themes,
 # @tailwindcss/cli, …). The base image symlinks @pylonsync/* into node_modules
 # but NOT these, and there is no workspace hoisting inside the image — so
 # without an install here BOTH the SSR render (react-dom/server) and the client
-# bundler (Bun.build resolving react/radix/etc., Tailwind via @tailwindcss/cli)
+# bundler (Bun.build resolving react/ui-sdk/etc., Tailwind via @tailwindcss/cli)
 # fail, and the site 500s or ships dead HTML. Full install (not --production):
 # @tailwindcss/cli lives in devDependencies but is needed at RUNTIME to compile
 # web/app/globals.css.

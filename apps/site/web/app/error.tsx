@@ -52,9 +52,7 @@ export default function RootError({
 						<RefreshCw className="size-3.5" />
 						Try again
 					</Button>
-					<Button asChild variant="default">
-						<Link href="/">Home</Link>
-					</Button>
+					<Button render={<Link href="/" />} variant="default">Home</Button>
 				</div>
 				{error.digest && (
 					<div className="pt-3 text-[11px] font-mono text-[var(--color-ink-4)]">

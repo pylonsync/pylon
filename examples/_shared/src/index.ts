@@ -1,5 +1,6 @@
 /**
- * @pylonsync/example-ui — shared shadcn primitives for the example apps.
+ * @pylonsync/example-ui — shared UI components for the example apps, built
+ * on ui-sdk (https://ui-sdk.dev).
  *
  * Each example imports the components it needs and supplies its own
  * Tailwind theme via an `@theme` block in its index.css. The components

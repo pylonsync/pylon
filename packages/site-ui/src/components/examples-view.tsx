@@ -155,11 +155,19 @@ export function ExamplesView({ signedIn = false }: { signedIn?: boolean }) {
 						The starter templates and the example apps are on GitHub. They are MIT licensed.
 					</p>
 					<div className="mt-8 flex flex-col items-stretch justify-center gap-2.5 sm:flex-row sm:items-center sm:gap-3">
-						<Button asChild variant="primary" size="lg">
-							<a href="https://github.com/pylonsync/pylon-templates">Browse on GitHub →</a>
+						<Button
+							render={<a href="https://github.com/pylonsync/pylon-templates" />}
+							variant="primary"
+							size="lg"
+						>
+							Browse on GitHub →
 						</Button>
-						<Button asChild variant="ghost" size="lg">
-							<Link href="/skill">Set up the Claude skill</Link>
+						<Button
+							render={<Link href="/skill" />}
+							variant="ghost"
+							size="lg"
+						>
+							Set up the Claude skill
 						</Button>
 					</div>
 				</div>

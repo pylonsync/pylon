@@ -58,13 +58,19 @@ export function ComparisonIndexView({
 						Decide by building.
 					</h2>
 					<div className="mt-8 flex flex-col items-stretch justify-center gap-2.5 sm:flex-row sm:items-center sm:gap-3">
-						<Button asChild variant="primary" size="lg">
-							<Link href={ctaUrl(signedIn)}>
-								{signedIn ? "Open dashboard →" : "Create your account →"}
-							</Link>
+						<Button
+							render={<Link href={ctaUrl(signedIn)} />}
+							variant="primary"
+							size="lg"
+						>
+							{signedIn ? "Open dashboard →" : "Create your account →"}
 						</Button>
-						<Button asChild variant="ghost" size="lg">
-							<Link href="/product">Explore the product</Link>
+						<Button
+							render={<Link href="/product" />}
+							variant="ghost"
+							size="lg"
+						>
+							Explore the product
 						</Button>
 					</div>
 				</div>

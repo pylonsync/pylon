@@ -587,6 +587,7 @@
       "invite_entity": "OrgInvite",
       "disabled": false
     },
+    "org_roles": [],
     "trusted_origins": []
   }
 }

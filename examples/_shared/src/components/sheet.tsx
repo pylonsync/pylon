@@ -1,90 +1,75 @@
 import * as React from "react";
-import * as DialogPrimitive from "@radix-ui/react-dialog";
+import {
+  Dialog as Sheet,
+  DialogBackdrop,
+  DialogClose as SheetClose,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+  DialogTrigger as SheetTrigger,
+} from "@ui-sdk/react/dialog";
 import { X } from "lucide-react";
-import { cn } from "../utils";
+import { cn, type StyledProps } from "../utils";
 
-export const Sheet = DialogPrimitive.Root;
-export const SheetTrigger = DialogPrimitive.Trigger;
-export const SheetClose = DialogPrimitive.Close;
-export const SheetPortal = DialogPrimitive.Portal;
+export { Sheet, SheetClose, SheetTrigger };
 
-const SheetOverlay = React.forwardRef<
-  React.ElementRef<typeof DialogPrimitive.Overlay>,
-  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>
->(({ className, ...props }, ref) => (
-  <DialogPrimitive.Overlay
-    className={cn(
-      "fixed inset-0 z-50 bg-black/50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
-      className,
-    )}
-    {...props}
-    ref={ref}
-  />
-));
-SheetOverlay.displayName = DialogPrimitive.Overlay.displayName;
+const sideClasses = {
+  right:
+    "inset-y-0 right-0 left-auto h-dvh w-full max-w-md border-l data-starting-style:translate-x-full data-ending-style:translate-x-full",
+  left: "inset-y-0 left-0 right-auto h-dvh w-full max-w-md border-r data-starting-style:-translate-x-full data-ending-style:-translate-x-full",
+  top: "inset-x-0 top-0 bottom-auto w-full max-w-none border-b data-starting-style:-translate-y-full data-ending-style:-translate-y-full",
+  bottom:
+    "inset-x-0 bottom-0 top-auto w-full max-w-none border-t data-starting-style:translate-y-full data-ending-style:translate-y-full",
+} as const;
 
-export const SheetContent = React.forwardRef<
-  React.ElementRef<typeof DialogPrimitive.Content>,
-  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & {
-    side?: "right" | "left" | "top" | "bottom";
-  }
->(({ side = "right", className, children, ...props }, ref) => (
-  <SheetPortal>
-    <SheetOverlay />
-    <DialogPrimitive.Content
-      ref={ref}
-      className={cn(
-        "fixed z-50 flex flex-col gap-4 bg-background shadow-lg transition ease-in-out data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:duration-300 data-[state=open]:duration-500",
-        side === "right" &&
-          "inset-y-0 right-0 h-full w-full max-w-md border-l data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right",
-        side === "left" &&
-          "inset-y-0 left-0 h-full w-full max-w-md border-r data-[state=closed]:slide-out-to-left data-[state=open]:slide-in-from-left",
-        side === "top" &&
-          "inset-x-0 top-0 border-b data-[state=closed]:slide-out-to-top data-[state=open]:slide-in-from-top",
-        side === "bottom" &&
-          "inset-x-0 bottom-0 border-t data-[state=closed]:slide-out-to-bottom data-[state=open]:slide-in-from-bottom",
-        className,
-      )}
-      {...props}
-    >
-      <DialogPrimitive.Close className="absolute right-4 top-4 rounded-sm opacity-70 transition-opacity hover:opacity-100 focus:outline-none">
-        <X className="size-4" />
-        <span className="sr-only">Close</span>
-      </DialogPrimitive.Close>
-      {children}
-    </DialogPrimitive.Content>
-  </SheetPortal>
-));
-SheetContent.displayName = DialogPrimitive.Content.displayName;
+/**
+ * A panel that slides in from one edge of the screen. It is a modal dialog:
+ * focus stays in the panel, and Escape or a press on the overlay closes it.
+ */
+export function SheetContent({
+  side = "right",
+  className,
+  children,
+  ...props
+}: Omit<StyledProps<typeof DialogContent>, "children"> & {
+  side?: keyof typeof sideClasses;
+  children?: React.ReactNode;
+}) {
+  return (
+    <>
+      <DialogBackdrop className="fixed inset-0 z-50 bg-black/50 transition-opacity duration-300 data-starting-style:opacity-0 data-ending-style:opacity-0 motion-reduce:transition-none" />
+      <DialogContent
+        className={cn(
+          "fixed z-50 m-0 flex max-h-none flex-col gap-4 bg-background text-foreground shadow-lg outline-none transition-transform duration-300 ease-in-out motion-reduce:transition-none",
+          sideClasses[side],
+          className,
+        )}
+        {...props}
+      >
+        <SheetClose
+          aria-label="Close"
+          className="absolute right-4 top-4 rounded-sm opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <X className="size-4" />
+        </SheetClose>
+        {children}
+      </DialogContent>
+    </>
+  );
+}
 
-export const SheetHeader = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
-  <div className={cn("flex flex-col space-y-2 px-6 pt-6 text-left", className)} {...props} />
-);
+export function SheetHeader({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
+  return <div className={cn("flex flex-col space-y-2 px-6 pt-6 text-left", className)} {...props} />;
+}
 
-export const SheetFooter = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
-  <div className={cn("mt-auto flex flex-col gap-2 border-t px-6 py-4", className)} {...props} />
-);
+export function SheetFooter({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
+  return <div className={cn("mt-auto flex flex-col gap-2 border-t px-6 py-4", className)} {...props} />;
+}
 
-export const SheetTitle = React.forwardRef<
-  React.ElementRef<typeof DialogPrimitive.Title>,
-  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Title>
->(({ className, ...props }, ref) => (
-  <DialogPrimitive.Title
-    ref={ref}
-    className={cn("text-lg font-semibold text-foreground", className)}
-    {...props}
-  />
-));
-SheetTitle.displayName = DialogPrimitive.Title.displayName;
+export function SheetTitle({ className, ...props }: StyledProps<typeof DialogTitle>) {
+  return <DialogTitle className={cn("text-lg font-semibold text-foreground", className)} {...props} />;
+}
 
-export const SheetDescription = React.forwardRef<
-  React.ElementRef<typeof DialogPrimitive.Description>,
-  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Description>
->(({ className, ...props }, ref) => (
-  <DialogPrimitive.Description
-    ref={ref}
-    className={cn("text-sm text-muted-foreground", className)}
-    {...props}
-  />
-));
-SheetDescription.displayName = DialogPrimitive.Description.displayName;
+export function SheetDescription({ className, ...props }: StyledProps<typeof DialogDescription>) {
+  return <DialogDescription className={cn("text-sm text-muted-foreground", className)} {...props} />;
+}

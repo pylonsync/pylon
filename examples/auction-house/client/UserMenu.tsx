@@ -18,13 +18,11 @@ export function UserMenu({ user }: { user: NonNullable<AuthUser> }) {
 
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button className="flex items-center gap-2 rounded-full border bg-background px-2 py-1 text-sm hover:bg-accent">
-          <span className="flex size-6 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
-            {initials(label)}
-          </span>
-          <span className="hidden text-foreground/80 sm:inline">{label}</span>
-        </button>
+      <DropdownMenuTrigger className="flex items-center gap-2 rounded-full border bg-background px-2 py-1 text-sm hover:bg-accent">
+        <span className="flex size-6 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
+          {initials(label)}
+        </span>
+        <span className="hidden text-foreground/80 sm:inline">{label}</span>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-60">
         <DropdownMenuLabel className="font-normal">
@@ -44,16 +42,14 @@ export function UserMenu({ user }: { user: NonNullable<AuthUser> }) {
           )}
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
-        <DropdownMenuItem
-          onClick={() => navigate("#/account")}
-        >
+        <DropdownMenuItem onSelect={() => navigate("#/account")}>
           <UserIcon className="size-4" />
           My bids
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem
-          className="text-destructive focus:text-destructive"
-          onClick={async () => {
+          className="text-destructive data-highlighted:text-destructive"
+          onSelect={async () => {
             await logout();
             navigate("#/");
           }}

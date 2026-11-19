@@ -1,23 +1,27 @@
 import * as React from "react";
-import * as TooltipPrimitive from "@radix-ui/react-tooltip";
-import { cn } from "../utils";
+import {
+  Tooltip,
+  TooltipContent as TooltipContentPart,
+  TooltipTrigger,
+} from "@ui-sdk/react/tooltip";
+import { cn, type StyledProps } from "../utils";
 
-export const TooltipProvider = TooltipPrimitive.Provider;
-export const Tooltip = TooltipPrimitive.Root;
-export const TooltipTrigger = TooltipPrimitive.Trigger;
+export { Tooltip, TooltipTrigger };
 
-export const TooltipContent = React.forwardRef<
-  React.ElementRef<typeof TooltipPrimitive.Content>,
-  React.ComponentPropsWithoutRef<typeof TooltipPrimitive.Content>
->(({ className, sideOffset = 4, ...props }, ref) => (
-  <TooltipPrimitive.Content
-    ref={ref}
-    sideOffset={sideOffset}
-    className={cn(
-      "z-50 overflow-hidden rounded-md border bg-popover px-3 py-1.5 text-xs text-popover-foreground shadow-md data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
-      className,
-    )}
-    {...props}
-  />
-));
-TooltipContent.displayName = TooltipPrimitive.Content.displayName;
+export function TooltipContent({
+  className,
+  sideOffset = 4,
+  ...props
+}: StyledProps<typeof TooltipContentPart>) {
+  return (
+    <TooltipContentPart
+      sideOffset={sideOffset}
+      className={cn(
+        "z-50 rounded-md border bg-popover px-3 py-1.5 text-xs text-popover-foreground shadow-md",
+        "origin-(--transform-origin) transition-[opacity,scale] duration-150 data-starting-style:scale-95 data-starting-style:opacity-0 data-ending-style:scale-95 data-ending-style:opacity-0 motion-reduce:transition-none",
+        className,
+      )}
+      {...props}
+    />
+  );
+}

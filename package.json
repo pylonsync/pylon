@@ -25,14 +25,14 @@
     "template:dev": "node packages/create-pylon/dev.mjs"
   },
   "overrides": {
-    "@types/react": "^19.2.0",
+    "@types/react": "^19.2.10",
     "@types/react-dom": "^19.2.0",
     "uuid": "^11.1.1",
     "satori": "0.33.5",
     "fflate": "0.8.3"
   },
   "resolutions": {
-    "@types/react": "^19.2.0",
+    "@types/react": "^19.2.10",
     "@types/react-dom": "^19.2.0",
     "uuid": "^11.1.1",
     "satori": "0.33.5",

@@ -38,7 +38,7 @@ export default defineConfig({
   },
   optimizeDeps: {
     // Top-level workspace packages — Vite walks their import graph
-    // and pre-bundles transitive deps (radix, clsx, tailwind-merge,
+    // and pre-bundles transitive deps (ui-sdk, clsx, tailwind-merge,
     // etc.) automatically. Subpath exports of `@pylonsync/example-ui`
     // (`/avatar`, `/button`, …) are listed via the parent include
     // and get pulled in via Vite's normal resolver; listing them

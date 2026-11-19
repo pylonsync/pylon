@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Slot } from "@radix-ui/react-slot";
+import { renderElement, type PartProps } from "@ui-sdk/react/primitive";
 import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "../../lib/utils";
 
@@ -57,32 +57,37 @@ const buttonVariants = cva(
 );
 
 export interface ButtonProps
-  extends React.ButtonHTMLAttributes<HTMLButtonElement>,
+  extends Omit<PartProps<"button">, "className">,
     VariantProps<typeof buttonVariants> {
-  asChild?: boolean;
+  className?: string;
   /** Disable the scale-on-press feedback (for contexts where motion distracts). */
   static?: boolean;
 }
 
+/**
+ * A button. To render a link that looks like a button, pass the link to
+ * `render`: `<Button render={<Link href="/" />}>Home</Button>`.
+ */
 function Button({
   className,
   variant,
   size,
-  asChild = false,
   static: isStatic = false,
+  render,
   ...props
 }: ButtonProps) {
-  const Comp = asChild ? Slot : "button";
-  return (
-    <Comp
-      data-slot="button"
-      className={cn(
+  return renderElement(
+    "button",
+    {
+      ...props,
+      "data-slot": "button",
+      className: cn(
         buttonVariants({ variant, size }),
         isStatic && "active:scale-100",
         className,
-      )}
-      {...props}
-    />
+      ),
+    },
+    render,
   );
 }
 

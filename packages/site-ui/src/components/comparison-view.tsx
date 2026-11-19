@@ -25,8 +25,13 @@ export function ComparisonView({
 					<h1 className="text-[28px] font-semibold tracking-tight">
 						Not found
 					</h1>
-					<Button asChild variant="primary" size="lg" className="mt-8">
-						<Link href="/vs">All comparisons →</Link>
+					<Button
+						render={<Link href="/vs" />}
+						variant="primary"
+						size="lg"
+						className="mt-8"
+					>
+						All comparisons →
 					</Button>
 				</div>
 			</MarketingShell>
@@ -63,13 +68,19 @@ export function ComparisonView({
 						{c.lede}
 					</p>
 					<div className="mt-8 flex flex-col items-stretch gap-2.5 sm:flex-row sm:items-center sm:gap-3">
-						<Button asChild variant="primary" size="lg">
-							<Link href={ctaUrl(signedIn)}>
-								{signedIn ? "Open dashboard →" : "Create your account →"}
-							</Link>
+						<Button
+							render={<Link href={ctaUrl(signedIn)} />}
+							variant="primary"
+							size="lg"
+						>
+							{signedIn ? "Open dashboard →" : "Create your account →"}
 						</Button>
-						<Button asChild variant="ghost" size="lg">
-							<a href={c.competitorUrl}>What is {c.competitor}?</a>
+						<Button
+							render={<a href={c.competitorUrl} />}
+							variant="ghost"
+							size="lg"
+						>
+							What is {c.competitor}?
 						</Button>
 					</div>
 				</div>
@@ -275,8 +286,12 @@ export function ComparisonView({
 						npm create @pylonsync/pylon@latest
 					</div>
 					<div className="mt-8 flex justify-center">
-						<Button asChild variant="primary" size="lg">
-							<Link href="/vs">See all comparisons →</Link>
+						<Button
+							render={<Link href="/vs" />}
+							variant="primary"
+							size="lg"
+						>
+							See all comparisons →
 						</Button>
 					</div>
 				</div>

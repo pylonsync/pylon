@@ -58,9 +58,7 @@ function Dashboard() {
             You're trading as <span className="font-medium">{name}</span>.
           </p>
         </div>
-        <Button asChild>
-          <Link href="/sell">Sell something</Link>
-        </Button>
+        <Button render={<Link href="/sell" />}>Sell something</Button>
       </header>
 
       <section className="space-y-3">

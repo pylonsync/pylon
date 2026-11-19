@@ -149,7 +149,7 @@ RUN apt-get update && apt-get upgrade -y && apt-get clean
 # each build took whatever npm served that day.
 COPY docker/framework-deps/package.json docker/framework-deps/bun.lock /pylon/
 RUN cd /pylon && bun install --production --frozen-lockfile
-# @pylonsync/example-ui's dependencies (@radix-ui/*, clsx, lucide-react…),
+# @pylonsync/example-ui's dependencies (@ui-sdk/*, clsx, lucide-react…),
 # linked in as its node_modules in the final stage.
 COPY docker/example-ui-deps/package.json docker/example-ui-deps/bun.lock /pylon/example-ui-deps/
 RUN cd /pylon/example-ui-deps && bun install --production --frozen-lockfile
@@ -185,13 +185,13 @@ COPY --from=rust-builder /build/tsconfig.base.json /pylon/tsconfig.base.json
 # `"@pylonsync/example-ui": "workspace:*"` dep.
 COPY --from=rust-builder /build/examples/_shared /pylon/packages/example-ui
 
-# Install example-ui's transitive deps (@radix-ui/*, clsx, lucide-react,
+# Install example-ui's transitive deps (@ui-sdk/*, clsx, lucide-react,
 # etc.) so a customer's web/ build can resolve them through Node's
 # module-resolution walk. .dockerignore excludes **/node_modules from
 # the build context, so the COPY above ships only source — without
 # this RUN, the chat dogfood (and any other example using
 # `@pylonsync/example-ui`) crashes at vite-build time with
-# "Cannot find module @radix-ui/react-slot". Producing the install at
+# "Cannot find module @ui-sdk/react/button". Producing the install at
 # image-build time is much cheaper than re-doing it on every
 # customer-machine boot.
 #

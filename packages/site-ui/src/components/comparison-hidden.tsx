@@ -17,8 +17,13 @@ export function ComparisonHidden({ signedIn = false }: { signedIn?: boolean }) {
 				<p className="mt-3 text-[var(--color-ink-3)]">
 					This page isn&apos;t available.
 				</p>
-				<Button asChild variant="primary" size="lg" className="mt-8">
-					<Link href="/product">Explore what Pylon offers →</Link>
+				<Button
+					render={<Link href="/product" />}
+					variant="primary"
+					size="lg"
+					className="mt-8"
+				>
+					Explore what Pylon offers →
 				</Button>
 			</div>
 		</MarketingShell>

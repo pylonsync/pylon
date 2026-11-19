@@ -1,8 +1,8 @@
 "use client";
 /**
  * User menu — avatar button + dropdown for account / orders / sign-out.
- * Uses @pylonsync/example-ui/dropdown-menu (Radix-backed) for proper
- * keyboard navigation and focus trapping.
+ * Uses @pylonsync/example-ui/dropdown-menu for keyboard navigation and
+ * focus handling.
  */
 import { LogOut, Package, User as UserIcon } from "lucide-react";
 import {
@@ -29,18 +29,20 @@ export function UserMenu({ user }: { user: NonNullable<AuthUser> }) {
 
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          variant="ghost"
-          className="flex items-center gap-2 rounded-full border bg-background px-2 py-1 text-sm hover:bg-accent h-auto"
-        >
-          <span className="flex size-6 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
-            {initials}
-          </span>
-          <span className="hidden text-foreground/80 sm:inline">
-            {user.name ?? user.email ?? "Account"}
-          </span>
-        </Button>
+      <DropdownMenuTrigger
+        render={
+          <Button
+            variant="ghost"
+            className="flex items-center gap-2 rounded-full border bg-background px-2 py-1 text-sm hover:bg-accent h-auto"
+          />
+        }
+      >
+        <span className="flex size-6 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
+          {initials}
+        </span>
+        <span className="hidden text-foreground/80 sm:inline">
+          {user.name ?? user.email ?? "Account"}
+        </span>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-56">
         <DropdownMenuLabel className="flex flex-col gap-0.5">
@@ -52,18 +54,18 @@ export function UserMenu({ user }: { user: NonNullable<AuthUser> }) {
           )}
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
-        <DropdownMenuItem onClick={() => navigate("/account")}>
+        <DropdownMenuItem onSelect={() => navigate("/account")}>
           <UserIcon className="size-4" />
           Account
         </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => navigate("/account")}>
+        <DropdownMenuItem onSelect={() => navigate("/account")}>
           <Package className="size-4" />
           Orders
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem
-          className="text-destructive focus:text-destructive"
-          onClick={async () => {
+          className="text-destructive data-highlighted:text-destructive"
+          onSelect={async () => {
             await logout();
             navigate("/");
           }}

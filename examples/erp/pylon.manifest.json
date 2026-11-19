@@ -558,7 +558,8 @@
           ],
           "unique": false
         }
-      ]
+      ],
+      "sync": false
     },
     {
       "name": "Quote",
@@ -1136,6 +1137,7 @@
       "invite_entity": "OrgInvite",
       "disabled": false
     },
+    "org_roles": [],
     "trusted_origins": []
   }
 }

@@ -36,8 +36,13 @@ export function ProductView({
 					<p className="mt-3 text-[var(--color-ink-3)]">
 						That product page doesn&apos;t exist.
 					</p>
-					<Button asChild variant="primary" size="lg" className="mt-8">
-						<Link href="/product">Browse the product →</Link>
+					<Button
+						render={<Link href="/product" />}
+						variant="primary"
+						size="lg"
+						className="mt-8"
+					>
+						Browse the product →
 					</Button>
 				</div>
 			</MarketingShell>
@@ -75,13 +80,19 @@ export function ProductView({
 								{p.tagline}
 							</p>
 							<div className="mt-8 flex flex-col items-stretch gap-2.5 sm:flex-row sm:items-center sm:gap-3">
-								<Button asChild variant="primary" size="lg">
-									<Link href={ctaUrl(signedIn)}>
-										{signedIn ? "Open dashboard →" : "Create your account →"}
-									</Link>
+								<Button
+									render={<Link href={ctaUrl(signedIn)} />}
+									variant="primary"
+									size="lg"
+								>
+									{signedIn ? "Open dashboard →" : "Create your account →"}
 								</Button>
-								<Button asChild variant="ghost" size="lg">
-									<a href="https://docs.pylonsync.com">Read the docs</a>
+								<Button
+									render={<a href="https://docs.pylonsync.com" />}
+									variant="ghost"
+									size="lg"
+								>
+									Read the docs
 								</Button>
 							</div>
 						</div>
@@ -172,8 +183,12 @@ export function ProductView({
 									.
 								</p>
 							</div>
-							<Button asChild variant="ghost" size="sm">
-								<Link href="/developers/examples">All examples →</Link>
+							<Button
+								render={<Link href="/developers/examples" />}
+								variant="ghost"
+								size="sm"
+							>
+								All examples →
 							</Button>
 						</div>
 
@@ -279,13 +294,19 @@ export function ProductView({
 						SSR. Free to start.
 					</p>
 					<div className="mt-8 flex flex-col items-stretch justify-center gap-2.5 sm:flex-row sm:items-center sm:gap-3">
-						<Button asChild variant="primary" size="lg">
-							<Link href={ctaUrl(signedIn)}>
-								{signedIn ? "Open dashboard →" : "Create your account →"}
-							</Link>
+						<Button
+							render={<Link href={ctaUrl(signedIn)} />}
+							variant="primary"
+							size="lg"
+						>
+							{signedIn ? "Open dashboard →" : "Create your account →"}
 						</Button>
-						<Button asChild variant="ghost" size="lg">
-							<a href="https://docs.pylonsync.com">Read the docs</a>
+						<Button
+							render={<a href="https://docs.pylonsync.com" />}
+							variant="ghost"
+							size="lg"
+						>
+							Read the docs
 						</Button>
 					</div>
 				</div>

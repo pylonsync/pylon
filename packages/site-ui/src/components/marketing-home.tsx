@@ -253,8 +253,12 @@ export function MarketingPage({
 							out of your stack.
 						</p>
 						<div className="mt-7">
-							<Button asChild variant="ghost" size="lg">
-								<a href="https://docs.pylonsync.com">Read the quickstart →</a>
+							<Button
+								render={<a href="https://docs.pylonsync.com" />}
+								variant="ghost"
+								size="lg"
+							>
+								Read the quickstart →
 							</Button>
 						</div>
 						</div>

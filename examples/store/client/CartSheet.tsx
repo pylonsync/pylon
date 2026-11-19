@@ -133,10 +133,10 @@ export function CartSheet({
               <span>Subtotal</span>
               <span>${cart.total.toFixed(2)}</span>
             </div>
-            <SheetClose asChild>
-              <Button onClick={() => navigate("/checkout")} className="w-full">
-                Checkout
-              </Button>
+            <SheetClose
+              render={<Button onClick={() => navigate("/checkout")} className="w-full" />}
+            >
+              Checkout
             </SheetClose>
             <Button
               variant="ghost"

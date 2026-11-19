@@ -83,10 +83,12 @@ export function ProductIndexView({ signedIn = false }: { signedIn?: boolean }) {
 						npm create @pylonsync/pylon@latest
 					</div>
 					<div className="mt-8">
-						<Button asChild variant="primary" size="lg">
-							<Link href={ctaUrl(signedIn)}>
-								{signedIn ? "Open dashboard →" : "Create your account →"}
-							</Link>
+						<Button
+							render={<Link href={ctaUrl(signedIn)} />}
+							variant="primary"
+							size="lg"
+						>
+							{signedIn ? "Open dashboard →" : "Create your account →"}
 						</Button>
 					</div>
 				</div>

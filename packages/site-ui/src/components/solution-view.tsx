@@ -24,8 +24,13 @@ export function SolutionView({
 					<h1 className="text-[28px] font-semibold tracking-tight">
 						Not found
 					</h1>
-					<Button asChild variant="primary" size="lg" className="mt-8">
-						<Link href="/solutions">Browse solutions →</Link>
+					<Button
+						render={<Link href="/solutions" />}
+						variant="primary"
+						size="lg"
+						className="mt-8"
+					>
+						Browse solutions →
 					</Button>
 				</div>
 			</MarketingShell>
@@ -57,13 +62,19 @@ export function SolutionView({
 							{s.tagline}
 						</p>
 						<div className="mt-8 flex flex-col items-stretch gap-2.5 sm:flex-row sm:items-center sm:gap-3">
-							<Button asChild variant="primary" size="lg">
-								<Link href={ctaUrl(signedIn)}>
-									{signedIn ? "Open dashboard →" : "Create your account →"}
-								</Link>
+							<Button
+								render={<Link href={ctaUrl(signedIn)} />}
+								variant="primary"
+								size="lg"
+							>
+								{signedIn ? "Open dashboard →" : "Create your account →"}
 							</Button>
-							<Button asChild variant="ghost" size="lg">
-								<a href="https://docs.pylonsync.com">Read the docs</a>
+							<Button
+								render={<a href="https://docs.pylonsync.com" />}
+								variant="ghost"
+								size="lg"
+							>
+								Read the docs
 							</Button>
 						</div>
 					</div>
@@ -172,13 +183,19 @@ export function SolutionView({
 						need to.
 					</p>
 					<div className="mt-8 flex flex-col items-stretch justify-center gap-2.5 sm:flex-row sm:items-center sm:gap-3">
-						<Button asChild variant="primary" size="lg">
-							<Link href={ctaUrl(signedIn)}>
-								{signedIn ? "Open dashboard →" : "Create your account →"}
-							</Link>
+						<Button
+							render={<Link href={ctaUrl(signedIn)} />}
+							variant="primary"
+							size="lg"
+						>
+							{signedIn ? "Open dashboard →" : "Create your account →"}
 						</Button>
-						<Button asChild variant="ghost" size="lg">
-							<Link href="/product">Explore the product</Link>
+						<Button
+							render={<Link href="/product" />}
+							variant="ghost"
+							size="lg"
+						>
+							Explore the product
 						</Button>
 					</div>
 				</div>

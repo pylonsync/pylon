@@ -50,8 +50,12 @@ export function SkillView({ signedIn = false }: { signedIn?: boolean }) {
 					</div>
 
 					<div className="mt-6 flex flex-col items-start gap-3 sm:flex-row sm:items-center">
-						<Button asChild variant="default" size="sm">
-							<a href="/pylon-skill.md">View the raw skill →</a>
+						<Button
+							render={<a href="/pylon-skill.md" />}
+							variant="default"
+							size="sm"
+						>
+							View the raw skill →
 						</Button>
 						<span className="text-[12.5px] text-[var(--color-ink-4)]">
 							Served at{" "}
@@ -98,8 +102,12 @@ export function SkillView({ signedIn = false }: { signedIn?: boolean }) {
 						npm create @pylonsync/pylon@latest
 					</div>
 					<div className="mt-8">
-						<Button asChild variant="ghost" size="lg">
-							<Link href="/developers/examples">See example apps →</Link>
+						<Button
+							render={<Link href="/developers/examples" />}
+							variant="ghost"
+							size="lg"
+						>
+							See example apps →
 						</Button>
 					</div>
 				</div>

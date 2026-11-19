@@ -130,21 +130,29 @@ export function MarketingNav({ signedIn = false }: { signedIn?: boolean }) {
 
 	const cta =
 		signedIn === true ? (
-			<Button asChild variant="primary" size="sm">
-				<Link href={accountUrl("/dashboard")}>Dashboard →</Link>
+			<Button
+				render={<Link href={accountUrl("/dashboard")} />}
+				variant="primary"
+				size="sm"
+			>
+				Dashboard →
 			</Button>
 		) : (
 			<>
 				<Button
-					asChild
+					render={<Link href={accountUrl("/login")} />}
 					variant="ghost"
 					size="sm"
 					className="hidden sm:inline-flex"
 				>
-					<Link href={accountUrl("/login")}>Sign in</Link>
+					Sign in
 				</Button>
-				<Button asChild variant="primary" size="sm">
-					<Link href={accountUrl("/signup")}>Create your account →</Link>
+				<Button
+					render={<Link href={accountUrl("/signup")} />}
+					variant="primary"
+					size="sm"
+				>
+					Create your account →
 				</Button>
 			</>
 		);
