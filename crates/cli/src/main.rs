@@ -489,9 +489,7 @@ fn print_usage() {
     println!("Commands:");
     println!("  dev [app.ts]              Start dev server with hot reload");
     println!("  start [app.ts]            Start production server (no watcher)");
-    println!(
-        "  add <analytics|feedback>  Wire a Stack0 suite app into this project"
-    );
+    println!("  add <analytics|feedback>  Wire a Stack0 suite app into this project");
     println!("  build                     Build for production");
     println!("  shards build              Build WebAssembly shard modules from their Rust crates");
     println!("  bench shard               Load-test a realtime shard with headless bots");
