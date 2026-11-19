@@ -12,11 +12,24 @@ runs:
     # succeeds; a hit is seconds.
     #
     # vcpkg only restores an archive whose ABI hash matches, and the hash
-    # changes when the runner image updates vcpkg (port versions) or MSVC. A
+    # changes with the pinned vcpkg commit (port versions) or the image's MSVC. A
     # cache key that does not change with them restores stale archives on
     # every run ("Restored 0 package(s)") and is never saved again, because a
     # key that exists is not overwritten. So the key carries the vcpkg commit
     # and the runner image version.
+    # The runner image carries its own vcpkg checkout, and an image update
+    # moves every port to a new version. The 2026-11-16 image moved zlib from
+    # 1.3.2 to 1.4, and the test build stopped linking (LNK1181 on zs.lib).
+    # Check out the ports at a commit the build is known to link against, so
+    # a port version changes only when this commit changes.
+    - name: Pin the vcpkg ports
+      shell: bash
+      env:
+        VCPKG_PORTS_COMMIT: afa249f12f52ed8a3b919f195495ba8b330288d1
+      run: |
+        set -euo pipefail
+        git -C "$VCPKG_INSTALLATION_ROOT" fetch --quiet --depth 1 origin "$VCPKG_PORTS_COMMIT"
+        git -C "$VCPKG_INSTALLATION_ROOT" checkout --quiet --force FETCH_HEAD
     - name: Compute vcpkg cache key
       id: vcpkg-key
       shell: bash

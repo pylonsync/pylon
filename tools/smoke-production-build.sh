@@ -214,7 +214,9 @@ echo "→ pylon build"
 echo "→ lowered client JS"
 while IFS= read -r f; do
 	case "$f" in *polyfills-*) continue ;; esac
-	if grep -q '?\.' "$f" || grep -q '??' "$f"; then
+	# `?.` before a digit is a ternary with a decimal (`n?.05:1`), which a
+	# minifier writes without spaces. Optional chaining never has a digit there.
+	if grep -Eq '\?\.[^0-9]' "$f" || grep -q '??' "$f"; then
 		fail "$f still has ?. or ?? after lowering"
 	fi
 done < <(find "$APP/dist/client" -name '*.js')

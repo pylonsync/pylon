@@ -158,11 +158,11 @@ fn manifest() -> AppManifest {
     }
 }
 
-fn now_secs() -> u64 {
+fn now_millis() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_secs()
+        .as_millis()
 }
 
 #[test]
@@ -209,28 +209,43 @@ fn edits_in_a_window_run_the_hook_once() {
         std::thread::sleep(Duration::from_millis(200));
     }
 
-    let first_write = now_secs();
-    let (status, body) = request(
-        port,
-        "POST",
-        "/api/entities/Note",
-        Some(ADMIN),
-        r#"{"title":"t0"}"#,
-    );
-    assert!(status == 200 || status == 201, "{status} {body}");
-    let note = json(&body)["id"].as_str().expect("note id").to_string();
-    for i in 1..=5 {
+    // The server puts each write in the wall-clock window it lands in, so
+    // the six writes must land in one window for the count below to be
+    // known. Start them just after a window opens, and take a new note when
+    // a slow machine still carries them into the next window.
+    let window_ms = u128::from(WINDOW) * 1000;
+    let mut written = None;
+    for _ in 0..10 {
+        while now_millis() % window_ms > 200 {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let window = now_millis() / window_ms;
         let (status, body) = request(
             port,
-            "PATCH",
-            &format!("/api/entities/Note/{note}"),
+            "POST",
+            "/api/entities/Note",
             Some(ADMIN),
-            &format!(r#"{{"title":"t{i}"}}"#),
+            r#"{"title":"t0"}"#,
         );
-        assert_eq!(status, 200, "{body}");
+        assert!(status == 200 || status == 201, "{status} {body}");
+        let note = json(&body)["id"].as_str().expect("note id").to_string();
+        for i in 1..=5 {
+            let (status, body) = request(
+                port,
+                "PATCH",
+                &format!("/api/entities/Note/{note}"),
+                Some(ADMIN),
+                &format!(r#"{{"title":"t{i}"}}"#),
+            );
+            assert_eq!(status, 200, "{body}");
+        }
+        if now_millis() / window_ms == window {
+            written = Some(note);
+            break;
+        }
     }
-    let last_write = now_secs();
-    let windows = (last_write / WINDOW - first_write / WINDOW + 1) as usize;
+    let note = written.expect("six writes never landed in one window");
+    let windows = 1usize;
 
     let runs = |rt: &Runtime| -> usize {
         rt.list("Run")
@@ -250,5 +265,5 @@ fn edits_in_a_window_run_the_hook_once() {
     }
     // And no more after that: one run per window, not one per write.
     std::thread::sleep(Duration::from_secs(WINDOW + 1));
-    assert_eq!(runs(&rt), windows, "six writes in {windows} window(s)");
+    assert_eq!(runs(&rt), windows, "six writes in one window");
 }
