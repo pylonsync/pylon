@@ -244,6 +244,59 @@ impl MemCache {
     }
 }
 
+/// What the page cache did since the process started. Each count is one
+/// relaxed atomic add on a path that already reads or writes the cache.
+pub mod stats {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static FRESH_HITS: AtomicU64 = AtomicU64::new(0);
+    static STALE_SERVES: AtomicU64 = AtomicU64::new(0);
+    static STALE_ON_ERROR: AtomicU64 = AtomicU64::new(0);
+    static NO_PAGE: AtomicU64 = AtomicU64::new(0);
+    static STORES: AtomicU64 = AtomicU64::new(0);
+
+    /// A fresh stored page answered the request.
+    pub fn fresh_hit() {
+        FRESH_HITS.fetch_add(1, Ordering::Relaxed);
+    }
+    /// A stored page past its window answered, and a new render started.
+    pub fn stale_serve() {
+        STALE_SERVES.fetch_add(1, Ordering::Relaxed);
+    }
+    /// A render failed and a stored page answered in its place.
+    pub fn stale_on_error() {
+        STALE_ON_ERROR.fetch_add(1, Ordering::Relaxed);
+    }
+    /// A request that could read the cache found no page it could serve, so
+    /// the page rendered.
+    pub fn no_page() {
+        NO_PAGE.fetch_add(1, Ordering::Relaxed);
+    }
+    pub(super) fn store() {
+        STORES.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn json() -> serde_json::Value {
+        let (entries, bytes, budget) = super::mem_cache()
+            .map(|m| {
+                let g = m.inner.read().unwrap();
+                (g.map.len(), g.bytes, m.budget_bytes)
+            })
+            .unwrap_or((0, 0, 0));
+        serde_json::json!({
+            "fresh_hits": FRESH_HITS.load(Ordering::Relaxed),
+            "stale_serves": STALE_SERVES.load(Ordering::Relaxed),
+            "stale_on_error": STALE_ON_ERROR.load(Ordering::Relaxed),
+            "no_page": NO_PAGE.load(Ordering::Relaxed),
+            "stores": STORES.load(Ordering::Relaxed),
+            "removals": super::removals().load(Ordering::Relaxed),
+            "memory_entries": entries,
+            "memory_bytes": bytes,
+            "memory_budget_bytes": budget,
+        })
+    }
+}
+
 /// Count of entries removed from disk. A read that loads an entry from disk
 /// notes the count first and copies the entry into memory only if the count
 /// is unchanged, so it cannot put back a page that was removed while it read.
@@ -384,7 +437,9 @@ pub fn put(
     if atomic_write(&dir.join(format!("{key}.html")), body).is_err() {
         return;
     }
-    let _ = atomic_write(&dir.join(format!("{key}.meta")), &meta_json);
+    if atomic_write(&dir.join(format!("{key}.meta")), &meta_json).is_ok() {
+        stats::store();
+    }
     // Keep the on-disk namespace bounded (throttled readdir-based eviction) so
     // path enumeration can't fill the disk.
     maybe_sweep_disk(&dir);

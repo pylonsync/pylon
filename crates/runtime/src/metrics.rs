@@ -404,6 +404,7 @@ impl Metrics {
                 "errors_per_minute": errors_per_min,
             },
             "latency_ms": latency,
+            "ssr_cache": crate::ssr_cache::stats::json(),
             "methods": {
                 "GET": self.requests_by_method.get.load(Ordering::Relaxed),
                 "POST": self.requests_by_method.post.load(Ordering::Relaxed),

@@ -6,8 +6,12 @@
 //! process itself (Fly restarts the machine). Neither was visible before this
 //! module; the first sign of trouble was the outage.
 //!
-//! Linux only. Every other platform returns `None` and `/metrics` omits the
-//! block.
+//! Linux reads /proc. macOS asks the kernel through sysctl, the Mach host
+//! statistics and libproc. Every other platform returns `None` and
+//! `/metrics` omits the block.
+
+// On macOS the /proc reader runs only in its tests.
+#![cfg_attr(target_os = "macos", allow(dead_code))]
 
 use std::path::Path;
 
@@ -66,13 +70,157 @@ impl MemorySnapshot {
     }
 }
 
-/// Read the current memory figures. `None` off Linux, or when /proc/meminfo
-/// cannot be read.
+/// Read the current memory figures. `None` on a platform other than Linux
+/// and macOS, or when the system does not answer.
 pub fn snapshot() -> Option<MemorySnapshot> {
-    if !cfg!(target_os = "linux") {
-        return None;
+    #[cfg(target_os = "macos")]
+    {
+        macos::snapshot()
     }
-    snapshot_from(Path::new("/proc"), std::process::id())
+    #[cfg(not(target_os = "macos"))]
+    {
+        if !cfg!(target_os = "linux") {
+            return None;
+        }
+        snapshot_from(Path::new("/proc"), std::process::id())
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use super::MemorySnapshot;
+
+    /// `hw.memsize`: the physical memory of the machine.
+    fn total_bytes() -> Option<u64> {
+        let mut value: u64 = 0;
+        let mut len = std::mem::size_of::<u64>();
+        // SAFETY: the name is NUL-terminated and `value` has `len` bytes.
+        let rc = unsafe {
+            libc::sysctlbyname(
+                c"hw.memsize".as_ptr(),
+                (&mut value as *mut u64).cast(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        (rc == 0).then_some(value)
+    }
+
+    /// Free and inactive pages: memory the kernel can hand out without
+    /// paging out a process. `free_count` holds the speculative pages, and
+    /// purgeable pages can be inactive too, so neither is added again.
+    /// The host port, taken once. Each `mach_host_self` call adds a
+    /// reference to the port, so the process keeps one for its life.
+    #[allow(deprecated)]
+    fn host_port() -> libc::mach_port_t {
+        static HOST: std::sync::OnceLock<libc::mach_port_t> = std::sync::OnceLock::new();
+        // SAFETY: mach_host_self has no preconditions.
+        *HOST.get_or_init(|| unsafe { libc::mach_host_self() })
+    }
+
+    fn available_bytes() -> Option<u64> {
+        // SAFETY: `stats` is a zeroed vm_statistics64 and `count` is its size
+        // in natural_t units; the kernel writes at most `count` units.
+        unsafe {
+            let mut stats: libc::vm_statistics64 = std::mem::zeroed();
+            let mut count = libc::HOST_VM_INFO64_COUNT;
+            let rc = libc::host_statistics64(
+                host_port(),
+                libc::HOST_VM_INFO64,
+                (&mut stats as *mut libc::vm_statistics64).cast(),
+                &mut count,
+            );
+            if rc != 0 {
+                return None;
+            }
+            let pages = u64::from(stats.free_count) + u64::from(stats.inactive_count);
+            Some(pages * libc::vm_page_size as u64)
+        }
+    }
+
+    /// Resident memory of one process, or `None` when it has exited or is
+    /// not readable.
+    fn rss_bytes(pid: libc::pid_t) -> Option<u64> {
+        // SAFETY: `info` is a zeroed proc_taskinfo and the size passed is its
+        // size; proc_pidinfo writes at most that many bytes.
+        unsafe {
+            let mut info: libc::proc_taskinfo = std::mem::zeroed();
+            let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+            let n = libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTASKINFO,
+                0,
+                (&mut info as *mut libc::proc_taskinfo).cast(),
+                size,
+            );
+            (n == size).then_some(info.pti_resident_size)
+        }
+    }
+
+    fn child_pids(pid: libc::pid_t) -> Vec<libc::pid_t> {
+        let mut buf = vec![0 as libc::pid_t; 256];
+        // SAFETY: the buffer has `buf.len()` pid_t slots and the size passed
+        // is its size in bytes.
+        let bytes = unsafe {
+            libc::proc_listchildpids(
+                pid,
+                buf.as_mut_ptr().cast(),
+                (buf.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int,
+            )
+        };
+        if bytes <= 0 {
+            return Vec::new();
+        }
+        // proc_listchildpids returns a count of pids on current macOS.
+        let n = (bytes as usize).min(buf.len());
+        buf.truncate(n);
+        buf.retain(|p| *p > 0);
+        buf
+    }
+
+    pub(super) fn snapshot() -> Option<MemorySnapshot> {
+        let pid = std::process::id() as libc::pid_t;
+        let mut children_rss_bytes = 0;
+        let mut children = 0;
+        for child in child_pids(pid) {
+            if let Some(rss) = rss_bytes(child) {
+                children_rss_bytes += rss;
+                children += 1;
+            }
+        }
+        Some(MemorySnapshot {
+            total_bytes: total_bytes()?,
+            available_bytes: available_bytes()?,
+            process_rss_bytes: rss_bytes(pid).unwrap_or(0),
+            children_rss_bytes,
+            children,
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn the_machine_and_this_process_report_memory() {
+            let snap = super::snapshot().expect("macOS answers");
+            assert!(snap.total_bytes > 0);
+            assert!(snap.available_bytes <= snap.total_bytes);
+            assert!(snap.process_rss_bytes > 0);
+        }
+
+        #[test]
+        fn a_child_process_is_counted() {
+            let mut child = std::process::Command::new("sleep")
+                .arg("5")
+                .spawn()
+                .unwrap();
+            let snap = super::snapshot().unwrap();
+            let _ = child.kill();
+            let _ = child.wait();
+            assert!(snap.children >= 1, "{snap:?}");
+            assert!(snap.children_rss_bytes > 0, "{snap:?}");
+        }
+    }
 }
 
 /// `snapshot()` against an arbitrary procfs root, so the walk is testable.

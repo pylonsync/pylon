@@ -2759,6 +2759,16 @@ fn start_server(
     // refresh. Always-on (memory cost is ~200 KB), gated only by
     // the route's admin-auth check.
     crate::log_ring::init_log_ring();
+    // The log file sits next to the SQLite database, or where
+    // PYLON_REQUEST_LOG_FILE says. A Postgres app with neither keeps the log
+    // in memory only.
+    let request_log_file = std::env::var("PYLON_REQUEST_LOG_FILE")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| runtime.db_path().map(|p| format!("{p}.requests.jsonl")));
+    if let Some(path) = request_log_file {
+        crate::log_ring::persist_to(std::path::PathBuf::from(path));
+    }
 
     // Shard kinds the app declares in app.ts, compiled before the listener
     // binds so a missing or invalid module fails the boot.
@@ -5415,23 +5425,25 @@ fn start_server(
                 mt.record_request("GET", 401);
                 return;
             }
-            // Parse `since=<iso-8601>` from the query string. Anything
-            // else in the query string is ignored — `since` is the
-            // only knob the dashboard sends and treating unknown
-            // params as errors would break casual curl debugging.
-            let since: Option<String> = url.split_once('?').map(|(_, q)| q).and_then(|q| {
-                q.split('&').find_map(|kv| {
-                    let (k, v) = kv.split_once('=')?;
-                    if k == "since" {
-                        Some(percent_decode_str(v))
-                    } else {
-                        None
-                    }
+            // `since=<iso-8601>` returns the entries after that time, and
+            // `limit=<n>` the newest n of them. Other parameters are
+            // ignored, so a hand-written curl does not fail on a typo.
+            let query_param = |name: &str| -> Option<String> {
+                url.split_once('?').map(|(_, q)| q).and_then(|q| {
+                    q.split('&').find_map(|kv| {
+                        let (k, v) = kv.split_once('=')?;
+                        (k == name).then(|| percent_decode_str(v))
+                    })
                 })
-            });
-            let entries = crate::log_ring::log_ring()
+            };
+            let since = query_param("since");
+            let limit = query_param("limit").and_then(|v| v.parse::<usize>().ok());
+            let mut entries = crate::log_ring::log_ring()
                 .map(|r| r.tail_since(since.as_deref()))
                 .unwrap_or_default();
+            if let Some(limit) = limit {
+                entries.truncate(limit);
+            }
             // Cursor = the newest timestamp we just shipped, or echo
             // the caller's `since` back when the tail was empty so a
             // subsequent poll doesn't rewind. Mirrors the Tinybird-
@@ -5486,7 +5498,6 @@ fn start_server(
                 )
             } else {
                 use crate::studio_health::Probe;
-                use pylon_http::DataStore as _;
                 // A primary-key read of a row that does not exist: it takes a
                 // connection and runs a query, and returns no data.
                 let database = match rt.manifest().entities.first() {
@@ -5511,6 +5522,19 @@ fn start_server(
                     .unwrap_or(0);
                 let (_, readiness) =
                     readiness(DRAINING.load(Ordering::SeqCst), crate::frontend::ssr_ready());
+                let db_path = rt.db_path();
+                let database_size = match (&db_path, rt.pg_shared_pool()) {
+                    (_, Some(pool)) => crate::studio_stats::postgres_json(&pool),
+                    (Some(path), None) => crate::studio_stats::sqlite_json(path),
+                    (None, None) => serde_json::Value::Null,
+                };
+                // The disk that holds the database file, or the working
+                // directory (uploads and the page cache live under it).
+                let data_dir = db_path
+                    .as_deref()
+                    .and_then(|p| std::path::Path::new(p).parent().map(|d| d.to_path_buf()))
+                    .filter(|d| !d.as_os_str().is_empty())
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
                 (
                     200,
                     serde_json::json!({
@@ -5521,7 +5545,11 @@ fn start_server(
                         "database": {
                             "backend": if rt.pg_shared_pool().is_some() { "postgres" } else { "sqlite" },
                             "probe": database,
+                            "size": database_size,
                         },
+                        "disk": crate::studio_stats::disk_json(&data_dir),
+                        "file_storage": crate::studio_stats::file_storage_json(),
+                        "ssr_cache": crate::ssr_cache::stats::json(),
                         "functions": functions,
                         "jobs": {
                             "stats": job_queue.stats(),
@@ -5985,7 +6013,6 @@ fn start_server(
                         None
                     }
                 });
-                use pylon_http::DataStore as _;
                 let rows = runtime
                     .list_after(path, after.as_deref(), limit + 1)
                     .unwrap_or_default();
@@ -10479,6 +10506,10 @@ fn start_server(
     // the shutdown window). Bounded by the same drain timeout; a
     // timeout just means we exit with a few events un-persisted, same
     // as a hard kill.
+    // The requests that finished during the drain are in the request log;
+    // write them, so the next process has them.
+    crate::log_ring::flush();
+
     if change_log.flush(drain_timeout) {
         tracing::info!("Change-log persister flushed");
     } else {

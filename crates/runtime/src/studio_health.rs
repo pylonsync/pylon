@@ -10,8 +10,6 @@
 
 use std::time::{Duration, Instant};
 
-use crate::jobs::{Job, JobStatus};
-
 /// The result of one probe: whether it passed, how long it took, and why it
 /// failed.
 #[derive(Debug, Clone, PartialEq)]

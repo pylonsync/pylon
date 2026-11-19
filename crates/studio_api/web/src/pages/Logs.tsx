@@ -150,9 +150,9 @@ export function LogsPage() {
 // ---------------------------------------------------------------------------
 
 /**
- * The request log, newest first. The server keeps the last 1,000 requests in
- * memory. The page loads them, then asks every 2 seconds for the rows after
- * the newest one it has.
+ * The request log, newest first. The server keeps the last requests: 1,000 by
+ * default, or PYLON_REQUEST_LOG_SIZE. The page loads the newest 1,000, then
+ * asks every 2 seconds for the rows after the newest one it has.
  */
 function RequestLog() {
 	const [rows, setRows] = useState<RequestRow[] | null>(null);
@@ -172,7 +172,7 @@ function RequestLog() {
 			try {
 				const since = cursor.current;
 				const res = await api<{ rows?: RequestRow[]; cursor?: string | null }>(
-					`/admin/logs/tail${since ? `?since=${encodeURIComponent(since)}` : ""}`,
+					`/admin/logs/tail?limit=${MAX_ROWS}${since ? `&since=${encodeURIComponent(since)}` : ""}`,
 				);
 				if (!alive) return;
 				const fresh = res?.rows ?? [];
@@ -299,7 +299,7 @@ function RequestLog() {
 						description={
 							narrowed
 								? "Change the text or the filters."
-								: `The server keeps the last ${MAX_ROWS.toLocaleString()} requests in memory. Open the app or call the API to see a request here. The requests that Studio makes are hidden: select "App and Studio requests" to see them.`
+								: `The request log has no app requests. Open the app or call the API to see a request here. The requests that Studio makes are hidden: select "App and Studio requests" to see them.`
 						}
 					/>
 				) : (

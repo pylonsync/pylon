@@ -23,6 +23,18 @@ export interface MetricsSnapshot {
 		p95_per_minute: Array<number | null>;
 		p99_per_minute: Array<number | null>;
 	} | null;
+	/** The page cache since the server started. */
+	ssr_cache?: {
+		fresh_hits: number;
+		stale_serves: number;
+		stale_on_error: number;
+		no_page: number;
+		stores: number;
+		removals: number;
+		memory_entries: number;
+		memory_bytes: number;
+		memory_budget_bytes: number;
+	};
 	methods?: Record<string, number>;
 	jobs?: {
 		pending: number;

@@ -33,7 +33,28 @@ type HealthReport = {
 	pylon_version: string;
 	app: { name: string; version: string };
 	uptime_secs: number;
-	database: { backend: string; probe: Probe | null };
+	database: {
+		backend: string;
+		probe: Probe | null;
+		/** SQLite: the file sizes. Postgres: pool use and the database size. */
+		size:
+			| { path: string; file_bytes: number; wal_bytes: number; total_bytes: number }
+			| {
+					pool_size: number;
+					pool_open: number;
+					pool_idle: number;
+					pool_in_use: number;
+					database_bytes: number | null;
+					error: string | null;
+			  }
+			| null;
+	};
+	/** The file system that holds the database, or the working directory. */
+	disk: { path: string; total_bytes: number; available_bytes: number } | null;
+	file_storage:
+		| { provider: "local"; dir: string; files: number; bytes: number; scanned_secs_ago: number }
+		| { provider: "local"; dir: string; scanning: true }
+		| { provider: string };
 	functions: Probe | null;
 	jobs: {
 		stats: { pending: number; running: number; failed: number; dead: number };
@@ -58,6 +79,19 @@ type HealthReport = {
 
 type State = "ok" | "warn" | "bad" | "none";
 
+/** Less than 10% free is a warning, less than 3% a problem. */
+function diskCheck(disk: HealthReport["disk"]): Check {
+	if (!disk) {
+		return { name: "Disk", state: "none", detail: "The server cannot read disk space on this platform" };
+	}
+	const free = disk.total_bytes > 0 ? disk.available_bytes / disk.total_bytes : 1;
+	return {
+		name: "Disk",
+		state: free < 0.03 ? "bad" : free < 0.1 ? "warn" : "ok",
+		detail: `${formatBytes(disk.available_bytes)} free of ${formatBytes(disk.total_bytes)} (${(free * 100).toFixed(0)}%) on the disk that holds ${disk.path}`,
+	};
+}
+
 type Check = {
 	name: string;
 	state: State;
@@ -74,6 +108,23 @@ const CHECK_BADGE: Record<State, { variant: BadgeProps["variant"]; label: string
 };
 
 const POLL_MS = 10_000;
+
+function databaseSize(db: HealthReport["database"]): string {
+	const size = db.size;
+	if (!size) return "In memory";
+	if ("file_bytes" in size) {
+		return `${formatBytes(size.total_bytes)} (SQLite file ${formatBytes(size.file_bytes)}, log ${formatBytes(size.wal_bytes)})`;
+	}
+	if (size.database_bytes === null) return `Postgres. The size is not available: ${size.error ?? "no answer"}`;
+	return `${formatBytes(size.database_bytes)} (Postgres)`;
+}
+
+function fileStorage(fs: HealthReport["file_storage"]): string {
+	if (fs.provider !== "local") return `Stored by ${fs.provider}. The server does not count them`;
+	if ("scanning" in fs) return `Counting the files in ${fs.dir}`;
+	if (!("files" in fs)) return "Not available";
+	return `${fs.files.toLocaleString()} ${fs.files === 1 ? "file" : "files"}, ${formatBytes(fs.bytes)} in ${fs.dir}`;
+}
 
 function probeCheck(name: string, probe: Probe | null, absent: string, slowMs: number): Check {
 	if (!probe) return { name, state: "none", detail: absent };
@@ -168,6 +219,7 @@ export function HealthPage() {
 						jobs?.persistent ? "The queue is stored" : "The queue is in memory only"
 					}`,
 				},
+				diskCheck(report.disk),
 				{
 					name: "Scheduler",
 					page: "jobs",
@@ -325,9 +377,28 @@ export function HealthPage() {
 								: "Loading"}
 						</p>
 					)}
-					<p className="px-3 pb-3 text-xs text-muted-foreground">
-						The server does not measure disk space.
-					</p>
+				</Section>
+
+				<Section title="Storage">
+					{report ? (
+						<Facts className="max-w-xl">
+							<Fact label="Database">{databaseSize(report.database)}</Fact>
+							{report.database.size && "pool_size" in report.database.size && (
+								<Fact label="Connections">
+									{report.database.size.pool_in_use} in use, {report.database.size.pool_open} open of{" "}
+									{report.database.size.pool_size}
+								</Fact>
+							)}
+							<Fact label="Disk">
+								{report.disk
+									? `${formatBytes(report.disk.total_bytes - report.disk.available_bytes)} of ${formatBytes(report.disk.total_bytes)} in use`
+									: "Not available on this platform"}
+							</Fact>
+							<Fact label="Files">{fileStorage(report.file_storage)}</Fact>
+						</Facts>
+					) : (
+						<p className="px-3 pb-3 text-xs text-muted-foreground">Loading</p>
+					)}
 				</Section>
 			</PageScroll>
 		</Page>

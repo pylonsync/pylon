@@ -29,16 +29,16 @@ An operator session counts only in Studio and on the admin API. It does not sign
 | Data | One page for each entity | The rows, 50 to a page. Sort on a column header. Filter a field with "contains" or "is equal to". A click on a row opens it in a panel to edit. |
 | App | Functions | The registered functions, and a form to call one. |
 | App | Policies, Routes, Manifest, Roles | What the manifest declares. |
-| Runtime | Logs | The last 1,000 requests with a live tail, the recent function calls, the audit events, and the sessions. |
-| Runtime | Metrics | Request rate, error rate and p50, p95 and p99 latency for the last 60 minutes, by route and by function. |
+| Runtime | Logs | The recent requests with a live tail, the recent function calls, the audit events, and the sessions. |
+| Runtime | Metrics | Request rate, error rate and p50, p95 and p99 latency for the last 60 minutes, by route and by function. The page cache hit rate. |
 | Runtime | Jobs | The queue by state, the dead-letter queue, the cron schedules and the handlers. Cancel a job that has not started, retry a dead job, run a schedule now. |
 | Runtime | Workflows | The runs by state and the steps of each run. Cancel a run. |
 | Runtime | Live sync | Each insert, update and delete as the server records it. |
-| Runtime | Health | Checks for the database, the functions runtime, the job queue, the scheduler, realtime clients, errors, latency and memory. |
+| Runtime | Health | Checks for the database, the functions runtime, the job queue, the scheduler, the disk, realtime clients, errors, latency and memory. The size of the database and the files, and the database connections in use. |
 | Runtime | Shards | The running shards and their tick times. |
 | Runtime | System tables | The auth and operations tables of the framework, read-only. |
 
-The request log is in memory. It holds the last 1,000 requests and starts empty after a restart. It keeps the path with no query string, and no headers and no bodies.
+The request log holds the last 1,000 requests. Set `PYLON_REQUEST_LOG_SIZE` to keep more (up to 50,000). On a SQLite app the server appends the log to `<database file>.requests.jsonl` every 5 seconds and reads it back when it starts, so a restart or a deploy keeps it. `PYLON_REQUEST_LOG_FILE` sets another path, and a Postgres app needs it to keep the log across a restart. It keeps the path with no query string, and no headers and no bodies.
 
 Live sync never shows the value of a `serverOnly` or `encrypted` field. It shows `[redacted]`.
 

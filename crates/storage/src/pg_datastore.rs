@@ -176,6 +176,29 @@ impl PgPool {
             .map_err(|e| format!("database query failed: {e}"))
     }
 
+    /// The size of the current database in bytes. Waits up to `timeout` for
+    /// a free connection, so a full pool cannot hold the caller.
+    pub fn database_size_bytes(&self, timeout: Duration) -> Result<i64, String> {
+        let mut conn = self.pool.get(timeout).map_err(|_| {
+            format!(
+                "no free database connection within {}ms",
+                timeout.as_millis()
+            )
+        })?;
+        if conn.is_closed() {
+            *conn = open_pooled(&self.url).map_err(|e| e.message)?;
+        }
+        conn.client_mut()
+            .query_one("SELECT pg_database_size(current_database())", &[])
+            .map(|row| row.get::<_, i64>(0))
+            .map_err(|e| format!("database query failed: {e}"))
+    }
+
+    /// Connections checked out and not yet returned.
+    pub fn in_use_count(&self) -> usize {
+        self.pool.in_use_count()
+    }
+
     /// Idle connections currently in the pool (for diagnostics/tests).
     pub fn available_count(&self) -> usize {
         self.pool.available_count()

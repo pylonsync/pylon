@@ -1790,6 +1790,7 @@ pub fn try_handle(
                     {
                         if entry.fresh {
                             tracing::debug!(path = %crate::metrics::request_log_path(&url), "SSR cache hit (disk, anon)");
+                            crate::ssr_cache::stats::fresh_hit();
                             return serve_cached_ssr(
                                 entry,
                                 cors_origin,
@@ -1812,6 +1813,7 @@ pub fn try_handle(
                                 &cache_vary,
                             );
                             revalidate_in_background(cfg, &request, cors_origin, key);
+                            crate::ssr_cache::stats::stale_serve();
                             return serve_cached_ssr_stale(
                                 entry,
                                 cors_origin,
@@ -1835,6 +1837,7 @@ pub fn try_handle(
                 {
                     if entry.fresh {
                         tracing::debug!(path = %crate::metrics::request_log_path(&url), session = session_present, "SSR cache hit (disk, bucket)");
+                        crate::ssr_cache::stats::fresh_hit();
                         return serve_cached_bucket_ssr(
                             entry,
                             cors_origin,
@@ -1844,6 +1847,11 @@ pub fn try_handle(
                             request,
                         );
                     }
+                }
+                // No stored page could answer, so the page renders. The render
+                // that refreshes a stale page is not a visitor's request.
+                if !is_background_revalidation() {
+                    crate::ssr_cache::stats::no_page();
                 }
             }
             return serve_via_ssr_rpc(
@@ -3934,6 +3942,7 @@ fn try_serve_stale_on_error(
                 fresh = entry.fresh,
                 "SSR render unavailable — serving cached copy (stale-on-error)"
             );
+            crate::ssr_cache::stats::stale_on_error();
             serve_cached_ssr_stale(entry, cors_origin, nav, md, "stale-on-error", request)
         }
         None => Err(request),

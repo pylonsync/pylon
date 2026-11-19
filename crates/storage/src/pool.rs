@@ -18,6 +18,8 @@ pub struct ConnectionPool<T> {
     inner: Mutex<VecDeque<T>>,
     available: Condvar,
     max_size: usize,
+    /// Connections handed out and not yet returned.
+    checked_out: std::sync::atomic::AtomicUsize,
 }
 
 /// RAII guard that returns the connection to the pool on drop.
@@ -44,6 +46,7 @@ impl<T> ConnectionPool<T> {
             inner: Mutex::new(VecDeque::with_capacity(max_size)),
             available: Condvar::new(),
             max_size,
+            checked_out: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -70,6 +73,8 @@ impl<T> ConnectionPool<T> {
 
         // Fast path: a connection is already available.
         if let Some(conn) = queue.pop_front() {
+            self.checked_out
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Ok(PooledConnection {
                 pool: self,
                 conn: Some(conn),
@@ -87,12 +92,21 @@ impl<T> ConnectionPool<T> {
         }
 
         match queue.pop_front() {
-            Some(conn) => Ok(PooledConnection {
-                pool: self,
-                conn: Some(conn),
-            }),
+            Some(conn) => {
+                self.checked_out
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(PooledConnection {
+                    pool: self,
+                    conn: Some(conn),
+                })
+            }
             None => Err(PoolError::Unavailable),
         }
+    }
+
+    /// Number of connections handed out and not yet returned.
+    pub fn in_use_count(&self) -> usize {
+        self.checked_out.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Number of connections currently idle in the pool.
@@ -139,6 +153,9 @@ impl std::error::Error for PoolError {}
 impl<T> Drop for PooledConnection<'_, T> {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
+            self.pool
+                .checked_out
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             self.pool.add(conn);
         }
     }
@@ -187,6 +204,20 @@ mod tests {
         }
 
         // Guard dropped, connection returned.
+        assert_eq!(pool.available_count(), 2);
+    }
+
+    #[test]
+    fn in_use_counts_only_connections_handed_out() {
+        // A pool of four that opened two: two are open, none is in use.
+        let pool = ConnectionPool::new(4);
+        pool.add("a");
+        pool.add("b");
+        assert_eq!(pool.in_use_count(), 0);
+        let first = pool.get(Duration::from_millis(10)).unwrap();
+        assert_eq!(pool.in_use_count(), 1);
+        drop(first);
+        assert_eq!(pool.in_use_count(), 0);
         assert_eq!(pool.available_count(), 2);
     }
 

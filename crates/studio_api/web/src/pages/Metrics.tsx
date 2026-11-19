@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/table";
 import { useMetrics } from "@/hooks/use-metrics";
 import { useQuery } from "@/hooks/use-query";
-import { formatDuration, percentile, routeOfPath } from "@/lib/format";
+import { formatBytes, formatDuration, percentile, routeOfPath } from "@/lib/format";
 import { api } from "@/lib/pylon";
 import { LockedPage } from "./Locked";
 
@@ -238,6 +238,7 @@ export function MetricsPage() {
 						empty="The server has no function traces. Call a function to record one."
 					/>
 				</Section>
+				<PageCacheSection cache={metrics?.ssr_cache} />
 				<Section title="Requests by method" aside="Since the server started">
 					<Table aria-label="Requests by method" className="border-t">
 						<TableHeader className="static">
@@ -266,8 +267,8 @@ export function MetricsPage() {
 					Latency is the time from the first byte of a request to the response,
 					in histogram buckets: a percentile shows the upper bound of its
 					bucket. The route and function tables come from the request log and
-					the function traces, which hold the most recent items only. The server
-					does not report page cache or database statistics.
+					the function traces, which hold the most recent items only. The
+					database size and connections are on the Health page.
 				</p>
 			</PageScroll>
 		</Page>
@@ -334,5 +335,56 @@ function BreakdownTable({
 				</TableBody>
 			</Table>
 		</div>
+	);
+}
+
+/**
+ * What the page cache did since the server started. A page is cached when it
+ * exports `revalidate` or `cache = "auth-bucketed"` (see the SSR caching docs).
+ */
+function PageCacheSection({ cache }: { cache: NonNullable<ReturnType<typeof useMetrics>["metrics"]>["ssr_cache"] }) {
+	if (!cache) {
+		return (
+			<Section title="Page cache">
+				<p className="px-3 pb-3 text-xs text-muted-foreground">Loading</p>
+			</Section>
+		);
+	}
+	const served = cache.fresh_hits + cache.stale_serves;
+	const lookups = served + cache.no_page;
+	return (
+		<Section title="Page cache" aside="Since the server started">
+			<StatStrip>
+				<Stat
+					label="Hit rate"
+					value={lookups > 0 ? `${((served / lookups) * 100).toFixed(1)}%` : "–"}
+					note={`${served.toLocaleString()} of ${lookups.toLocaleString()} page requests`}
+				/>
+				<Stat label="Fresh hits" value={cache.fresh_hits.toLocaleString()} />
+				<Stat
+					label="Stale serves"
+					value={cache.stale_serves.toLocaleString()}
+					note="Served while a new render ran"
+				/>
+				<Stat
+					label="Served on error"
+					value={cache.stale_on_error.toLocaleString()}
+					note="A render failed"
+				/>
+				<Stat label="No stored page" value={cache.no_page.toLocaleString()} />
+				<Stat
+					label="In memory"
+					value={formatBytes(cache.memory_bytes)}
+					note={`${cache.memory_entries.toLocaleString()} ${cache.memory_entries === 1 ? "page" : "pages"} of ${formatBytes(cache.memory_budget_bytes)}`}
+				/>
+			</StatStrip>
+			<p className="px-3 py-2 text-xs text-muted-foreground">
+				A page request that can read the cache is a hit when a stored page answers
+				it. A page that does not export <code>revalidate</code> or{" "}
+				<code>cache = "auth-bucketed"</code> is never stored, so its requests count
+				as no stored page. {cache.stores.toLocaleString()} renders were stored and{" "}
+				{cache.removals.toLocaleString()} pages were removed.
+			</p>
+		</Section>
 	);
 }
