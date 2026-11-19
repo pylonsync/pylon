@@ -1262,11 +1262,12 @@ fn complete_login(
         // delete it, and fall through to the email-lookup branch
         // (which will either find a freshly-recreated User by
         // email or create one).
-        let user_exists = matches!(
-            ctx.store.get_by_id(&user_entity_name, &existing.user_id),
-            Ok(Some(_))
-        );
-        if !user_exists {
+        let user_row = ctx
+            .store
+            .get_by_id(&user_entity_name, &existing.user_id)
+            .ok()
+            .flatten();
+        if user_row.is_none() {
             tracing::warn!(
                 "[oauth] dropping stale Account link for provider={provider} account_id={} — User row \"{}\" no longer exists",
                 userinfo.provider_account_id,
@@ -1295,6 +1296,17 @@ fn complete_login(
         } else {
             // User row exists — refresh the token bundle and
             // reuse the linked id.
+            if let Some(row) = &user_row {
+                stamp_email_verified_if_vouched(
+                    ctx,
+                    &user_entity_name,
+                    &existing.user_id,
+                    row,
+                    &canonical_email,
+                    &now,
+                    email_link,
+                );
+            }
             let mut refreshed =
                 pylon_auth::Account::new(existing.user_id.clone(), userinfo, tokens);
             refreshed.created_at = existing.created_at;
@@ -1368,6 +1380,45 @@ fn complete_login(
     Ok((user_id, session))
 }
 
+/// Stamp `emailVerified` on an existing User row when the provider just
+/// vouched for the row's own address and the row has no stamp yet.
+///
+/// Runs on every OAuth sign-in to an existing user, not only the first link.
+/// A row created before the app declared `emailVerified`, or linked before
+/// this ran on re-login, otherwise stayed unverified for good, and
+/// `PYLON_ADMIN_EMAILS` (which only promotes verified addresses) could never
+/// apply to it. Best-effort: a schema without the field drops the update,
+/// and sign-in still succeeds.
+#[cfg(not(target_arch = "wasm32"))]
+fn stamp_email_verified_if_vouched(
+    ctx: &RouterContext,
+    user_entity_name: &str,
+    user_id: &str,
+    row: &serde_json::Value,
+    canonical_email: &str,
+    now: &str,
+    email_link: EmailLink,
+) {
+    if email_link != EmailLink::ByEmail {
+        return;
+    }
+    let row_email = row
+        .get("email")
+        .and_then(|v| v.as_str())
+        .map(pylon_auth::normalize_email);
+    if row_email.as_deref() != Some(canonical_email) {
+        return;
+    }
+    if !row.get("emailVerified").map_or(true, |v| v.is_null()) {
+        return;
+    }
+    let _ = ctx.store.update(
+        user_entity_name,
+        user_id,
+        &serde_json::json!({ "emailVerified": now }),
+    );
+}
+
 /// Common path for OAuth callbacks that need to either match an
 /// existing User by email and link the provider, OR create a fresh
 /// User row. Called from two places:
@@ -1409,16 +1460,16 @@ fn handle_oauth_user_lookup_or_create(
                 message: "User row matched by email but had no id field".into(),
             });
         }
-        if row.get("emailVerified").map_or(true, |v| v.is_null()) {
-            // Best-effort — schemas without the field silently
-            // drop the update. We do NOT bail on this error since
-            // the user already existed and OAuth still succeeded.
-            let _ = ctx.store.update(
-                user_entity_name,
-                &id,
-                &serde_json::json!({ "emailVerified": now }),
-            );
-        }
+        // The row was found by this address, so the provider vouched for it.
+        stamp_email_verified_if_vouched(
+            ctx,
+            user_entity_name,
+            &id,
+            &row,
+            canonical_email,
+            now,
+            email_link,
+        );
         ctx.account_store
             .upsert(&pylon_auth::Account::new(id.clone(), userinfo, tokens));
         return Ok(id);
@@ -5565,6 +5616,83 @@ mod auth_gate_tests {
             assert_eq!(entity, "User");
             assert_eq!(id, "u-1");
             assert!(data.get("emailVerified").is_some());
+        });
+    }
+
+    fn linked_identity(email: &str) -> (pylon_auth::UserInfo, pylon_auth::TokenSet) {
+        let info = pylon_auth::UserInfo {
+            provider: "stack0".into(),
+            provider_account_id: "sub-alice".into(),
+            email: email.into(),
+            name: Some("Alice".into()),
+            avatar_url: None,
+            orgs: None,
+        };
+        let tokens = pylon_auth::TokenSet {
+            access_token: "at".into(),
+            refresh_token: None,
+            id_token: None,
+            expires_at: None,
+            scope: None,
+            refresh_token_expires_at: None,
+        };
+        (info, tokens)
+    }
+
+    fn stamped_email_verified(store: &UserStubStore) -> bool {
+        store
+            .last_update
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|(entity, id, data)| {
+                entity == "User" && id == "u-1" && data.get("emailVerified").is_some()
+            })
+    }
+
+    // A user linked to the provider before their row was ever stamped (the
+    // app declared emailVerified later) stayed unverified on every later
+    // sign-in, so PYLON_ADMIN_EMAILS could never promote them.
+    #[test]
+    fn returning_oauth_sign_in_stamps_an_unverified_row_for_the_vouched_email() {
+        let anon = AuthContext::anonymous();
+        with_user_ctx(true, &anon, |ctx, store, _, _| {
+            let (info, tokens) = linked_identity("Alice@Example.com");
+            ctx.account_store
+                .upsert(&pylon_auth::Account::new("u-1".into(), &info, &tokens));
+            let (user_id, _) = crate::complete_login_from_userinfo(ctx, "stack0", &info, &tokens)
+                .ok()
+                .expect("sign-in succeeds");
+            assert_eq!(user_id, "u-1");
+            assert!(stamped_email_verified(store));
+        });
+    }
+
+    #[test]
+    fn returning_oauth_sign_in_does_not_stamp_a_different_address() {
+        let anon = AuthContext::anonymous();
+        with_user_ctx(true, &anon, |ctx, store, _, _| {
+            let (info, tokens) = linked_identity("alice@elsewhere.example");
+            ctx.account_store
+                .upsert(&pylon_auth::Account::new("u-1".into(), &info, &tokens));
+            crate::complete_login_from_userinfo(ctx, "stack0", &info, &tokens)
+                .ok()
+                .expect("sign-in succeeds");
+            assert!(!stamped_email_verified(store));
+        });
+    }
+
+    #[test]
+    fn returning_sign_in_without_an_email_does_not_stamp() {
+        let anon = AuthContext::anonymous();
+        with_user_ctx(true, &anon, |ctx, store, _, _| {
+            let (info, tokens) = linked_identity("alice@example.com");
+            ctx.account_store
+                .upsert(&pylon_auth::Account::new("u-1".into(), &info, &tokens));
+            crate::complete_login_without_email(ctx, "stack0", &info, &tokens)
+                .ok()
+                .expect("sign-in succeeds");
+            assert!(!stamped_email_verified(store));
         });
     }
 
