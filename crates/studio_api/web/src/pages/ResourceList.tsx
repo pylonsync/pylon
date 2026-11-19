@@ -58,7 +58,7 @@ import { Tooltip } from "@/components/ui/tooltip";
 import { Icon } from "@/layout/icon";
 import { setCount } from "@/lib/counts";
 import { getExtensionAction } from "@/lib/extensions";
-import { useQuery } from "@/hooks/use-query";
+import { nextRequestNumber, useQuery } from "@/hooks/use-query";
 import {
 	clip,
 	errorText,
@@ -178,10 +178,14 @@ export function ResourceListPage({
 	useEffect(() => {
 		const t = window.setTimeout(() => {
 			const next = searchText.trim();
-			setView((v) => (v.search === next ? v : { ...v, search: next, page: 1 }));
+			if (next === view.search) return;
+			// A new search shows other rows. A row that is no longer shown
+			// leaves the selection, so a bulk action cannot reach it.
+			setSelected(new Set());
+			setView((v) => ({ ...v, search: next, page: 1 }));
 		}, 250);
 		return () => window.clearTimeout(t);
-	}, [searchText]);
+	}, [searchText, view.search]);
 
 	const params = new URLSearchParams();
 	params.set("page", String(page));
@@ -202,6 +206,7 @@ export function ResourceListPage({
 		error,
 		loading,
 		reload: load,
+		dataRequest: listRequest,
 	} = useQuery(listUrl, async (): Promise<{ rows: Row[]; total: number | null }> => {
 		const res = await api<ListResponse>(listUrl);
 		if (Array.isArray(res)) {
@@ -325,8 +330,20 @@ export function ResourceListPage({
 			live = false;
 		};
 	}, [openId, rowOnPage, rows, fetchedRow, entity, openRow]);
+	// The row the server returned for the last save. The panel shows it at
+	// once, before the list reloads, and keeps it if the reload fails. Only a
+	// list from a request that started after the save replaces it.
+	const [lastSave, setLastSave] = useState<{ row: Row; after: number } | null>(
+		null,
+	);
+	const savedRow =
+		lastSave && listRequest < lastSave.after && lastSave.row.id === openId
+			? lastSave.row
+			: null;
 	const panelRow =
-		rowOnPage ?? (fetchedRow && fetchedRow.id === openId ? fetchedRow : null);
+		savedRow ??
+		rowOnPage ??
+		(fetchedRow && fetchedRow.id === openId ? fetchedRow : null);
 
 	const returnFocus = useCallback(() => {
 		const id = lastOpenId.current;
@@ -1031,6 +1048,7 @@ export function ResourceListPage({
 						if (saved?.id) lastOpenId.current = saved.id;
 					} else if (saved && saved.id === openId) {
 						setFetchedRow(saved);
+						setLastSave({ row: saved, after: nextRequestNumber() });
 					}
 					afterWrite();
 				}}

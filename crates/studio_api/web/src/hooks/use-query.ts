@@ -18,13 +18,38 @@ export interface QueryResult<T> {
 	loading: boolean;
 	/** Load again now. The Promise settles when the request does. */
 	reload: () => Promise<void>;
+	/**
+	 * The number of the request that produced `data`. Request numbers grow
+	 * in the order requests start, across every query in the page.
+	 */
+	dataRequest: number;
+}
+
+let requestCounter = 0;
+
+/**
+ * Whether a response replaces the shown state. A response for another key
+ * always does. For the same key, only a request that started after the one
+ * shown does.
+ */
+export function responseReplaces(
+	shown: { key: string | null; request: number },
+	response: { key: string; request: number },
+): boolean {
+	return shown.key !== response.key || response.request > shown.request;
+}
+
+/** The number the next request will get. A request started later gets a larger one. */
+export function nextRequestNumber(): number {
+	return requestCounter + 1;
 }
 
 /**
  * Load data for a key, and load again when the key changes.
  *
  * `key` names the request: the same key means the same data. `fetcher` makes
- * the request. A response that arrives for an older key is dropped.
+ * the request. A response that arrives for an older key is dropped, and so is
+ * a response to a request that started before the one whose data is shown.
  */
 export function useQuery<T>(
 	key: string,
@@ -35,7 +60,8 @@ export function useQuery<T>(
 		key: string | null;
 		data: T | null;
 		error: string | null;
-	}>({ key: null, data: null, error: null });
+		request: number;
+	}>({ key: null, data: null, error: null, request: 0 });
 	const [manual, setManual] = useState(0);
 
 	const latest = useRef({ key, fetcher });
@@ -44,17 +70,22 @@ export function useQuery<T>(
 	});
 
 	const run = useCallback(async (forKey: string) => {
+		const request = ++requestCounter;
 		try {
 			const data = await latest.current.fetcher();
 			if (latest.current.key !== forKey) return;
-			setState({ key: forKey, data, error: null });
+			setState((prev) =>
+				responseReplaces(prev, { key: forKey, request })
+					? { key: forKey, data, error: null, request }
+					: prev,
+			);
 		} catch (err) {
 			if (latest.current.key !== forKey) return;
-			setState((prev) => ({
-				key: forKey,
-				data: prev.data,
-				error: errorText(err),
-			}));
+			setState((prev) =>
+				responseReplaces(prev, { key: forKey, request })
+					? { key: forKey, data: prev.data, error: errorText(err), request: prev.request }
+					: prev,
+			);
 		}
 	}, []);
 
@@ -80,5 +111,6 @@ export function useQuery<T>(
 		error: state.error,
 		loading: enabled && (state.key !== key || manual > 0),
 		reload,
+		dataRequest: state.request,
 	};
 }

@@ -202,6 +202,16 @@ function RowForm({
 					`${path}/${encodeURIComponent(row.id)}`,
 					{ method: "PATCH", body: JSON.stringify(body) },
 				);
+				// The saved values are the server's now. Drop them from the
+				// edits, so a later change by another writer shows. A field that
+				// the operator changed again while the request ran stays.
+				setEdits((prev) => {
+					const rest = { ...prev };
+					for (const k of Object.keys(body)) {
+						if (JSON.stringify(rest[k]) === JSON.stringify(body[k])) delete rest[k];
+					}
+					return rest;
+				});
 				toast.success(
 					`${plural(dirtyKeys.length, "field")} saved`,
 				);
