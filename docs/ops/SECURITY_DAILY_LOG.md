@@ -1142,3 +1142,68 @@ The backup-code consumption race from November 13 remains open. It needs an atom
 Earlier copied-handler and deployment follow-up still applies. Main now includes the prior security patches, but this review did not verify deployed versions. This run commits the fix, regression tests, and report to a new PR under the user's final instruction. No merge or deployment is performed.
 
 Next main area: secrets and deployment configuration. Retain atomic backup-code consumption, dependency migration, and the blocked monitoring changes as follow-up work.
+
+## 2026-11-19
+
+Reviewed main at `e4f35ecd8` (0.22.75). HTTPS fetch confirmed no new main commits since the November 18 review. Created `security/daily-review-2026-11-19` in `/Users/ericc59/Dev/pylon-security-20261119`. The primary checkout remains at `ce9189551`. It had no tracked edits. Preserved its Python caches and all other worktrees.
+
+Read SECURITY.md, both October 27 reports, security workflows, and prior daily findings. The November 18 report and signing-key exclusions remain in [PR #86](https://github.com/pylonsync/pylon/pull/86), at `bed8cccb9`. They are pending fixes, not new findings today. The November 12 monitoring fixes remain on their local branch. No existing work was overwritten. The daily task remains at 09:00 local time. Its next run is November 20. No duplicate task was created.
+
+### Dependency and build review
+
+Reviewed the runtime and builder dependency stages, generated Docker installs, CI advisory gates, static Linux dependency checksums, and release artifact transfer. The root and Docker dependency manifests agree. The release build uses the Cargo lockfile. Generated app and workspace build installs can resolve dependencies when their input manifest changes. Build source and configuration must remain trusted. No new build-script or template authorization defect was confirmed.
+
+Current RustSec data added eight Wasmtime advisories, RUSTSEC-2026-0566 through RUSTSEC-2026-0573. Both production and benchmark locks selected 49.0.5. Initial Cargo audit and Cargo deny failed. Updated the runtime requirement and both locks to 49.0.6. Cargo also updated its coupled Cranelift and internal Wasmtime packages. No application API change was needed. The benchmark lock also refreshed 17 local package versions from 0.22.70 to 0.22.75.
+
+Traced the shard engine in `crates/runtime/src/shard_wasm.rs`. Pylon builds without Wasmtime threads, GC, component-model, or WASI support. It does not enable threads through `Config::wasm_features`. It does not call `Caller::get_module_export`. No remote exploit of the eight advisories was confirmed in Pylon's current configuration. These dependency updates remove affected versions; they do not prove that an unauthenticated caller could exploit the original runtime.
+
+The [threads advisory](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-2674-w29h-wqvj) requires an embedder to enable threads despite compiling without that support. An attacker must then supply a guest module that executes an affected atomic instruction. Added `crates/runtime/tests/wasmtime_security.rs` to verify that this invalid configuration is rejected. A positive test retains the default engine. The same test source ran in a temporary crate with 49.0.5 and Pylon's feature set. The denial test failed, and the positive test passed. Both pass with 49.0.6 in the runtime workspace. The probe checks the unsafe configuration before guest execution. It does not abort a host process or test a production service.
+
+Current data also added nine heapless unsoundness advisories, RUSTSEC-2026-0574 through RUSTSEC-2026-0582. Updated heapless 0.9.2 to the compatible fixed 0.9.4 in both locks. This dependency comes through generic-btree and Loro. Cargo 1.98.1 regenerated both locks. Inspected the changed package selections and tested the shard and CRDT paths. No advisory ignore or security threshold changed.
+
+### Current advisory scans and remaining dependency work
+
+Scanned all 12 tracked supported lockfiles before and after the updates. Final OSV exit: 1 for findings. Severity gate exit: 0 under the existing policy. The scan is not clean. Initial OSV also returned 1 and its gate returned 0. The Wasmtime advisories had absent or low scores in that input; Cargo checks still blocked them.
+
+| Scope | Final result |
+| --- | --- |
+| Production/root Cargo | 28 advisory groups: 10 prior groups and 18 heapless groups |
+| Root Bun | No reported matches |
+| Studio build tools | One existing minimatch 10.2.5 group |
+| Docker/build | No reported matches in three locks; manifest consistency passed |
+| Search benchmark | 27 groups: 9 prior groups and 18 heapless groups |
+| Vendor-only SAML | One existing Chrono maintenance group |
+| Shard and Swift | No reported matches in four locks |
+
+Final Cargo audit and Cargo deny returned 0. RustSec commit: `7133866a6b44d6d3e1994ae6a48a296553c3c3da`, updated November 19. Audit reported zero unsuppressed vulnerabilities, eight maintenance warnings, and 20 unsoundness warnings. Deny passed advisories, bans, licenses, and sources under the existing policy. Image-lock and advisory-ignore checks passed.
+
+Heapless 0.7.17 remains through postcard 1.1.3. Heapless 0.8.0 remains through loro-delta 1.9.1. Postcard 1.1.3 is still the current registry release. Inspected the current loro-delta 1.18.0 manifest; it still requires heapless 0.8.0. A lockfile-only compatible update cannot select 0.9.4 for these chains. No safe caller migration was established today. The inspected paths use heapless Vec. Loro also consumes its owning iterator. The iterator advisory requires an element destructor to panic. A remotely controlled destructor or another affected operation was not established in these paths. This is limited source tracing, not proof of safety. Keep the matches visible. Follow upstream caller migration and test serialization, CRDT imports, and panic handling before replacing these dependencies. No validated runtime mitigation was found.
+
+GitHub [withdrew the picomatch advisory](https://github.com/advisories/GHSA-fc5q-39xc-vjpf) on November 18. Today's OSV results no longer report it. No package or ignore change removed that result. This corrects yesterday's outstanding advisory status. Studio minimatch still requires a tested caller migration to the fixed 11.0.1 line. Keep build patterns trusted. Chrono, im, sized-chunks, and the RSA exception remain unresolved as previously recorded.
+
+### Verification and gaps
+
+Rust tests used Cargo/rustc 1.98.1 and the primary checkout's build cache. Copied its existing Studio bundle for compilation. Studio was not rebuilt. No Bun lockfile or TypeScript source changed. Local evidence uses `/tmp/pylon-security-20261119-*`.
+
+| Command | Result |
+| --- | --- |
+| Wasmtime regression with exact 49.0.5 in a temporary crate | 1 expected failure; 1 passed |
+| `cargo test --locked -p pylon-runtime --test wasmtime_security --test shard_wasm` | 47 passed, including 45 shard integration tests |
+| `cargo test --locked -p pylon-crdt` | 52 passed |
+| `cargo check --locked --manifest-path benchmarks/search/Cargo.toml` | Passed |
+| `python3 -m unittest discover -s tools -p 'test_*.py' -v` | 5 passed, including both local Docker context builds |
+| `node --test packages/create-pylon/test/scaffold.test.mjs` | 19 passed |
+| `python3 tools/scan-lockfiles.py` and `tools/osv-gate.py`, final | Scan exit 1; gate exit 0 |
+| Cargo audit and Cargo deny, final | Exit 0 with warnings above |
+| Image-lock and advisory-ignore checks | Passed |
+| `cargo fmt --all -- --check` and `git diff --check` | Passed |
+
+The Docker tests verify main's existing context rules. They do not replace the signing-key regressions in pending PR #86. Full workspace tests, PostgreSQL integration, native client and release builds, full image vulnerability scans, native C library advisory scans, deployed secrets, cloud permissions, and Nix inputs were not checked. Existing compiler warnings remain. Direct unauthenticated GitHub advisory API requests failed; current RustSec data, OSV data, and upstream advisory pages were available. No failed scan was called clean. No live application was tested.
+
+### Deployment steps and next review
+
+Rebuild and release the runtime, CLI, and images with the updated Rust dependencies. Existing generated apps need that runtime update. Apps that build Pylon from source must refresh their own locks and scan them. No new copied TypeScript handler migration is required today. Prior handler and signing-key exclusion steps still apply.
+
+The backup-code consumption race remains open. It needs atomic storage changes and SQLite/PostgreSQL concurrency tests. Until fixed, require a current authenticator code through an application gate for sensitive operations. The November 12 monitoring fixes remain local because the earlier push credential lacked workflow scope. The release-history and native-library coverage gaps remain. Do not use the stale primary branch as a release source.
+
+This run prepares a commit and a new PR under the user's final instruction. No merge, deployment, or release is performed. Next main area: authentication and sessions. Prioritize atomic backup-code consumption. Retain the heapless caller migrations, Studio minimatch migration, and pending monitoring fixes as follow-up work.
