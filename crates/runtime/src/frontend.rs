@@ -175,8 +175,7 @@ impl FrontendConfig {
             }
         } else {
             // Default discovery: <app>/web/dist or <app>/apps/web/dist.
-            // First hit wins; matches the layout the `pylon init`
-            // template + the examples use.
+            // First hit wins; matches the layout the examples use.
             //
             // Plus the fallback locations the CLI's `ensure_frontend_built`
             // writes to when /app/web/ is read-only (Pylon Cloud / Fly

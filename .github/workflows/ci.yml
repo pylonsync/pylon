@@ -98,10 +98,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
-      # Catches drift between /templates + /packages/sdk and the copies
-      # vendored into crates/cli/ (cargo publish strips paths outside the
-      # crate root), and between /scripts and the installers the site
-      # serves.
+      # Catches drift between /scripts and the installers the site serves.
       - run: bash tools/check-cli-vendored.sh
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec  # stable
       # Cargo.lock must already agree with the manifests. Nothing else in CI

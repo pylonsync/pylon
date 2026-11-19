@@ -107,7 +107,6 @@ fn run() -> ExitCode {
         Some("explain") => commands::explain::run(&args, json_mode),
         Some("fn") => commands::cloud_fn::run(&args, json_mode),
         Some("jobs") => commands::cloud_jobs::run(&args, json_mode),
-        Some("init") => commands::init::run(&args, json_mode),
         Some("link") => commands::link::run(&args, json_mode),
         Some("lint") => commands::lint::run(&args, json_mode),
         Some("mcp") => commands::mcp::run(&args, json_mode),
@@ -163,6 +162,12 @@ fn run() -> ExitCode {
         Some("restore") => commands::backup::run_restore(&args, json_mode),
         Some("version") => commands::version::run(json_mode),
         Some("whoami") => commands::whoami::run(&args, json_mode),
+        Some("init") => {
+            output::print_error(
+                "pylon has no init command. To make a new project, run: npm create @pylonsync/pylon@latest <name>",
+            );
+            ExitCode::Usage
+        }
         Some(cmd) => {
             output::print_error(&format!("unknown command: \"{cmd}\""));
             if let Some(suggestion) = suggest_command(cmd, &TOP_LEVEL_COMMANDS) {
@@ -190,7 +195,7 @@ fn run() -> ExitCode {
 // Known commands for did-you-mean suggestions
 // ---------------------------------------------------------------------------
 
-const TOP_LEVEL_COMMANDS: [&str; 47] = [
+const TOP_LEVEL_COMMANDS: [&str; 46] = [
     "audit",
     "backup",
     "billing",
@@ -208,7 +213,6 @@ const TOP_LEVEL_COMMANDS: [&str; 47] = [
     "env",
     "explain",
     "fn",
-    "init",
     "jobs",
     "link",
     "lint",
@@ -411,21 +415,6 @@ fn print_command_help(cmd: &str) -> bool {
             println!("  -h, --help           Show this help");
             true
         }
-        "init" => {
-            println!("pylon init — scaffold a new project");
-            println!();
-            println!("Usage:");
-            println!("  pylon init [--frontend <f>] [--template <t>] [--yes]");
-            println!();
-            println!("Options:");
-            println!("  --frontend <f>       nextjs | react | tanstack | none");
-            println!("  --template <t>       Starter template");
-            println!("  --bun                Use bun as the package manager");
-            println!("  --yes, --no-prompt   Accept defaults, skip interactive prompts");
-            println!("  --overwrite          Allow writing into a non-empty directory");
-            println!("  -h, --help           Show this help");
-            true
-        }
         "add" => {
             println!("pylon add — wire a Stack0 suite app into this project");
             println!();
@@ -501,8 +490,7 @@ fn print_usage() {
     println!("  dev [app.ts]              Start dev server with hot reload");
     println!("  start [app.ts]            Start production server (no watcher)");
     println!(
-        "  init                      Initialize a new project
-  add <analytics|feedback>  Wire a Stack0 suite app into this project"
+        "  add <analytics|feedback>  Wire a Stack0 suite app into this project"
     );
     println!("  build                     Build for production");
     println!("  shards build              Build WebAssembly shard modules from their Rust crates");

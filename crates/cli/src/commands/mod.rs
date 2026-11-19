@@ -35,7 +35,6 @@ pub mod diagnostics;
 pub mod doctor;
 pub mod env;
 pub mod explain;
-pub mod init;
 pub mod link;
 pub mod lint;
 pub mod login;

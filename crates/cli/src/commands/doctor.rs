@@ -362,10 +362,8 @@ fn available_mb() -> Option<u64> {
 }
 
 fn check_manifest() -> Check {
-    // Accept either the root layout (legacy / `pylon init --frontend=none`
-    // before workspace scaffold) or the workspace layout `pylon init`
-    // currently produces (`apps/api/app.ts` next to its sibling web/
-    // app). Also `schema.ts` — some downstream apps named theirs that
+    // Accept either the root layout (a single app) or the workspace layout
+    // (`apps/api/app.ts` next to its sibling web/ app). Also `schema.ts` — some downstream apps named theirs that
     // way before the convention settled.
     const CANDIDATES: &[&str] = &[
         "pylon.manifest.json",

@@ -5,15 +5,7 @@ description: "Deploy a Next.js and Pylon app to Vercel with the required env, co
 
 One supported production shape puts the Next.js frontend on Vercel and the Pylon backend on Stack0 Cloud (Fly Machines internally). This guide takes you from a scaffolded Next.js and Pylon monorepo to a live production URL. If you do not need a separate Next.js app, Pylon's default scaffold serves server-rendered React and the API from one port (see [Deploy](/operations/deploy)), and you can skip Vercel entirely.
 
-If you have not scaffolded yet, generate the Next.js and Pylon monorepo:
-
-```bash
-pylon init my-app --frontend nextjs
-cd my-app
-bun install && bun dev
-```
-
-That gives you `apps/api` (Pylon backend) and `apps/web` (Next.js frontend), ready to deploy. `apps/web/next.config.js` already proxies `/api/*` to the backend on `:4321`.
+The guide assumes a repository with the Pylon backend in `apps/api` and the Next.js frontend in `apps/web`, where `apps/web/next.config.js` proxies `/api/*` to the backend on `:4321`. See [Next.js](/clients/next) for that setup.
 
 ## 1. Deploy the backend to Stack0 Cloud
 

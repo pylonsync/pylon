@@ -6,7 +6,7 @@
 //!
 //! Why a generator instead of a template default:
 //!
-//!   * The site key does not exist at `pylon init` time. A scaffold could
+//!   * The site key does not exist when the project is scaffolded. A scaffold could
 //!     only ship a placeholder, which either no-ops (dead code everyone
 //!     deletes) or posts to a site that is not theirs.
 //!   * Pylon is open source. Every new project phoning home to a commercial

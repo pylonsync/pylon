@@ -49,36 +49,29 @@ docker pull ghcr.io/pylonsync/pylon:latest
 ## 2. Scaffold a new app
 
 ```bash
-pylon init notes
+npm create @pylonsync/pylon@latest notes
 cd notes
+npm install
 ```
 
-This scaffolds a Bun workspace with the API at `apps/api/`:
+This scaffolds the default template, one app that serves the pages and the API from one port:
 
 ```
 notes/
-  apps/
-    api/
-      app.ts             # schema + manifest entry point
-      sdk.ts             # local re-export of @pylonsync/sdk
-      tsconfig.json
-      package.json
-  package.json           # workspace root
-  .gitignore
-  README.md
+  app.ts               # schema + manifest entry point
+  app/                 # server-rendered React routes
+  components/          # reusable React components
+  functions/           # server functions, one per file
+  package.json
 ```
 
-`pylon init` scaffolds the backend only, with no frontend framework, because Pylon renders React on the server natively. To also generate a separate frontend, pass `--frontend react` (Vite), `--frontend tanstack`, or `--frontend nextjs`, or pick interactively when stdin is a TTY. For a full-stack app with SSR pages, use `npm create @pylonsync/pylon` (above) instead.
-
-You'll add a `functions/` directory under `apps/api/` by hand in step 4.
+To use a different starting point, pass a template: `npm create @pylonsync/pylon@latest notes -- --template saas`. Run the command with no arguments to see the list.
 
 ## 3. Define the schema
 
-Replace `apps/api/app.ts` with:
+Open `app.ts`. It defines an `Item` entity that the starter page reads. Add a `Note` entity and its policy below `itemPolicy`:
 
 ```ts
-import { entity, field, policy, buildManifest } from "@pylonsync/sdk";
-
 const Note = entity(
   "Note",
   {
@@ -100,28 +93,28 @@ const notePolicy = policy({
   allowUpdate: "auth.userId == data.authorId",
   allowDelete: "auth.userId == data.authorId",
 });
+```
 
+Then add both to the manifest:
+
+```ts
 const manifest = buildManifest({
   name: "notes",
   version: "0.1.0",
-  entities: [Note],
-  policies: [notePolicy],
-  queries: [],
-  actions: [],
-  routes: [],
+  entities: [Item, Note],
+  queries: fns.queries,
+  actions: fns.actions,
+  policies: [itemPolicy, notePolicy],
+  auth: auth(),
+  routes: await discoverAppRoutes(),
 });
-
-// Not a debug leftover: the CLI runs `bun run app.ts` and parses stdout as
-// your manifest (see crates/cli/src/bun.rs). Deleting this line breaks every
-// pylon command that reads your schema.
-console.log(JSON.stringify(manifest, null, 2));
 ```
 
-The trailing `console.log` is required. `pylon dev` captures stdout as the manifest.
+Keep the `console.log(JSON.stringify(manifest, null, 2))` line at the end of the file. The CLI runs `app.ts` and reads the manifest from its output.
 
 ## 4. Add a server function
 
-Create `apps/api/functions/createNote.ts`:
+Create `functions/createNote.ts`:
 
 ```ts
 import { mutation, v } from "@pylonsync/functions";
@@ -150,20 +143,13 @@ export default mutation({
 
 The filename becomes the RPC name. It is callable at `POST /api/fn/createNote`.
 
-`pylon init` already adds `@pylonsync/sdk` + `@pylonsync/functions` to `apps/api/package.json`. If you skipped init or removed the deps, install them manually:
-
-```bash
-cd apps/api && bun add @pylonsync/sdk @pylonsync/functions
-```
-
 ## 5. Run the server
 
 ```bash
-cd apps/api
-pylon dev
+npm run dev
 ```
 
-`pylon dev` does four things:
+`npm run dev` runs `pylon dev`, which does four things:
 
 - auto-discovers `app.ts` (and `schema.ts` for legacy projects).
 - watches `app.ts` and `functions/*.ts`.
@@ -173,7 +159,7 @@ pylon dev
 Expected output:
 
 ```
-✓ notes v0.1.0 — 1 entities, 0 queries, 0 actions, 1 policies, 0 routes
+[1] OK: notes v0.1.0 — 2 entities, 0 queries, 1 actions, 2 policies, 8 routes
   Server:   http://localhost:4321
   Database: .pylon/dev.db
 ```

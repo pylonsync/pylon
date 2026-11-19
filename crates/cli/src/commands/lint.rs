@@ -935,12 +935,9 @@ mod tests {
 
     #[test]
     fn default_scaffold_manifest_is_lint_clean() {
-        // The `create-pylon` scaffold (templates/basic/app.ts) ships a `Post`
-        // entity WITH a `post_access` policy (public read, authed write). It
-        // must lint clean — a newcomer running `pylon dev` should never hit a
-        // PYL002 (no-policy → 403) cliff or a PYL001/PYL004 warning out of the
-        // box. If the default template drifts to something lint-dirty, this
-        // fails. Mirrors the scaffold exactly.
+        // A `Post` entity with a `post_access` policy (public read, authed
+        // write) must lint clean: no PYL002 (no policy, so 403) and no
+        // PYL001/PYL004 warning.
         let post = entity_with(
             "Post",
             vec![
