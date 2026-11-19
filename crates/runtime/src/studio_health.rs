@@ -3,10 +3,8 @@
 //! One answer with the checks an operator runs when something is wrong: can
 //! the server reach the database and how fast, does the functions runtime
 //! answer, do jobs wait past their time, does this machine run the cron tick,
-//! how many realtime clients are connected, how much memory is in use, and
-//! does the server take traffic.
-//!
-//! The server does not measure disk space, so the report has none.
+//! how many realtime clients are connected, how much memory and disk is in
+//! use, and does the server take traffic.
 
 use std::time::{Duration, Instant};
 
@@ -44,15 +42,15 @@ fn millis(d: Duration) -> f64 {
     (d.as_secs_f64() * 100_000.0).round() / 100.0
 }
 
-/// A job time: Unix seconds, written as `"1795114363Z"`.
-fn job_time(s: &str) -> Option<u64> {
-    s.trim_end_matches('Z').parse().ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::jobs::JobQueue;
+
+    /// A job time: Unix seconds, written as `"1795114363Z"`.
+    fn job_time(s: &str) -> Option<u64> {
+        s.trim_end_matches('Z').parse().ok()
+    }
 
     #[test]
     fn a_probe_reports_the_failure_and_a_time() {
