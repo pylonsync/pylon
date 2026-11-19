@@ -6,7 +6,7 @@ const SITE = process.env.SITE_URL ?? "http://localhost:4321";
 export default function robots(): Robots {
   return {
     // Keep the authenticated app and the API out of the index.
-    rules: { userAgent: "*", allow: "/", disallow: ["/dashboard", "/api/"] },
+    rules: { userAgent: "*", allow: "/", disallow: ["/dashboard", "/api/", "/internal/"] },
     sitemap: `${SITE}/sitemap.xml`,
   };
 }

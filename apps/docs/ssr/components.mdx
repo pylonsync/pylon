@@ -1,0 +1,59 @@
+---
+title: Components and design tokens
+description: "Every Pylon app with a frontend starts with ui-sdk primitives, a design token page and a component gallery."
+---
+
+An app made with `npm create @pylonsync/pylon@latest` has three things for its user interface:
+
+- `components/ui/`: primitives such as `Button`, `Dialog` and `Select`. Their behavior comes from [ui-sdk](https://ui-sdk.dev) (`@ui-sdk/react` and `@ui-sdk/core`). Their styles are Tailwind classes that read the design tokens.
+- `/internal/design`: a page that shows each design token in `app/globals.css`.
+- `/internal/components`: a page that shows each component in `components/ui/` with its variants and states.
+
+Both pages use the layout in `app/internal/layout.tsx`, a sidebar with a link to each section.
+
+## Rules for components
+
+These rules are in the `AGENTS.md` of each template, so a coding agent follows them.
+
+- Look in `components/` and on `/internal/components` before you write markup. Use the component that exists. If it almost fits, add a variant or a prop to it.
+- A page composes components. When the same markup appears a second time, move it into a component.
+- `components/ui/` holds primitives with no app data. `components/` holds the components of the product, built from the primitives.
+- Build a component from small parts that nest and accept `children` and `className`. A visual variation is a `cva` variant.
+- Use token classes such as `bg-primary` and `text-muted-foreground`. To add a token, add it to `app/globals.css` and to `app/internal/design/page.tsx`.
+- When you add or change a component, update its entry in `app/internal/components/page.tsx` and in `app/internal/sections.ts` in the same change.
+
+## Build a primitive on ui-sdk
+
+ui-sdk parts handle focus, keyboard navigation and ARIA attributes. They have no styles. Import each component from its own entry and style its parts with Tailwind:
+
+```tsx
+import { Tabs, TabsList, TabsPanel, TabsTab } from "@ui-sdk/react/tabs";
+```
+
+Each part has a `data-slot` attribute and state attributes such as `data-open`, `data-disabled` and `data-selected`. Popup content has `data-starting-style` and `data-ending-style` for transitions. The packages ship their documentation: read `node_modules/@ui-sdk/react/docs/llms.txt`, then the page of the component in `node_modules/@ui-sdk/react/docs/components/`.
+
+To render a part as a different element, pass the element to `render`:
+
+```tsx
+import { Link } from "@pylonsync/react";
+import { Button } from "@/components/ui/button";
+
+<Button render={<Link href="/settings" />}>Settings</Button>;
+```
+
+`app/globals.css` starts with `@layer ui-sdk;`. ui-sdk puts a small amount of its own CSS in that layer, and the line makes every style in your stylesheet win over it.
+
+## Who can open the internal pages
+
+The product does not link to `/internal/*`. `app/robots.ts` disallows the path and the pages set `robots: "noindex, nofollow"`. Anyone who has the URL can open them. To restrict them, read `auth` in `app/internal/layout.tsx` and call `response.notFound()`:
+
+```tsx
+export default function InternalLayout({ children, auth, response }: InternalLayoutProps) {
+  if (!auth.user_id) response.notFound();
+  // ...
+}
+```
+
+## ui-sdk is in beta
+
+The templates pin `@ui-sdk/react` and `@ui-sdk/core` to one exact version, because a beta release can change an API. Update both packages together, then check `/internal/components`.

@@ -6,7 +6,7 @@ const SITE = process.env.SITE_URL ?? "http://localhost:4321";
 export default function robots(): Robots {
   return {
     // Browse + listings are indexable; keep the personal inbox and API out.
-    rules: { userAgent: "*", allow: "/", disallow: ["/me", "/api/"] },
+    rules: { userAgent: "*", allow: "/", disallow: ["/me", "/api/", "/internal/"] },
     sitemap: `${SITE}/sitemap.xml`,
   };
 }

@@ -78,14 +78,12 @@ export function TimeDialog({
               <Select
                 id="task-status"
                 value={status}
-                onChange={(event) => onMove(event.target.value)}
-              >
-                {TASK_STATUSES.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.label}
-                  </option>
-                ))}
-              </Select>
+                onValueChange={(value) => onMove(value)}
+                items={TASK_STATUSES.map((s) => ({
+                  value: s.id,
+                  label: s.label,
+                }))}
+              />
             </div>
           ) : null}
 

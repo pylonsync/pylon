@@ -25,6 +25,8 @@ this pass before the user has to ask.
 - `app.ts`: data model + manifest (`entity()` + `field.*`, queries/actions/policies, `routes: await discoverAppRoutes()`). Ends with `console.log(JSON.stringify(manifest))` — that line is the manifest handoff (the CLI parses this file's stdout), not debug output. Never remove it.
 - `app/`: file-based SSR routes. `app/page.tsx` → `/`, `app/about/page.tsx` → `/about`, `app/blog/[slug]/page.tsx` → `/blog/:slug`. A `(group)` directory is stripped from the URL — `app/(marketing)/about/page.tsx` still serves `/about` — so a group's `layout.tsx` gives one section its own chrome (nav, footer) without changing any path; routes outside the group render without it. `app/layout.tsx` is the document shell; `app/error.tsx` / `app/not-found.tsx` are boundaries.
 - `app/globals.css`: Tailwind v4 entrypoint (auto-compiled and injected).
+- `components/`: reusable React components. `components/ui/` holds the primitives, built on `@ui-sdk/react`.
+- `app/internal/`: `/internal/design` shows the design tokens and `/internal/components` shows every component. See "UI: design tokens and components".
 - `functions/`: server functions, one per file, `default`-exported.
 - `.pylon/`: local dev state (SQLite, jobs, sessions, uploads). Created by `pylon dev`. Do not commit.
 
@@ -86,6 +88,21 @@ export default action({
 
 - **It's `db.useQueryOne`, not `useOne`.** Validators and field types have aliases: `v.bool`/`v.boolean`, `v.float`/`v.number`.
 - **Use the supported file and scheduling APIs.** Files go through `<FileUpload>` and `/api/files/*`; an upload is readable by its uploader only, so pass `visibility: "public"` to `uploadFile` or `<FileUpload>` for files every visitor sees; there is no `ctx.files`. One-shot work uses `ctx.scheduler.runAfter`, `runAt`, or `cancel`; there is no `defineWorkflow` or `defineJob`. Recurring work uses `cron("0 * * * *", "fnName")` in `buildManifest({ crons: [...] })`, imported from `@pylonsync/sdk`. Make the target function `internal: true`. It runs with anonymous auth, but its own `ctx.db.*` calls are server-side and bypass policies. Use `ctx.auth.elevate({ admin: true, reason: "..." })`, with a mandatory reason, only when chaining another internal function through `ctx.scheduler`.
+
+## UI: design tokens and components
+
+Every screen is built from reusable components. Before you write UI, open `/internal/components` (the component gallery) and `/internal/design` (the design tokens) in the running app.
+
+- **Reuse first.** Look in `components/` and on `/internal/components` before you write markup. If a component exists, use it. If it almost fits, extend it with a variant or a prop. Do not copy its markup into a page.
+- **A page composes components.** A `page.tsx` holds data loading and layout. When the same markup appears a second time, move it into a component.
+- **Two levels.** `components/ui/` holds primitives (Button, Dialog, Select). A primitive has no app data and makes no `db.*` or `callFn` call. `components/` holds the components of this product, built from the primitives.
+- **Compose, do not configure.** Build a component from small parts that nest (`Card`, `CardHeader`, `CardTitle`) and accept `children`. Do not add a boolean prop for each layout variation. Each component accepts `className` and passes its other props to its root element. A visual variation is a `cva` variant.
+- **Behavior comes from ui-sdk.** Build interactive primitives (dialogs, menus, selects, tabs, tooltips, comboboxes) on `@ui-sdk/react` parts. Do not write focus handling, keyboard navigation or ARIA attributes by hand, and do not add a second component library. Read `node_modules/@ui-sdk/react/docs/llms.txt` first, then the page of each component you use in `node_modules/@ui-sdk/react/docs/components/`. For a behavior with no ready-made component, read `core.md` and `rendering.md` in the same `docs/` directory.
+- **ui-sdk conventions.** Import each component from its own entry (`@ui-sdk/react/dialog`). The parts have no styles. Style them with Tailwind classes and their state attributes (`data-open`, `data-disabled`, `data-highlighted`, `data-starting-style`, `data-ending-style`). To render a part as a different element, pass the element to `render`: `<Button render={<Link href="/" />}>Home</Button>`. There is no `asChild` prop. `@layer ui-sdk;` stays the first line of `app/globals.css`.
+- **Tokens only.** Colors, radii and shadows come from the tokens in `app/globals.css` (`bg-primary`, `text-muted-foreground`, `rounded-lg`). Do not write a hex color in a new component. To add a token, add it to `app/globals.css` and to `app/internal/design/page.tsx`.
+- **Keep the gallery current.** When you add or change a component, update its `Showcase` in `app/internal/components/page.tsx` and its entry in `app/internal/sections.ts` in the same change. Show each variant and each state.
+
+The product does not link to `/internal/*`, and `app/robots.ts` and the page metadata keep search engines out. The pages are open to anyone who has the URL. To restrict them, read `auth` in `app/internal/layout.tsx` and call `response.notFound()`.
 
 ## Testing
 

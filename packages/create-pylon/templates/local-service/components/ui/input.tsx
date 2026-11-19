@@ -1,16 +1,16 @@
 import * as React from "react";
+import { Input as InputPart } from "@ui-sdk/react/input";
 
 import { cn } from "@/lib/utils";
 
 function Input({
   className,
-  type,
   ...props
-}: React.InputHTMLAttributes<HTMLInputElement>) {
+}: Omit<React.ComponentProps<typeof InputPart>, "className"> & {
+  className?: string;
+}) {
   return (
-    <input
-      type={type}
-      data-slot="input"
+    <InputPart
       className={cn(
         "flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors",
         "placeholder:text-muted-foreground",

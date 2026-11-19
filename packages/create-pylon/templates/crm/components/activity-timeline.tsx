@@ -86,15 +86,13 @@ export function ActivityTimeline({
             <Select
               aria-label="Activity type"
               value={kind}
-              onChange={(event) => setKind(event.target.value as ActivityKind)}
+              onValueChange={(value) => setKind(value as ActivityKind)}
               className="h-7 text-[12px]"
-            >
-              {ACTIVITY_KINDS.map((value) => (
-                <option key={value} value={value}>
-                  {value[0].toUpperCase() + value.slice(1)}
-                </option>
-              ))}
-            </Select>
+              items={ACTIVITY_KINDS.map((value) => ({
+                value: value,
+                label: value[0].toUpperCase() + value.slice(1),
+              }))}
+            />
           </div>
           <Button type="submit" size="sm" disabled={!body.trim() || busy}>
             {busy ? "Saving…" : "Log"}

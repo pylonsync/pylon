@@ -8,7 +8,7 @@ export default function robots(): Robots {
   return {
     // Keep the signed-in app and the API out of the index. `llms.txt` and the
     // sitemap stay crawlable — they are what a crawler or agent reads first.
-    rules: { userAgent: "*", allow: "/", disallow: ["/api/", "/login"] },
+    rules: { userAgent: "*", allow: "/", disallow: ["/api/", "/internal/", "/login"] },
     sitemap: `${SITE}/sitemap.xml`,
   };
 }

@@ -63,6 +63,7 @@
               "ssr/link",
               "ssr/image",
               "ssr/styling",
+              "ssr/components",
               "ssr/agents",
               "ssr/customer-domains",
               "ssr/offline"

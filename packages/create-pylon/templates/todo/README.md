@@ -16,16 +16,19 @@ to a second tab. Editing a file under `app/` reloads the page.
 
 ```
 app.ts              data model + manifest (entities, policies, auth, routes)
-app/page.tsx        "/" — the server-rendered page (heading + intro)
-app/todo-app.tsx    client island: guest session + live, optimistic todo list
-app/layout.tsx      root layout wrapping every page
+app/(app)/page.tsx  "/" — the server-rendered page (heading + intro)
+app/(app)/todo-app.tsx  client island: guest session + live, optimistic todo list
+app/(app)/layout.tsx  the centered column around the product pages
+app/internal/       /internal/design (tokens) and /internal/components (gallery)
+app/layout.tsx      root layout: the document shell
+components/ui/      primitives built on @ui-sdk/react
 app/globals.css     Tailwind entrypoint (compiled by Pylon)
 functions/          server functions (query/action) — typed RPC, if you need them
 ```
 
 ## How it works
 
-No login wall: `app/todo-app.tsx` wraps the list in `<EnsureGuest>`, which
+No login wall: `app/(app)/todo-app.tsx` wraps the list in `<EnsureGuest>`, which
 POSTs `/api/auth/guest` on first load so every visitor implicitly becomes their
 own user. Todos are private per browser — the `todo_access` policy in `app.ts`
 gates every read and write to the owner, and `userId: field.owner()` stamps the

@@ -1,7 +1,12 @@
 "use client";
 
 import React, { createContext, useContext, useEffect, useState } from "react";
-import * as DialogPrimitive from "@radix-ui/react-dialog";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { BRAND } from "@/lib/brand";
 import { Sidebar } from "@/components/sidebar";
 
@@ -61,31 +66,25 @@ export function AppShell({
           <Sidebar {...sidebar} />
         </aside>
 
-        <DialogPrimitive.Root open={navOpen} onOpenChange={setNavOpen}>
-          <DialogPrimitive.Portal>
-            <DialogPrimitive.Overlay className="fixed inset-0 z-40 bg-black/40 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 md:hidden" />
-            <DialogPrimitive.Content
-              className={
-                "fixed inset-y-0 left-0 z-40 flex w-[min(300px,86vw)] border-r border-border shadow-xl outline-none md:hidden " +
-                "duration-200 data-[state=open]:animate-in data-[state=open]:slide-in-from-left " +
-                "data-[state=closed]:animate-out data-[state=closed]:slide-out-to-left"
-              }
-            >
-              <DialogPrimitive.Title className="sr-only">{BRAND.name} navigation</DialogPrimitive.Title>
-              <DialogPrimitive.Description className="sr-only">
-                Links to every section, search, and your account.
-              </DialogPrimitive.Description>
-              <Sidebar
-                {...sidebar}
-                onNavigate={() => setNavOpen(false)}
-                onOpenCommand={() => {
-                  setNavOpen(false);
-                  onOpenCommand();
-                }}
-              />
-            </DialogPrimitive.Content>
-          </DialogPrimitive.Portal>
-        </DialogPrimitive.Root>
+        <Sheet open={navOpen} onOpenChange={setNavOpen}>
+          <SheetContent
+            className="border-r border-border md:hidden"
+            backdropClassName="md:hidden"
+          >
+            <SheetTitle className="sr-only">{BRAND.name} navigation</SheetTitle>
+            <SheetDescription className="sr-only">
+              Links to every section, search, and your account.
+            </SheetDescription>
+            <Sidebar
+              {...sidebar}
+              onNavigate={() => setNavOpen(false)}
+              onOpenCommand={() => {
+                setNavOpen(false);
+                onOpenCommand();
+              }}
+            />
+          </SheetContent>
+        </Sheet>
 
         <main className="flex min-w-0 flex-1 flex-col">{children}</main>
       </div>

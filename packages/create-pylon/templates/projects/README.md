@@ -79,7 +79,7 @@ app/
   clients/                client list + billable rollups
   login/                  email/password auth
 components/               presentational — props in, callbacks out
-  ui/                     shadcn primitives
+  ui/                     primitives built on @ui-sdk/react
 lib/work.ts               statuses, time, budget, progress — pure
 lib/format.ts             time + initials — pure
 functions/                server functions

@@ -94,29 +94,27 @@ export function NewTicketDialog({
               <Select
                 id="ticket-customer"
                 value={customerId}
-                onChange={(event) => setCustomerId(event.target.value)}
-              >
-                <option value="">—</option>
-                {customers.map((customer) => (
-                  <option key={customer.id} value={customer.id}>
-                    {customer.name}
-                  </option>
-                ))}
-              </Select>
+                onValueChange={(value) => setCustomerId(value)}
+                items={[
+                  { value: "", label: "—" },
+                  ...customers.map((customer) => ({
+                    value: customer.id,
+                    label: customer.name,
+                  })),
+                ]}
+              />
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="ticket-priority">Priority</Label>
               <Select
                 id="ticket-priority"
                 value={priority}
-                onChange={(event) => setPriority(event.target.value)}
-              >
-                {PRIORITIES.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.label}
-                  </option>
-                ))}
-              </Select>
+                onValueChange={(value) => setPriority(value)}
+                items={PRIORITIES.map((p) => ({
+                  value: p.id,
+                  label: p.label,
+                }))}
+              />
             </div>
           </div>
 

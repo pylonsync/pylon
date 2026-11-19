@@ -1,3 +1,7 @@
+/* ui-sdk adds a small amount of CSS in this layer. The layer is declared
+   first so that every style in this file wins over it. */
+@layer ui-sdk;
+
 @import "tailwindcss";
 @import "tw-animate-css";
 
@@ -14,8 +18,7 @@
    still means something. Light is the default; `.dark` holds a complete dark
    set (add `class="dark"` to <html> in app/layout.tsx to switch).
 
-   These are the variable names shadcn/ui generates against, so
-   `npx shadcn@latest add <component>` drops in already themed.
+   `/internal/design` shows every token.
 --------------------------------------------------------------------------- */
 :root {
   /* The brand accent: primary buttons, the brand mark, focus rings, and the

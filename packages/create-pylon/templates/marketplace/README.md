@@ -72,7 +72,7 @@ and shipping or pickup workflow before accepting real transactions.
 
 ## Rebrand it
 
-The brand ("Reprise") lives in `app/layout.tsx`; the demo catalog +
+The brand ("Reprise") lives in `app/(market)/layout.tsx`; the demo catalog +
 seed accounts are in `functions/seedMarket.ts`, `functions/seedOffers.ts`,
 and `client/market.ts`. The design tokens are in
 `ui/tokens.css` + `app/globals.css`.
@@ -81,10 +81,13 @@ and `client/market.ts`. The design tokens are in
 
 ```
 app.ts                         User + Listing + Offer + Watch + policies
-app/page.tsx                   SSR discovery, search, sort, category facets
-app/listing/[id]/page.tsx      SSR listing detail (+ generateMetadata)
-app/sell/page.tsx              list an item (sign-in gated)
-app/me/page.tsx                your listings, offers, watchlist (live)
+app/(market)/layout.tsx        header, search and footer around the marketplace pages
+app/(market)/page.tsx          SSR discovery, search, sort, category facets
+app/(market)/listing/[id]/page.tsx  SSR listing detail (+ generateMetadata)
+app/(market)/sell/page.tsx     list an item (sign-in gated)
+app/(market)/me/page.tsx       your listings, offers, watchlist (live)
+app/internal/                  /internal/design (tokens) and /internal/components (gallery)
+components/ui/                 primitives built on @ui-sdk/react
 functions/buyNow.ts, makeOffer.ts, respondToOffer.ts, seedMarket.ts, seedOffers.ts
 lib/catalog.ts                 categories, filtering, offer math (pure, tested)
 client/*                       the realtime islands (grid, activity feed, offers, sell form)

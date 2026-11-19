@@ -17,9 +17,12 @@ to a second tab. Editing a file under `app/` reloads the page.
 
 ```
 app.ts              data model + manifest (the Item entity, its policy, auth)
-app/page.tsx        "/" — the server-rendered page
-app/items-client.tsx client island: guest session + live, optimistic list
-app/layout.tsx      root layout wrapping every page
+app/(app)/page.tsx  "/" — the server-rendered page
+app/(app)/items-client.tsx  client island: guest session + live, optimistic list
+app/(app)/layout.tsx  the centered column around the product pages
+app/internal/       /internal/design (tokens) and /internal/components (gallery)
+app/layout.tsx      root layout: the document shell
+components/ui/      primitives built on @ui-sdk/react
 app/globals.css     Tailwind entrypoint (compiled by Pylon)
 functions/          server functions (query/action) — add them when you need them
 ```

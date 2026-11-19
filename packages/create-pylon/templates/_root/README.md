@@ -12,7 +12,7 @@ apps/
   expo/        Expo + React Native app (if you picked --platforms expo)
 
 packages/
-  ui/          Shared shadcn-style React primitives (web only)
+  ui/          Shared React primitives (web only)
 ```
 
 ## Getting started

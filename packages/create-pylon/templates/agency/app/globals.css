@@ -1,3 +1,7 @@
+/* ui-sdk adds a small amount of CSS in this layer. The layer is declared
+   first so that every style in this file wins over it. */
+@layer ui-sdk;
+
 @import "tailwindcss";
 @import "tw-animate-css";
 
@@ -11,7 +15,7 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
-/* shadcn/ui design tokens (new-york / zinc) + the marketing site colors. The
+/* Design tokens (`/internal/design` shows every token) + the marketing site colors. The
    marketing page is white with black type; `--brand` is used for links only,
    `--paper` is the light grey band behind the contact form. app/layout.tsx
    overrides these three from lib/site.config.ts on <html>. */

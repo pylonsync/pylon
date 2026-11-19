@@ -1,8 +1,8 @@
 import React from "react";
 
-// A layout wraps every page. This one is a centered column — the page renders
-// server-side first (shell + copy in the HTML), then hydrates into the live
-// list.
+// The root layout is the document shell for every route. Page chrome lives in
+// a route group layout: `app/(app)/layout.tsx` for the product and
+// `app/internal/layout.tsx` for the design reference.
 interface LayoutProps {
   children: React.ReactNode;
 }
@@ -18,9 +18,7 @@ export default function RootLayout({ children }: LayoutProps) {
             stylesheet link is injected here automatically. */}
       </head>
       <body className="min-h-screen bg-background text-foreground antialiased">
-        <main className="mx-auto flex min-h-screen max-w-lg flex-col px-4 py-12">
-          {children}
-        </main>
+        {children}
       </body>
     </html>
   );

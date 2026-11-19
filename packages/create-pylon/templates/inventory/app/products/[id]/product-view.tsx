@@ -39,9 +39,7 @@ export function ProductView({
                 }
                 action={
                   data.loading ? undefined : (
-                    <Button size="sm" variant="secondary" asChild>
-                      <Link href="/">Back to products</Link>
-                    </Button>
+                    <Button size="sm" variant="secondary" render={<Link href="/" />}>Back to products</Button>
                   )
                 }
               />

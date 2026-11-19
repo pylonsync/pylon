@@ -99,15 +99,15 @@ export function DealDialog({
             <Select
               id="deal-company"
               value={companyId}
-              onChange={(event) => setCompanyId(event.target.value)}
-            >
-              <option value="">—</option>
-              {companies.map((company) => (
-                <option key={company.id} value={company.id}>
-                  {company.name}
-                </option>
-              ))}
-            </Select>
+              onValueChange={(value) => setCompanyId(value)}
+              items={[
+                { value: "", label: "—" },
+                ...companies.map((company) => ({
+                  value: company.id,
+                  label: company.name,
+                })),
+              ]}
+            />
           </div>
 
           <div className="grid grid-cols-2 gap-3">
@@ -129,14 +129,12 @@ export function DealDialog({
               <Select
                 id="deal-stage"
                 value={stage}
-                onChange={(event) => setStage(event.target.value)}
-              >
-                {BOARD_STAGES.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.label}
-                  </option>
-                ))}
-              </Select>
+                onValueChange={(value) => setStage(value)}
+                items={BOARD_STAGES.map((s) => ({
+                  value: s.id,
+                  label: s.label,
+                }))}
+              />
             </div>
           </div>
 

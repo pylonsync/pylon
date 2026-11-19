@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 // This project uses the classic JSX transform, so .tsx tests import React.
 import React from "react";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { StockLevel } from "../components/stock-level";
 import { MovementDialog } from "../components/movement-dialog";
 
@@ -32,10 +32,23 @@ describe("StockLevel", () => {
   });
 });
 
+// Open the select that a label names, then pick the option with this text.
+async function pick(label: string, option: string) {
+  const id = screen.getByText(label, { selector: "label" }).getAttribute("for");
+  const trigger = document.getElementById(id ?? "");
+  if (!trigger) throw new Error(`no select for the label "${label}"`);
+  await act(async () => {
+    fireEvent.click(trigger);
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole("option", { name: option }));
+  });
+}
+
 describe("MovementDialog", () => {
   const level = (id: string) => (id === "p1" ? 12 : 0);
 
-  test("a sale is recorded as a negative delta from a positive input", () => {
+  test("a sale is recorded as a negative delta from a positive input", async () => {
     // Asking someone to type "-3" is how you get a "+3" sale.
     const recorded: unknown[] = [];
     render(
@@ -47,14 +60,14 @@ describe("MovementDialog", () => {
         onRecord={(id, delta, reason) => recorded.push([id, delta, reason])}
       />,
     );
-    fireEvent.change(screen.getByLabelText("Product"), { target: { value: "p1" } });
-    fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "sold" } });
+    await pick("Product", "CFE-001 · House Blend");
+    await pick("Reason", "Sold");
     fireEvent.change(screen.getByLabelText("Quantity"), { target: { value: "3" } });
     fireEvent.click(screen.getByRole("button", { name: /^record$/i }));
     expect(recorded).toEqual([["p1", -3, "sold"]]);
   });
 
-  test("a receipt is positive", () => {
+  test("a receipt is positive", async () => {
     const recorded: unknown[] = [];
     render(
       <MovementDialog
@@ -65,13 +78,13 @@ describe("MovementDialog", () => {
         onRecord={(id, delta) => recorded.push(delta)}
       />,
     );
-    fireEvent.change(screen.getByLabelText("Product"), { target: { value: "p1" } });
+    await pick("Product", "CFE-001 · House Blend");
     fireEvent.change(screen.getByLabelText("Quantity"), { target: { value: "10" } });
     fireEvent.click(screen.getByRole("button", { name: /^record$/i }));
     expect(recorded).toEqual([10]);
   });
 
-  test("a stock count sets the level, so it sends the difference", () => {
+  test("a stock count sets the level, so it sends the difference", async () => {
     // Counting a shelf produces "there are 9", not "adjust by -3".
     const recorded: unknown[] = [];
     render(
@@ -83,14 +96,14 @@ describe("MovementDialog", () => {
         onRecord={(id, delta) => recorded.push(delta)}
       />,
     );
-    fireEvent.change(screen.getByLabelText("Product"), { target: { value: "p1" } });
-    fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "count" } });
+    await pick("Product", "CFE-001 · House Blend");
+    await pick("Reason", "Stock count");
     fireEvent.change(screen.getByLabelText("Counted"), { target: { value: "9" } });
     fireEvent.click(screen.getByRole("button", { name: /^record$/i }));
     expect(recorded).toEqual([-3]);
   });
 
-  test("refuses to take stock below zero", () => {
+  test("refuses to take stock below zero", async () => {
     const recorded: unknown[] = [];
     render(
       <MovementDialog
@@ -101,15 +114,15 @@ describe("MovementDialog", () => {
         onRecord={(id, delta) => recorded.push(delta)}
       />,
     );
-    fireEvent.change(screen.getByLabelText("Product"), { target: { value: "p2" } });
-    fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "sold" } });
+    await pick("Product", "PKG-011 · Lids");
+    await pick("Reason", "Sold");
     fireEvent.change(screen.getByLabelText("Quantity"), { target: { value: "1" } });
     fireEvent.click(screen.getByRole("button", { name: /^record$/i }));
     expect(recorded).toEqual([]);
     expect(screen.getByText(/below zero/i)).toBeDefined();
   });
 
-  test("shows what the level will become", () => {
+  test("shows what the level will become", async () => {
     render(
       <MovementDialog
         open
@@ -119,7 +132,7 @@ describe("MovementDialog", () => {
         onRecord={() => {}}
       />,
     );
-    fireEvent.change(screen.getByLabelText("Product"), { target: { value: "p1" } });
+    await pick("Product", "CFE-001 · House Blend");
     fireEvent.change(screen.getByLabelText("Quantity"), { target: { value: "5" } });
     expect(screen.getByText(/On hand 12 → 17/)).toBeDefined();
   });

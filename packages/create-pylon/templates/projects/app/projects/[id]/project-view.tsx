@@ -43,9 +43,7 @@ export function ProjectView({
                 }
                 action={
                   data.loading ? undefined : (
-                    <Button size="sm" variant="secondary" asChild>
-                      <Link href="/">Back to projects</Link>
-                    </Button>
+                    <Button size="sm" variant="secondary" render={<Link href="/" />}>Back to projects</Button>
                   )
                 }
               />
@@ -92,18 +90,15 @@ export function ProjectView({
                   aria-label="Project status"
                   value={project.status}
                   className="h-8 md:h-7.5"
-                  onChange={(event) =>
+                  onValueChange={(value) =>
                     db.update("Project", project.id, {
-                      status: event.target.value,
-                    }).catch(console.warn)
-                  }
-                >
-                  {PROJECT_STATUSES.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.label}
-                    </option>
-                  ))}
-                </Select>
+                      status: value,
+                    }).catch(console.warn)}
+                  items={PROJECT_STATUSES.map((s) => ({
+                    value: s.id,
+                    label: s.label,
+                  }))}
+                />
               </div>
             </PageHeader>
 

@@ -89,7 +89,7 @@ app/
   movements/              the full ledger
   login/                  email/password auth
 components/               presentational — props in, callbacks out
-  ui/                     shadcn primitives
+  ui/                     primitives built on @ui-sdk/react
 lib/stock.ts              levels, valuation, reorder state — pure
 lib/format.ts             time + initials — pure
 functions/                server functions

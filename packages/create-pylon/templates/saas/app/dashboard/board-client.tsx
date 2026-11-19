@@ -3,8 +3,9 @@
 import React, { useEffect, useState } from "react";
 import { callFn } from "@pylonsync/react";
 import { listOrgMembers, type OrgMember } from "@pylonsync/client";
-import { CalendarDays, ChevronDown, Plus, Trash2 } from "lucide-react";
+import { CalendarDays, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Select } from "@/components/ui/select";
 import {
   Dialog,
   DialogContent,
@@ -319,32 +320,40 @@ function TaskDialog({
           />
           <div className="grid grid-cols-2 gap-3">
             <Field label="Status">
-              <Select value={status} onChange={setStatus}>
-                {TASK_STATUSES.map((s) => (
-                  <option key={s} value={s}>
-                    {STATUS_LABEL[s]}
-                  </option>
-                ))}
-              </Select>
+              <Select
+                className={inputCls}
+                value={status}
+                onValueChange={setStatus}
+                items={TASK_STATUSES.map((s) => ({
+                  value: s,
+                  label: STATUS_LABEL[s],
+                }))}
+              />
             </Field>
             <Field label="Priority">
-              <Select value={priority} onChange={setPriority}>
-                {TASK_PRIORITIES.map((p) => (
-                  <option key={p} value={p}>
-                    {PRIORITY_LABEL[p]}
-                  </option>
-                ))}
-              </Select>
+              <Select
+                className={inputCls}
+                value={priority}
+                onValueChange={setPriority}
+                items={TASK_PRIORITIES.map((p) => ({
+                  value: p,
+                  label: PRIORITY_LABEL[p],
+                }))}
+              />
             </Field>
             <Field label="Assignee">
-              <Select value={assigneeId} onChange={setAssigneeId}>
-                <option value="">Unassigned</option>
-                {options.map((m) => (
-                  <option key={m.userId} value={m.userId}>
-                    {m.name}
-                  </option>
-                ))}
-              </Select>
+              <Select
+                className={inputCls}
+                value={assigneeId}
+                onValueChange={setAssigneeId}
+                items={[
+                  { value: "", label: "Unassigned" },
+                  ...options.map((m) => ({
+                    value: m.userId,
+                    label: m.name,
+                  })),
+                ]}
+              />
             </Field>
             <Field label="Due date">
               <span className="relative block">
@@ -384,25 +393,6 @@ function TaskDialog({
         </form>
       </DialogContent>
     </Dialog>
-  );
-}
-
-function Select({
-  value,
-  onChange,
-  children,
-}: {
-  value: string;
-  onChange: (value: string) => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <span className="relative block">
-      <select value={value} onChange={(e) => onChange(e.target.value)} className={inputCls + " appearance-none pr-8"}>
-        {children}
-      </select>
-      <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 size-3.5 -translate-y-1/2 text-zinc-400" />
-    </span>
   );
 }
 

@@ -1,14 +1,16 @@
 import * as React from "react";
+import { Label as LabelPart } from "@ui-sdk/react/label";
 
 import { cn } from "@/lib/utils";
 
 function Label({
   className,
   ...props
-}: React.LabelHTMLAttributes<HTMLLabelElement>) {
+}: Omit<React.ComponentProps<typeof LabelPart>, "className"> & {
+  className?: string;
+}) {
   return (
-    <label
-      data-slot="label"
+    <LabelPart
       className={cn(
         "text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70",
         className,

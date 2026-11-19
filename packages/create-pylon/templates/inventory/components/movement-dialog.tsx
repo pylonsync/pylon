@@ -103,15 +103,15 @@ export function MovementDialog({
             <Select
               id="movement-product"
               value={productId}
-              onChange={(event) => setProductId(event.target.value)}
-            >
-              <option value="">—</option>
-              {products.map((product) => (
-                <option key={product.id} value={product.id}>
-                  {product.sku} · {product.name}
-                </option>
-              ))}
-            </Select>
+              onValueChange={(value) => setProductId(value)}
+              items={[
+                { value: "", label: "—" },
+                ...products.map((product) => ({
+                  value: product.id,
+                  label: `${product.sku} · ${product.name}`,
+                })),
+              ]}
+            />
           </div>
 
           <div className="grid grid-cols-2 gap-3">
@@ -120,14 +120,12 @@ export function MovementDialog({
               <Select
                 id="movement-reason"
                 value={reason}
-                onChange={(event) => setReason(event.target.value)}
-              >
-                {REASONS.map((r) => (
-                  <option key={r.id} value={r.id}>
-                    {r.label}
-                  </option>
-                ))}
-              </Select>
+                onValueChange={(value) => setReason(value)}
+                items={REASONS.map((r) => ({
+                  value: r.id,
+                  label: r.label,
+                }))}
+              />
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="movement-count">

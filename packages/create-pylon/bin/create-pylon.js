@@ -916,7 +916,9 @@ const layoutLines = isUnified
 			"  app.ts            data model + manifest (entities, functions, routes)",
 			"  app/              file-based SSR routes (app/page.tsx → /)",
 			"  app/layout.tsx    root layout (receives url + auth)",
+			"  components/       reusable components; components/ui is built on ui-sdk",
 			"  functions/        server functions (query/action)",
+			"  /internal/design, /internal/components   design tokens and the component gallery",
 		]
 	: ["  apps/api          schema + functions/ handlers"];
 if (!isUnified && platforms.includes("web")) {

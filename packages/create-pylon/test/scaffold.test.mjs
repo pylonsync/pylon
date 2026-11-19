@@ -420,3 +420,84 @@ test("--no-skill adds no skill", () => {
 	assert.ok(!existsSync(join(dir, "myapp", ".agents")));
 	assert.ok(!existsSync(join(dir, "myapp", ".claude", "skills")));
 });
+
+// Every template with a frontend ships the same UI base: primitives built on
+// ui-sdk, the `/internal/design` and `/internal/components` reference pages,
+// and the agent rules that tell an agent to reuse and compose components.
+const TEMPLATES_DIR = resolve(HERE, "..", "templates");
+const FRONTEND_TEMPLATES = readdirSync(TEMPLATES_DIR).filter(
+	(name) =>
+		existsSync(join(TEMPLATES_DIR, name, "app.ts")) &&
+		existsSync(join(TEMPLATES_DIR, name, "app", "layout.tsx")),
+);
+
+test("there are frontend templates to check", () => {
+	assert.ok(FRONTEND_TEMPLATES.length >= 20, `found ${FRONTEND_TEMPLATES.length}`);
+});
+
+for (const name of FRONTEND_TEMPLATES) {
+	const root = join(TEMPLATES_DIR, name);
+	const read = (...parts) => readFileSync(join(root, ...parts), "utf8");
+
+	test(`${name}: depends on ui-sdk and on no other component library`, () => {
+		const pkg = JSON.parse(read("package.json"));
+		const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+		assert.ok(deps["@ui-sdk/react"], "missing @ui-sdk/react");
+		assert.ok(deps["@ui-sdk/core"], "missing @ui-sdk/core");
+		const other = Object.keys(deps).filter(
+			(dep) => dep === "radix-ui" || dep.startsWith("@radix-ui/"),
+		);
+		assert.deepEqual(other, []);
+		assert.ok(!existsSync(join(root, "components.json")), "components.json is shadcn config");
+		assert.match(read("app", "globals.css"), /@layer ui-sdk;[\s\S]*@import "tailwindcss"/);
+	});
+
+	test(`${name}: ships the internal design and components pages`, () => {
+		for (const file of [
+			["app", "internal", "layout.tsx"],
+			["app", "internal", "sections.ts"],
+			["app", "internal", "design", "page.tsx"],
+			["app", "internal", "components", "page.tsx"],
+		]) {
+			assert.ok(existsSync(join(root, ...file)), `missing ${file.join("/")}`);
+		}
+		// The layout is a sidebar with a link to each page.
+		const layout = read("app", "internal", "layout.tsx");
+		assert.match(layout, /<aside/);
+		assert.match(layout, /href="\/internal\/design"/);
+		assert.match(layout, /href="\/internal\/components"/);
+		assert.match(read("app", "robots.ts"), /"\/internal\/"|disallow: "\/"/);
+	});
+
+	test(`${name}: the gallery shows every component in components/ui`, () => {
+		const gallery = read("app", "internal", "components", "page.tsx");
+		const sections = read("app", "internal", "sections.ts");
+		const missing = readdirSync(join(root, "components", "ui"))
+			.filter((file) => file.endsWith(".tsx"))
+			.map((file) => file.replace(/\.tsx$/, ""))
+			.filter((component) => !gallery.includes(`"@/components/ui/${component}"`));
+		assert.deepEqual(missing, [], "components with no Showcase");
+		// Each Showcase id has a sidebar entry.
+		for (const [, id] of gallery.matchAll(/<Showcase\s+id="([^"]+)"/g)) {
+			assert.ok(sections.includes(`id: "${id}"`), `sections.ts has no entry for "${id}"`);
+		}
+	});
+
+	test(`${name}: every color token is on the design page`, () => {
+		const css = read("app", "globals.css");
+		const page = read("app", "internal", "design", "page.tsx");
+		const missing = [...css.matchAll(/--color-([a-z0-9-]+)\s*:/g)]
+			.map(([, token]) => token)
+			.filter((token) => !token.endsWith("-foreground"))
+			.filter((token) => !page.includes(`"bg-${token}"`));
+		assert.deepEqual([...new Set(missing)], []);
+	});
+
+	test(`${name}: AGENTS.md has the component rules`, () => {
+		const agents = read("AGENTS.md");
+		assert.match(agents, /## UI: design tokens and components/);
+		assert.match(agents, /\/internal\/components/);
+		assert.match(agents, /node_modules\/@ui-sdk\/react\/docs\/llms\.txt/);
+		assert.doesNotMatch(agents, /shadcn/i);
+	});
+}

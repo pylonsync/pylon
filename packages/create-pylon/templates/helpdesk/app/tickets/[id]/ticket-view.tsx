@@ -42,9 +42,7 @@ export function TicketView({
                 }
                 action={
                   data.loading ? undefined : (
-                    <Button size="sm" variant="secondary" asChild>
-                      <Link href="/">Back to inbox</Link>
-                    </Button>
+                    <Button size="sm" variant="secondary" render={<Link href="/" />}>Back to inbox</Button>
                   )
                 }
               />
@@ -68,44 +66,39 @@ export function TicketView({
                 aria-label="Status"
                 value={ticket.status}
                 className="h-8 bg-background md:h-7.5"
-                onChange={(event) => setState({ status: event.target.value })}
-              >
-                {STATUSES.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.label}
-                  </option>
-                ))}
-              </Select>
+                onValueChange={(value) => setState({ status: value })}
+                items={STATUSES.map((s) => ({
+                  value: s.id,
+                  label: s.label,
+                }))}
+              />
             </Field>
             <Field label="Priority">
               <Select
                 aria-label="Priority"
                 value={ticket.priority}
                 className="h-8 bg-background md:h-7.5"
-                onChange={(event) => setState({ priority: event.target.value })}
-              >
-                {PRIORITIES.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.label}
-                  </option>
-                ))}
-              </Select>
+                onValueChange={(value) => setState({ priority: value })}
+                items={PRIORITIES.map((p) => ({
+                  value: p.id,
+                  label: p.label,
+                }))}
+              />
             </Field>
             <Field label="Assignee">
               <Select
                 aria-label="Assignee"
                 value={ticket.assigneeId ?? ""}
                 className="h-8 bg-background md:h-7.5"
-                onChange={(event) => setState({ assigneeId: event.target.value })}
-              >
-                <option value="">Unassigned</option>
-                {data.agents.map((agent) => (
-                  <option key={agent.id} value={agent.id}>
-                    {agent.displayName || agent.email}
-                    {agent.id === data.userId ? " (you)" : ""}
-                  </option>
-                ))}
-              </Select>
+                onValueChange={(value) => setState({ assigneeId: value })}
+                items={[
+                  { value: "", label: "Unassigned" },
+                  ...data.agents.map((agent) => ({
+                    value: agent.id,
+                    label: `${agent.displayName || agent.email}${agent.id === data.userId ? " (you)" : ""}`,
+                  })),
+                ]}
+              />
             </Field>
           </>
         );

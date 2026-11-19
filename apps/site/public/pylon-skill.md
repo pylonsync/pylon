@@ -28,7 +28,7 @@ Use this skill whenever:
 - The user's project has a `pylon.manifest.json`, `app.ts` importing from `@pylonsync/*`, or a `functions/` directory next to an `app.ts`.
 - The user's Swift project imports `PylonClient`, `PylonSync`, `PylonRealtime`, or `PylonSwiftUI`.
 - The user says "Pylon", "Pylonsync", "realtime backend", or asks to build a live-syncing feature.
-- The user runs `pylon dev`, `pylon init`, `pylon deploy`, `pylon codegen`, or another `pylon` CLI command.
+- The user runs `pylon dev`, `pylon deploy`, `pylon codegen`, or another `pylon` CLI command.
 - The user mentions Pylon Cloud, `www.pylonsync.com`, or `pylon deploy --target cloud`.
 
 ## Core mental model
@@ -55,12 +55,12 @@ my-app/
     blog/
       page.tsx           #   route "/blog"
       [slug]/page.tsx    #   dynamic route "/blog/:slug"
+    internal/            #   /internal/design (tokens), /internal/components (gallery)
     sitemap.ts           #   served at /sitemap.xml (optional)
     robots.ts            #   served at /robots.txt (optional)
   components/            # your components (see the layering table below)
-    ui/                  #   shadcn primitives — button, card, input, label,
-                         #   select, badge, table, textarea
-  components.json        # shadcn config — `bunx shadcn@latest add <name>` works
+    ui/                  #   primitives built on @ui-sdk/react: button, dialog,
+                         #   input, label, select, badge, card, table, textarea
   lib/utils.ts           # `cn` (clsx + tailwind-merge)
   public/                # static assets served verbatim at the root
   package.json           # deps: @pylonsync/sdk, @pylonsync/functions, @pylonsync/react, @pylonsync/client, react, react-dom
@@ -597,15 +597,11 @@ Pylon natively server-renders React from the same server that runs your backend 
 
   Keeping the data boundary in exactly one module is what makes everything below it trivially testable. The `create-pylon` starters are generated in this shape — read one for a worked example.
 
-- **Build on the UI kit that's already there.** Scaffolded apps ship `components/ui/` with shadcn primitives (`button`, `card`, `input`, `label`, `select`, `badge`, `table`, `textarea`), `lib/utils.ts` (`cn`), and a configured `components.json`. Use them, and style with the semantic tokens (`bg-background`, `bg-card`, `text-muted-foreground`, `border`) rather than hardcoded palette classes like `bg-zinc-50` — a raw `<input>` or a fixed color renders as an unstyled control next to the kit and breaks dark mode.
+- **Build on the UI kit that's already there.** Scaffolded apps (≥0.22.76) ship `components/ui/` with primitives built on `@ui-sdk/react` (`button`, `dialog`, `input`, `label`, `select`, `badge`, `card`, `table`, `textarea`), `lib/utils.ts` (`cn`), and two reference pages: `/internal/components` shows every component with its variants, and `/internal/design` shows every design token. Open both before you write UI. Use the components, and style with the semantic tokens (`bg-background`, `bg-card`, `text-muted-foreground`, `border`) rather than hardcoded palette classes like `bg-zinc-50`. A raw `<input>` or a fixed color renders as an unstyled control next to the kit and breaks dark mode.
 
-  Need a primitive that isn't there (dialog, dropdown, tabs, popover, …)? Add it rather than hand-rolling:
+  Every component is composable and reusable. Build it from small parts that nest and accept `children` and `className` (`Card`, `CardHeader`, `CardTitle`), make a visual variation a `cva` variant, and keep app data out of `components/ui/`. When the same markup appears on a second page, move it into `components/`.
 
-  ```sh
-  bunx shadcn@latest add dialog     # npx if you're on Node
-  ```
-
-  `components.json` is preconfigured (new-york, zinc, `@/components/ui`), so the component lands with the right imports and tokens.
+  Need a primitive that isn't there (menu, tabs, popover, tooltip, combobox, …)? Build it in `components/ui/` on the matching `@ui-sdk/react` part. Do not write the focus handling, keyboard navigation or ARIA attributes by hand, and do not add a second component library. Read `node_modules/@ui-sdk/react/docs/llms.txt`, then that component's page in `docs/components/`. The parts have no styles: import from the component's own entry (`@ui-sdk/react/tabs`), style with Tailwind and the state attributes (`data-open`, `data-selected`, `data-starting-style`), and pass an element to `render` to change what a part renders (`<Button render={<Link href="/" />}>`). There is no `asChild`. Add a `Showcase` for the new component to `app/internal/components/page.tsx` in the same change.
 
 - The page receives props: `{ url, params, searchParams, auth, response, serverData }` — type them with `PageProps<{ slug: string }>` from `@pylonsync/react` instead of hand-rolling. `auth` is `{ user_id, is_admin, tenant_id, roles }` resolved from the shared session. **The request's `headers` and `cookies` are intentionally NOT props** — they're server-only and stripped from the hydration payload (a session cookie must never reach client JS), so reading them in a component body would hydrate-mismatch. Read request-derived data through `serverData` or a server function.
 

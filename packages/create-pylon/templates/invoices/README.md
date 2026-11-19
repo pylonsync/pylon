@@ -70,7 +70,7 @@ app/
   clients/                client list
   login/                  email/password auth
 components/               presentational — props in, callbacks out
-  ui/                     shadcn primitives
+  ui/                     primitives built on @ui-sdk/react
 lib/billing.ts            money, totals, ageing, numbering — pure
 lib/format.ts             time + initials — pure
 functions/                server functions

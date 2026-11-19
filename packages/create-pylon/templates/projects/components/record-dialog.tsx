@@ -86,17 +86,16 @@ export function RecordDialog({
                 <Select
                   id={`record-${field.name}`}
                   value={values[field.name] ?? ""}
-                  onChange={(event) =>
-                    setValues((v) => ({ ...v, [field.name]: event.target.value }))
-                  }
-                >
-                  <option value="">—</option>
-                  {field.options.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </Select>
+                  onValueChange={(value) =>
+                    setValues((v) => ({ ...v, [field.name]: value }))}
+                  items={[
+                    { value: "", label: "—" },
+                    ...field.options.map((option) => ({
+                      value: option.value,
+                      label: option.label,
+                    })),
+                  ]}
+                />
               ) : (
                 <Input
                   id={`record-${field.name}`}

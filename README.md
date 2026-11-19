@@ -24,12 +24,12 @@ Open `http://localhost:4321`. The Pylon CLI ships as a dependency, so `npm run
 dev` runs it. You only need [Bun](https://bun.sh) ≥ 1.0 on your PATH (Pylon runs
 your TypeScript and SSR on it).
 
-Want `pylon` on your PATH (for `pylon init`, or `pylon deploy` from anywhere)?
+Want `pylon` on your PATH (for `pylon deploy` from anywhere)?
 `curl -fsSL https://www.pylonsync.com/install.sh | bash`, or on Windows
-`powershell -c "irm https://www.pylonsync.com/install.ps1 | iex"`. Prefer a backend-only
-project? `pylon init my-app` scaffolds an API-only app (add a frontend with
-`--frontend react|tanstack|nextjs`); `http://localhost:4321/studio` is the
-inspector.
+`powershell -c "irm https://www.pylonsync.com/install.ps1 | iex"`.
+`http://localhost:4321/studio` is the inspector. Every app with a frontend also
+serves `/internal/design` (its design tokens) and `/internal/components` (its
+component gallery).
 
 ## Use with your coding agent
 

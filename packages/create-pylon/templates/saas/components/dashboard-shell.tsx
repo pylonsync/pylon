@@ -3,7 +3,14 @@
 import React, { useState } from "react";
 import { Link, useRouter } from "@pylonsync/react";
 import { useAuth, OrganizationSwitcher } from "@pylonsync/client";
-import * as DialogPrimitive from "@radix-ui/react-dialog";
+import {
+  Sheet,
+  SheetClose,
+  SheetContent,
+  SheetDescription,
+  SheetTitle,
+  SheetTrigger,
+} from "@/components/ui/sheet";
 import {
   LayoutGrid,
   FolderKanban,
@@ -97,34 +104,34 @@ export function DashboardShell({
       <aside className="sticky top-0 hidden h-screen w-[244px] shrink-0 md:block">{sidebar}</aside>
 
       {/* Mobile top bar + drawer. */}
-      <DialogPrimitive.Root open={drawer} onOpenChange={setDrawer}>
+      <Sheet open={drawer} onOpenChange={setDrawer}>
         <header className="sticky top-0 z-30 flex h-14 items-center gap-2 border-b border-zinc-200/80 bg-white/90 px-3 backdrop-blur md:hidden">
-          <DialogPrimitive.Trigger
+          <SheetTrigger
             aria-label="Open navigation"
             className="flex size-9 items-center justify-center rounded-lg text-zinc-600 transition-colors hover:bg-zinc-100"
           >
             <Menu className="size-[18px]" strokeWidth={1.75} />
-          </DialogPrimitive.Trigger>
+          </SheetTrigger>
           <div className="min-w-0 flex-1 truncate text-[14px] font-medium">{title}</div>
           <Avatar id={userId} name={userName} />
         </header>
-        <DialogPrimitive.Portal>
-          <DialogPrimitive.Overlay className="fixed inset-0 z-40 bg-zinc-950/30 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 md:hidden" />
-          <DialogPrimitive.Content className="fixed inset-y-0 left-0 z-50 w-[280px] max-w-[85vw] bg-[#f4f4f5] shadow-[0_0_0_1px_rgba(0,0,0,0.06),0_24px_64px_-12px_rgba(0,0,0,0.3)] data-[state=open]:animate-in data-[state=open]:slide-in-from-left data-[state=closed]:animate-out data-[state=closed]:slide-out-to-left md:hidden">
-            <DialogPrimitive.Title className="sr-only">Navigation</DialogPrimitive.Title>
-            <DialogPrimitive.Description className="sr-only">
-              Pages and projects in this workspace
-            </DialogPrimitive.Description>
-            <DialogPrimitive.Close
-              aria-label="Close navigation"
-              className="absolute right-2.5 top-3 z-10 flex size-8 items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-200/60"
-            >
-              <X className="size-4" />
-            </DialogPrimitive.Close>
-            {sidebar}
-          </DialogPrimitive.Content>
-        </DialogPrimitive.Portal>
-      </DialogPrimitive.Root>
+        <SheetContent
+          className="block w-[280px] max-w-[85vw] bg-[#f4f4f5] shadow-[0_0_0_1px_rgba(0,0,0,0.06),0_24px_64px_-12px_rgba(0,0,0,0.3)] md:hidden"
+          backdropClassName="bg-zinc-950/30 md:hidden"
+        >
+          <SheetTitle className="sr-only">Navigation</SheetTitle>
+          <SheetDescription className="sr-only">
+            Pages and projects in this workspace
+          </SheetDescription>
+          <SheetClose
+            aria-label="Close navigation"
+            className="absolute right-2.5 top-3 z-10 flex size-8 items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-200/60"
+          >
+            <X className="size-4" />
+          </SheetClose>
+          {sidebar}
+        </SheetContent>
+      </Sheet>
 
       <div className="min-w-0 flex-1 md:py-2 md:pr-2">
         <div className="flex min-h-screen flex-col bg-white md:min-h-[calc(100vh-1rem)] md:rounded-xl md:shadow-[0_0_0_1px_rgba(0,0,0,0.06),0_1px_2px_rgba(0,0,0,0.04)]">

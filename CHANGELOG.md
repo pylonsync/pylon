@@ -4,6 +4,10 @@
 
 ### Features
 
+* **templates:** every template with a frontend builds its `components/ui/` primitives on [ui-sdk](https://ui-sdk.dev) (`@ui-sdk/react` and `@ui-sdk/core`, pinned to `0.1.0-beta.12`). Radix, the `radix-ui` package and `components.json` are gone from the templates. `Button` takes `render` where it took `asChild`; a `Promise` returned from `onClick` keeps the button pending. `Select` takes its options as `items` and reports a change through `onValueChange`. The five back-office templates and `saas` have a `Sheet` for navigation on small screens.
+* **templates:** every template with a frontend serves `/internal/design` (each design token in `app/globals.css`) and `/internal/components` (each component in `components/ui/` with its variants and states), under a sidebar layout. `robots.ts` and the page metadata keep search engines out. `AGENTS.md` has the rules for components: reuse before writing, compose from small parts, build behavior on ui-sdk, use tokens, keep the gallery current.
+* **templates:** in `barebones`, `todo` and `marketplace` the root layout is the document shell, and the page chrome is in a route group layout (`app/(app)/layout.tsx`, `app/(market)/layout.tsx`).
+
 * **ssr:** a cached page past its `revalidate` window is served at once and rendered again in the background. Before, the visitor who found the page expired waited for the whole render (0.7 to 0.9 s for one app's home page, against 6 ms for a cached one), which on a site with few visitors was almost every visit. One render runs per page however many visitors arrive. The response carries `X-Pylon-Cache: stale-while-revalidate` and a short `Cache-Control`. A stored page older than `PYLON_SSR_STALE_MAX_SECS` (default one day; `0` restores the old behavior) is rendered before it is served. A finished render that is no longer cacheable (a 404, a redirect, a page that now reads the session) removes the stored page. Pages cached with `export const revalidate`; not `auth-bucketed` pages.
 * **functions:** `ctx.db.count(entity, filter?)` counts the matching rows in the database. No row is loaded and the 10,000-row limit of `ctx.db.query` does not apply; `$order`, `$limit` and `$offset` are ignored. Before, the only way to count was `(await ctx.db.query(...)).length`, which loaded every row into the function runner and stopped at 10,000. SQLite and Postgres, inside a mutation's transaction too. Under `strictPolicies` the caller needs a read policy that allows the whole entity. Not available on a page's `serverData`.
 * **runtime:** `GET /api/files/<id>` and files in `public/` send an `ETag` (file size and modification time) and answer a matching `If-None-Match` with 304. A `Range` request whose `If-Range` names another version gets the whole file. Before, there was no validator, so a browser or CDN downloaded the whole file again each time its copy expired.
@@ -47,6 +51,10 @@
 * **auth:** `PYLON_AUTH_CODE_LENGTH` sets the digits in magic, email-verification, and phone codes, from 4 to 8 (default 6). An invalid value stops the server at boot. `/api/auth/magic/send`, `/api/auth/email/send-verification`, and `/api/auth/phone/send-code` return `codeLength`.
 * **auth:** each email and phone number has a daily wrong-guess limit across codes: `10^length / 1000`, at least 10 (10 for 4 digits, 1,000 for 6). When it is reached, sends and verifies return `429 CODE_LOCKED` until the oldest wrong guess is 24 hours old. A correct code clears the count. The count is stored in `_pylon_code_failures` (SQLite or Postgres), so a restart does not reset it.
 * **auth:** `PYLON_SMS_TEMPLATE_SIGN_IN_CODE` sets the sign-in SMS text, with `{{code}}` and `{{app_name}}`. The app name comes from `PYLON_APP_NAME`, then `PYLON_EMAIL_APP_NAME`. The default text names the app when one is set.
+
+### Removed
+
+* **cli:** `pylon init` is removed. `npm create @pylonsync/pylon@latest <name>` is the one way to make a project. `pylon init` prints that command and exits with a usage error. The quickstart uses the scaffolder.
 
 ### Bug Fixes
 

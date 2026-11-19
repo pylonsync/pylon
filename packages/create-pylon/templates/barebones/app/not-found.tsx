@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 export default function NotFound(_props: NotFoundProps) {
   const router = useRouter();
   return (
-    <div className="space-y-6">
+    <div className="mx-auto max-w-lg space-y-6 px-4 py-12">
       <section>
         <h1 className="text-2xl font-semibold tracking-tight">404</h1>
         <p className="mt-2 text-muted-foreground">
@@ -20,9 +20,7 @@ export default function NotFound(_props: NotFoundProps) {
         <Button onClick={() => router.back()} variant="outline">
           ← Go back
         </Button>
-        <Button asChild>
-          <Link href="/">Home</Link>
-        </Button>
+        <Button render={<Link href="/" />}>Home</Button>
       </div>
     </div>
   );

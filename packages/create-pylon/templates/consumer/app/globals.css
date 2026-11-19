@@ -1,19 +1,21 @@
+/* ui-sdk adds a small amount of CSS in this layer. The layer is declared
+   first so that every style in this file wins over it. */
+@layer ui-sdk;
+
 @import "tailwindcss";
 @import "tw-animate-css";
 
-/* Tailwind v4 scans these globs for class names. `components/` is here so
-   shadcn/ui component classes are seen — add more @source lines if you put
-   markup elsewhere. */
+/* Tailwind v4 scans these globs for class names. Add an @source line when you
+   put markup in another directory. */
 @source "../app/**/*.{tsx,ts,jsx,js}";
 @source "../components/**/*.{tsx,ts,jsx,js}";
 @source "../node_modules/@pylonsync/client/**/*.{tsx,ts,jsx,js}";
 
 @custom-variant dark (&:where(.dark, .dark *));
 
-/* shadcn/ui design tokens (new-york / zinc). Edit these to re-theme the
-   whole app; `npx shadcn@latest add <component>` drops new components that
-   consume the same variables. Toggle dark mode by putting `class="dark"`
-   on <html>. */
+/* Design tokens. Edit these to change the theme of the whole app.
+   `/internal/design` shows every token. Put `class="dark"` on <html> for
+   dark mode. */
 :root {
   --radius: 0.625rem;
   /* The app's own colors: links and the follow button, and a liked heart.

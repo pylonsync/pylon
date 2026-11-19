@@ -1,3 +1,7 @@
+/* ui-sdk adds a small amount of CSS in this layer. The layer is declared
+   first so that every style in this file wins over it. */
+@layer ui-sdk;
+
 @import "tailwindcss";
 @import "tw-animate-css";
 
@@ -34,7 +38,7 @@
   --danger: #b42318;
   --ok: #2f8f5b;
 
-  /* shadcn/ui tokens used by components/ui. */
+  /* Tokens used by components/ui. */
   --background: var(--bg);
   --foreground: var(--ink);
   --card: var(--surface);

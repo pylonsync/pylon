@@ -1,14 +1,14 @@
 import React from "react";
 
-// A layout wraps every page. This one is intentionally minimal — just a
-// centered column. The page below it is server-rendered first (so the
-// shell and copy are in the HTML), then hydrates into the live todo UI.
+// The root layout is the document shell for every route. Page chrome lives in
+// a route group layout: `app/(app)/layout.tsx` for the product and
+// `app/internal/layout.tsx` for the design reference.
 interface LayoutProps {
   children: React.ReactNode;
 }
 
 export default function RootLayout({ children }: LayoutProps) {
-  // Add `className="dark"` to this <html> to flip every shadcn token to its
+  // Add `className="dark"` to this <html> to switch every design token to its
   // dark value. The classes below use semantic tokens (bg-background,
   // text-foreground, …) so the whole UI re-themes from app/globals.css.
   return (
@@ -22,9 +22,7 @@ export default function RootLayout({ children }: LayoutProps) {
             wire up. */}
       </head>
       <body className="min-h-screen bg-background text-foreground antialiased">
-        <main className="mx-auto flex min-h-screen max-w-xl flex-col px-4 py-12">
-          {children}
-        </main>
+        {children}
       </body>
     </html>
   );

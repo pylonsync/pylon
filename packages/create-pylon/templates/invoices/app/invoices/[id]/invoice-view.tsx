@@ -41,9 +41,7 @@ export function InvoiceView({
                 }
                 action={
                   data.loading ? undefined : (
-                    <Button size="sm" variant="secondary" asChild>
-                      <Link href="/">Back to invoices</Link>
-                    </Button>
+                    <Button size="sm" variant="secondary" render={<Link href="/" />}>Back to invoices</Button>
                   )
                 }
               />
@@ -136,38 +134,34 @@ export function InvoiceView({
                       aria-label="Status"
                       value={invoice.status}
                       className="h-8 bg-background md:h-7.5"
-                      onChange={(event) =>
+                      onValueChange={(value) =>
                         void callFn("setInvoiceStatus", {
                           invoiceId: invoice.id,
-                          status: event.target.value,
-                        })
-                      }
-                    >
-                      {STATUSES.map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {s.label}
-                        </option>
-                      ))}
-                    </Select>
+                          status: value,
+                        })}
+                      items={STATUSES.map((s) => ({
+                        value: s.id,
+                        label: s.label,
+                      }))}
+                    />
                   </Field>
                   <Field label="Client">
                     <Select
                       aria-label="Client"
                       value={invoice.clientId ?? ""}
                       className="h-8 bg-background md:h-7.5"
-                      onChange={(event) =>
+                      onValueChange={(value) =>
                         db.update("Invoice", invoice.id, {
-                          clientId: event.target.value || null,
-                        }).catch(console.warn)
-                      }
-                    >
-                      <option value="">—</option>
-                      {data.clients.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.name}
-                        </option>
-                      ))}
-                    </Select>
+                          clientId: value || null,
+                        }).catch(console.warn)}
+                      items={[
+                        { value: "", label: "—" },
+                        ...data.clients.map((c) => ({
+                          value: c.id,
+                          label: c.name,
+                        })),
+                      ]}
+                    />
                   </Field>
                   <Field label="Issued">
                     {invoice.issueDate

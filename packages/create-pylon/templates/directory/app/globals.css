@@ -1,3 +1,7 @@
+/* ui-sdk adds a small amount of CSS in this layer. The layer is declared
+   first so that every style in this file wins over it. */
+@layer ui-sdk;
+
 @import "tailwindcss";
 @import "tw-animate-css";
 
@@ -11,7 +15,7 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
-/* shadcn/ui design tokens (new-york / zinc) + the marketing brand accent. The
+/* Design tokens (`/internal/design` shows every token) + the marketing brand accent. The
    three brand vars are defaults — app/layout.tsx overrides them from
    lib/site.config.ts on <html>, so re-theming the whole page is one edit there. */
 :root {

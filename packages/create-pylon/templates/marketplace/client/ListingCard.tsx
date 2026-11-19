@@ -2,7 +2,7 @@ import React from "react";
 import { Link } from "@pylonsync/react";
 import { cn } from "@/lib/utils";
 import { listingSrcSet } from "../lib/catalog";
-import { CategoryIcon } from "../app/_components/CategoryIcon";
+import { CategoryIcon } from "../components/CategoryIcon";
 import { WatchButton } from "./WatchButton";
 import {
   conditionLabel,

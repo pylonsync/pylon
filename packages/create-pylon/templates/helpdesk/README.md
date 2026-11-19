@@ -70,7 +70,7 @@ app/
   customers/              customer list
   login/                  email/password auth
 components/               presentational — props in, callbacks out
-  ui/                     shadcn primitives
+  ui/                     primitives built on @ui-sdk/react
 lib/tickets.ts            statuses, priority, SLA, queue order — pure
 lib/format.ts             time + initials — pure
 functions/                server functions

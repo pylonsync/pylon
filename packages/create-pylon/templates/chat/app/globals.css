@@ -1,16 +1,18 @@
+/* ui-sdk adds a small amount of CSS in this layer. The layer is declared
+   first so that every style in this file wins over it. */
+@layer ui-sdk;
+
 @import "tailwindcss";
 @import "tw-animate-css";
 
-/* Tailwind v4 scans these globs for class names. `components/` is here so
-   shadcn/ui and chat component classes are seen. Add more @source lines if
-   you put markup elsewhere. */
+/* Tailwind v4 scans these globs for class names. Add an @source line when you
+   put markup in another directory. */
 @source "../app/**/*.{tsx,ts,jsx,js}";
 @source "../components/**/*.{tsx,ts,jsx,js}";
 
 @custom-variant dark (&:where(.dark, .dark *));
 
-/* Design tokens. The shadcn/ui names (background, primary, sidebar, …) are
-   kept so `npx shadcn@latest add <component>` drops in components that match.
+/* Design tokens. `/internal/design` shows every token.
    `signal` is the accent (send button, unread badges); `online` is the
    presence dot. Toggle dark mode by putting `class="dark"` on <html>. */
 :root {

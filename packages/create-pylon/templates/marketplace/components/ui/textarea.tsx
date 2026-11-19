@@ -1,14 +1,16 @@
 import * as React from "react";
+import { Textarea as TextareaPart } from "@ui-sdk/react/textarea";
 
 import { cn } from "@/lib/utils";
 
 function Textarea({
   className,
   ...props
-}: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
+}: Omit<React.ComponentProps<typeof TextareaPart>, "className"> & {
+  className?: string;
+}) {
   return (
-    <textarea
-      data-slot="textarea"
+    <TextareaPart
       className={cn(
         "flex min-h-24 w-full rounded-lg border border-input bg-background px-3 py-2.5 text-sm",
         "placeholder:text-muted-foreground",

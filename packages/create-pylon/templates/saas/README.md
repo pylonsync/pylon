@@ -39,7 +39,7 @@ lib/tasks.ts                    task statuses, priorities, validation, ordering
 lib/sample-workspace.ts         the sample projects and tasks seedWorkspace adds
 public/screenshots/             dashboard captures the landing page shows
 scripts/capture-screenshots.mjs regenerates public/screenshots from the running app
-components/                     dashboard shell, task board pieces, marketing pieces, shadcn primitives
+components/                     dashboard shell, task board pieces, marketing pieces, primitives built on @ui-sdk/react
 ```
 
 ## How it works

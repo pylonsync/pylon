@@ -36,9 +36,7 @@ export function DealView({ dealId }: { dealId: string }) {
                 }
                 action={
                   data.loading ? undefined : (
-                    <Button size="sm" variant="secondary" asChild>
-                      <Link href="/">Back to pipeline</Link>
-                    </Button>
+                    <Button size="sm" variant="secondary" render={<Link href="/" />}>Back to pipeline</Button>
                   )
                 }
               />
@@ -132,19 +130,16 @@ export function DealView({ dealId }: { dealId: string }) {
                         aria-label="Stage"
                         value={deal.stage}
                         className="h-8 bg-background md:h-7.5"
-                        onChange={(event) =>
+                        onValueChange={(value) =>
                           void callFn("moveDeal", {
                             dealId: deal.id,
-                            stage: event.target.value,
-                          })
-                        }
-                      >
-                        {PIPELINE.map((stage) => (
-                          <option key={stage.id} value={stage.id}>
-                            {stage.label}
-                          </option>
-                        ))}
-                      </Select>
+                            stage: value,
+                          })}
+                        items={PIPELINE.map((stage) => ({
+                          value: stage.id,
+                          label: stage.label,
+                        }))}
+                      />
                     </Field>
 
                     <Field label="Owner">

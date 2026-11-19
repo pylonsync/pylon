@@ -22,9 +22,7 @@ export default function NotFound(_props: NotFoundProps) {
           <ArrowLeft className="mr-1.5 size-4" aria-hidden />
           Go back
         </Button>
-        <Button asChild>
-          <Link href="/">Home</Link>
-        </Button>
+        <Button render={<Link href="/" />}>Home</Button>
       </div>
     </div>
   );

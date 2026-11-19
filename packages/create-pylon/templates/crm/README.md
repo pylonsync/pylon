@@ -64,7 +64,7 @@ app/
   deals/[id]/             deal detail + activity timeline
   login/                  email/password auth
 components/               presentational — props in, callbacks out
-  ui/                     shadcn primitives
+  ui/                     primitives built on @ui-sdk/react
 lib/pipeline.ts           stages, money, metrics — pure
 lib/search.ts             ⌘K ranking — pure
 functions/                server functions
@@ -94,9 +94,8 @@ no policy allows an anonymous read — keep it that way if you add one.
 
 Light by default. The dark tokens in `app/globals.css` are complete, so adding
 `className="dark"` to the `<html>` in `app/layout.tsx` flips the whole app —
-wire it to a stored preference or `prefers-color-scheme` for a toggle. Both use
-the standard shadcn variables, so `npx shadcn@latest add <component>` drops in
-already themed.
+wire it to a stored preference or `prefers-color-scheme` for a toggle. `/internal/design`
+shows every token.
 
 ## Grow it
 

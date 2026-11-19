@@ -31,9 +31,7 @@ export default function Error({ error, reset }: ErrorBoundaryProps) {
         <Button type="button" onClick={reset}>
           Try again
         </Button>
-        <Button asChild variant="link">
-          <a href="/">Back to browse</a>
-        </Button>
+        <Button variant="link" render={<a href="/" />}>Back to browse</Button>
       </EmptyContent>
     </Empty>
   );

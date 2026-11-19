@@ -97,14 +97,12 @@ export function PaymentDialog({
               <Select
                 id="payment-method"
                 value={method}
-                onChange={(event) => setMethod(event.target.value)}
-              >
-                {METHODS.map((m) => (
-                  <option key={m} value={m}>
-                    {m[0].toUpperCase() + m.slice(1)}
-                  </option>
-                ))}
-              </Select>
+                onValueChange={(value) => setMethod(value)}
+                items={METHODS.map((m) => ({
+                  value: m,
+                  label: m[0].toUpperCase() + m.slice(1),
+                }))}
+              />
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="payment-reference">Reference</Label>
