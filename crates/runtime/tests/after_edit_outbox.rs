@@ -65,7 +65,24 @@ fn outbox_rows(rt: &Runtime) -> Vec<(String, String)> {
     rows
 }
 
+/// Wait until a new second has just started. A row is due at the end of its
+/// 1-second window, so the writes and the "not due yet" check below must run
+/// inside one second; a slow machine that starts them late in a second sees
+/// a row come due.
+fn wait_for_second_start() {
+    let millis = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    };
+    while millis() % 1000 > 50 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 fn exercise(rt: &Runtime, jobs: &JobQueue, queued: &dyn Fn() -> Vec<String>) {
+    wait_for_second_start();
     let a = rt
         .insert("Note", &serde_json::json!({ "title": "a" }))
         .unwrap();
