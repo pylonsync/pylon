@@ -114,6 +114,7 @@ fn status_frame(name: &str, log: &ChangeLog) -> String {
 
 /// Send changes until the client goes away or the stream reaches
 /// [`MAX_LIFETIME`]. `send` writes one chunk to the client.
+/// Check current session validity and admin access before each poll.
 ///
 /// A new stream starts at the head of the log: it sends the changes made
 /// after the connection opened. A reconnect passes the `Last-Event-ID` the
@@ -124,8 +125,12 @@ pub(crate) fn run(
     log: &ChangeLog,
     manifest: &AppManifest,
     resume_after: Option<u64>,
+    mut authorized: impl FnMut() -> bool,
     mut send: impl FnMut(&[u8]) -> std::io::Result<()>,
 ) {
+    if !authorized() {
+        return;
+    }
     let started = Instant::now();
     let head = log.current_seq();
     let mut after = match resume_after {
@@ -136,7 +141,7 @@ pub(crate) fn run(
     if send(format!("retry: 2000\n\n{}", status_frame("hello", log)).as_bytes()).is_err() {
         return;
     }
-    while started.elapsed() < MAX_LIFETIME {
+    while started.elapsed() < MAX_LIFETIME && authorized() {
         let mut out = String::new();
         match log.pull(&SyncCursor { last_seq: after }, BATCH) {
             Ok(page) => {
@@ -194,6 +199,31 @@ mod tests {
     }
 
     #[test]
+    fn revoked_session_stops_before_the_next_change() {
+        let log = ChangeLog::new();
+        let sessions = pylon_auth::SessionStore::new();
+        let session = sessions.create("stream-user".into());
+        let mut sent = String::new();
+        run(
+            &log,
+            &manifest(),
+            None,
+            || sessions.get(&session.token).is_some(),
+            |bytes| {
+                sent.push_str(&String::from_utf8_lossy(bytes));
+                if sent.contains("event: change") {
+                    return Err(std::io::Error::other("unexpected disclosure"));
+                }
+                sessions.revoke(&session.token);
+                log.append("Org", "after-revocation", ChangeKind::Insert, None);
+                Ok(())
+            },
+        );
+        assert!(sent.contains("event: hello"));
+        assert!(!sent.contains("after-revocation"), "{sent}");
+    }
+
+    #[test]
     fn server_only_and_encrypted_values_are_redacted() {
         let row = serde_json::json!({
             "id": "o1",
@@ -245,18 +275,24 @@ mod tests {
         log.append("Org", "before", ChangeKind::Insert, None);
         let mut sent = String::new();
         let mut writes = 0;
-        run(&log, &manifest(), None, |bytes| {
-            sent.push_str(&String::from_utf8_lossy(bytes));
-            writes += 1;
-            if writes == 1 {
-                // The first write is the hello. A change arrives after it.
-                log.append("Org", "after", ChangeKind::Insert, None);
-                Ok(())
-            } else {
-                // The client goes away after the first change.
-                Err(std::io::Error::other("closed"))
-            }
-        });
+        run(
+            &log,
+            &manifest(),
+            None,
+            || true,
+            |bytes| {
+                sent.push_str(&String::from_utf8_lossy(bytes));
+                writes += 1;
+                if writes == 1 {
+                    // The first write is the hello. A change arrives after it.
+                    log.append("Org", "after", ChangeKind::Insert, None);
+                    Ok(())
+                } else {
+                    // The client goes away after the first change.
+                    Err(std::io::Error::other("closed"))
+                }
+            },
+        );
         assert!(sent.contains("event: hello"), "{sent}");
         assert!(sent.contains("\"row_id\":\"after\""), "{sent}");
         assert!(!sent.contains("\"row_id\":\"before\""), "{sent}");
@@ -271,15 +307,21 @@ mod tests {
         log.append("Org", "missed-2", ChangeKind::Update, None);
         let mut sent = String::new();
         let mut writes = 0;
-        run(&log, &manifest(), Some(seen), |bytes| {
-            sent.push_str(&String::from_utf8_lossy(bytes));
-            writes += 1;
-            if writes < 2 {
-                Ok(())
-            } else {
-                Err(std::io::Error::other("closed"))
-            }
-        });
+        run(
+            &log,
+            &manifest(),
+            Some(seen),
+            || true,
+            |bytes| {
+                sent.push_str(&String::from_utf8_lossy(bytes));
+                writes += 1;
+                if writes < 2 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::other("closed"))
+                }
+            },
+        );
         assert!(!sent.contains("\"row_id\":\"seen\""), "{sent}");
         assert!(sent.contains("\"row_id\":\"missed-1\""), "{sent}");
         assert!(sent.contains("\"row_id\":\"missed-2\""), "{sent}");
@@ -291,16 +333,22 @@ mod tests {
         log.append("Org", "old", ChangeKind::Insert, None);
         let mut sent = String::new();
         let mut writes = 0;
-        run(&log, &manifest(), Some(u64::MAX), |bytes| {
-            sent.push_str(&String::from_utf8_lossy(bytes));
-            writes += 1;
-            if writes == 1 {
-                log.append("Org", "new", ChangeKind::Insert, None);
-                Ok(())
-            } else {
-                Err(std::io::Error::other("closed"))
-            }
-        });
+        run(
+            &log,
+            &manifest(),
+            Some(u64::MAX),
+            || true,
+            |bytes| {
+                sent.push_str(&String::from_utf8_lossy(bytes));
+                writes += 1;
+                if writes == 1 {
+                    log.append("Org", "new", ChangeKind::Insert, None);
+                    Ok(())
+                } else {
+                    Err(std::io::Error::other("closed"))
+                }
+            },
+        );
         assert!(!sent.contains("\"row_id\":\"old\""), "{sent}");
         assert!(sent.contains("\"row_id\":\"new\""), "{sent}");
     }

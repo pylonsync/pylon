@@ -4122,6 +4122,25 @@ impl Runtime {
         id: &str,
         data: &serde_json::Value,
     ) -> Result<bool, RuntimeError> {
+        self.update_checked(entity, id, data, None)
+    }
+
+    pub(crate) fn update_checked(
+        &self,
+        entity: &str,
+        id: &str,
+        data: &serde_json::Value,
+        expected: Option<&serde_json::Value>,
+    ) -> Result<bool, RuntimeError> {
+        let matches = |row: &serde_json::Value| -> bool {
+            expected.is_none_or(|expected| {
+                expected.as_object().is_some_and(|fields| {
+                    fields
+                        .iter()
+                        .all(|(key, value)| row.get(key) == Some(value))
+                })
+            })
+        };
         validate_field_lengths(self.require_entity(entity)?, data)?;
         let canonical_owned;
         let data = match canonicalize_datetime_fields(self.require_entity(entity)?, data) {
@@ -4180,6 +4199,11 @@ impl Runtime {
                         else {
                             return Ok(false);
                         };
+                        let mut normalized = before.clone();
+                        self.normalize_row_on_read(entity, &mut normalized);
+                        if !matches(&normalized) {
+                            return Ok(false);
+                        }
                         let row = pg_row_as_doc_holds(ent, crdt_fields, before.clone());
                         let projected = pg
                             .crdt
@@ -4219,6 +4243,32 @@ impl Runtime {
                 pg.crdt.evict(entity, id);
                 return result;
             }
+            if expected.is_some() {
+                return pg
+                    .store
+                    .with_transaction_raw(|tx| -> Result<bool, RuntimeError> {
+                        let Some(before) = pylon_storage::pg_tx_store::tx_lock_row(tx, entity, id)
+                            .map_err(data_err_to_runtime)?
+                        else {
+                            return Ok(false);
+                        };
+                        let mut normalized = before.clone();
+                        self.normalize_row_on_read(entity, &mut normalized);
+                        if !matches(&normalized) {
+                            return Ok(false);
+                        }
+                        pylon_storage::pg_tx_store::tx_update_locked(
+                            tx,
+                            &self.manifest,
+                            entity,
+                            id,
+                            pg_data,
+                            &before,
+                        )
+                        .map(|row| row.is_some())
+                        .map_err(data_err_to_runtime)
+                    });
+            }
             return pylon_http::DataStore::update(&pg.store, entity, id, pg_data)
                 .map_err(data_err_to_runtime);
         }
@@ -4247,6 +4297,14 @@ impl Runtime {
         // Atomic block — same shape as insert. CRDT snapshot, SQL UPDATE,
         // and FTS maintenance all commit together.
         let result = with_write_tx(self, &conn, || -> Result<i64, RuntimeError> {
+            if expected.is_some() {
+                let Some(before) = self.get_by_id_with_conn(&conn, entity, id)? else {
+                    return Ok(0);
+                };
+                if !matches(&before) {
+                    return Ok(0);
+                }
+            }
             let mut corrections = None;
             if ent.crdt {
                 let crdt_fields = self.crdt_fields_for(ent)?;
