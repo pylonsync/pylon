@@ -1142,3 +1142,79 @@ The backup-code consumption race from November 13 remains open. It needs an atom
 Earlier copied-handler and deployment follow-up still applies. Main now includes the prior security patches, but this review did not verify deployed versions. This run commits the fix, regression tests, and report to a new PR under the user's final instruction. No merge or deployment is performed.
 
 Next main area: secrets and deployment configuration. Retain atomic backup-code consumption, dependency migration, and the blocked monitoring changes as follow-up work.
+
+
+## 2026-11-20
+
+Reviewed main at `1302ebf54de3c44ac2cda7d982885128263b63df` (0.22.77). Created `security/daily-review-2026-11-20` in `/Users/ericc59/Dev/pylon-security-20261120` from an authenticated HTTPS fetch. The primary checkout remains at `ce9189551`. It had no tracked edits. Preserved its Python caches and all other worktrees. No unrelated work was reset or overwritten.
+
+Read SECURITY.md, both October 27 reports, security workflows, and prior daily reports. The November 18 signing-key exclusions remain in PR #86. The November 19 dependency changes remain in PR #87. Both reports were read from their worktrees because main does not contain them. The November 12 monitoring changes remain local. These are existing findings and pending fixes. The daily task already runs at 09:00 local time. No duplicate task was created.
+
+Compared main with the last reviewed main commit, `e4f35ecd8`. Reviewed the returning-OAuth email verification change, operator session response, job cancellation gate, new Studio health and change-stream gates, and dependency changes. Sampled generated consumer session ownership and AI Chat guest-claim handlers. Removed template families and their tests were accounted for. The large UI and template rewrite was not fully audited. Native binary changes were not inspected. These are review gaps.
+
+### Authentication and sessions
+
+Reviewed TOTP enrollment, verification, backup-code rotation, device trust, session expiry and revocation, and operator authorization. Confirmed the known backup-code race from November 13 with a local HTTP reproduction. Also confirmed a new revocation defect in the Studio change stream.
+
+An attacker exploiting backup-code reuse needs an authenticated user session, a valid backup code, and concurrent requests. The old handler removed a code, then checked its absence. Two concurrent requests passed that check in the regression run. Both accepted the same code. Requests using different codes could also restore each other's removals. The test used only synthetic credentials and a local server.
+
+Added an atomic conditional update to the DataStore interface. SQLite compares the secret and code list inside its existing write transaction. PostgreSQL compares them under a row lock inside a transaction. Both reuse the existing write paths and retain CRDT, search, and afterEdit maintenance. A stale snapshot returns 409. A storage failure returns 500 before device trust is granted. Duplicate copies of the consumed hash are removed together. Custom stores without atomic update support fail closed. Normal TOTP verification remains available.
+
+The backend regression uses four independent SQLite connections or PostgreSQL pools. It checks same-code requests, different-code requests, stale snapshots, secret changes, missing rows, and failed writes. It runs with CRDT both enabled and disabled. The HTTP regression failed against the old handler: two successful requests instead of one. The fixed handler passes. A router test verifies that an unsupported store cannot grant device trust.
+
+The new `/admin/changes/stream` route checked administration access only at connection time. An attacker needed an existing authorized admin or operator session and an open stream. Revoking that session or deleting the operator did not stop the stream. It could disclose later row changes until its 30-minute lifetime ended. Field redaction did not prevent disclosure of ordinary private row fields.
+
+The stream now repeats the same credential and admin checks before each poll. This covers expired or revoked sessions, deleted operators, and removed admin authority. Bearer-token and cookie rules remain unchanged. Checks run at the existing 400 ms poll interval. Data already sent cannot be recalled. A local HTTP regression deletes the operator, changes a row, and requires the stream to close without that change. It failed before the fix because the changed row arrived. A separate stream test reproduces session revocation with a local SessionStore.
+
+### Dependencies and current advisory data
+
+Main already uses Wasmtime 49.0.7, but its benchmark lock still selected 49.0.5. Both root and benchmark locks still selected heapless 0.9.2. Applied the compatible heapless 0.9.4 update to both locks. Regenerating the benchmark lock also selected the manifest's Wasmtime 49.0.7 and coupled Cranelift packages. It refreshed local workspace versions to 0.22.77. Cargo/rustc 1.98.1 generated and tested these locks. No Rust dependency API change was needed.
+
+These fixes overlap pending PR #87. They are not new advisory discoveries. The benchmark now follows main's newer Wasmtime requirement. Maintainers must account for that overlap when merging the two PRs. No advisory ignore, severity threshold, or authorization rule was weakened.
+
+OSV scanned all 12 tracked supported lockfiles before and after the updates. Both scans returned findings. The final scan returned 1; `tools/osv-gate.py` returned 0. The scan is not clean.
+
+| Scope | Final result |
+| --- | --- |
+| Production/root Cargo | 28 advisory groups, down from 37 |
+| Root Bun | No reported matches |
+| Studio build tools | One existing minimatch group |
+| Docker/build | No reported matches in three locks; manifest consistency passed |
+| Search benchmark | 27 advisory groups, down from 44 |
+| Vendor-only SAML | One existing Chrono maintenance group |
+| Shard and Swift | No reported matches in four locks |
+
+Cargo audit and Cargo deny returned 0 under the existing policy. RustSec commit: `f291af9b1cc0d21dfcea1709d6b037963cef262b`, updated November 20. Final audit reported zero unsuppressed vulnerabilities, eight maintenance warnings, and 20 unsoundness warnings. Image-lock consistency and advisory-ignore date checks passed.
+
+Heapless 0.7.17 remains through postcard; 0.8.0 remains through loro-delta. Their version constraints do not permit a lockfile-only update to 0.9.4. The [upstream advisories](https://rustsec.org/advisories/RUSTSEC-2026-0577.html) still require caller migration and panic-safety tests. No remote exploit or validated runtime mitigation was established for these remaining chains. Studio [minimatch](https://github.com/isaacs/minimatch/security/advisories/GHSA-g3hv-75wg-m249) still needs a tested migration to 11.0.1. Keep build patterns trusted. Chrono, im, sized-chunks, and the existing RSA exception remain unresolved. Passing gates do not resolve these risks.
+
+### Verification and gaps
+
+Used Bun 1.4.4 for the frozen Studio install and its type check/build. The first Rust test build failed because the primary checkout's old Studio bundle lacked new modules. Built the current Studio source and repeated the tests. No generated bundle was committed. Rust tests used the primary checkout's build cache. PostgreSQL tests used a new local PostgreSQL 17 container on loopback. No production service was tested.
+
+| Command | Result |
+| --- | --- |
+| `cargo test --locked -p pylon-runtime --test totp_security`, with old handler | Failed: two accepts for one backup code |
+| `cargo test --locked -p pylon-runtime --test totp_atomic --test totp_security --test bearer_cookie_fallback --test admin_mutation_security --test shard_wasm -- --include-ignored` with isolated `PYLON_TEST_PG_URL` | 57 passed, including live PostgreSQL concurrency |
+| `cargo test --locked -p pylon-auth -p pylon-router -p pylon-crdt --lib` | 735 passed; one existing release-mode performance benchmark ignored |
+| Stream revocation unit and HTTP regressions, before fix | Both failed with post-revocation data |
+| `cargo test --locked -p pylon-runtime --lib studio_changes`, final | 8 passed |
+| `cargo test --locked -p pylon-runtime --test studio_operator_api_e2e --test studio_access_e2e --test admin_mutation_security --test bearer_cookie_fallback`, final | 32 passed |
+| `cargo fmt --all -- --check` and `git diff --check`, final | Passed |
+| `cargo check --locked --manifest-path benchmarks/search/Cargo.toml` | Passed |
+| Studio `bun install --frozen-lockfile` and `bun run build` | Passed; build includes TypeScript check |
+| `python3 -m unittest discover -s tools -p 'test_*.py' -v` | 5 passed, including both Docker context tests |
+| `node --test packages/create-pylon/test/scaffold.test.mjs` | 125 passed |
+| `python3 tools/scan-lockfiles.py` and `tools/osv-gate.py`, final | Scan exit 1; gate exit 0 |
+| Cargo audit and Cargo deny, final | Exit 0 with warnings above |
+| Image-lock and advisory-ignore checks | Passed |
+
+Reviewed the final source, tests, dependency locks, documentation, and report diff. Local evidence uses `/tmp/pylon-security-20261120-*`. Full workspace tests, all changed templates, browser exploitation, native client and release builds, full image vulnerability scans, native C library advisory scans, deployed secrets, cloud permissions, and Nix inputs were not checked. Existing compiler and Vite warnings remain. The Docker context tests cover main's rules; the additional signing-key checks remain in PR #86. Custom DataStore implementations beyond the default denial were not tested. No failed or partial check was called clean.
+
+### Deployment steps and next review
+
+Rebuild and release the patched runtime, CLI, and images. Existing generated apps need the runtime update. No copied TypeScript handler change is needed for today's fixes. Custom stores must implement `update_if_matches` atomically before accepting backup codes. Until rollout, require a current authenticator code for sensitive operations and close existing Studio streams when revoking access. Review trusted devices if backup-code reuse is suspected. The patch does not remove previously granted trust or recall disclosed data.
+
+Prior copied-handler, signing-key exclusion, and independent app lockfile steps still apply. PR #86 and the local monitoring changes remain pending. The stale primary checkout must not be used as a release source. This run commits and pushes a PR under the user's final instruction. No merge, release, or deployment is performed.
+
+Next main area: authorization and tenant isolation. Include the new Studio surfaces and generated template changes that were only sampled today. Retain the dependency migrations and monitoring changes as follow-up work.

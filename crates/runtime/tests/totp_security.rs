@@ -161,6 +161,59 @@ fn backup_code_rotation_requires_current_totp() {
         .0,
         429
     );
+    // Concurrent backup verification grants device trust to only one caller.
+    use sha2::{Digest, Sha256};
+    let hash = format!("{:x}", Sha256::digest(b"TEST-CODE"));
+    let concurrent_id = rt.insert("User", &json!({
+        "email":"concurrent@example.test",
+        "totpSecret":pylon_auth::totp::seal_secret(&pylon_auth::totp::base32_encode(&secret)),
+        "totpVerified":true, "totpBackupCodes":[hash, "other-hash"],
+    })).unwrap();
+    let (status, session) = call(
+        port,
+        "POST",
+        "/api/auth/session",
+        Some("totp-test-admin"),
+        &json!({"user_id":concurrent_id}).to_string(),
+    );
+    assert_eq!(status, 201);
+    let barrier = Arc::new(std::sync::Barrier::new(4));
+    let threads: Vec<_> = (0..4)
+        .map(|_| {
+            let token = session["token"].as_str().unwrap().to_owned();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                call(
+                    port,
+                    "POST",
+                    "/api/auth/totp/verify",
+                    Some(&token),
+                    r#"{"code":"TEST-CODE","trust_device":true}"#,
+                )
+            })
+        })
+        .collect();
+    let results: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+    assert_eq!(
+        results.iter().filter(|(status, _)| *status == 200).count(),
+        1
+    );
+    assert!(results
+        .iter()
+        .all(|(status, _)| [200, 401, 409].contains(status)));
+    assert_eq!(
+        results
+            .iter()
+            .filter(|(_, body)| body["trust_device"] == true)
+            .count(),
+        1
+    );
+    assert_eq!(
+        rt.get_by_id("User", &concurrent_id).unwrap().unwrap()["totpBackupCodes"],
+        json!(["other-hash"])
+    );
+
     // Pending enrollment and unreadable secrets must not replace existing codes.
     for (email, enrolled, seed, expected) in [
         (

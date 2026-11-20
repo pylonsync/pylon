@@ -5333,6 +5333,7 @@ mod auth_gate_tests {
     /// emailVerified field gets set.
     struct UserStubStore {
         manifest: AppManifest,
+        row_override: std::sync::Mutex<Option<serde_json::Value>>,
         last_update: std::sync::Mutex<Option<(String, String, serde_json::Value)>>,
     }
     impl pylon_http::DataStore for UserStubStore {
@@ -5351,6 +5352,9 @@ mod auth_gate_tests {
             entity: &str,
             id: &str,
         ) -> Result<Option<serde_json::Value>, pylon_http::DataError> {
+            if let Some(row) = self.row_override.lock().unwrap().as_ref() {
+                return Ok(Some(row.clone()));
+            }
             if entity == "User" && id == "u-1" {
                 return Ok(Some(serde_json::json!({
                     "id": "u-1",
@@ -5458,6 +5462,7 @@ mod auth_gate_tests {
         let manifest = empty_manifest();
         let store = UserStubStore {
             manifest: manifest.clone(),
+            row_override: std::sync::Mutex::new(None),
             last_update: std::sync::Mutex::new(None),
         };
         let session_store = SessionStore::new();
@@ -5616,6 +5621,35 @@ mod auth_gate_tests {
             assert_eq!(entity, "User");
             assert_eq!(id, "u-1");
             assert!(data.get("emailVerified").is_some());
+        });
+    }
+
+    #[test]
+    fn backup_code_storage_errors_do_not_grant_trust() {
+        let auth = AuthContext::authenticated("backup-storage-error".into());
+        with_user_ctx(true, &auth, |ctx, store, _, _| {
+            use sha2::{Digest, Sha256};
+            let secret = pylon_auth::totp::base32_encode(&pylon_auth::totp::generate_secret());
+            *store.row_override.lock().unwrap() = Some(serde_json::json!({
+                "totpSecret": pylon_auth::totp::seal_secret(&secret),
+                "totpVerified": true,
+                "totpBackupCodes": [format!("{:x}", Sha256::digest(b"TEST-CODE"))],
+            }));
+            // This store has no atomic update implementation. It must fail closed.
+            let (status, body, _) = route(
+                ctx,
+                HttpMethod::Post,
+                "/api/auth/totp/verify",
+                r#"{"code":"TEST-CODE","trust_device":true}"#,
+                None,
+            );
+            assert_eq!(status, 500, "{body}");
+            assert!(body.contains("TOTP_CONSUME_FAILED"));
+            assert!(store.last_update.lock().unwrap().is_none());
+            assert!(ctx
+                .trusted_devices
+                .list_for_user("backup-storage-error")
+                .is_empty());
         });
     }
 
