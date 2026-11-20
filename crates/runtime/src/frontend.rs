@@ -437,6 +437,17 @@ fn parse_byte_range(header: &str, total: u64) -> RangeSpec {
     RangeSpec::Partial(start, end)
 }
 
+/// Send `response` and store its status for the request log and the metrics
+/// (see [`crate::metrics::take_response_status`]). Every response this module
+/// sends goes through here.
+pub(crate) fn respond<R: std::io::Read>(
+    request: Request,
+    response: Response<R>,
+) -> std::io::Result<()> {
+    crate::metrics::note_response_status(response.status_code().0);
+    request.respond(response)
+}
+
 /// Serve `bytes` for a GET, honoring a single HTTP `Range` request (RFC 7233):
 /// `206 Partial Content` + `Content-Range` for a satisfiable range, `416` for
 /// an unsatisfiable one, else a full `200`. ALWAYS advertises
@@ -520,7 +531,7 @@ pub(crate) fn respond_not_modified(request: Request, etag: &str, cache: &str, co
         .with_header(
             Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes()).unwrap(),
         );
-    let _ = request.respond(response);
+    let _ = respond(request, response);
 }
 
 /// Serve an uploaded file from the app's origin. The uploader chose its
@@ -650,7 +661,7 @@ fn respond_reader_with_headers<R: std::io::Read + std::io::Seek + Send + 'static
     let (status, length, mut headers) = match spec {
         RangeSpec::Partial(start, end) => {
             if reader.seek(std::io::SeekFrom::Start(start)).is_err() {
-                let _ = request.respond(Response::empty(500));
+                let _ = respond(request, Response::empty(500));
                 return;
             }
             let content_range =
@@ -682,7 +693,7 @@ fn respond_reader_with_headers<R: std::io::Read + std::io::Seek + Send + 'static
         Some(length),
         None,
     );
-    let _ = request.respond(response);
+    let _ = respond(request, response);
 }
 
 /// Minimal percent-decoder for a query-string value. `encodeURIComponent`
@@ -781,7 +792,7 @@ fn serve_og_image(
                 )
                 .unwrap(),
             );
-        let _ = req.respond(resp);
+        let _ = respond(req, resp);
         Ok(())
     };
 
@@ -825,7 +836,7 @@ fn serve_og_image(
         // The og URL carries a `&v=<mtime>` cache-buster, so a 1h public
         // cache is safe — a changed image gets a new `v` and re-fetches.
         .with_header(Header::from_bytes("Cache-Control", "public, max-age=3600").unwrap());
-    let _ = request.respond(response);
+    let _ = respond(request, response);
     Ok(())
 }
 
@@ -859,7 +870,7 @@ fn dev_boot_id() -> &'static str {
 /// script is injected into every SSR page in dev (see ssr-runtime.ts).
 ///
 /// Written RAW via `Request::into_writer()` + an explicit flush per event —
-/// NOT `request.respond()`. tiny_http buffers respond() output in a 1KB
+/// NOT `respond(request, )`. tiny_http buffers respond() output in a 1KB
 /// BufWriter that it only flushes after the whole body EOFs; this stream
 /// never EOFs, so the status line + `hello` event sat unsent (~45s of
 /// heartbeats to fill 1KB) and the browser's EventSource never connected —
@@ -1045,7 +1056,7 @@ fn serve_dev_file_write(
                 resp = resp.with_header(h);
             }
         }
-        let _ = request.respond(resp);
+        let _ = respond(request, resp);
         return Ok(());
     }
 
@@ -1055,7 +1066,7 @@ fn serve_dev_file_write(
         } else {
             "forbidden"
         };
-        let _ = request.respond(Response::from_string(msg).with_status_code(status));
+        let _ = respond(request, Response::from_string(msg).with_status_code(status));
         return Ok(());
     }
 
@@ -1072,9 +1083,13 @@ fn serve_dev_file_write(
     };
 
     let Some(target) = resolve_safe_for_write(&root, rel) else {
-        let _ = request.respond(cors(
-            Response::from_string("{\"ok\":false,\"error\":\"bad path\"}").with_status_code(400u16),
-        ));
+        let _ = respond(
+            request,
+            cors(
+                Response::from_string("{\"ok\":false,\"error\":\"bad path\"}")
+                    .with_status_code(400u16),
+            ),
+        );
         return Ok(());
     };
 
@@ -1086,7 +1101,7 @@ fn serve_dev_file_write(
                 Err(e) => Response::from_string(format!("{{\"ok\":false,\"error\":\"{e}\"}}"))
                     .with_status_code(500u16),
             };
-            let _ = request.respond(cors(resp));
+            let _ = respond(request, cors(resp));
             Ok(())
         }
         Method::Put | Method::Post => {
@@ -1094,18 +1109,24 @@ fn serve_dev_file_write(
             let mut body = Vec::new();
             let read = request.as_reader().take(MAX + 1).read_to_end(&mut body);
             if read.is_err() || body.len() as u64 > MAX {
-                let _ = request.respond(cors(
-                    Response::from_string("{\"ok\":false,\"error\":\"body too large\"}")
-                        .with_status_code(413u16),
-                ));
+                let _ = respond(
+                    request,
+                    cors(
+                        Response::from_string("{\"ok\":false,\"error\":\"body too large\"}")
+                            .with_status_code(413u16),
+                    ),
+                );
                 return Ok(());
             }
             if let Some(parent) = target.parent() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
-                    let _ = request.respond(cors(
-                        Response::from_string(format!("{{\"ok\":false,\"error\":\"{e}\"}}"))
-                            .with_status_code(500u16),
-                    ));
+                    let _ = respond(
+                        request,
+                        cors(
+                            Response::from_string(format!("{{\"ok\":false,\"error\":\"{e}\"}}"))
+                                .with_status_code(500u16),
+                        ),
+                    );
                     return Ok(());
                 }
             }
@@ -1114,14 +1135,17 @@ fn serve_dev_file_write(
                 Err(e) => Response::from_string(format!("{{\"ok\":false,\"error\":\"{e}\"}}"))
                     .with_status_code(500u16),
             };
-            let _ = request.respond(cors(resp));
+            let _ = respond(request, cors(resp));
             Ok(())
         }
         _ => {
-            let _ = request.respond(cors(
-                Response::from_string("{\"ok\":false,\"error\":\"method not allowed\"}")
-                    .with_status_code(405u16),
-            ));
+            let _ = respond(
+                request,
+                cors(
+                    Response::from_string("{\"ok\":false,\"error\":\"method not allowed\"}")
+                        .with_status_code(405u16),
+                ),
+            );
             Ok(())
         }
     }
@@ -1627,7 +1651,7 @@ pub fn try_handle(
             {
                 resp = resp.with_header(h);
             }
-            let _ = request.respond(resp);
+            let _ = respond(request, resp);
             return Ok(());
         }
         return Err(request);
@@ -1652,7 +1676,7 @@ pub fn try_handle(
         // Design render (`X-Pylon-Design: 1`) exists in dev mode only. Outside
         // dev the header names a variant this server does not produce: 404.
         if is_design_request(&request) && !is_dev_mode() {
-            let _ = request.respond(plain_response(404, "not found", cors_origin));
+            let _ = respond(request, plain_response(404, "not found", cors_origin));
             return Ok(());
         }
         // Which representation does this client want? A markdown request routes
@@ -1673,7 +1697,7 @@ pub fn try_handle(
                 let viewer = match design_viewer_from_request(&request) {
                     Ok(v) => v,
                     Err(status) => {
-                        let _ = request.respond(plain_response(
+                        let _ = respond(request, plain_response(
                             status,
                             "unauthorized: X-Pylon-Design-Viewer requires the dev file API token",
                             cors_origin,
@@ -1705,7 +1729,7 @@ pub fn try_handle(
             // URL is a 404 regardless of what the client would have accepted.
             if matches!(variant, PageVariant::NotAcceptable) {
                 let path = match_url.split('?').next().unwrap_or(&match_url);
-                let _ = request.respond(not_acceptable_response(path, true, cors_origin));
+                let _ = respond(request, not_acceptable_response(path, true, cors_origin));
                 return Ok(());
             }
             tracing::debug!(
@@ -2084,7 +2108,7 @@ fn serve_build_in_progress(request: Request, cors_origin: &str) -> Result<(), Re
         // not a permanent error."
         .with_header(Header::from_bytes("Retry-After", "5").unwrap())
         .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap());
-    let _ = request.respond(response);
+    let _ = respond(request, response);
     Ok(())
 }
 
@@ -2128,7 +2152,7 @@ fn serve_build_failed(request: Request, msg: &str, cors_origin: &str) -> Result<
             .unwrap(),
         )
         .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap());
-    let _ = request.respond(response);
+    let _ = respond(request, response);
     Ok(())
 }
 
@@ -2201,7 +2225,7 @@ fn serve_from_disk(
             // shows stale UI until the browser cache expires.
             Header::from_bytes("Cache-Control", "no-cache, must-revalidate").unwrap(),
         );
-    let _ = request.respond(response);
+    let _ = respond(request, response);
     Ok(())
 }
 
@@ -2250,7 +2274,7 @@ fn serve_via_proxy(proxy_base: &str, request: Request, cors_origin: &str) -> Res
                 let response = Response::from_data(body)
                     .with_status_code(502u16)
                     .with_header(Header::from_bytes("Content-Type", "text/plain").unwrap());
-                let _ = request.respond(response);
+                let _ = respond(request, response);
                 return Ok(());
             }
             let response = Response::from_data(buf)
@@ -2263,7 +2287,7 @@ fn serve_via_proxy(proxy_base: &str, request: Request, cors_origin: &str) -> Res
                     )
                     .unwrap(),
                 );
-            let _ = request.respond(response);
+            let _ = respond(request, response);
             Ok(())
         }
         Err(ureq::Error::Status(status, response)) => {
@@ -2276,7 +2300,7 @@ fn serve_via_proxy(proxy_base: &str, request: Request, cors_origin: &str) -> Res
             let resp = Response::from_data(buf)
                 .with_status_code(status)
                 .with_header(Header::from_bytes("Content-Type", ct.as_bytes()).unwrap());
-            let _ = request.respond(resp);
+            let _ = respond(request, resp);
             Ok(())
         }
         Err(ureq::Error::Transport(_)) => {
@@ -2288,7 +2312,7 @@ fn serve_via_proxy(proxy_base: &str, request: Request, cors_origin: &str) -> Res
             let response = Response::from_data(body)
                 .with_status_code(502u16)
                 .with_header(Header::from_bytes("Content-Type", "text/plain").unwrap());
-            let _ = request.respond(response);
+            let _ = respond(request, response);
             Ok(())
         }
     }
@@ -2556,7 +2580,10 @@ fn serve_dev_render(
     let cors_owned = dev_api_cors_origin(&request, cors_origin);
     let cors_origin = cors_owned.as_str();
     if !matches!(request.method(), Method::Get) {
-        let _ = request.respond(plain_response(405, "method not allowed", cors_origin));
+        let _ = respond(
+            request,
+            plain_response(405, "method not allowed", cors_origin),
+        );
         return Ok(());
     }
     if let Err(status) = dev_workspace_access(&request) {
@@ -2565,17 +2592,20 @@ fn serve_dev_render(
         } else {
             "forbidden"
         };
-        let _ = request.respond(plain_response(status, msg, cors_origin));
+        let _ = respond(request, plain_response(status, msg, cors_origin));
         return Ok(());
     }
     let viewer = match design_viewer_from_request(&request) {
         Ok(v) => v,
         Err(status) => {
-            let _ = request.respond(plain_response(
-                status,
-                "unauthorized: X-Pylon-Design-Viewer requires the dev file API token",
-                cors_origin,
-            ));
+            let _ = respond(
+                request,
+                plain_response(
+                    status,
+                    "unauthorized: X-Pylon-Design-Viewer requires the dev file API token",
+                    cors_origin,
+                ),
+            );
             return Ok(());
         }
     };
@@ -2586,11 +2616,14 @@ fn serve_dev_render(
         .map(PathBuf::from)
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let Some(component) = get("component").and_then(|c| dev_render_module(&root, &c)) else {
-        let _ = request.respond(plain_response(
-            400,
-            "bad request: `component` must name a source module inside the project",
-            cors_origin,
-        ));
+        let _ = respond(
+            request,
+            plain_response(
+                400,
+                "bad request: `component` must name a source module inside the project",
+                cors_origin,
+            ),
+        );
         return Ok(());
     };
     let mut layouts: Vec<String> = Vec::new();
@@ -2603,11 +2636,14 @@ fn serve_dev_render(
         match dev_render_module(&root, raw) {
             Some(l) => layouts.push(l),
             None => {
-                let _ = request.respond(plain_response(
-                    400,
-                    "bad request: `layouts` must name source modules inside the project",
-                    cors_origin,
-                ));
+                let _ = respond(
+                    request,
+                    plain_response(
+                        400,
+                        "bad request: `layouts` must name source modules inside the project",
+                        cors_origin,
+                    ),
+                );
                 return Ok(());
             }
         }
@@ -2736,7 +2772,7 @@ fn serve_via_ssr_rpc(
             route = %matched.route.path,
             "SSR prefetch not rendered: renders in flight at the limit"
         );
-        let _ = request.respond(ssr_prefetch_shed_response(cors_origin));
+        let _ = respond(request, ssr_prefetch_shed_response(cors_origin));
         return Ok(());
     };
     // Build the client bundle BEFORE dispatching the render. The Bun renderer
@@ -2889,7 +2925,7 @@ fn serve_via_ssr_rpc(
         ) {
             Ok(()) => Ok(()),
             Err(req) => {
-                let _ = req.respond(ssr_warming_response(cors_origin));
+                let _ = respond(req, ssr_warming_response(cors_origin));
                 Ok(())
             }
         };
@@ -3043,7 +3079,7 @@ fn serve_via_ssr_rpc(
                     format!("could not spawn the SSR render thread: {e}"),
                 )
             });
-            let _ = request.respond(ssr_render_error_response(detail, cors_origin));
+            let _ = respond(request, ssr_render_error_response(detail, cors_origin));
             return Ok(());
         }
     };
@@ -3064,7 +3100,7 @@ fn serve_via_ssr_rpc(
             // generic 500 (detail stays in logs) only when nothing is cached.
             if is_dev_mode() {
                 let detail = err_rx.recv().ok();
-                let _ = request.respond(ssr_render_error_response(detail, cors_origin));
+                let _ = respond(request, ssr_render_error_response(detail, cors_origin));
                 return Ok(());
             }
             return match try_serve_stale_on_error(
@@ -3081,7 +3117,7 @@ fn serve_via_ssr_rpc(
             ) {
                 Ok(()) => Ok(()),
                 Err(req) => {
-                    let _ = req.respond(ssr_render_error_response(None, cors_origin));
+                    let _ = respond(req, ssr_render_error_response(None, cors_origin));
                     Ok(())
                 }
             };
@@ -3159,7 +3195,7 @@ fn serve_via_ssr_rpc(
                     None,
                     None,
                 );
-                let _ = request.respond(response);
+                let _ = respond(request, response);
             } else {
                 let response = Response::new(
                     tiny_http::StatusCode(status),
@@ -3170,7 +3206,7 @@ fn serve_via_ssr_rpc(
                 );
                 // request.respond drains StreamingBody chunk-by-chunk as HTTP
                 // chunked-transfer frames; returns at EOF (render thread done).
-                let _ = request.respond(response);
+                let _ = respond(request, response);
             }
             None
         }
@@ -3323,12 +3359,12 @@ fn respond_markdown(
             {
                 resp = resp.with_header(h);
             }
-            let _ = request.respond(resp);
+            let _ = respond(request, resp);
             return None;
         }
         if !md.html_acceptable {
             let path = md.render_url.split('?').next().unwrap_or("/");
-            let _ = request.respond(not_acceptable_response(path, false, cors_origin));
+            let _ = respond(request, not_acceptable_response(path, false, cors_origin));
             return None;
         }
         // The client would read HTML too, and we already have it — send the
@@ -3343,7 +3379,7 @@ fn respond_markdown(
         ) {
             resp = resp.with_header(h);
         }
-        let _ = request.respond(resp);
+        let _ = respond(request, resp);
         return None;
     }
 
@@ -3368,7 +3404,7 @@ fn respond_markdown(
     ) {
         resp = resp.with_header(h);
     }
-    let _ = request.respond(resp);
+    let _ = respond(request, resp);
     Some(cache_copy)
 }
 
@@ -3858,7 +3894,7 @@ fn serve_cached_ssr(
     for h in build_ssr_response_headers(&page_headers, cors_origin, !nav, false, variant) {
         resp = resp.with_header(h);
     }
-    let _ = request.respond(resp);
+    let _ = respond(request, resp);
     Ok(())
 }
 
@@ -3897,7 +3933,7 @@ fn serve_cached_bucket_ssr(
     ) {
         resp = resp.with_header(h);
     }
-    let _ = request.respond(resp);
+    let _ = respond(request, resp);
     Ok(())
 }
 
@@ -4180,7 +4216,7 @@ fn serve_cached_ssr_stale(
     if let Ok(h) = Header::from_bytes("X-Pylon-Cache", reason) {
         resp = resp.with_header(h);
     }
-    let _ = request.respond(resp);
+    let _ = respond(request, resp);
     Ok(())
 }
 
@@ -4253,16 +4289,18 @@ fn serve_via_form_rpc(
         use std::io::Read;
         let mut limited = request.as_reader().take((MAX_FORM_BODY as u64) + 1);
         if limited.read_to_end(&mut body).is_err() {
-            let _ = request.respond(form_text_response(
-                400,
-                "could not read request body",
-                cors_origin,
-            ));
+            let _ = respond(
+                request,
+                form_text_response(400, "could not read request body", cors_origin),
+            );
             return Ok(());
         }
     }
     if body.len() > MAX_FORM_BODY {
-        let _ = request.respond(form_text_response(413, "form body too large", cors_origin));
+        let _ = respond(
+            request,
+            form_text_response(413, "form body too large", cors_origin),
+        );
         return Ok(());
     }
 
@@ -4270,26 +4308,27 @@ fn serve_via_form_rpc(
     // is fully supported. multipart/form-data is STAGED — file uploads go
     // through the existing /api/files path; reject with a clear 415 rather than
     // silently dropping fields.
-    let form_json = if content_type.starts_with("application/x-www-form-urlencoded") {
-        parse_urlencoded_form(&body)
-    } else if content_type.starts_with("multipart/form-data") {
-        let _ = request.respond(form_text_response(
+    let form_json =
+        if content_type.starts_with("application/x-www-form-urlencoded") {
+            parse_urlencoded_form(&body)
+        } else if content_type.starts_with("multipart/form-data") {
+            let _ = respond(request, form_text_response(
             415,
             "multipart/form-data isn't supported yet — use application/x-www-form-urlencoded, \
              or upload files via /api/files",
             cors_origin,
         ));
-        return Ok(());
-    } else if body.is_empty() || content_type.starts_with("application/json") {
-        // A JSON body has no form fields to parse. Running it through the
-        // urlencoded parser produced one nonsense key per `&`-free blob, which
-        // read as "the fields are there, just wrong". The handler reads
-        // `req.body` instead.
-        serde_json::json!({})
-    } else {
-        // Unknown content-type with a body — best-effort urlencoded.
-        parse_urlencoded_form(&body)
-    };
+            return Ok(());
+        } else if body.is_empty() || content_type.starts_with("application/json") {
+            // A JSON body has no form fields to parse. Running it through the
+            // urlencoded parser produced one nonsense key per `&`-free blob, which
+            // read as "the fields are there, just wrong". The handler reads
+            // `req.body` instead.
+            serde_json::json!({})
+        } else {
+            // Unknown content-type with a body — best-effort urlencoded.
+            parse_urlencoded_form(&body)
+        };
     // The exact bytes, for handlers that answer machines: JSON APIs, JSON-RPC
     // (MCP), and webhooks that verify a signature over the raw body.
     let raw_body = String::from_utf8_lossy(&body).to_string();
@@ -4307,7 +4346,7 @@ fn serve_via_form_rpc(
             "route handler runner not ready after {}ms; serving retryable 503",
             ready_timeout.as_millis()
         );
-        let _ = request.respond(ssr_warming_response(cors_origin));
+        let _ = respond(request, ssr_warming_response(cors_origin));
         return Ok(());
     }
 
@@ -4360,7 +4399,7 @@ fn serve_via_form_rpc(
         tracing::error!(error = ?e, "failed to spawn form handler thread");
         let detail =
             is_dev_mode().then(|| ("SSR_FORM_THREAD_SPAWN_FAILED".to_string(), format!("{e}")));
-        let _ = request.respond(ssr_render_error_response(detail, cors_origin));
+        let _ = respond(request, ssr_render_error_response(detail, cors_origin));
         return Ok(());
     }
 
@@ -4372,7 +4411,7 @@ fn serve_via_form_rpc(
             } else {
                 None
             };
-            let _ = request.respond(ssr_render_error_response(detail, cors_origin));
+            let _ = respond(request, ssr_render_error_response(detail, cors_origin));
             return Ok(());
         }
     };
@@ -4393,7 +4432,7 @@ fn serve_via_form_rpc(
         None,
         None,
     );
-    let _ = request.respond(response);
+    let _ = respond(request, response);
     Ok(())
 }
 
@@ -5673,7 +5712,7 @@ fn serve_pylon_client_bundle(
                         )
                         .unwrap(),
                     );
-                let _ = request.respond(response);
+                let _ = respond(request, response);
                 return Ok(());
             }
         }
@@ -5697,7 +5736,7 @@ fn serve_pylon_client_bundle(
                 Header::from_bytes("Content-Type", "application/javascript; charset=utf-8")
                     .unwrap(),
             );
-        let _ = request.respond(response);
+        let _ = respond(request, response);
         return Ok(());
     }
 
@@ -5718,7 +5757,7 @@ fn serve_pylon_client_bundle(
                     Header::from_bytes("Content-Type", "application/javascript; charset=utf-8")
                         .unwrap(),
                 );
-            let _ = request.respond(response);
+            let _ = respond(request, response);
             return Ok(());
         }
     };
@@ -5730,7 +5769,7 @@ fn serve_pylon_client_bundle(
                     Header::from_bytes("Content-Type", "application/javascript; charset=utf-8")
                         .unwrap(),
                 );
-            let _ = request.respond(response);
+            let _ = respond(request, response);
             return Ok(());
         }
     }
@@ -5761,7 +5800,7 @@ fn serve_pylon_client_bundle(
                     Header::from_bytes("Content-Type", "application/javascript; charset=utf-8")
                         .unwrap(),
                 );
-            let _ = request.respond(response);
+            let _ = respond(request, response);
             return Ok(());
         }
     };
@@ -5801,7 +5840,7 @@ fn serve_pylon_client_bundle(
         // Caches between here and the browser must key on the encoding.
         response = response.with_header(Header::from_bytes("Vary", "Accept-Encoding").unwrap());
     }
-    let _ = request.respond(response);
+    let _ = respond(request, response);
     Ok(())
 }
 
@@ -6379,7 +6418,7 @@ mod tests {
 
     /// Regression: the dev live-reload SSE must deliver its HTTP head + the
     /// `hello` event IMMEDIATELY — not after tiny_http's 1KB write buffer
-    /// fills (~45s of heartbeats). The old `request.respond()` path buffered
+    /// fills (~45s of heartbeats). The old `respond(request, )` path buffered
     /// exactly that way (raw_print never returns for an infinite body, and
     /// tiny_http only flushes after it returns), so the browser's EventSource
     /// never connected and hot reload was dead. Drives a REAL tiny_http

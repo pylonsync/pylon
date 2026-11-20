@@ -62,7 +62,7 @@ pub(super) fn serve(mut request: Request, path_only: &str, cors_origin: &str) {
                 resp = resp.with_header(h);
             }
         }
-        let _ = request.respond(resp);
+        let _ = super::respond(request, resp);
         return;
     }
 
@@ -72,17 +72,20 @@ pub(super) fn serve(mut request: Request, path_only: &str, cors_origin: &str) {
         } else {
             "forbidden"
         };
-        let _ = request.respond(json(
-            status,
-            serde_json::json!({ "ok": false, "error": error }),
-            cors_origin,
-        ));
+        let _ = super::respond(
+            request,
+            json(
+                status,
+                serde_json::json!({ "ok": false, "error": error }),
+                cors_origin,
+            ),
+        );
         return;
     }
 
     if !matches!(request.method(), Method::Post) {
         let body = serde_json::json!({ "ok": false, "error": "method not allowed" });
-        let _ = request.respond(json(405, body, cors_origin));
+        let _ = super::respond(request, json(405, body, cors_origin));
         return;
     }
 
@@ -93,7 +96,7 @@ pub(super) fn serve(mut request: Request, path_only: &str, cors_origin: &str) {
         .read_to_end(&mut body);
     if read.is_err() || body.len() as u64 > MAX_BODY {
         let body = serde_json::json!({ "ok": false, "error": "body too large" });
-        let _ = request.respond(json(413, body, cors_origin));
+        let _ = super::respond(request, json(413, body, cors_origin));
         return;
     }
 
@@ -120,7 +123,7 @@ pub(super) fn serve(mut request: Request, path_only: &str, cors_origin: &str) {
             cors_origin,
         ),
     };
-    let _ = request.respond(resp);
+    let _ = super::respond(request, resp);
 }
 
 fn workspace_root() -> PathBuf {

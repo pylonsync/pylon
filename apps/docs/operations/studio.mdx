@@ -30,7 +30,7 @@ An operator session counts only in Studio and on the admin API. It does not sign
 | App | Functions | The registered functions, and a form to call one. |
 | App | Policies, Routes, Manifest, Roles | What the manifest declares. |
 | Runtime | Logs | The recent requests with a live tail, the recent function calls, the audit events, and the sessions. |
-| Runtime | Metrics | Request rate, error rate and p50, p95 and p99 latency for the last 60 minutes, by route and by function. The page cache hit rate. |
+| Runtime | Metrics | Request rate, error rate and p50, p95 and p99 latency for the last 60 minutes, by route and by function. The page cache hit rate. The error rate counts 5xx responses only. 4xx responses (not found, unauthorized, rate limited) show as client errors. |
 | Runtime | Jobs | The queue by state, the dead-letter queue, the cron schedules and the handlers. Cancel a job that has not started, retry a dead job, run a schedule now. |
 | Runtime | Workflows | The runs by state and the steps of each run. Cancel a run. |
 | Runtime | Live sync | Each insert, update and delete as the server records it. |

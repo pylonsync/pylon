@@ -33,6 +33,7 @@ import {
 	shortId,
 } from "@/lib/format";
 import { api } from "@/lib/pylon";
+import { statusClass } from "@/lib/status";
 import { LockedPage } from "./Locked";
 
 type RequestRow = {
@@ -100,8 +101,9 @@ const MAX_ROWS = 1000;
 const TAIL_MS = 2000;
 
 function statusVariant(status: number): BadgeProps["variant"] {
-	if (status >= 500 || status < 100) return "red";
-	if (status >= 400) return "amber";
+	const cls = statusClass(status);
+	if (cls === "server") return "red";
+	if (cls === "client") return "amber";
 	if (status >= 300) return "blue";
 	return "green";
 }
@@ -158,7 +160,7 @@ function RequestLog() {
 	const [rows, setRows] = useState<RequestRow[] | null>(null);
 	const [error, setError] = useState<string | null>(null);
 	const [live, setLive] = useState(true);
-	const [statusClass, setStatusClass] = useState("all");
+	const [statusFilter, setStatusFilter] = useState("all");
 	const [method, setMethod] = useState("all");
 	const [source, setSource] = useState("app");
 	const [text, setText] = useState("");
@@ -208,10 +210,10 @@ function RequestLog() {
 		return (rows ?? []).filter((r) => {
 			if (source === "app" && r.studio) return false;
 			if (method !== "all" && r.method !== method) return false;
-			if (statusClass !== "all") {
-				const bad = r.status >= 400 || r.status < 100;
-				if (statusClass === "errors" ? !bad : Math.floor(r.status / 100) !== Number(statusClass))
-					return false;
+			if (statusFilter === "server" || statusFilter === "client") {
+				if (statusClass(r.status) !== statusFilter) return false;
+			} else if (statusFilter !== "all" && Math.floor(r.status / 100) !== Number(statusFilter)) {
+				return false;
 			}
 			return (
 				!q ||
@@ -220,8 +222,8 @@ function RequestLog() {
 				(r.error ?? "").toLowerCase().includes(q)
 			);
 		});
-	}, [rows, source, method, statusClass, text]);
-	const narrowed = method !== "all" || statusClass !== "all" || text.trim() !== "";
+	}, [rows, source, method, statusFilter, text]);
+	const narrowed = method !== "all" || statusFilter !== "all" || text.trim() !== "";
 
 	return (
 		<>
@@ -249,15 +251,14 @@ function RequestLog() {
 				/>
 				<Select
 					aria-label="Status"
-					value={statusClass}
-					onValueChange={setStatusClass}
+					value={statusFilter}
+					onValueChange={setStatusFilter}
 					options={[
 						{ value: "all", label: "All statuses" },
-						{ value: "errors", label: "Errors (4xx, 5xx)" },
+						{ value: "server", label: "Server errors (5xx)" },
+						{ value: "client", label: "Client errors (4xx)" },
 						{ value: "2", label: "2xx" },
 						{ value: "3", label: "3xx" },
-						{ value: "4", label: "4xx" },
-						{ value: "5", label: "5xx" },
 					]}
 				/>
 				<Select

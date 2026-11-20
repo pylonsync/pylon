@@ -6,9 +6,13 @@ export interface MetricsSnapshot {
 	requests: {
 		total: number;
 		ok: number;
+		/** Responses with a 5xx status. */
 		error: number;
+		/** Responses with a 4xx status. A server before 0.22.78 does not send it. */
+		client_error?: number;
 		per_minute?: number[];
 		errors_per_minute?: number[];
+		client_errors_per_minute?: number[];
 	};
 	/**
 	 * Latency of the last 60 minutes, in milliseconds. A percentile is the

@@ -5,7 +5,8 @@ use std::time::Instant;
 use crate::log_ring::{log_ring, RingEntry};
 use crate::tinybird_logger::{iso_now_ms, TinybirdLogger};
 
-/// Rolling per-minute buckets for the request count + error count.
+/// Rolling per-minute buckets for the request, server error and client
+/// error counts.
 /// Sized for the Studio Overview's "last 60 minutes" sparkline. Cheap
 /// to update (one mutex lock + two array bumps per request) and tiny
 /// (~960 bytes). The Mutex-guarded path runs once per request,
@@ -13,21 +14,37 @@ use crate::tinybird_logger::{iso_now_ms, TinybirdLogger};
 /// concern.
 const ROLLUP_MINUTES: usize = 60;
 
-/// A response counts as an error when its status is 4xx or 5xx. A
-/// `101 Switching Protocols` (every WebSocket upgrade, including `/shard`)
-/// is a success. A status below 100 is not valid HTTP, so it counts as an error.
-fn is_error_status(status: u16) -> bool {
-    !(100..400).contains(&status)
+/// How a response status is counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusClass {
+    /// 1xx, 2xx and 3xx. A `101 Switching Protocols` (every WebSocket
+    /// upgrade, including `/shard`) is a success.
+    Ok,
+    /// 4xx: the server refused the request (not found, unauthorized, rate
+    /// limited). Scanners and bad clients make these, so they are not errors.
+    ClientError,
+    /// 5xx, and a status below 100, which is not valid HTTP.
+    ServerError,
+}
+
+fn status_class(status: u16) -> StatusClass {
+    match status {
+        100..=399 => StatusClass::Ok,
+        400..=499 => StatusClass::ClientError,
+        _ => StatusClass::ServerError,
+    }
 }
 
 struct RequestBuckets {
     /// Wall-clock minute (epoch seconds / 60) the head bucket
     /// represents. We rotate when the current minute moves past this.
     head_minute: u64,
-    /// Total + errors per minute, ring-buffered. `requests[0]` is the
-    /// most recent minute, `requests[ROLLUP_MINUTES-1]` is 59 minutes ago.
+    /// Counts per minute, ring-buffered. `requests[0]` is the most recent
+    /// minute, `requests[ROLLUP_MINUTES-1]` is 59 minutes ago. `errors`
+    /// counts server errors and `client_errors` counts 4xx responses.
     requests: [u64; ROLLUP_MINUTES],
     errors: [u64; ROLLUP_MINUTES],
+    client_errors: [u64; ROLLUP_MINUTES],
     /// Request durations per minute, as counts per [`LATENCY_BOUNDS_MS`]
     /// bucket. The last slot counts durations above the largest bound.
     latency: [[u32; LATENCY_BUCKETS]; ROLLUP_MINUTES],
@@ -68,6 +85,7 @@ impl RequestBuckets {
             head_minute: 0,
             requests: [0; ROLLUP_MINUTES],
             errors: [0; ROLLUP_MINUTES],
+            client_errors: [0; ROLLUP_MINUTES],
             latency: [[0; LATENCY_BUCKETS]; ROLLUP_MINUTES],
         }
     }
@@ -93,17 +111,23 @@ impl RequestBuckets {
             // Shift ring right by `shift` slots, zeroing the freed head.
             self.requests.rotate_right(shift);
             self.errors.rotate_right(shift);
+            self.client_errors.rotate_right(shift);
             self.latency.rotate_right(shift);
             for i in 0..shift {
                 self.requests[i] = 0;
                 self.errors[i] = 0;
+                self.client_errors[i] = 0;
                 self.latency[i] = [0; LATENCY_BUCKETS];
             }
             self.head_minute = now;
         }
         self.requests[0] = self.requests[0].saturating_add(1);
-        if is_error_status(status) {
-            self.errors[0] = self.errors[0].saturating_add(1);
+        match status_class(status) {
+            StatusClass::Ok => {}
+            StatusClass::ClientError => {
+                self.client_errors[0] = self.client_errors[0].saturating_add(1);
+            }
+            StatusClass::ServerError => self.errors[0] = self.errors[0].saturating_add(1),
         }
         if let Some(ms) = duration_ms {
             let bucket = LATENCY_BOUNDS_MS
@@ -114,8 +138,12 @@ impl RequestBuckets {
         }
     }
 
-    fn snapshot(&self) -> (Vec<u64>, Vec<u64>) {
-        (self.requests.to_vec(), self.errors.to_vec())
+    fn snapshot(&self) -> (Vec<u64>, Vec<u64>, Vec<u64>) {
+        (
+            self.requests.to_vec(),
+            self.errors.to_vec(),
+            self.client_errors.to_vec(),
+        )
     }
 
     /// Latency percentiles for the whole window and for each minute.
@@ -184,7 +212,10 @@ impl MethodCounters {
 pub struct Metrics {
     pub requests_total: AtomicU64,
     pub requests_ok: AtomicU64,
+    /// Responses with a 5xx status.
     pub requests_err: AtomicU64,
+    /// Responses with a 4xx status.
+    pub requests_client_err: AtomicU64,
     pub requests_by_method: MethodCounters,
     /// Rolling 60-minute window for the Studio Overview sparkline.
     /// Mutex-guarded because we rotate the ring on minute boundaries.
@@ -218,6 +249,23 @@ struct CurrentRequest {
 
 thread_local! {
     static CURRENT_REQUEST: std::cell::Cell<Option<CurrentRequest>> = const { std::cell::Cell::new(None) };
+}
+
+thread_local! {
+    static RESPONSE_STATUS: std::cell::Cell<Option<u16>> = const { std::cell::Cell::new(None) };
+}
+
+/// Store the status of the response this thread sent. The frontend module
+/// sends many kinds of response (pages, files, redirects, not-found pages,
+/// render errors), and the server reads the status back with
+/// [`take_response_status`] to count and log the request.
+pub(crate) fn note_response_status(status: u16) {
+    RESPONSE_STATUS.with(|cell| cell.set(Some(status)));
+}
+
+/// Return the status that [`note_response_status`] stored, and clear it.
+pub(crate) fn take_response_status() -> Option<u16> {
+    RESPONSE_STATUS.with(|cell| cell.take())
 }
 
 /// Remove query strings and fragments, which can contain credentials.
@@ -313,14 +361,15 @@ impl Metrics {
             requests_total: AtomicU64::new(0),
             requests_ok: AtomicU64::new(0),
             requests_err: AtomicU64::new(0),
+            requests_client_err: AtomicU64::new(0),
             requests_by_method: MethodCounters::new(),
             request_buckets: Mutex::new(RequestBuckets::new()),
             start_time: Instant::now(),
         }
     }
 
-    /// Record a completed request. A status code in the 200-399 range is
-    /// counted as successful; everything else counts as an error.
+    /// Record a completed request. A 1xx-3xx status is a success, a 4xx
+    /// status is a client error, and anything else is a server error.
     ///
     /// Also emits an access log line via tracing if a thread-local
     /// request context was set (see [`set_current_request`]). The
@@ -331,11 +380,12 @@ impl Metrics {
     /// in-flight request without cross-talk.
     pub fn record_request(&self, method: &str, status: u16) {
         self.requests_total.fetch_add(1, Ordering::Relaxed);
-        if is_error_status(status) {
-            self.requests_err.fetch_add(1, Ordering::Relaxed);
-        } else {
-            self.requests_ok.fetch_add(1, Ordering::Relaxed);
-        }
+        let counter = match status_class(status) {
+            StatusClass::Ok => &self.requests_ok,
+            StatusClass::ClientError => &self.requests_client_err,
+            StatusClass::ServerError => &self.requests_err,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
         self.requests_by_method.increment(method);
 
         // Pull the per-request context if set. We log even without it
@@ -386,12 +436,16 @@ impl Metrics {
     /// Overview sparkline. Index 0 is the current minute (partial),
     /// index 59 is 59 minutes ago.
     pub fn snapshot(&self) -> serde_json::Value {
-        let ((requests_per_min, errors_per_min), latency) = self
+        let ((requests_per_min, errors_per_min, client_errors_per_min), latency) = self
             .request_buckets
             .lock()
             .map(|b| (b.snapshot(), b.latency_snapshot()))
             .unwrap_or((
-                (vec![0; ROLLUP_MINUTES], vec![0; ROLLUP_MINUTES]),
+                (
+                    vec![0; ROLLUP_MINUTES],
+                    vec![0; ROLLUP_MINUTES],
+                    vec![0; ROLLUP_MINUTES],
+                ),
                 serde_json::Value::Null,
             ));
         serde_json::json!({
@@ -400,8 +454,10 @@ impl Metrics {
                 "total": self.requests_total.load(Ordering::Relaxed),
                 "ok": self.requests_ok.load(Ordering::Relaxed),
                 "error": self.requests_err.load(Ordering::Relaxed),
+                "client_error": self.requests_client_err.load(Ordering::Relaxed),
                 "per_minute": requests_per_min,
                 "errors_per_minute": errors_per_min,
+                "client_errors_per_minute": client_errors_per_min,
             },
             "latency_ms": latency,
             "ssr_cache": crate::ssr_cache::stats::json(),
@@ -421,6 +477,7 @@ impl Metrics {
         let total = self.requests_total.load(Ordering::Relaxed);
         let ok = self.requests_ok.load(Ordering::Relaxed);
         let err = self.requests_err.load(Ordering::Relaxed);
+        let client_err = self.requests_client_err.load(Ordering::Relaxed);
         let uptime = self.uptime_secs();
         let get = self.requests_by_method.get.load(Ordering::Relaxed);
         let post = self.requests_by_method.post.load(Ordering::Relaxed);
@@ -438,9 +495,12 @@ impl Metrics {
              # HELP pylon_http_requests_ok_total HTTP requests with 1xx/2xx/3xx status.\n\
              # TYPE pylon_http_requests_ok_total counter\n\
              pylon_http_requests_ok_total {ok}\n\
-             # HELP pylon_http_requests_errors_total HTTP requests with 4xx/5xx status.\n\
+             # HELP pylon_http_requests_errors_total HTTP requests with 5xx status.\n\
              # TYPE pylon_http_requests_errors_total counter\n\
              pylon_http_requests_errors_total {err}\n\
+             # HELP pylon_http_requests_client_errors_total HTTP requests with 4xx status.\n\
+             # TYPE pylon_http_requests_client_errors_total counter\n\
+             pylon_http_requests_client_errors_total {client_err}\n\
              # HELP pylon_http_requests_by_method HTTP requests by method.\n\
              # TYPE pylon_http_requests_by_method counter\n\
              pylon_http_requests_by_method{{method=\"GET\"}} {get}\n\
@@ -673,11 +733,16 @@ mod tests {
         m.record_request("GET", 200);
         m.record_request("POST", 400);
 
+        m.record_request("GET", 503);
+
         let snap = m.snapshot();
-        assert_eq!(snap["requests"]["total"], 2);
+        assert_eq!(snap["requests"]["total"], 3);
         assert_eq!(snap["requests"]["ok"], 1);
         assert_eq!(snap["requests"]["error"], 1);
-        assert_eq!(snap["methods"]["GET"], 1);
+        assert_eq!(snap["requests"]["client_error"], 1);
+        assert_eq!(snap["requests"]["errors_per_minute"][0], 1);
+        assert_eq!(snap["requests"]["client_errors_per_minute"][0], 1);
+        assert_eq!(snap["methods"]["GET"], 2);
         assert_eq!(snap["methods"]["POST"], 1);
         assert_eq!(snap["methods"]["PATCH"], 0);
         assert_eq!(snap["methods"]["DELETE"], 0);
@@ -700,13 +765,21 @@ mod tests {
         // 3xx = ok (redirects)
         m.record_request("GET", 301);
         m.record_request("GET", 399);
-        // 4xx = error
+        // 4xx = client error, not an error
         m.record_request("GET", 400);
         m.record_request("GET", 404);
-        // 5xx = error
+        m.record_request("GET", 429);
+        m.record_request("GET", 499);
+        // 5xx and invalid statuses = error
         m.record_request("GET", 500);
+        m.record_request("GET", 599);
+        m.record_request("GET", 0);
 
         assert_eq!(m.requests_ok.load(Ordering::Relaxed), 5);
+        assert_eq!(m.requests_client_err.load(Ordering::Relaxed), 4);
         assert_eq!(m.requests_err.load(Ordering::Relaxed), 3);
+        assert!(m
+            .prometheus()
+            .contains("pylon_http_requests_client_errors_total 4\n"));
     }
 }

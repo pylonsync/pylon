@@ -239,7 +239,7 @@ export function HealthPage() {
 					page: "logs",
 					state: !metrics ? "none" : errorRate > 5 ? "bad" : recentErrors > 0 ? "warn" : "ok",
 					detail: metrics
-						? `${recentErrors.toLocaleString()} of ${recent.toLocaleString()} requests failed in the last 60 minutes (${errorRate.toFixed(1)}%)`
+						? `${recentErrors.toLocaleString()} of ${recent.toLocaleString()} requests had a server error (5xx) in the last 60 minutes (${errorRate.toFixed(1)}%)`
 						: "Metrics are not loaded",
 				},
 				{

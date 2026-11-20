@@ -17,6 +17,7 @@ import { useMetrics } from "@/hooks/use-metrics";
 import { useQuery } from "@/hooks/use-query";
 import { formatBytes, formatDuration, percentile, routeOfPath } from "@/lib/format";
 import { api } from "@/lib/pylon";
+import { isServerError } from "@/lib/status";
 import { LockedPage } from "./Locked";
 
 type RequestRow = {
@@ -115,7 +116,7 @@ export function MetricsPage() {
 					return { key: `${r.method} ${route}`, label: route, note: r.method };
 				},
 				(r) => r.cpu_ms,
-				(r) => r.status >= 400 || r.status < 100,
+				(r) => isServerError(r.status),
 			),
 		[samples.data],
 	);
@@ -168,7 +169,12 @@ export function MetricsPage() {
 						label="Error rate"
 						value={errorRate === null ? "–" : `${errorRate.toFixed(2)}%`}
 						tone={!errorRate ? "default" : errorRate > 5 ? "bad" : "warn"}
-						note={requests ? `${n(requests.error)} errors` : undefined}
+						note={requests ? `${n(requests.error)} server errors (5xx)` : undefined}
+					/>
+					<Stat
+						label="Client errors"
+						value={n(requests?.client_error)}
+						note="4xx responses. They are not in the error rate."
 					/>
 					<Stat label="Latency p50" value={ms(latency?.p50)} note="Last 60 minutes" />
 					<Stat label="Latency p95" value={ms(latency?.p95)} />

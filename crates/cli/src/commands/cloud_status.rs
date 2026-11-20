@@ -22,7 +22,11 @@ struct ProjectForCli {
 struct Requests {
     total: u64,
     ok: u64,
+    /// 5xx responses. A server before 0.22.78 also counts 4xx here.
     error: u64,
+    /// 4xx responses. A server before 0.22.78 does not send it.
+    #[serde(default)]
+    client_error: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -148,7 +152,12 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
             "status": project.status,
             "region": project.region,
             "uptime_secs": m.uptime_secs,
-            "requests": {"total": m.requests.total, "ok": m.requests.ok, "error": m.requests.error},
+            "requests": {
+                "total": m.requests.total,
+                "ok": m.requests.ok,
+                "error": m.requests.error,
+                "client_error": m.requests.client_error,
+            },
             "jobs": m.jobs.as_ref().map(|j| serde_json::json!({"running": j.running, "pending": j.pending, "failed": j.failed})),
             "realtime": m.realtime.as_ref().map(|r| serde_json::json!({"ws": r.ws, "sse": r.sse})),
             "shards": m.shards.as_ref().map(|s| serde_json::json!({
@@ -162,10 +171,16 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     println!("{}  ({})", project.slug, project.status);
     println!("  Region:   {}", project.region);
     println!("  Uptime:   {}", fmt_secs(m.uptime_secs));
-    println!(
-        "  Requests: {} total · {} ok · {} error",
-        m.requests.total, m.requests.ok, m.requests.error
-    );
+    match m.requests.client_error {
+        Some(client_error) => println!(
+            "  Requests: {} total · {} ok · {} client error (4xx) · {} server error (5xx)",
+            m.requests.total, m.requests.ok, client_error, m.requests.error
+        ),
+        None => println!(
+            "  Requests: {} total · {} ok · {} error (4xx and 5xx)",
+            m.requests.total, m.requests.ok, m.requests.error
+        ),
+    }
     if let Some(j) = &m.jobs {
         println!(
             "  Jobs:     {} running · {} pending · {} failed",

@@ -20,7 +20,7 @@
 //! (`X-Pylon-Offline-Shell: 1`) as an offline shell only when its HTML does
 //! not depend on who is signed in; see [`OFFLINE_SHELL_RESPONSE_HEADER`].
 
-use super::{content_type_for, open_static_file, respond_static_reader};
+use super::{content_type_for, open_static_file, respond, respond_static_reader};
 use std::path::{Path, PathBuf};
 use tiny_http::{Header, Request, Response};
 
@@ -147,7 +147,7 @@ pub(crate) fn serve_service_worker(request: Request, outdir: Option<&Path>, cors
             if let Ok(h) = Header::from_bytes("Cache-Control", "no-store") {
                 response = response.with_header(h);
             }
-            let _ = request.respond(response);
+            let _ = respond(request, response);
         }
     }
 }
@@ -180,7 +180,7 @@ pub(crate) fn serve_build_version(request: Request, outdir: Option<&Path>, cors_
                     response = response.with_header(h);
                 }
             }
-            let _ = request.respond(response);
+            let _ = respond(request, response);
         }
     }
 }
@@ -233,7 +233,7 @@ mod tests {
                 .unwrap();
             if let Err(request) = super::super::try_handle(&cfg, request, "*") {
                 // What the API router answers for an unknown path.
-                let _ = request.respond(Response::empty(404));
+                let _ = respond(request, Response::empty(404));
             }
         });
         let mut client = std::net::TcpStream::connect(addr).unwrap();

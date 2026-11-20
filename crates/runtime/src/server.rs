@@ -6476,14 +6476,15 @@ fn start_server(
         // CSRF gate above.
         if frontend_config.is_active() {
             let method_str_for_metric = method.as_str().to_string();
+            // Clear a status that an earlier request on this thread left.
+            let _ = crate::metrics::take_response_status();
             match crate::frontend::try_handle(&frontend_config, request, &cors_origin) {
                 Ok(()) => {
-                    // Status is logged inside the module; we record a
-                    // 200 here as a conservative aggregate (precise per-
-                    // asset status codes flow through `tracing::info!`
-                    // in dev). The frontend module never panics — a
-                    // 502 from the proxy still flows through Ok(()).
-                    metrics.record_request(&method_str_for_metric, 200);
+                    // The frontend module stores the status of the response
+                    // it sent. A response written straight to the socket (the
+                    // dev reload stream) stores none and counts as 200.
+                    let status = crate::metrics::take_response_status().unwrap_or(200);
+                    metrics.record_request(&method_str_for_metric, status);
                     return;
                 }
                 Err(returned) => {
