@@ -66,11 +66,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         print_help();
         return ExitCode::Ok;
     }
-    let positional: Vec<&str> = args
-        .iter()
-        .filter(|a| !a.starts_with('-') && *a != "services")
-        .map(|s| s.as_str())
-        .collect();
+    let positional = positional_args(args);
 
     let creds = match require_credentials() {
         Ok(c) => c,
@@ -104,6 +100,25 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
             ExitCode::Usage
         }
     }
+}
+
+/// Flags of this command that take a value in the next argument.
+const VALUE_FLAGS: &[&str] = &["--project", "--lines"];
+
+/// The words after `services` that are not flags or a flag's value: the
+/// subcommand and the service name. `pylon services --project rafter` has
+/// none, so it lists; "rafter" is the project, not a subcommand.
+fn positional_args(args: &[String]) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut iter = args.iter().map(String::as_str);
+    while let Some(arg) = iter.next() {
+        if VALUE_FLAGS.contains(&arg) {
+            iter.next();
+        } else if !arg.starts_with('-') && arg != "services" {
+            out.push(arg);
+        }
+    }
+    out
 }
 
 fn usage(line: &str) -> ExitCode {
@@ -338,6 +353,37 @@ mod tests {
         assert_eq!(
             lines_flag(&args(&["services", "logs", "w", "--lines", "many"])),
             None
+        );
+    }
+
+    #[test]
+    fn a_flag_value_is_not_a_subcommand() {
+        assert!(positional_args(&args(&["services", "--project", "rafter"])).is_empty());
+        assert_eq!(
+            positional_args(&args(&[
+                "services",
+                "--project",
+                "rafter",
+                "logs",
+                "worker",
+                "--lines",
+                "50"
+            ])),
+            vec!["logs", "worker"]
+        );
+        assert_eq!(
+            positional_args(&args(&[
+                "services",
+                "restart",
+                "worker",
+                "--yes",
+                "--project=rafter"
+            ])),
+            vec!["restart", "worker"]
+        );
+        assert_eq!(
+            positional_args(&args(&["services", "list", "--json"])),
+            vec!["list"]
         );
     }
 

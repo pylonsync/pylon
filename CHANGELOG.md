@@ -4,6 +4,7 @@
 
 ### Features
 
+* **cli:** `pylon services --project <slug>` lists the project's services. It took the slug for a subcommand and printed "Unknown services command".
 * **release:** the release workflow builds the macOS and Windows binaries and the runtime and builder images while CI is still testing the commit, and publishes them only after CI passes. Before, each build started after CI, so a release took the CI run plus the Windows build (60 minutes for 0.22.78). The npm check after publishing waits up to 5 minutes for a tarball to be downloadable. The Windows test job no longer saves a 6.6 GB build cache that took 17 minutes to write and pushed the repository over GitHub's 10 GB cache limit.
 * **cli:** `pylon deploy` no longer refuses an app that declares `requireEnv("PYLON_PUBLIC_URL", ...)` or another variable Stack0 Cloud sets on every machine. The check asked for a secret of that name, and Cloud refuses one (`PROTECTED_KEY`), so the deploy could not pass. The CLI now asks the host which variables it sets and counts them as present.
 * **auth:** a signed-in user who is a platform admin (`auth({ user: { adminField } })` or `PYLON_ADMIN_EMAILS`) and a member of the active org now carries that org's role. Before, the session had `is_admin: true` and `roles: []`, so `<HasRole role="owner">` hid the org's controls from its owner and `ctx.auth.roles` was empty in functions. The admin-token context keeps `["admin"]`, and an API key still gets no org role.
