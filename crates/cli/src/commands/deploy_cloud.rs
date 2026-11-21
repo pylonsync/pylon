@@ -1451,6 +1451,20 @@ fn check_required_env(
     // A variable a service provides (its URL, its token) is set by the host
     // during the deploy. It has no secret before the first one.
     present.extend(service_provided_env(&manifest.services));
+    // Variables the host sets on every machine (PYLON_PUBLIC_URL and the
+    // like). The host refuses a secret of the same name, so asking for one
+    // would stop the deploy for good. A host that does not answer this call
+    // names none.
+    #[derive(serde::Deserialize)]
+    struct ManagedKeys {
+        #[serde(default)]
+        keys: Vec<String>,
+    }
+    let managed: Vec<String> =
+        post_json::<_, ManagedKeys>(creds, "/api/fn/listManagedEnvKeys", &())
+            .map(|m| m.keys)
+            .unwrap_or_default();
+    present.extend(managed.iter().map(String::as_str));
     let missing = missing_required_env(&manifest.required_env, &present);
 
     if missing.is_empty() {
@@ -1652,6 +1666,14 @@ mod tests {
         let missing = super::missing_required_env(&declared, &provided);
         assert_eq!(missing.len(), 1);
         assert_eq!(missing[0].name, "MAPS_KEY");
+    }
+
+    #[test]
+    fn required_env_the_host_sets_is_not_missing() {
+        let declared = [req("PYLON_PUBLIC_URL"), req("SITE_URL")];
+        let missing = super::missing_required_env(&declared, &["PYLON_PUBLIC_URL"]);
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].name, "SITE_URL");
     }
 
     #[test]
