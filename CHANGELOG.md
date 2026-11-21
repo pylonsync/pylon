@@ -4,6 +4,7 @@
 
 ### Features
 
+* **release:** the runtime and builder images are built once, while CI runs, and handed to the publishing job as files. In 0.22.80 the publishing job built the runtime image a second time (13 minutes) because the build cache it was meant to reuse was not there.
 * **cli:** `pylon services --project <slug>` lists the project's services. It took the slug for a subcommand and printed "Unknown services command".
 * **release:** the release workflow builds the macOS and Windows binaries and the runtime and builder images while CI is still testing the commit, and publishes them only after CI passes. Before, each build started after CI, so a release took the CI run plus the Windows build (60 minutes for 0.22.78). The npm check after publishing waits up to 5 minutes for a tarball to be downloadable. The Windows test job no longer saves a 6.6 GB build cache that took 17 minutes to write and pushed the repository over GitHub's 10 GB cache limit.
 * **cli:** `pylon deploy` no longer refuses an app that declares `requireEnv("PYLON_PUBLIC_URL", ...)` or another variable Stack0 Cloud sets on every machine. The check asked for a secret of that name, and Cloud refuses one (`PROTECTED_KEY`), so the deploy could not pass. The CLI now asks the host which variables it sets and counts them as present.

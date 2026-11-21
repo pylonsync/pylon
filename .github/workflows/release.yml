@@ -927,12 +927,21 @@ jobs:
           set -euo pipefail
           node scripts/npm-postflight.mjs packages/cli-darwin-arm64/package.json packages/cli-linux-x64/package.json packages/cli-win32-x64/package.json packages/cli/package.json
 
-  # The runtime and builder images, built into the build cache while CI is
-  # still testing. Nothing is pushed. `docker` runs the same builds after
-  # ci-gate and finds every layer cached, so its time is the push. The dev
-  # image is not built here: it is built on the runtime image of this
+  # The runtime and builder images, built while CI is still testing and
+  # handed to `docker` as files. Nothing is pushed here. `docker` loads the
+  # two files after ci-gate and pushes them, so its time is the push.
+  #
+  # The images travel as workflow artifacts, not through the build cache. The
+  # first version of this job (0.22.80) built into the GitHub Actions cache
+  # and `docker` built again from it: every step missed, and the runtime
+  # image compiled a second time for 13 minutes. That cache shares the
+  # repository's 10 GB limit with the Rust caches and is evicted without
+  # notice; an artifact is not.
+  #
+  # The images carry their final names and labels, so `docker` only pushes.
+  # The dev image is not built here: it is built on the runtime image of this
   # version, which exists only after `docker` pushes it.
-  docker-warm:
+  docker-prebuild:
     name: docker build (no push)
     needs: verify
     runs-on: ubuntu-24.04
@@ -941,24 +950,60 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051  # v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/pylon
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+      # `outputs: type=docker` writes an image archive `docker load` reads.
+      # That exporter cannot carry a provenance attestation, so it is off;
+      # the images are public and built from this tagged commit.
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
         with:
           context: .
-          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64
+          provenance: false
+          outputs: type=docker,dest=${{ runner.temp }}/pylon-runtime.tar
           cache-from: type=gha,scope=pylon-runtime
           cache-to: type=gha,mode=max,scope=pylon-runtime
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051  # v5
+        id: meta-builder
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/pylon-builder
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
         with:
           context: .
           file: builder/Dockerfile
-          push: false
+          tags: ${{ steps.meta-builder.outputs.tags }}
+          labels: ${{ steps.meta-builder.outputs.labels }}
           platforms: linux/amd64
+          provenance: false
+          outputs: type=docker,dest=${{ runner.temp }}/pylon-builder.tar
           cache-from: type=gha,scope=pylon-builder
           cache-to: type=gha,mode=max,scope=pylon-builder
+      - name: Upload the images
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: pylon-images
+          path: |
+            ${{ runner.temp }}/pylon-runtime.tar
+            ${{ runner.temp }}/pylon-builder.tar
+          retention-days: 1
+          if-no-files-found: error
+          # The archives are already compressed layer by layer.
+          compression-level: 0
 
   docker:
-    needs: [verify, ci-gate, docker-warm]
+    needs: [verify, ci-gate, docker-prebuild]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
@@ -1028,28 +1073,33 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
-        if: steps.immutable.outputs.pylon != 'true'
+      # The runtime and builder images come from `docker-prebuild`, already
+      # named and labelled. Load them and push each tag.
+      - name: Download the images `docker-prebuild` built
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
         with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          # Single-platform for now. linux/arm64 via QEMU emulation
-          # quadruples the build time (45+ min cold, painful even
-          # warm) and we have no native arm64 runners. Add it back
-          # once we either: (a) introduce a separate arm64 build job
-          # on a GitHub-hosted ARM runner, or (b) accept the wait
-          # and queue parallel jobs by platform via matrix.
-          platforms: linux/amd64
-          # GHA cache backend persists buildx layers across runs so
-          # the cargo dep tree (~80% of build time) doesn't recompile
-          # unless Cargo.lock actually changed. mode=max preserves
-          # intermediate layers, not just the final image — saves
-          # the rust-builder stage's deps cache too.
-          # Each image needs its own scope to preserve all three caches.
-          cache-from: type=gha,scope=pylon-runtime
-          cache-to: type=gha,mode=max,scope=pylon-runtime
+          name: pylon-images
+          path: ${{ runner.temp }}/images
+      - name: Load the images
+        shell: bash
+        env:
+          DIR: ${{ runner.temp }}/images
+        run: |
+          set -euo pipefail
+          docker load --input "$DIR/pylon-runtime.tar"
+          docker load --input "$DIR/pylon-builder.tar"
+      - name: Push the runtime image
+        if: steps.immutable.outputs.pylon != 'true'
+        shell: bash
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r tag; do
+            [[ -n "$tag" ]] || continue
+            docker image inspect "$tag" >/dev/null
+            docker push "$tag"
+          done <<<"$TAGS"
 
       # pylon-dev: the cloud dev-workspace image, the runtime image just
       # pushed plus the coding agent's browser and web search
@@ -1088,17 +1138,18 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+      - name: Push the builder image
         if: steps.immutable.outputs.builder != 'true'
-        with:
-          context: .
-          file: builder/Dockerfile
-          push: true
-          tags: ${{ steps.meta-builder.outputs.tags }}
-          labels: ${{ steps.meta-builder.outputs.labels }}
-          platforms: linux/amd64
-          cache-from: type=gha,scope=pylon-builder
-          cache-to: type=gha,mode=max,scope=pylon-builder
+        shell: bash
+        env:
+          TAGS: ${{ steps.meta-builder.outputs.tags }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r tag; do
+            [[ -n "$tag" ]] || continue
+            docker image inspect "$tag" >/dev/null
+            docker push "$tag"
+          done <<<"$TAGS"
 
   # ---------------------------------------------------------------
   # Tell Pylon Cloud the release exists so its PYLON_RELEASE pin moves.
