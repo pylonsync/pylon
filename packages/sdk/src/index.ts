@@ -989,6 +989,8 @@ export interface AppManifest {
   build?: BuildConfig;
   /** Realtime shard kinds whose simulation is a WebAssembly module. */
   shards?: ManifestShard[];
+  /** Processes that run beside the app on their own machine. */
+  services?: ManifestService[];
   /** Installable app that opens without a network. See `OfflineConfig`. */
   offline?: ManifestOffline;
 }
@@ -1360,6 +1362,157 @@ function validateShard(def: ManifestShard): void {
   if (def.onStop !== undefined && (typeof def.onStop !== "string" || def.onStop === "")) {
     fail("onStop must be a function name");
   }
+}
+
+/** One service. See {@link service}. */
+export interface ManifestService {
+  /** Lowercase name, unique in the app: a letter, then up to 30 letters,
+   *  digits or '-'. */
+  name: string;
+  /** The service's source directory, relative to the app root. */
+  dir: string;
+  /** Shell command that installs the service. It runs in the source
+   *  directory on every deploy that changes the service. */
+  setup?: string;
+  /** Shell command that starts the HTTP server. It runs in the source
+   *  directory and must listen on `port`. */
+  start: string;
+  /** The port the server listens on. Default 8080. */
+  port?: number;
+  /** Path that returns 2xx when the server is ready. The host calls it
+   *  without credentials. Default "/". */
+  healthPath?: string;
+  /** App environment variable that receives the service's URL. */
+  urlEnv: string;
+  /** Environment variable, set on the app and on the service, that holds a
+   *  token the host generates. The service must check it on each request:
+   *  the URL is public. */
+  tokenEnv?: string;
+  /** Project secrets the service may read, by name. */
+  env?: string[];
+  /** Plain environment values for the service. */
+  vars?: Record<string, string>;
+  /** Hosts the service may connect to (`"api.example.com"`,
+   *  `"*.example.com"`). The app's own host is always allowed. Unset: any
+   *  host. */
+  allowHosts?: string[];
+  /** Memory limit in MiB. Unset: the host's default. */
+  memoryMb?: number;
+  /** Keep the machine running with no requests. Default `false`: it sleeps
+   *  when idle and the next request wakes it. */
+  keepAwake?: boolean;
+}
+
+/**
+ * Declare a service: an HTTP server in any language that runs beside the app
+ * on its own machine. `pylon deploy` ships its directory with the app. The
+ * app reads the service's URL from `urlEnv` and sends the token in
+ * `tokenEnv` with each request.
+ *
+ * ```ts
+ * buildManifest({
+ *   // ...
+ *   services: [
+ *     service({
+ *       name: "worker",
+ *       dir: "services/worker",
+ *       setup: "uv sync --frozen --no-dev",
+ *       start: "uv run uvicorn worker.app:app --host 0.0.0.0 --port 8080",
+ *       healthPath: "/health",
+ *       urlEnv: "WORKER_URL",
+ *       tokenEnv: "WORKER_TOKEN",
+ *     }),
+ *   ],
+ * });
+ * ```
+ *
+ * The service's environment holds `PORT`, the app's public address in
+ * `PYLON_APP_URL` and `PYLON_APP_HOST`, the token, the project secrets named
+ * in `env`, and `vars`.
+ */
+export function service(def: ManifestService): ManifestService {
+  validateService(def);
+  return def;
+}
+
+const SERVICE_NAME = /^[a-z][a-z0-9-]{0,30}$/;
+const ENV_NAME = /^[A-Z_][A-Z0-9_]{0,127}$/;
+const SERVICE_HOST = /^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
+/** Environment names the host sets on a service. */
+const SERVICE_RESERVED_ENV = new Set(["PORT", "PYLON_APP_URL", "PYLON_APP_HOST"]);
+
+/** Throws when a service has a value the host cannot deploy. */
+function validateService(def: ManifestService): void {
+  const fail = (msg: string): never => {
+    throw new Error(`service(${JSON.stringify(def?.name ?? "")}): ${msg}`);
+  };
+  if (typeof def?.name !== "string" || !SERVICE_NAME.test(def.name)) {
+    fail("name must start with a lowercase letter and hold up to 31 lowercase letters, digits, '-'");
+  }
+  if (typeof def.dir !== "string" || def.dir === "") fail("dir must be a non-empty path");
+  const dir = def.dir.replace(/\\/g, "/");
+  if (dir.startsWith("/") || /^[A-Za-z]:/.test(dir) || dir.split("/").includes("..")) {
+    fail('dir must be relative to the app root, without ".."');
+  }
+  if (dir.split("/").every((part) => part === "" || part === ".")) {
+    fail("dir must be a directory below the app root");
+  }
+  const checkCommand = (value: unknown, field: string) => {
+    if (typeof value !== "string" || value.trim() === "") fail(`${field} must be a non-empty command`);
+    if ((value as string).length > 4000) fail(`${field} must be 4000 characters or fewer`);
+    if (/[\0\r]/.test(value as string)) fail(`${field} must not hold a NUL or a carriage return`);
+  };
+  checkCommand(def.start, "start");
+  if (def.setup !== undefined) checkCommand(def.setup, "setup");
+  if (def.port !== undefined && (!Number.isInteger(def.port) || def.port < 1024 || def.port > 65535)) {
+    fail("port must be an integer from 1024 to 65535");
+  }
+  if (def.healthPath !== undefined && (typeof def.healthPath !== "string" || !/^\/[\x21-\x7e]{0,255}$/.test(def.healthPath))) {
+    fail('healthPath must start with "/"');
+  }
+  const checkEnvName = (value: unknown, field: string) => {
+    if (typeof value !== "string" || !ENV_NAME.test(value)) {
+      fail(`${field} must be an environment variable name (A-Z, 0-9, '_')`);
+    }
+    if (SERVICE_RESERVED_ENV.has(value as string)) fail(`${field} cannot be ${value}: the host sets it`);
+  };
+  checkEnvName(def.urlEnv, "urlEnv");
+  if (def.tokenEnv !== undefined) {
+    checkEnvName(def.tokenEnv, "tokenEnv");
+    if (def.tokenEnv === def.urlEnv) fail("tokenEnv and urlEnv must differ");
+  }
+  const taken = new Set<string>(def.tokenEnv ? [def.tokenEnv] : []);
+  if (def.env !== undefined) {
+    if (!Array.isArray(def.env)) fail("env must be a list of secret names");
+    for (const name of def.env) {
+      checkEnvName(name, "env entries");
+      if (taken.has(name)) fail(`${name} is set twice`);
+      taken.add(name);
+    }
+  }
+  if (def.vars !== undefined) {
+    if (typeof def.vars !== "object" || def.vars === null || Array.isArray(def.vars)) fail("vars must be an object");
+    for (const [name, value] of Object.entries(def.vars)) {
+      checkEnvName(name, "vars keys");
+      if (taken.has(name)) fail(`${name} is set twice`);
+      taken.add(name);
+      if (typeof value !== "string" || value.length > 4000 || /\0/.test(value)) {
+        fail(`vars.${name} must be a string of 4000 characters or fewer`);
+      }
+    }
+  }
+  if (def.allowHosts !== undefined) {
+    if (!Array.isArray(def.allowHosts) || def.allowHosts.length > 100) fail("allowHosts must be a list of up to 100 hosts");
+    for (const host of def.allowHosts) {
+      if (typeof host !== "string" || host.length > 253 || !SERVICE_HOST.test(host)) {
+        fail(`allowHosts entries must be lowercase hosts such as "api.example.com" or "*.example.com"`);
+      }
+    }
+  }
+  if (def.memoryMb !== undefined && (!Number.isInteger(def.memoryMb) || def.memoryMb < 256 || def.memoryMb > 16384)) {
+    fail("memoryMb must be an integer from 256 to 16384");
+  }
+  if (def.keepAwake !== undefined && typeof def.keepAwake !== "boolean") fail("keepAwake must be a boolean");
 }
 
 /** One environment variable the app declares it needs. */
@@ -2717,6 +2870,8 @@ export function buildManifest(options: {
   build?: BuildConfig;
   /** Realtime shard kinds. See `shard`. */
   shards?: ManifestShard[];
+  /** Processes that run beside the app on their own machine. See `service`. */
+  services?: ManifestService[];
   /** Installable app that opens without a network. See `OfflineConfig`. */
   offline?: OfflineConfig;
   /** Set by `discoverFunctions()` (spread its result into this call).
@@ -2749,6 +2904,23 @@ export function buildManifest(options: {
     }
     shardNames.add(def.name);
   }
+  const serviceNames = new Set<string>();
+  const serviceAppEnv = new Set<string>();
+  for (const def of options.services ?? []) {
+    validateService(def);
+    if (serviceNames.has(def.name)) {
+      throw new Error(`buildManifest: two services are named "${def.name}"`);
+    }
+    serviceNames.add(def.name);
+    for (const name of [def.urlEnv, def.tokenEnv]) {
+      if (name === undefined) continue;
+      if (serviceAppEnv.has(name)) {
+        throw new Error(`buildManifest: two services set the app's ${name}`);
+      }
+      serviceAppEnv.add(name);
+    }
+  }
+  if (serviceNames.size > 8) throw new Error("buildManifest: an app can declare up to 8 services");
   const attached: PolicyDefinition[] = [];
   for (const ent of options.entities) {
     const extracted = extractAttachedPolicies(ent);
@@ -2817,6 +2989,9 @@ export function buildManifest(options: {
       : {}),
     ...(options.shards && options.shards.length > 0
       ? { shards: options.shards }
+      : {}),
+    ...(options.services && options.services.length > 0
+      ? { services: options.services }
       : {}),
     ...(offline ? { offline } : {}),
   };

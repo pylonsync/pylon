@@ -171,6 +171,13 @@ pub struct AppManifest {
     /// boot; `ctx.shards.create(kind, id)` starts a shard of that kind.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shards: Vec<ManifestShard>,
+    /// Processes that run beside the app on their own machine, from the
+    /// SDK's `service({...})` helper: a worker in another language, a
+    /// long-running agent. The host deploys each one with the app and gives
+    /// the app its URL in an environment variable. The runtime only carries
+    /// them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<ManifestService>,
     /// Installable app that opens without a network, from
     /// `buildManifest({ offline: {...} })`. When set, the runtime serves
     /// `/manifest.webmanifest` and `/pylon-sw.js`, and the client registers
@@ -449,6 +456,62 @@ pub struct ManifestBuildServer {
     /// (native modules, packages that read their own files at run time).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub external: Vec<String>,
+}
+
+/// One service: an HTTP server the host runs beside the app. Emitted by the
+/// SDK's `service({...})` helper.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestService {
+    /// Lowercase name, unique in the app.
+    pub name: String,
+    /// The service's source directory, relative to the app root.
+    pub dir: String,
+    /// Shell command that installs the service. Runs in the source
+    /// directory on every deploy that changes the service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<String>,
+    /// Shell command that starts the HTTP server. It must listen on `port`.
+    pub start: String,
+    /// The port the server listens on.
+    #[serde(default = "default_service_port")]
+    pub port: u16,
+    /// Path that returns 2xx when the server is ready. Called without
+    /// credentials.
+    #[serde(default = "default_service_health_path")]
+    pub health_path: String,
+    /// App environment variable that receives the service's URL.
+    pub url_env: String,
+    /// Environment variable, set on the app and on the service, that holds
+    /// a token the host generates. The service checks it on each request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_env: Option<String>,
+    /// Project secrets the service may read, by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
+    /// Plain environment values for the service.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub vars: std::collections::BTreeMap<String, String>,
+    /// Hosts the service may connect to (`api.example.com`,
+    /// `*.example.com`). The app's own host is always allowed. Unset: any
+    /// host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_hosts: Option<Vec<String>>,
+    /// Memory limit in MiB. Unset: the host's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<u32>,
+    /// Keep the machine running with no requests. Off: it sleeps when idle
+    /// and the next request wakes it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_awake: bool,
+}
+
+fn default_service_port() -> u16 {
+    8080
+}
+
+fn default_service_health_path() -> String {
+    "/".to_string()
 }
 
 /// One environment variable the app cannot run correctly without.

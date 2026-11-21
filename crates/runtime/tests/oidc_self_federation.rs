@@ -70,6 +70,7 @@ fn test_manifest() -> AppManifest {
         required_env: Vec::new(),
         build: Default::default(),
         shards: Vec::new(),
+        services: Vec::new(),
         offline: None,
         manifest_version: 1,
         name: "oidc-self-federation".into(),

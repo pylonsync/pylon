@@ -23,6 +23,7 @@ pub mod cloud_projects;
 pub mod cloud_restart;
 pub mod cloud_runtime;
 pub mod cloud_secrets;
+pub mod cloud_services;
 pub mod cloud_status;
 pub mod codegen;
 pub mod codegen_client;

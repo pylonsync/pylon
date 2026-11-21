@@ -853,6 +853,7 @@ mod tests {
             required_env: vec![],
             build: Default::default(),
             shards: Vec::new(),
+            services: Vec::new(),
             offline: None,
         }
     }

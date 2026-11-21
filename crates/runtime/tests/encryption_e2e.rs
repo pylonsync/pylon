@@ -27,6 +27,7 @@ fn manifest_with_encrypted_ssn() -> AppManifest {
         required_env: Vec::new(),
         build: Default::default(),
         shards: Vec::new(),
+        services: Vec::new(),
         offline: None,
         manifest_version: 1,
         name: "encryption-e2e".into(),

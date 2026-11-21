@@ -136,11 +136,20 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         return ExitCode::Usage;
     }
 
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    // 2c. The same for services: refuse when one names a directory that is
+    //     not there or a secret the project does not have. Cloud would fail
+    //     the deploy for either, minutes later, after the build.
+    if let Err(e) = check_services(&creds, &project_slug, &cwd, json_mode) {
+        output::print_error(&e);
+        return ExitCode::Usage;
+    }
+
     // 3. Build the tarball from the current directory.
     if !json_mode {
         println!("→ Packaging project source...");
     }
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     warn_on_runtime_version_skew(&cwd, json_mode);
     let workspace = detect_workspace(&cwd);
 
@@ -1371,6 +1380,15 @@ fn missing_required_env<'a>(
         .collect()
 }
 
+/// The app env names the host sets from the app's services: each `urlEnv`
+/// and `tokenEnv`.
+fn service_provided_env(services: &[pylon_kernel::ManifestService]) -> Vec<&str> {
+    services
+        .iter()
+        .flat_map(|s| std::iter::once(s.url_env.as_str()).chain(s.token_env.as_deref()))
+        .collect()
+}
+
 /// Compare `requiredEnv` in the manifest against the project's secrets.
 ///
 /// Only a definite answer stops a deploy. No manifest, nothing declared, or
@@ -1429,7 +1447,10 @@ fn check_required_env(
         Err(_) => return Ok(()),
     };
 
-    let present: Vec<&str> = secrets.iter().map(|s| s.key.as_str()).collect();
+    let mut present: Vec<&str> = secrets.iter().map(|s| s.key.as_str()).collect();
+    // A variable a service provides (its URL, its token) is set by the host
+    // during the deploy. It has no secret before the first one.
+    present.extend(service_provided_env(&manifest.services));
     let missing = missing_required_env(&manifest.required_env, &present);
 
     if missing.is_empty() {
@@ -1461,8 +1482,187 @@ fn check_required_env(
     Err(out)
 }
 
+/// What stops a deploy of these services, as lines to print: a directory
+/// that is missing or empty, and a secret a service reads that the project
+/// does not have. `present` is None when the project's secrets could not be
+/// listed; then only the directories are checked.
+fn service_problems(
+    services: &[pylon_kernel::ManifestService],
+    app_dir: &Path,
+    present: Option<&[&str]>,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    for service in services {
+        let dir = app_dir.join(&service.dir);
+        let has_files = std::fs::read_dir(&dir)
+            .map(|mut entries| entries.next().is_some())
+            .unwrap_or(false);
+        if !dir.is_dir() {
+            problems.push(format!(
+                "service \"{}\": no directory at {}",
+                service.name, service.dir
+            ));
+        } else if !has_files {
+            problems.push(format!(
+                "service \"{}\": {} is empty",
+                service.name, service.dir
+            ));
+        }
+        if let Some(present) = present {
+            for name in &service.env {
+                if !present.contains(&name.as_str()) {
+                    problems.push(format!(
+                        "service \"{}\": the project has no secret named {name} (pylon secrets set {name} <value>)",
+                        service.name
+                    ));
+                }
+            }
+        }
+    }
+    problems
+}
+
+/// Check the services the app declares before anything is uploaded. No
+/// manifest or no services passes. A cloud call that fails skips the secret
+/// check and keeps the directory check, which needs no network.
+fn check_services(
+    creds: &crate::cloud_client::Credentials,
+    project_slug: &str,
+    app_dir: &Path,
+    json_mode: bool,
+) -> Result<(), String> {
+    let manifest = match crate::manifest::load_manifest(
+        &app_dir.join("pylon.manifest.json").to_string_lossy(),
+    ) {
+        Ok(m) => m,
+        Err(_) => return Ok(()),
+    };
+    if manifest.services.is_empty() {
+        return Ok(());
+    }
+
+    #[derive(serde::Serialize)]
+    struct SlugArgs<'a> {
+        slug: &'a str,
+    }
+    #[derive(serde::Deserialize)]
+    struct ProjectId {
+        id: String,
+    }
+    #[derive(serde::Serialize)]
+    struct ProjectArgs<'a> {
+        #[serde(rename = "projectId")]
+        project_id: &'a str,
+    }
+    #[derive(serde::Deserialize)]
+    struct Secret {
+        key: String,
+    }
+    let secrets: Option<Vec<Secret>> = post_json::<_, ProjectId>(
+        creds,
+        "/api/fn/getProjectForCli",
+        &SlugArgs { slug: project_slug },
+    )
+    .ok()
+    .and_then(|project| {
+        post_json(
+            creds,
+            "/api/fn/listSecrets",
+            &ProjectArgs {
+                project_id: &project.id,
+            },
+        )
+        .ok()
+    });
+    let present: Option<Vec<&str>> = secrets
+        .as_ref()
+        .map(|rows| rows.iter().map(|s| s.key.as_str()).collect());
+
+    let problems = service_problems(&manifest.services, app_dir, present.as_deref());
+    if problems.is_empty() {
+        if !json_mode {
+            let names: Vec<&str> = manifest.services.iter().map(|s| s.name.as_str()).collect();
+            println!("  Services: {}.", names.join(", "));
+        }
+        return Ok(());
+    }
+    if json_mode {
+        return Err(format!(
+            "{{\"error\":\"SERVICES_NOT_DEPLOYABLE\",\"problems\":{}}}",
+            serde_json::to_string(&problems).unwrap_or_else(|_| "[]".into())
+        ));
+    }
+    let mut out = String::from("This app's services cannot be deployed:\n");
+    for problem in &problems {
+        out.push_str(&format!("\n  {problem}"));
+    }
+    Err(out)
+}
+
 #[cfg(test)]
 mod tests {
+    // -----------------------------------------------------------------
+    // Services
+    // -----------------------------------------------------------------
+
+    fn svc(name: &str, dir: &str, env: &[&str]) -> pylon_kernel::ManifestService {
+        serde_json::from_value(serde_json::json!({
+            "name": name, "dir": dir, "start": "run", "urlEnv": "S_URL", "env": env,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_service_with_its_directory_and_secrets_passes() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("services/worker")).unwrap();
+        std::fs::write(tmp.path().join("services/worker/app.py"), "x").unwrap();
+        let services = [svc("worker", "services/worker", &["MAPS_KEY"])];
+        assert!(
+            super::service_problems(&services, tmp.path(), Some(&["MAPS_KEY", "OTHER"])).is_empty()
+        );
+        // Secrets could not be listed: only the directory is checked.
+        assert!(super::service_problems(&services, tmp.path(), None).is_empty());
+    }
+
+    #[test]
+    fn a_missing_or_empty_directory_and_a_missing_secret_are_named() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("services/empty")).unwrap();
+        let services = [
+            svc("gone", "services/gone", &[]),
+            svc("empty", "services/empty", &["A", "B"]),
+        ];
+        let problems = super::service_problems(&services, tmp.path(), Some(&["A"]));
+        assert_eq!(problems.len(), 3);
+        assert!(problems[0].contains("\"gone\": no directory at services/gone"));
+        assert!(problems[1].contains("services/empty is empty"));
+        assert!(problems[2].contains("no secret named B"));
+    }
+
+    #[test]
+    fn required_env_a_service_provides_is_not_missing() {
+        let mut worker = svc("worker", "w", &[]);
+        worker.url_env = "WORKER_URL".into();
+        worker.token_env = Some("WORKER_TOKEN".into());
+        let services = [worker, svc("plain", "p", &[])];
+        let provided = super::service_provided_env(&services);
+        assert_eq!(provided, vec!["WORKER_URL", "WORKER_TOKEN", "S_URL"]);
+        let declared = [req("WORKER_URL"), req("WORKER_TOKEN"), req("MAPS_KEY")];
+        let missing = super::missing_required_env(&declared, &provided);
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].name, "MAPS_KEY");
+    }
+
+    #[test]
+    fn a_service_entry_takes_its_defaults() {
+        let s = svc("worker", "w", &[]);
+        assert_eq!(s.port, 8080);
+        assert_eq!(s.health_path, "/");
+        assert!(!s.keep_awake);
+        assert!(s.token_env.is_none());
+    }
+
     // -----------------------------------------------------------------
     // Required env
     // -----------------------------------------------------------------

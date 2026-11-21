@@ -1,0 +1,179 @@
+---
+title: Services
+description: "Run an HTTP server in another language beside a Pylon app."
+---
+
+A service is an HTTP server that runs beside the app on its own machine. Use one for work that does not fit a Pylon function:
+
+- a worker in Python, Go, or another language
+- a process that needs system packages or a browser
+- a long-running agent
+
+You declare a service in `app.ts`. `pylon deploy` ships it with the app. Stack0 Cloud runs each service on a [Fly Sprite](https://sprites.dev), a Linux machine that sleeps when it is idle.
+
+## Declare a service
+
+```ts app.ts
+import { buildManifest, service } from "@pylonsync/sdk";
+
+const manifest = buildManifest({
+  // ...
+  services: [
+    service({
+      name: "worker",
+      dir: "services/worker",
+      setup: "uv sync --frozen --no-dev",
+      start: "uv run uvicorn worker.app:app --host 0.0.0.0 --port 8080",
+      healthPath: "/health",
+      urlEnv: "WORKER_URL",
+      tokenEnv: "WORKER_TOKEN",
+    }),
+  ],
+});
+```
+
+| Field | Meaning |
+| --- | --- |
+| `name` | A lowercase name, unique in the app. |
+| `dir` | The source directory of the service, relative to the app root. |
+| `setup` | A shell command that installs the service. It runs in `dir` on each deploy that changes the service. |
+| `start` | A shell command that starts the server. It runs in `dir`. |
+| `port` | The port the server listens on. The default is `8080`. |
+| `healthPath` | A path that returns 2xx when the server is ready. The default is `/`. |
+| `urlEnv` | The app environment variable that receives the URL of the service. |
+| `tokenEnv` | An environment variable that holds a token. The host sets it on the app and on the service. |
+| `env` | The project secrets the service can read, by name. |
+| `vars` | Plain environment values for the service. |
+| `allowHosts` | The hosts the service can connect to. Without it, the service can connect to any host. |
+| `memoryMb` | The memory limit in MiB. The default is `2048`. |
+| `keepAwake` | `true` keeps the machine running with no requests. The default is `false`. |
+
+An app can declare up to 8 services.
+
+## Call the service from the app
+
+The app reads the URL and the token from its environment.
+
+```ts functions/measure.ts
+import { action, v } from "@pylonsync/functions";
+
+export default action({
+  args: { address: v.string() },
+  async handler(ctx, args) {
+    const res = await fetch(`${ctx.env.WORKER_URL}/measure`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${ctx.env.WORKER_TOKEN}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(args),
+    });
+    if (!res.ok) throw ctx.error("WORKER_FAILED", `The worker returned ${res.status}.`);
+    return res.json();
+  },
+});
+```
+
+## Check the token in the service
+
+The URL of a service is public. The service must check the token on each request, and it must compare it in constant time.
+
+```python services/worker/worker/app.py
+import hmac, os
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+
+TOKEN = os.environ["WORKER_TOKEN"]
+app = FastAPI()
+
+@app.middleware("http")
+async def check_token(request: Request, call_next):
+    if request.url.path != "/health":
+        sent = request.headers.get("authorization", "")
+        if not hmac.compare_digest(sent, f"Bearer {TOKEN}"):
+            return JSONResponse({"code": "UNAUTHORIZED"}, status_code=401)
+    return await call_next(request)
+```
+
+The host calls `healthPath` without the token. Do not return private data from it.
+
+## The environment of a service
+
+The `setup` command and the `start` command see these variables:
+
+| Variable | Value |
+| --- | --- |
+| `PORT` | The value of `port`. |
+| `PYLON_APP_URL` | The public URL of the app, for example `https://your-app.stack0.app`. |
+| `PYLON_APP_HOST` | The host of that URL. |
+| The name in `tokenEnv` | The token. |
+| Each name in `env` | The value of that project secret. |
+| Each key in `vars` | The value you wrote. |
+
+`~/.local/bin` is on `PATH`, so tools that `uv`, `pipx`, and similar installers add are found.
+
+A service that reads a secret the project does not have stops the deploy. Set the secret first:
+
+```bash
+pylon secrets set GOOGLE_MAPS_API_KEY
+```
+
+## What a deploy does
+
+1. `pylon deploy` checks that each `dir` exists and that the project has each secret in `env`.
+2. The builder packs each `dir`. It leaves out `.git`, `node_modules`, `.venv`, and Python cache directories.
+3. Cloud installs each changed service beside the release that runs. It runs `setup` with outbound access to the package registries.
+4. When all services are installed, Cloud switches each one to the new release and restarts it.
+5. Cloud calls `healthPath` on each service. Each one has 3 minutes to answer.
+6. Cloud sets the URL and the token on the app and starts the new app version.
+
+A deploy does not install a service again when its files, its declaration, and its environment are the same as the release that runs.
+
+A failed `setup` leaves the app and all services on the releases they had. A service that does not answer goes back to its release from before, and the deploy fails. The deployment page and `pylon services` show the install log.
+
+## Limit outbound access
+
+`allowHosts` limits the hosts a service can connect to when it runs. The app is always allowed.
+
+```ts
+service({
+  // ...
+  allowHosts: ["solar.googleapis.com", "*.example.com"],
+});
+```
+
+The limit is DNS-based. A host that is not on the list does not resolve.
+
+## Idle services
+
+A service sleeps about 30 seconds after its last request. The next request wakes it in 1 to 2 seconds, or in less than a second when it slept a short time. Open connections drop when the machine sleeps.
+
+Set `keepAwake: true` for a service that must hold a connection open or must answer without the wake time. That service runs, and bills, all the time.
+
+## See and operate services
+
+```bash
+pylon services                  # status, run time, and cost
+pylon services logs worker      # the last lines the server printed
+pylon services restart worker   # restart the server on its current release
+```
+
+The project's **Services** page in the dashboard shows the same data, with each deploy and its log. `logs` and `restart` need the owner role or the admin role.
+
+## Cost
+
+Cloud bills a service for what it uses:
+
+- CPU time
+- memory, for the time the machine runs
+- disk
+
+A sleeping service bills for disk only. The usage appears on the invoice as Cloud compute. Services need a paid plan.
+
+## Limits
+
+- A service is an HTTP server. It has one port.
+- Each service has its own machine and its own disk. The disk keeps files between deploys and restarts.
+- A rollback builds the earlier commit again, so it also puts the services back on that commit.
+- A preview environment does not get services, and it does not get the URL or the token of the project's services.
+- `pylon dev` does not start services. Start each one yourself and set `urlEnv` and `tokenEnv` in `.env`.

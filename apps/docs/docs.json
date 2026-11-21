@@ -49,6 +49,7 @@
               "concepts/streaming",
               "concepts/realtime",
               "concepts/shards",
+              "concepts/services",
               "concepts/live-queries",
               "concepts/reactive-queries",
               "concepts/optimistic-updates",

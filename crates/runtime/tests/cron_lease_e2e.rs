@@ -24,6 +24,7 @@ fn manifest_with_cron() -> AppManifest {
         required_env: Vec::new(),
         build: Default::default(),
         shards: Vec::new(),
+        services: Vec::new(),
         offline: None,
         manifest_version: 1,
         name: "cron-lease-e2e".into(),

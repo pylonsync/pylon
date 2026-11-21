@@ -55,6 +55,7 @@ RUN ln -s /usr/local/bin/bun /usr/local/bin/bunx \
 
 WORKDIR /build
 COPY builder/build.ts /usr/local/lib/pylon-build.ts
+COPY builder/pylon-build-services.ts /usr/local/lib/pylon-build-services.ts
 
 # Fail the image build if the CLI's shared libraries are missing, rather than
 # discovering it as a fifteen-minute deploy timeout in production.

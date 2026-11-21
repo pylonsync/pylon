@@ -274,6 +274,7 @@ mod tests {
             required_env: Vec::new(),
             build: Default::default(),
             shards: Vec::new(),
+            services: Vec::new(),
             offline: None,
             manifest_version: 1,
             name: "t".into(),

@@ -16,14 +16,19 @@
 //   PYLON_ARTIFACT_COMPLETE_PUT_URL signed PUT ← .complete JSON {sha256,size}
 //   PYLON_ARTIFACT_LOG_PUT_URL      signed PUT ← build.log (optional; the
 //                                    control plane surfaces it in the dashboard)
+//   PYLON_SERVICES_PUT_URL          signed PUT ← services.tar.gz (set by a
+//                                    control plane that deploys services)
 //   PYLON_BUILD_ID                  for logs
 
 import { existsSync } from "node:fs";
 import { readFile, readdir, rm } from "node:fs/promises";
+import { declaredServices, MAX_SERVICES_ARCHIVE_BYTES, packServices, type PackedService } from "./pylon-build-services";
 
 const SRC = "/build/src";
 const SOURCE_TAR = "/build/source.tar.gz";
 const BUNDLE = "/build/bundle.tar.gz";
+const SERVICES_STAGE = "/build/services";
+const SERVICES_TAR = "/build/services.tar.gz";
 
 // --- Build-log capture ---------------------------------------------------
 // The machine self-destructs, so its stdout (Fly logs) is gone by the time
@@ -393,6 +398,45 @@ async function main() {
 		await Bun.write(`${appDir}/pylon.manifest.json`, manifestText);
 	}
 
+	// 3b-ter. Pack the services the app declares. They leave in their own
+	// archive: the control plane deploys each one on its own machine, and the
+	// app goes live only after they answer.
+	let services: PackedService[] = [];
+	let servicesArchive: { hex: string; size: number } | null = null;
+	const declared = declaredServices(
+		await Bun.file(`${appDir}/pylon.manifest.json`).json(),
+	);
+	if (declared.length > 0) {
+		const servicesPutUrl = process.env.PYLON_SERVICES_PUT_URL;
+		if (!servicesPutUrl) {
+			throw new Error(
+				`the app declares ${declared.length} service(s), and this host does not deploy services`,
+			);
+		}
+		services = await packServices({
+			appDir,
+			services: declared,
+			stageDir: SERVICES_STAGE,
+			archivePath: SERVICES_TAR,
+			run: sh,
+		});
+		servicesArchive = await sha256(SERVICES_TAR);
+		if (servicesArchive.size > MAX_SERVICES_ARCHIVE_BYTES) {
+			throw new Error(
+				`services archive is ${(servicesArchive.size / 1048576).toFixed(1)} MB, over the ${MAX_SERVICES_ARCHIVE_BYTES / 1048576} MB limit`,
+			);
+		}
+		const resp = await fetch(servicesPutUrl, {
+			method: "PUT",
+			headers: { "content-type": "application/gzip" },
+			body: Bun.file(SERVICES_TAR),
+		});
+		if (!resp.ok) throw new Error(`upload services: HTTP ${resp.status}`);
+		console.log(
+			`[builder] packed ${services.length} service(s): ${services.map((s) => s.declaration.name).join(", ")}`,
+		);
+	}
+
 	let clientAssetsPublished = false;
 	const publicPrefix = process.env.PYLON_PUBLIC_PREFIX ?? "";
 	const assetsPutUrl = process.env.PYLON_ASSETS_PUT_URL ?? "";
@@ -516,6 +560,11 @@ async function main() {
 		// the runtime rather than a request; the control plane must not treat
 		// it as an instruction to change anything.
 		sdkVersionSource: installed.source,
+		// The declared services with a hash of each one's files, and the
+		// archive they are in. Absent when the app declares none.
+		...(servicesArchive
+			? { services, servicesSha256: servicesArchive.hex, servicesSize: servicesArchive.size }
+			: {}),
 	});
 	console.log(`[builder] build ${buildId} done`);
 	// Flush the build log to Tigris BEFORE the COMPLETE marker so it's already

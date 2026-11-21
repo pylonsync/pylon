@@ -74,6 +74,7 @@ fn run() -> ExitCode {
         match positional.first().copied() {
             Some("logs") => return commands::cloud_logs::run(&args, json_mode),
             Some("restart") => return commands::cloud_restart::run(&args, json_mode),
+            Some("services") => return commands::cloud_services::run(&args, json_mode),
             Some("studio") => return commands::studio::run(&args, json_mode),
             Some("upgrade") => return commands::self_update::run(&args, json_mode),
             Some("whoami") => return commands::whoami::run(&args, json_mode),
@@ -128,6 +129,7 @@ fn run() -> ExitCode {
         Some("restart") => commands::cloud_restart::run(&args, json_mode),
         Some("runtime") => commands::cloud_runtime::run(&args, json_mode),
         Some("secrets") => commands::cloud_secrets::run(&args, json_mode),
+        Some("services") => commands::cloud_services::run(&args, json_mode),
         Some("shards") => commands::shards::run(&args, json_mode),
         Some("status") => commands::cloud_status::run(&args, json_mode),
         Some("studio") => commands::studio::run(&args, json_mode),
@@ -195,7 +197,7 @@ fn run() -> ExitCode {
 // Known commands for did-you-mean suggestions
 // ---------------------------------------------------------------------------
 
-const TOP_LEVEL_COMMANDS: [&str; 46] = [
+const TOP_LEVEL_COMMANDS: [&str; 47] = [
     "audit",
     "backup",
     "billing",
@@ -234,6 +236,7 @@ const TOP_LEVEL_COMMANDS: [&str; 46] = [
     "schema",
     "secrets",
     "seed",
+    "services",
     "start",
     "status",
     "studio",
@@ -519,6 +522,7 @@ fn print_usage() {
     );
     println!("  status                    One-glance project health");
     println!("  restart                   Restart the project's machines without rebuilding");
+    println!("  services [list|logs|restart] The services the app declares with service({{...}})");
     println!("  billing                   Plan, this month's usage + projected charge, invoices");
     println!("  billing upgrade           Move the org to Pro (opens Stripe checkout)");
     println!();

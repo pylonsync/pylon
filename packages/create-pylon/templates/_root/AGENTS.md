@@ -112,4 +112,26 @@ requiredEnv: [
 
 Declare the variables whose absence is SILENT — a public origin, a webhook secret, an API base URL. A missing database URL crashes on the first query and someone notices in a minute. A missing public origin gets baked into a script tag, served to a customer's website, and errors nowhere.
 
+## Run a server in another language beside the app
+
+`services` in `buildManifest({...})` deploys an HTTP server with the app, on its own machine (Stack0 Cloud; it sleeps when idle):
+
+```ts
+import { service } from "@pylonsync/sdk";
+
+services: [
+  service({
+    name: "worker",
+    dir: "services/worker",            // shipped by `pylon deploy`
+    setup: "uv sync --frozen --no-dev", // runs when the service changes
+    start: "uv run uvicorn worker.app:app --host 0.0.0.0 --port 8080",
+    healthPath: "/health",
+    urlEnv: "WORKER_URL",              // set on the app
+    tokenEnv: "WORKER_TOKEN",          // set on the app and the service
+  }),
+],
+```
+
+The app calls `ctx.env.WORKER_URL` with `Authorization: Bearer ${ctx.env.WORKER_TOKEN}`. The URL is public, so the service MUST check the token on every request. `pylon services` lists them; `pylon services logs <name>` prints output. `pylon dev` does not start services. See https://docs.pylonsync.com/concepts/services.
+
 For full signatures, env vars, the complete CLI, and SSR/client/server-primitive details: **https://docs.pylonsync.com/llms-full.txt**.
