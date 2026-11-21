@@ -84,11 +84,14 @@ jobs:
 
   # ---------------------------------------------------------------
   # Sanity check: every published artifact must agree on the version.
-  # Runs before anything mutates a registry.
+  # Runs before anything mutates a registry. It reads files and publishes
+  # nothing, so it does not wait for ci-gate: the builds that follow it
+  # (`prebuild`, `docker-warm`) run while CI is still testing. Every job that
+  # writes to a registry, a release or a mirror names ci-gate in its own
+  # `needs`.
   # ---------------------------------------------------------------
   verify:
     name: Verify versions match tag
-    needs: ci-gate
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.v.outputs.version }}
@@ -127,7 +130,7 @@ jobs:
   # ---------------------------------------------------------------
   publish-npm:
     name: Publish npm packages
-    needs: verify
+    needs: [verify, ci-gate]
     runs-on: ubuntu-24.04
     # NPM_TOKEN lives under the `Production` environment (not as a
     # repository secret). Declaring the environment here is what grants
@@ -344,8 +347,13 @@ jobs:
           # the loop then cannot go green no matter how long it runs. v0.9.1
           # failed all 20 attempts over 5 minutes while @pylonsync/loro had
           # been on the registry the whole time, which also skipped the
-          # notify-cloud job downstream. Step 1 already proved the versions
-          # are live, so a failure here is a real dependency-graph problem.
+          # notify-cloud job downstream.
+          #
+          # Twenty attempts, 15 seconds apart. Step 1 proves the versions are
+          # listed, and a listed version's tarball can still answer 404 for
+          # a while: v0.22.78 failed all of five attempts (75 seconds) on
+          # sdk-0.22.78.tgz, which was downloadable minutes later, and the
+          # failure skipped notify-cloud.
           POSTFLIGHT_DIR="$(mktemp -d)"
           (
             cd "$POSTFLIGHT_DIR"
@@ -361,8 +369,8 @@ jobs:
               attempt=$((attempt + 1))
               BUN_INSTALL_CACHE_DIR="$POSTFLIGHT_DIR/cache-$attempt" \
                 bun install --no-save 2>&1 | tee install.log && break
-              if [[ "$attempt" -ge 5 ]]; then
-                echo "::error::Postflight: bun install of the published @pylonsync graph FAILED 5 times with a fresh cache each time, after the registry confirmed every version. This is a real unsatisfiable dependency graph." >&2
+              if [[ "$attempt" -ge 20 ]]; then
+                echo "::error::Postflight: bun install of the published @pylonsync graph FAILED 20 times over 5 minutes with a fresh cache each time, after the registry confirmed every version. Either a tarball is still not downloadable or the dependency graph cannot be satisfied; install.log below says which." >&2
                 cat install.log >&2
                 exit 5
               fi
@@ -388,7 +396,7 @@ jobs:
   # RELEASES_REPO_TOKEN works if it covers them.
   publish-mirrors:
     name: Mirror ${{ matrix.folder }}
-    needs: verify
+    needs: [verify, ci-gate]
     runs-on: ubuntu-24.04
     environment: Production
     strategy:
@@ -436,7 +444,7 @@ jobs:
   # pylon-replication first: the guest crate depends on it.
   publish-shard-guest:
     name: Publish pylon-replication + pylon-shard-guest
-    needs: verify
+    needs: [verify, ci-gate]
     runs-on: ubuntu-24.04
     environment: Production
     steps:
@@ -468,20 +476,28 @@ jobs:
             done
           done
 
-  binaries:
-    name: binary (${{ matrix.target }})
-    needs: [verify, ci-gate]
+  # ---------------------------------------------------------------
+  # macOS and Windows binaries, built while CI is still testing.
+  #
+  # These builds take 14 and 19 minutes. They used to start only after
+  # ci-gate, so a release was the CI run (36 minutes) plus the Windows build,
+  # one after the other. This job needs only `verify`, publishes nothing, and
+  # leaves each packaged binary as a workflow artifact. `binaries` uploads it
+  # to the release after ci-gate passes; if CI fails, nothing left this
+  # workflow.
+  #
+  # The Linux binary is not built here: `binaries` takes it from the CI run.
+  # ---------------------------------------------------------------
+  prebuild:
+    name: build (${{ matrix.target }})
+    needs: verify
     permissions:
-      actions: read
-      contents: write
+      contents: read
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-24.04
-            archive: tar.gz
           - target: aarch64-apple-darwin
             os: macos-latest
             archive: tar.gz
@@ -516,11 +532,14 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec  # stable
-        if: runner.os != 'Linux'
         with:
           targets: ${{ matrix.target }}
+      # Restore only. A cache saved on a tag ref can be read by that tag
+      # alone, so saving one here costs time and space in the repository's
+      # 10 GB cache and no later release can use it.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2
-        if: runner.os != 'Linux'
+        with:
+          save-if: false
       - if: runner.os == 'macOS'
         timeout-minutes: 15
         run: |
@@ -533,35 +552,13 @@ jobs:
       # `pylon-studio-api`'s build.rs requires `web/dist/index.html` to
       # exist. Build the Studio UI bundle before cargo runs.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
-        if: runner.os != 'Linux'
         with:
           bun-version: "1.4.4"
       - name: Build Studio UI bundle
-        if: runner.os != 'Linux'
         working-directory: crates/studio_api/web
         shell: bash
         run: bun install --frozen-lockfile && bun run build
-      - name: Restore Linux binary from successful CI
-        if: runner.os == 'Linux'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CI_RUN_ID: ${{ needs.ci-gate.outputs.run-id }}
-          TARGET: ${{ matrix.target }}
-          VERSION: ${{ needs.verify.outputs.version }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          # The gate selects a successful main-branch run for this exact commit.
-          gh run download "$CI_RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --name "ci-release-$TARGET" --dir "target/$TARGET/release"
-          chmod +x "target/$TARGET/release/pylon"
-          test "$(target/$TARGET/release/pylon --version)" = "pylon $VERSION"
-          # The shared library list, the glibc floor, and a start on the
-          # distros people install on.
-          scripts/verify-linux-binary.sh "target/$TARGET/release/pylon"
-          scripts/smoke-linux-binary.sh "target/$TARGET/release/pylon"
       - name: Build
-        if: runner.os != 'Linux'
         run: cargo build --release --locked --bin pylon --target ${{ matrix.target }}
       # The SAML verifier links libxmlsec1, which on macOS comes from Homebrew,
       # so a fresh build carries absolute /opt/homebrew paths and dyld aborts on
@@ -583,27 +580,28 @@ jobs:
 
       # Artifact names must match what install.sh and Formula/pylon.rb
       # expect: pylon-${TAG}-${TARGET}.{tar.gz,zip}
-      - name: Package (unix)
+      #
+      # macOS carries its vendored dylibs in lib/ (see the bundle step above)
+      # and the binary resolves them via @loader_path, so the archive has to
+      # keep the two side by side.
+      - name: Package (macOS)
         if: matrix.archive == 'tar.gz'
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
           TAG: ${{ github.ref_name }}
-          OS_NAME: ${{ runner.os }}
         run: |
           set -euo pipefail
           cd "target/$TARGET/release"
-          # macOS carries its vendored dylibs in lib/ (see the bundle step above)
-          # and the binary resolves them via @loader_path, so the archive has to
-          # keep the two side by side. The Linux build links its C dependencies
-          # statically (docker/linux-release) and ships the binary alone.
-          if [ "$OS_NAME" = "macOS" ]; then
-            tar czf "../../../pylon-$TAG-$TARGET.tar.gz" pylon lib
-          else
-            tar czf "../../../pylon-$TAG-$TARGET.tar.gz" pylon
-          fi
+          tar czf "../../../pylon-$TAG-$TARGET.tar.gz" pylon lib
+          cd ../../..
+          shasum -a 256 "pylon-$TAG-$TARGET.tar.gz" > "pylon-$TAG-$TARGET.tar.gz.sha256"
       # The Windows build links its C dependencies statically (see the vcpkg
       # setup above), so the archive is the single .exe.
+      #
+      # install.ps1 and install.sh both read the hash as the first
+      # whitespace-separated field, so match `sha256sum`'s "<hash>  <name>"
+      # shape rather than Get-FileHash's default object rendering.
       - name: Package (windows)
         if: matrix.archive == 'zip'
         shell: pwsh
@@ -612,32 +610,112 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           $ErrorActionPreference = "Stop"
-          Compress-Archive -Path "target/$env:TARGET/release/pylon.exe" `
-            -DestinationPath "pylon-$env:TAG-$env:TARGET.zip"
-      - name: Compute SHA256 (unix)
-        if: matrix.archive == 'tar.gz' && runner.os == 'Linux'
+          $asset = "pylon-$env:TAG-$env:TARGET.zip"
+          Compress-Archive -Path "target/$env:TARGET/release/pylon.exe" -DestinationPath $asset
+          $hash = (Get-FileHash -Algorithm SHA256 $asset).Hash.ToLower()
+          "$hash  $asset" | Out-File -FilePath "$asset.sha256" -Encoding ascii -NoNewline
+      # The archive and its hash for the release, and the raw binary (with
+      # lib/ on macOS) for the npm platform package. The paths share the
+      # repository root as their common parent, so `binaries` downloads them
+      # back to the same places.
+      - name: Upload the packaged binary
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: pylon-prebuilt-${{ matrix.target }}
+          path: |
+            pylon-${{ github.ref_name }}-${{ matrix.target }}.*
+            target/${{ matrix.target }}/release/pylon
+            target/${{ matrix.target }}/release/pylon.exe
+            target/${{ matrix.target }}/release/lib
+          retention-days: 1
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------
+  # Publish the binaries: after ci-gate, and only then.
+  #
+  # Linux comes from the CI run the gate selected. macOS and Windows come
+  # from `prebuild`. Nothing is compiled here.
+  # ---------------------------------------------------------------
+  binaries:
+    name: binary (${{ matrix.target }})
+    needs: [verify, ci-gate, prebuild]
+    permissions:
+      actions: read
+      contents: write
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Not built: x86_64-unknown-linux-musl and aarch64-unknown-linux-gnu.
+          # The Linux binary comes from ci.yml's build job, which builds for
+          # the runner's architecture in the docker/linux-release image.
+          # aarch64 needs an arm64 runner in that job's matrix plus a
+          # cli-linux-arm64 npm package; musl needs a musl build image.
+          - target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            archive: zip
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - name: Restore Linux binary from successful CI
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ needs.ci-gate.outputs.run-id }}
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        shell: bash
         run: |
-          sha256sum pylon-${{ github.ref_name }}-${{ matrix.target }}.tar.gz \
-            > pylon-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
-      - name: Compute SHA256 (macOS)
-        if: matrix.archive == 'tar.gz' && runner.os == 'macOS'
-        run: |
-          shasum -a 256 pylon-${{ github.ref_name }}-${{ matrix.target }}.tar.gz \
-            > pylon-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
-      # install.ps1 and install.sh both read the hash as the first
-      # whitespace-separated field, so match `sha256sum`'s "<hash>  <name>"
-      # shape rather than Get-FileHash's default object rendering.
-      - name: Compute SHA256 (windows)
-        if: matrix.archive == 'zip'
-        shell: pwsh
+          set -euo pipefail
+          # The gate selects a successful main-branch run for this exact commit.
+          gh run download "$CI_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name "ci-release-$TARGET" --dir "target/$TARGET/release"
+          chmod +x "target/$TARGET/release/pylon"
+          test "$(target/$TARGET/release/pylon --version)" = "pylon $VERSION"
+          # The shared library list, the glibc floor, and a start on the
+          # distros people install on.
+          scripts/verify-linux-binary.sh "target/$TARGET/release/pylon"
+          scripts/smoke-linux-binary.sh "target/$TARGET/release/pylon"
+      # The Linux build links its C dependencies statically
+      # (docker/linux-release) and ships the binary alone.
+      - name: Package (Linux)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
         env:
           TARGET: ${{ matrix.target }}
           TAG: ${{ github.ref_name }}
         run: |
-          $ErrorActionPreference = "Stop"
-          $asset = "pylon-$env:TAG-$env:TARGET.zip"
-          $hash = (Get-FileHash -Algorithm SHA256 $asset).Hash.ToLower()
-          "$hash  $asset" | Out-File -FilePath "$asset.sha256" -Encoding ascii -NoNewline
+          set -euo pipefail
+          cd "target/$TARGET/release"
+          tar czf "../../../pylon-$TAG-$TARGET.tar.gz" pylon
+          cd ../../..
+          sha256sum "pylon-$TAG-$TARGET.tar.gz" > "pylon-$TAG-$TARGET.tar.gz.sha256"
+      - name: Download the binary `prebuild` packaged
+        if: matrix.target != 'x86_64-unknown-linux-gnu'
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
+        with:
+          name: pylon-prebuilt-${{ matrix.target }}
+          path: .
+      - name: Check the archive against its hash
+        if: matrix.target != 'x86_64-unknown-linux-gnu'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          TAG: ${{ github.ref_name }}
+          ARCHIVE: ${{ matrix.archive }}
+        run: |
+          set -euo pipefail
+          asset="pylon-$TAG-$TARGET.$ARCHIVE"
+          test -s "$asset"
+          want="$(cut -d' ' -f1 "$asset.sha256")"
+          got="$(sha256sum "$asset" | cut -d' ' -f1)"
+          if [[ "$want" != "$got" ]]; then
+            echo "::error::$asset does not match the hash prebuild recorded ($got != $want)"
+            exit 1
+          fi
       # Publish to the private source repo (so internal tooling, the
       # release-please flow, and crates/npm jobs all observe the same tag).
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
@@ -849,8 +927,38 @@ jobs:
           set -euo pipefail
           node scripts/npm-postflight.mjs packages/cli-darwin-arm64/package.json packages/cli-linux-x64/package.json packages/cli-win32-x64/package.json packages/cli/package.json
 
-  docker:
+  # The runtime and builder images, built into the build cache while CI is
+  # still testing. Nothing is pushed. `docker` runs the same builds after
+  # ci-gate and finds every layer cached, so its time is the push. The dev
+  # image is not built here: it is built on the runtime image of this
+  # version, which exists only after `docker` pushes it.
+  docker-warm:
+    name: docker build (no push)
     needs: verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        with:
+          context: .
+          push: false
+          platforms: linux/amd64
+          cache-from: type=gha,scope=pylon-runtime
+          cache-to: type=gha,mode=max,scope=pylon-runtime
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        with:
+          context: .
+          file: builder/Dockerfile
+          push: false
+          platforms: linux/amd64
+          cache-from: type=gha,scope=pylon-builder
+          cache-to: type=gha,mode=max,scope=pylon-builder
+
+  docker:
+    needs: [verify, ci-gate, docker-warm]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
