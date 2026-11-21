@@ -6006,9 +6006,8 @@ fn resolve_request_auth(
     //      diverging from the API/sync paths (which DO lift it).
     //   2. Active-org role enrichment (`auth.roles`).
     //
-    // Order matters: `enrich_active_org_role` early-returns when `is_admin`, so
-    // the admin-lift must run first (an admin who is also an org owner then
-    // carries `is_admin:true, roles:[]` — identical to the API path).
+    // Same order as the API path: an admin who is also an org owner carries
+    // `is_admin:true` and their org role on both.
     if let Some(rt) = cfg.runtime.as_ref() {
         crate::server::lift_admin(rt, &mut ctx);
     }

@@ -1112,13 +1112,21 @@ fn random_token(n_bytes: usize) -> String {
 /// This runs once per request, after session resolution and admin promotion,
 /// to fill that gap from the same `OrgMember` table the server already trusts
 /// for enforcement. Conservative + idempotent:
-///   - never overwrites a non-empty `roles` list (admin contexts carry
-///     `["admin"]`; JWT sessions carry their claim roles),
-///   - skips admin and API-key contexts (a scoped `pk.*` token must not pick
-///     up org roles it wasn't minted with),
+///   - never overwrites a non-empty `roles` list (the admin-token context
+///     carries `["admin"]`; JWT sessions carry their claim roles),
+///   - skips API-key contexts (a scoped `pk.*` token must not pick up org
+///     roles it wasn't minted with),
 ///   - only fills when there's an active tenant AND a membership row in it.
+///
+/// A signed-in user whose `is_admin` was lifted (`auth.user.adminField`,
+/// `PYLON_ADMIN_EMAILS`) is still a member of their org and gets its role.
+/// Until 0.22.80 this returned early for every admin context, so a platform
+/// admin who owned an org carried `roles: []`: `<HasRole role="owner">` hid
+/// the org's controls from its owner, and app code that read
+/// `ctx.auth.roles` saw no role. `has_role` already answers true for an
+/// admin, so the role adds no access; it only tells the truth.
 pub fn enrich_active_org_role(orgs: &OrgStore, auth: &mut crate::AuthContext) {
-    if !auth.roles.is_empty() || auth.is_admin || auth.is_api_key_auth() {
+    if !auth.roles.is_empty() || auth.is_api_key_auth() {
         return;
     }
     let (Some(tenant), Some(uid)) = (auth.tenant_id.clone(), auth.user_id.clone()) else {
@@ -1410,6 +1418,26 @@ mod tests {
         assert_eq!(member.roles, vec!["member".to_string()]);
     }
 
+    // A platform admin (`adminField` or PYLON_ADMIN_EMAILS lifts `is_admin`
+    // on their own session) who owns an org is still its owner.
+    #[test]
+    fn enrich_gives_a_lifted_admin_their_org_role() {
+        let s = store();
+        let org = s.create("Acme", "u-alice").unwrap();
+        s.add_member(&org.id, "u-bob", OrgRole::Member);
+
+        let mut owner = crate::AuthContext::user("u-alice".into()).with_tenant(org.id.clone());
+        owner.is_admin = true;
+        enrich_active_org_role(&s, &mut owner);
+        assert!(owner.is_admin);
+        assert_eq!(owner.roles, vec!["owner".to_string()]);
+
+        let mut member = crate::AuthContext::user("u-bob".into()).with_tenant(org.id.clone());
+        member.is_admin = true;
+        enrich_active_org_role(&s, &mut member);
+        assert_eq!(member.roles, vec!["member".to_string()]);
+    }
+
     #[test]
     fn enrich_is_conservative() {
         let s = store();
@@ -1431,6 +1459,14 @@ mod tests {
         let mut admin = crate::AuthContext::admin().with_tenant(org.id.clone());
         enrich_active_org_role(&s, &mut admin);
         assert_eq!(admin.roles, vec!["admin".to_string()]);
+
+        // A user lifted to admin who is not a member of the active org gets
+        // no role from it.
+        let mut lifted_stranger =
+            crate::AuthContext::user("u-stranger".into()).with_tenant(org.id.clone());
+        lifted_stranger.is_admin = true;
+        enrich_active_org_role(&s, &mut lifted_stranger);
+        assert!(lifted_stranger.roles.is_empty());
 
         // A scoped API-key context must not pick up org roles it wasn't
         // minted with, even for a real member user.
