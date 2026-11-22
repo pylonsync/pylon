@@ -1142,3 +1142,81 @@ The backup-code consumption race from November 13 remains open. It needs an atom
 Earlier copied-handler and deployment follow-up still applies. Main now includes the prior security patches, but this review did not verify deployed versions. This run commits the fix, regression tests, and report to a new PR under the user's final instruction. No merge or deployment is performed.
 
 Next main area: secrets and deployment configuration. Retain atomic backup-code consumption, dependency migration, and the blocked monitoring changes as follow-up work.
+
+
+## 2026-11-22
+
+Reviewed main at `0a76b60200be950f20b647e84007b51b97ca58fb` (0.22.80). Created `security/daily-review-2026-11-22` in `/Users/ericc59/Dev/pylon-security-20261122`. SSH fetch failed because its key was unavailable. Authenticated HTTPS fetch succeeded and confirmed the same main commit. The primary checkout had no tracked edits. Its Python caches and all other worktrees were preserved.
+
+Read SECURITY.md, both October 27 reports, security workflows, and prior daily reports. Read the November 18–21 entries from their separate worktrees. PR #86 contains signing-key exclusions. PR #87 contains dependency updates. PR #90 contains atomic backup-code consumption, Studio stream revocation, and overlapping dependency updates. PR #93 contains yesterday's review. These PRs remain open. The November 12 monitoring fixes remain local. Existing fixes were not reported as new findings. The daily task already runs at 09:00 local time. No duplicate task was created.
+
+Compared main with the last reviewed main commit, `6974745a8`. Reviewed the platform-admin organization-role change, service declarations and packaging, deploy environment checks, and release artifact handoff. The role change retains API-key exclusion and requires an existing organization membership. Service commands run as app build code. Public service endpoints require the service's own token check. The documented health endpoint must return no private data. Publishing jobs still depend on the CI gate. Native release artifacts and the external service control plane were not inspected.
+
+### HTTP, CSRF, CORS, and WebSocket boundaries
+
+No new application boundary bypass was confirmed. Traced production CORS configuration, credentialed origin reflection, form-route CSRF checks, stale-bearer cookie fallback, and operator mutation authorization. Traced the main-port WebSocket cookie-origin check and its explicit-token path. Dedicated sync and shard handshakes read explicit tokens without session cookies. Reviewed frame limits and session sign-out behavior. Checked the dynamic trusted-host path and its exact-host trust model. This review does not establish that every browser or deployment configuration is safe.
+
+Sampled SaaS, consumer, AI Chat, and shop auth declarations. They use the shared auth defaults. Reviewed the copied root instructions and the new service token example. Existing generated apps still need explicit production origins and the prior copied-handler fixes. The local HTTP regressions cover form dispatch, invalid bearer fallback, admin body limits, room messages, private-field fanout, and socket closure on sign-out. No live production system was tested.
+
+### New dependency advisory and fix
+
+Current RustSec data added `RUSTSEC-2026-0592` (`GHSA-hrj5-67jp-wqp9`). It affects `url` through 2.5.8. An attacker must supply a nested `blob:` URL to a caller of `Url::origin()` or `url::quirks::origin()`. Recursive origin calculation can exhaust the stack and abort the process. No authenticated access is required by the library operation itself. Application access requirements depend on the caller.
+
+Source tracing found two direct origin calls. `crates/auth/src/lib.rs` rejects non-HTTP(S) schemes before the call. The CLI audit target parser also requires HTTP(S). No remote Pylon path to the vulnerable operation was established. This is a confirmed affected dependency, not a confirmed unauthenticated Pylon crash. The [upstream fix](https://github.com/servo/rust-url/pull/1186) changes nested and unsupported blob origins to opaque origins. HTTP(S) origin behavior remains available.
+
+Updated `url` to 2.5.9 in the root, search benchmark, and standalone SAML lockfiles. Cargo also updated required URL dependencies. The vendor update ran in a temporary copy because the vendor manifest cannot run as a standalone workspace inside the root checkout. No vendor manifest changed. Cargo/rustc 1.98.1 generated the locks. The repository uses stable Rust in CI and has no exact Rust toolchain pin.
+
+Regenerating the benchmark lock also selected main's required Wasmtime 49.0.7 and its coupled Cranelift packages. It refreshed local package versions to 0.22.80. This overlaps the pending benchmark fixes in PR #87 and PR #90. It is not a new Wasmtime finding. Heapless updates remain in those PRs. No advisory ignore, scan threshold, or authorization control changed.
+
+Added `crates/auth/tests/url_origin.rs`. The regression fails with 2.5.8 at two blob prefixes. It passes with 2.5.9 at both two and 10,000 prefixes. The shallow check prevents an old dependency from aborting the test process. The test also checks the runtime helper's scheme rejection and normal HTTPS origin behavior. The local run did not attempt a process-crashing HTTP exploit. An initial test compile used an unavailable Origin method; that test error was corrected before the before/after runs.
+
+### Current advisory scans
+
+OSV scanned all 12 tracked supported lockfiles before and after the update. Both scans returned 1 for findings. `tools/osv-gate.py` returned 0 both times under the existing severity policy. The new URL advisory had no CVSS score in this input, so the OSV gate did not block it. Cargo audit and Cargo deny did block it before the update. The scans are not clean.
+
+| Scope | Final result |
+| --- | --- |
+| Production/root Cargo | 37 advisory groups, down from 38 |
+| Root Bun | No reported matches |
+| Studio build tools | One existing minimatch group |
+| Docker/build | No reported matches in three locks; manifest consistency passed |
+| Search benchmark | 36 advisory groups, down from 45 |
+| Vendor-only SAML | One Chrono maintenance group, down from two |
+| Shard and Swift | No reported matches in four locks |
+
+Final Cargo audit and Cargo deny returned 0 under the existing policy. RustSec commit: `d1fe6ac3eba823a3515e849045f36dc34543885d`, updated November 22. Audit reported zero unsuppressed vulnerabilities, eight maintenance warnings, and 29 unsoundness warnings. Image-lock consistency and advisory-ignore date checks passed.
+
+Heapless 0.9.2 remains on main with an update pending in PR #87 and PR #90. Its older 0.7 and 0.8 caller chains need a tested migration. Studio minimatch still needs a tested migration from 10.2.5 to fixed 11.0.1; keep build patterns trusted. Chrono maintenance, im and sized-chunks memory safety, and the RSA exception remain unresolved. Passing gates do not resolve these risks.
+
+### Verification and gaps
+
+Used pinned Bun 1.4.4 through `npm exec --yes --package=bun@1.4.4`. Root and Studio frozen installs passed. Built the current Studio source, including its TypeScript check. Rust checks used the primary checkout's build cache. Local evidence uses `/tmp/pylon-security-20261122-*`.
+
+| Command | Result |
+| --- | --- |
+| `cargo test --locked -p pylon-auth --test url_origin`, with original lock | One expected assertion failure; one passed |
+| `cargo test --locked -p pylon-auth --test url_origin --lib`, patched | 502 passed |
+| `cargo test --locked -p pylon-runtime --test csrf_form_route --test bearer_cookie_fallback --test admin_mutation_security --test rooms_ws_push --test ws_live_fanout` | 21 passed |
+| `cargo test --locked -p pylon-runtime --lib origin` | 8 passed |
+| `cargo test --locked -p pylon-plugin --lib csrf` | 14 passed |
+| `cargo test --locked -p pylon-runtime --lib request_auth` | 7 passed |
+| `cargo check --locked --manifest-path benchmarks/search/Cargo.toml` | Passed |
+| `cargo check --locked` in the temporary standalone SAML copy | Passed |
+| `bun test builder/pylon-build-services.test.ts packages/sdk/src/service-config.test.ts` | 7 passed |
+| `node --test packages/create-pylon/test/scaffold.test.mjs` | 125 passed |
+| `python3 -m unittest discover -s tools -p 'test_*.py' -v` | 3 scanner tests passed; 2 Docker context tests failed because Docker was unavailable |
+| Root and Studio frozen installs; Studio `bun run build` | Passed |
+| Final OSV scan and severity gate | Scan exit 1; gate exit 0 |
+| Final `cargo audit --json` and `cargo deny check` | Exit 0 with warnings above |
+| Image-lock and advisory-ignore checks | Passed |
+| `cargo fmt --all -- --check` | Passed after formatting the new test |
+
+Start the local Docker daemon and repeat the context tests. No full image build or image vulnerability scan ran. Full workspace tests, PostgreSQL integration, browser exploitation, all template handlers, native clients, release builds, native C library scans, deployed secrets, cloud permissions, and Nix inputs were not checked. Existing compiler and Vite warnings remain. Template tests do not exercise complete generated apps over HTTP.
+
+### Deployment steps and next review
+
+Rebuild and release the runtime, CLI, and Docker images with the updated locks. Existing generated apps need the patched runtime. Apps with independent Rust locks must update and scan their own URL dependency. Today's change requires no copied TypeScript handler edit. Prior B2B, AI Studio, shop, signed-file, and signing-key exclusion steps still apply.
+
+Review the pending fixes through the normal PR process. Account for benchmark lock overlap with PR #87 and PR #90. Until PR #90 is deployed, require a current authenticator code for sensitive operations and close existing Studio streams when revoking access. Keep custom signing-key paths outside Docker contexts until PR #86 is applied. The local monitoring fixes still need a workflow-authorized push.
+
+Reviewed the final test, lockfile, and report diff. `git diff --check` passed. This run prepares a commit and PR under the user's final instruction. No merge, release, or deployment is performed. Next main area: files, SSRF, and path traversal. Include the new service archive paths and retain the pending dependency migrations and monitoring fixes.
