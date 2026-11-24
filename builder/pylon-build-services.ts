@@ -8,7 +8,8 @@
 
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { lstat, mkdir, readFile, readdir, readlink } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, readlink, realpath } from "node:fs/promises";
+import { isAbsolute, relative, sep } from "node:path";
 
 /** Directory and file names left out of a service's archive, at any depth. */
 export const SERVICE_EXCLUDES = [
@@ -103,18 +104,24 @@ export async function packServices(opts: {
 	run: (cmd: string[], cwd?: string) => Promise<void>;
 }): Promise<PackedService[]> {
 	const packed: PackedService[] = [];
+	const appRoot = await realpath(opts.appDir);
 	await mkdir(opts.stageDir, { recursive: true });
 	for (const declaration of opts.services) {
 		const source = `${opts.appDir}/${declaration.dir.replace(/\\/g, "/")}`;
 		if (!existsSync(source) || !(await lstat(source)).isDirectory()) {
 			throw new Error(`service "${declaration.name}": no directory at ${declaration.dir}`);
 		}
+		const sourceDir = await realpath(source);
+		const pathFromRoot = relative(appRoot, sourceDir);
+		if (!pathFromRoot || pathFromRoot === ".." || pathFromRoot.startsWith(`..${sep}`) || isAbsolute(pathFromRoot)) {
+			throw new Error(`service "${declaration.name}": dir must be a directory below the app root`);
+		}
 		const target = `${opts.stageDir}/${declaration.name}`;
 		await mkdir(target, { recursive: true });
 		const excludes = SERVICE_EXCLUDES.map((name) => `--exclude=${name}`);
 		// tar to tar keeps modes and symlinks and applies the excludes.
 		// bash, for "${@:3}".
-		await opts.run(["bash", "-c", 'tar -C "$1" "${@:3}" -cf - . | tar -C "$2" -xf -', "bash", source, target, ...excludes]);
+		await opts.run(["bash", "-c", 'tar -C "$1" "${@:3}" -cf - . | tar -C "$2" -xf -', "bash", sourceDir, target, ...excludes]);
 		packed.push({ declaration, sourceHash: await hashDirectory(target) });
 	}
 	await opts.run(["tar", "czf", opts.archivePath, "-C", opts.stageDir, "."]);

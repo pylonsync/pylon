@@ -1142,3 +1142,52 @@ The backup-code consumption race from November 13 remains open. It needs an atom
 Earlier copied-handler and deployment follow-up still applies. Main now includes the prior security patches, but this review did not verify deployed versions. This run commits the fix, regression tests, and report to a new PR under the user's final instruction. No merge or deployment is performed.
 
 Next main area: secrets and deployment configuration. Retain atomic backup-code consumption, dependency migration, and the blocked monitoring changes as follow-up work.
+
+## 2026-11-24
+
+Reviewed main at `0a76b60200be950f20b647e84007b51b97ca58fb`. Remote main matched the November 22 completed review. No commits changed in that interval. The November 23 worktree had one unfinished builder test and no report. This branch uses a copy of that test. The original worktree and the primary checkout's untracked Python cache were preserved. The daily task is active at 09:00 America/Chicago.
+
+### Files, remote fetches, and path handling
+
+- **Service archives.** The builder checked the last directory component before running tar. An app author who controls the manifest and source tree could select a readable directory outside the app through a linked parent. The host must support service uploads. The effect depends on the builder's filesystem permissions and the recipient's access to the archive. The builder now resolves the source, verifies it is a strict descendant of the app root, and gives tar the checked path. Internal directory aliases still work. The test uses a sibling fixture and a command recorder. It detects acceptance before any archive command reads the fixture. This check assumes the source tree stays stable during packaging. Keep unrelated credentials outside the builder's filesystem.
+- **iOS consumer uploads.** The copied media client compared the upload host and port before attaching a session token. It omitted the scheme. Both implicit ports compare equal even if one URL uses HTTPS and the other uses HTTP. Exposure requires a signed-in user, an upload response with such a destination, and a client configuration that permits the insecure connection. A party able to observe that connection could receive the token. The new request builder compares HTTP origins, including the effective port. Tests inspect the request headers with a synthetic token. No upload or token capture was needed.
+- Traced runtime static-file resolution, the dev workspace write gate, signed file expiry, and the image optimizer's host allowlist, redirect limit, guarded DNS resolution, and read limit. Sampled generated iOS upload initialization, PUT, and confirmation. No additional remote access issue was confirmed in those checks. The dev write API grants trusted workspace editing access. This review did not establish confinement against a concurrent local filesystem writer.
+
+### Dependency checks on main
+
+`python3 tools/scan-lockfiles.py` scanned all 12 supported tracked locks and returned 1. `python3 tools/osv-gate.py` returned 0 under the existing severity policy. Counts below are OSV groups per locked package version. A single advisory can occur in more than one group.
+
+| Scope | OSV result |
+| --- | --- |
+| Production | Root Cargo had 38 groups. Root Bun had no matches. |
+| Docker and build | Three Docker Bun locks had no matches. Studio's Bun lock had one minimatch group. |
+| Benchmark | Search Cargo had 45 groups, including Wasmtime, heapless, and url. |
+| Vendor only | SAML Cargo had two groups for Chrono and url. |
+| Examples and clients | Two shard locks and two Swift locks had no matches. |
+
+`cargo audit --json` failed on url 2.5.8. It also reported eight maintenance warnings and 29 unsoundness warnings. RustSec database commit was `1d328b6bb9f2f350bf65c1c81ab68781cb9e018a` on November 24. `cargo deny check` failed advisories and passed bans, licenses, and sources. The repository's image-lock and advisory-ignore checks both passed.
+
+PR #94 already updates url to 2.5.9 in all three affected locks. Review that PR and rebuild affected binaries. PRs #87 and #90 contain overlapping dependency changes. Keep those changes in their existing reviews. Older heapless callers, im, sized-chunks, Chrono, the RSA exception, and the Studio minimatch major upgrade still need follow-up. Keep Studio build patterns trusted. No dependency or advisory exception changed in this branch.
+
+### Local verification
+
+| Command or check | Result |
+| --- | --- |
+| Bun 1.4.4 builder tests before the change | The new source-directory test failed. Four tests passed. |
+| Swift upload request test with the original header rule | Failed on the HTTP destination. |
+| Frozen Bun install and `bun test builder/pylon-build-services.test.ts packages/sdk/src/service-config.test.ts` | Install passed. Eight tests passed. |
+| Strict TypeScript check of both builder files and `bun build builder/build.ts --target=bun` | Both passed. |
+| `node --test packages/create-pylon/test/scaffold.test.mjs` | 126 passed. This includes compilation and execution of the generated Swift upload helper on macOS. |
+| `cargo test --locked -p pylon-runtime --lib` with filters `resolve_safe`, `file_urls`, and `image_optim` | 2, 4, and 24 passed on the same main commit. |
+| `python3 -m unittest discover -s tools -p 'test_*.py' -v` | Two Docker tests initially failed because the daemon was stopped. Started Docker Desktop locally. All five tests passed on the retry. |
+| Generated iOS Simulator build | Package resolution failed. The public Swift mirror lacks a version in the scaffold's required range of 0.22.80 through versions below 1.0. |
+
+The full generated app built for the iOS Simulator with the SDK source from the reviewed commit. This check used a temporary project and local package paths. The Loro 1.19.0 binary matched its package checksum. An earlier partial type check omitted app model types. The complete local build included those types. The public package resolution failure still applies.
+
+No full container image scan, full workspace test run, real storage integration, or deployed app check ran. No secret values were collected. Docker context tests used synthetic files.
+
+### Deployment and follow-up
+
+Rebuild the builder image after review. Inspect earlier service archives only if their source paths might have left the app root. Existing iOS consumer apps must copy the media upload change and its helper, then rebuild. Regenerate the Xcode project or add the helper to the app target. Keep upload endpoints on HTTPS. Revoke sessions known to have crossed an insecure connection. Verify the public Swift SDK release before relying on a fresh scaffold build.
+
+Next area is server functions and generated app templates. Keep the pending dependency and monitoring changes in their existing reviews.

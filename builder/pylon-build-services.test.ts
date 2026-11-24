@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync, existsSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { declaredServices, hashDirectory, packServices } from "./pylon-build-services";
@@ -51,11 +51,12 @@ test("the hash follows the files, not the machine or the excluded directories", 
 
 test("packServices stages each service under its name without the excluded directories", async () => {
 	const dir = app("c");
+	symlinkSync(join(dir, "services"), join(dir, "service-alias"), "dir");
 	const stageDir = join(root, "stage-c");
 	const archivePath = join(root, "services-c.tar.gz");
 	const packed = await packServices({
 		appDir: dir,
-		services: [{ name: "worker", dir: "services/worker" }],
+		services: [{ name: "worker", dir: "service-alias/worker" }],
 		stageDir,
 		archivePath,
 		run,
@@ -76,4 +77,19 @@ test("a missing directory fails the build", async () => {
 	await expect(
 		packServices({ appDir: dir, services: [{ name: "gone", dir: "services/gone" }], stageDir: join(root, "stage-d"), archivePath: join(root, "d.tar.gz"), run }),
 	).rejects.toThrow("no directory at services/gone");
+});
+
+test("service packaging rejects a source outside the app before reading its files", async () => {
+	const dir = app("linked");
+	const sibling = app("linked-sibling");
+	symlinkSync(sibling, join(dir, "alias"), "dir");
+	let commandCount = 0;
+	await expect(packServices({
+		appDir: dir,
+		services: [{ name: "worker", dir: "alias/services/worker" }],
+		stageDir: join(root, "stage-linked"),
+		archivePath: join(root, "linked.tar.gz"),
+		run: async () => { commandCount++; },
+	})).rejects.toThrow("below the app root");
+	expect(commandCount).toBe(0);
 });
