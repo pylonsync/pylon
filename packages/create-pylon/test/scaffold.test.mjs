@@ -501,3 +501,15 @@ for (const name of FRONTEND_TEMPLATES) {
 		assert.doesNotMatch(agents, /shadcn/i);
 	});
 }
+
+test("generated iOS consumer sends upload credentials only to the API origin", { skip: process.platform !== "darwin" }, () => {
+	const dir = mkdtempSync(join(tmpdir(), "pylon-media-test-"));
+	const app = runScaffold({ name: "media", template: "consumer", platforms: "ios", cwd: dir });
+	assert.equal(app.status, 0, app.stderr);
+	const binary = join(dir, "media-test");
+	const source = join(dir, "media/apps/ios/Sources/Media/MediaUpload.swift");
+	const build = spawnSync("swiftc", [source, join(HERE, "MediaUploadTest.swift"), "-o", binary], { encoding: "utf8" });
+	assert.equal(build.status, 0, build.stderr);
+	const run = spawnSync(binary, [], { encoding: "utf8" });
+	assert.equal(run.status, 0, run.stderr);
+});

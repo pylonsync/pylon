@@ -62,14 +62,7 @@ struct MediaService: Sendable {
 		guard let target = URL(string: slot.uploadUrl, relativeTo: baseURL)?.absoluteURL else {
 			throw MediaError.badResponse
 		}
-		var put = URLRequest(url: target)
-		put.httpMethod = "PUT"
-		put.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
-		// Only this server gets the session token. A storage provider's
-		// presigned URL carries its own authorization.
-		if target.host == baseURL.host, target.port == baseURL.port, let token {
-			put.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-		}
+		let put = mediaUploadRequest(to: target, from: baseURL, token: token)
 		let (_, putResponse) = try await URLSession.shared.upload(for: put, from: data)
 		guard let http = putResponse as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
 			throw MediaError.uploadFailed
