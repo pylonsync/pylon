@@ -31,7 +31,7 @@
 # the mismatch the runtime Dockerfile already warns about, which fails at dlopen
 # time rather than at install time. Keep this base in step with the runtime
 # image's `debian:trixie-slim`.
-FROM oven/bun:1.4.4@sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d AS bun
+FROM oven/bun:1.4.5@sha256:3aa040e5445efa09d75bb428a64ba50db13e2b3ac9b6b0c7f145615f62b2ee18 AS bun
 
 # Pinned by digest; Renovate opens the PRs that move it.
 FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
