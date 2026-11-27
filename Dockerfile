@@ -35,7 +35,7 @@ ARG RUST_VERSION=1.98
 # of the cargo build, so changes to Rust code don't redo the bun build
 # and vice versa.
 # Base images are pinned by digest; Renovate opens the PRs that move them.
-FROM oven/bun:1.4.4@sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d AS bun
+FROM oven/bun:1.4.5@sha256:3aa040e5445efa09d75bb428a64ba50db13e2b3ac9b6b0c7f145615f62b2ee18 AS bun
 
 FROM bun AS studio-builder
 WORKDIR /studio
