@@ -5660,6 +5660,12 @@ fn start_server(
                 .iter()
                 .find(|h| h.field.equiv("Last-Event-ID"))
                 .and_then(|h| h.value.as_str().trim().parse::<u64>().ok());
+            let stream_bearer = admin_bearer(&request).map(str::to_owned);
+            let stream_cookies = header("Cookie");
+            let stream_sessions = Arc::clone(&session_store);
+            let stream_accounts = Arc::clone(&account_store);
+            let stream_admin_token = admin_token.clone();
+            let stream_cookie_config = cookie_config.clone();
             let log = Arc::clone(&cl);
             let stream_runtime = Arc::clone(&runtime);
             let stream_metrics = Arc::clone(&mt);
@@ -5688,6 +5694,11 @@ fn start_server(
                             &log,
                             stream_runtime.manifest(),
                             resume_after,
+                            || dev_admin_open || verify_admin_credentials(
+                                stream_bearer.as_deref(), stream_cookies.as_deref(),
+                                stream_admin_token.as_deref(), &stream_cookie_config,
+                                &stream_sessions, &stream_accounts, stream_runtime.as_ref(),
+                            ).is_some(),
                             |bytes| body.send(bytes),
                         );
                         // The terminal chunk ends the response, so the
@@ -10821,12 +10832,36 @@ fn verify_admin_auth(
     accounts: &pylon_auth::AccountStore,
     runtime: &Runtime,
 ) -> Option<AdminCredential> {
+    verify_admin_credentials(
+        admin_bearer(request),
+        request
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv("Cookie"))
+            .map(|h| h.value.as_str()),
+        admin_token,
+        cookie_config,
+        session_store,
+        accounts,
+        runtime,
+    )
+}
+
+fn verify_admin_credentials(
+    bearer: Option<&str>,
+    cookies: Option<&str>,
+    admin_token: Option<&str>,
+    cookie_config: &pylon_auth::CookieConfig,
+    session_store: &pylon_auth::SessionStore,
+    accounts: &pylon_auth::AccountStore,
+    runtime: &Runtime,
+) -> Option<AdminCredential> {
     let is_admin_session = |token: &str| {
         session_store
             .get(token)
             .is_some_and(|session| admin_session_user(&session.user_id, accounts, runtime))
     };
-    if let Some(token) = admin_bearer(request) {
+    if let Some(token) = bearer {
         let token_matches = admin_token.is_some_and(|admin| {
             !admin.is_empty() && pylon_auth::constant_time_eq(token.as_bytes(), admin.as_bytes())
         });
@@ -10834,12 +10869,7 @@ fn verify_admin_auth(
             return Some(AdminCredential::Explicit);
         }
     }
-    let cookies = request
-        .headers()
-        .iter()
-        .find(|h| h.field.equiv("Cookie"))?
-        .value
-        .as_str();
+    let cookies = cookies?;
     let token = pylon_auth::extract_session_cookie(cookies, &studio_cookie_name(cookie_config))
         .or_else(|| pylon_auth::extract_session_cookie(cookies, &cookie_config.name))?;
     is_admin_session(&token).then_some(AdminCredential::Cookie)

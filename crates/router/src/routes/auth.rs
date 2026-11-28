@@ -4417,54 +4417,39 @@ pub(crate) fn handle(
         if !totp_ok && backup_consumed.is_none() {
             return Some((401, json_error("INVALID_TOTP_CODE", "Wrong code")));
         }
-        // Backup-code consumption: rewrite the array WITHOUT the
-        // matching index. Single-use; keeping the rest valid.
-        // Wave-6 codex P1: under concurrent verifies the read-modify-
-        // write pattern races. We mitigate by re-reading the row
-        // AFTER the write and asserting the consumed hash is gone.
-        // If a parallel verify swapped in its own version (where our
-        // hash is still present), we lost the race — refuse to mint
-        // the session so only ONE caller per code wins.
+        // Compare the secret and code set under the database write lock.
+        // A concurrent consumption, rotation, or enrollment must reject this snapshot.
         if let Some(idx) = backup_consumed {
-            let consumed_hash = row
-                .get("totpBackupCodes")
-                .and_then(|v| v.as_array())
-                .and_then(|arr| arr.get(idx))
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            if let Some(stored) = row.get("totpBackupCodes").and_then(|v| v.as_array()) {
-                let kept: Vec<&serde_json::Value> = stored
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| *i != idx)
-                    .map(|(_, v)| v)
-                    .collect();
-                let _ = ctx.store.update(
-                    &ctx.store.manifest().auth.user.entity,
-                    &user_id,
-                    &stamp_user_fields(ctx, serde_json::json!({"totpBackupCodes": kept})),
-                );
-            }
-            // Post-write verify: the consumed hash MUST be absent now.
-            if let Some(want_gone) = consumed_hash {
-                if let Ok(Some(after)) = ctx
-                    .store
-                    .get_by_id(&ctx.store.manifest().auth.user.entity, &user_id)
-                {
-                    if let Some(arr) = after.get("totpBackupCodes").and_then(|v| v.as_array()) {
-                        let still_there = arr
-                            .iter()
-                            .any(|v| v.as_str().map(|s| s == want_gone).unwrap_or(false));
-                        if still_there {
-                            // A concurrent verify swapped in a row
-                            // where our consumed code is back in the
-                            // array. Refuse — only one caller wins.
-                            return Some((409, json_error(
-                                "TOTP_RACE",
-                                "Backup code was consumed by a concurrent request. Try a different code.",
-                            )));
-                        }
-                    }
+            let stored = row["totpBackupCodes"]
+                .as_array()
+                .expect("matched backup array");
+            let consumed = &stored[idx];
+            let kept: Vec<_> = stored.iter().filter(|hash| *hash != consumed).collect();
+            let expected = serde_json::json!({
+                "totpSecret": secret_blob,
+                "totpBackupCodes": stored,
+            });
+            match ctx.store.update_if_matches(
+                &ctx.store.manifest().auth.user.entity,
+                &user_id,
+                &expected,
+                &serde_json::json!({"totpBackupCodes": kept}),
+            ) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Some((
+                        409,
+                        json_error(
+                            "TOTP_RACE",
+                            "Backup codes changed. Try an unused code again.",
+                        ),
+                    ))
+                }
+                Err(_) => {
+                    return Some((
+                        500,
+                        json_error("TOTP_CONSUME_FAILED", "Could not consume backup code"),
+                    ))
                 }
             }
         }

@@ -132,6 +132,22 @@ pub trait DataStore: Send + Sync {
     /// no-op: plain stores don't gate on auth.
     fn set_op_admin(&self, _admin: bool) {}
 
+    /// Update only if all expected fields still match, in one database transaction.
+    /// Auth routes use this to consume a backup code without concurrent reuse.
+    /// Stores without this operation must fail closed.
+    fn update_if_matches(
+        &self,
+        _entity: &str,
+        _id: &str,
+        _expected: &serde_json::Value,
+        _data: &serde_json::Value,
+    ) -> Result<bool, DataError> {
+        Err(DataError {
+            code: "ATOMIC_UPDATE_UNSUPPORTED".into(),
+            message: "This store does not support atomic conditional updates".into(),
+        })
+    }
+
     fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, DataError>;
 
     fn get_by_id(&self, entity: &str, id: &str) -> Result<Option<serde_json::Value>, DataError>;

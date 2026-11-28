@@ -334,3 +334,47 @@ fn the_list_endpoint_filters_by_a_substring_and_keeps_server_only_fields_out() {
     );
     assert_ne!(status, 200, "{text}");
 }
+
+#[test]
+fn deleting_an_operator_closes_an_existing_change_stream() {
+    let rt = test_runtime();
+    let port = start_server(Arc::clone(&rt));
+    let cookie = operator_cookie(port);
+    let org = rt
+        .insert("Org", &json!({"name":"before-revocation"}))
+        .unwrap();
+    let mut stream = open(
+        port,
+        "GET",
+        "/admin/changes/stream",
+        &format!("Cookie: {cookie}\r\nOrigin: http://127.0.0.1:{port}\r\n"),
+        "",
+    );
+    let head = read_until(&mut stream, Duration::from_secs(5), |t| {
+        t.contains("event: hello")
+    });
+    assert_eq!(status_of(&head), 200, "{head}");
+    assert_eq!(
+        request(port, "DELETE", "/admin/operators/ops", &bearer(), "").0,
+        200
+    );
+    assert_eq!(
+        request(
+            port,
+            "PATCH",
+            &format!("/api/entities/Org/{org}"),
+            &bearer(),
+            &json!({"name":"after-revocation"}).to_string()
+        )
+        .0,
+        200
+    );
+    let events = read_until(&mut stream, Duration::from_secs(3), |t| {
+        t.contains("after-revocation") || t.ends_with("0\r\n\r\n")
+    });
+    assert!(!events.contains("after-revocation"), "{events}");
+    assert!(
+        events.ends_with("0\r\n\r\n"),
+        "stream did not close: {events}"
+    );
+}

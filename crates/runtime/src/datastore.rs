@@ -622,6 +622,17 @@ impl DataStore for Runtime {
             .map_err(into_data_error)
     }
 
+    fn update_if_matches(
+        &self,
+        entity: &str,
+        id: &str,
+        expected: &serde_json::Value,
+        data: &serde_json::Value,
+    ) -> Result<bool, DataError> {
+        self.update_checked(entity, id, data, Some(expected))
+            .map_err(into_data_error)
+    }
+
     fn update(&self, entity: &str, id: &str, data: &serde_json::Value) -> Result<bool, DataError> {
         Runtime::update(self, entity, id, data).map_err(into_data_error)
     }
