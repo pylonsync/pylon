@@ -1142,3 +1142,69 @@ The backup-code consumption race from November 13 remains open. It needs an atom
 Earlier copied-handler and deployment follow-up still applies. Main now includes the prior security patches, but this review did not verify deployed versions. This run commits the fix, regression tests, and report to a new PR under the user's final instruction. No merge or deployment is performed.
 
 Next main area: secrets and deployment configuration. Retain atomic backup-code consumption, dependency migration, and the blocked monitoring changes as follow-up work.
+
+
+## 2026-11-21
+
+Reviewed main at `6974745a8ddcc620a6be878361e053451f89a30a` (0.22.78). Created `security/daily-review-2026-11-21` in `/Users/ericc59/Dev/pylon-security-20261121` from an authenticated HTTPS fetch. The primary checkout remains at `ce9189551`. It had no tracked edits. Preserved its Python caches and all other worktrees. No unrelated work was reset or overwritten.
+
+Read SECURITY.md, both October 27 reports, security workflows, and prior daily reports. Read the November 18, 19, and 20 reports from their worktrees because their PRs remain open. Accounted for signing-key exclusions in PR #86, dependency updates in PR #87, and atomic backup-code consumption and Studio stream revocation in PR #90. The November 12 monitoring changes remain local. These are pending fixes, not new findings. The existing daily task runs at 09:00 local time. Its next run is November 22. No duplicate task was created.
+
+Compared main with the last reviewed main commit, `1302ebf54`. Reviewed the frontend response wrapper, request status recording, 4xx/5xx metrics split, CLI status output, release dependency pins, and test timing change. The response wrapper retains the existing access checks. The selected response-status regression passed. Native release artifacts were not inspected.
+
+### Authorization and tenant isolation
+
+No new issue was confirmed in this review. Traced Studio admin and metrics credential checks, operator identity separation, and the new health and change-stream routes. Metrics credentials retain their documented privileged read access. The known change-stream revocation defect remains on main and has a fix in PR #90. It was not reported as a new issue.
+
+Traced session tenant membership revalidation, API-key exclusion from admin promotion, query row-policy checks, aggregate tenant filters, graph relation authorization, and secret-field projection. Reviewed tenant scope checks across REST updates, sync pushes, relation changes, and CRDT writes. The existing regressions passed for these selected paths.
+
+Reviewed the SaaS project and task handlers, their membership checks, immutable organization and project fields, and disabled direct client writes. Traced `requireMember` through query, mutation, and internal action lookup. Reviewed the copied billing wrappers and the Stripe plugin's caller, organization role, and internal-handler boundaries. Sampled consumer profile and post handlers. Their write identities come from the authenticated context. Public guest posting is explicit in that template. No cross-tenant or caller-identity bypass was confirmed in these samples.
+
+No application code, dependency, advisory ignore, or authorization rule changed today. No new regression was added because no new defect was confirmed. Existing pending fixes were not duplicated.
+
+### Current advisory scans
+
+OSV scanned all 12 tracked supported lockfiles. It returned 1 for findings. `tools/osv-gate.py` returned 0 under the existing severity policy. The scan is not clean.
+
+| Scope | Result on main |
+| --- | --- |
+| Production/root Cargo | 37 advisory groups |
+| Root Bun | No reported matches |
+| Studio build tools | One existing minimatch group |
+| Docker/build | No reported matches in three locks; manifest consistency passed |
+| Search benchmark | 44 advisory groups |
+| Vendor-only SAML | One Chrono maintenance group |
+| Shard and Swift | No reported matches in four locks |
+
+Cargo audit returned 0 under the existing ignore policy. It reported zero unsuppressed vulnerabilities, eight maintenance warnings, and 29 unsoundness warnings. RustSec commit: `55e1c3dfbd834237a05bbbf7b50ba3b5be27b662`, updated November 21. Cargo deny passed advisories, bans, licenses, and sources. Image-lock consistency and advisory-ignore date checks passed.
+
+The higher counts than November 20's final scan reflect pending dependency changes. Main still uses heapless 0.9.2, and the benchmark still selects Wasmtime 49.0.5. PR #90 already updates those locks. PR #87 overlaps those updates. No new advisory identifier was found against the prior recorded findings. Do not use this report as evidence that those fixes have merged.
+
+The current [heapless advisory](https://rustsec.org/advisories/RUSTSEC-2026-0577.html) still lists 0.9.4 as patched. The older 0.7 and 0.8 caller chains need a tested migration. The [minimatch advisory](https://github.com/isaacs/minimatch/security/advisories/GHSA-g3hv-75wg-m249) still lists 11.0.1 as fixed. Studio's version-10 callers need a tested major-version migration. Keep build patterns trusted. No affected production HTTP path was established for minimatch. Chrono maintenance, im and sized-chunks memory safety, and the existing RSA exception remain unresolved. No validated runtime mitigation was established for the memory-safety warnings. Passing gates do not resolve these risks.
+
+### Verification and gaps
+
+Used pinned Bun 1.4.4 through `npm exec --yes --package=bun@1.4.4`. The frozen root install passed. Rust tests used the primary checkout's build cache and a copy of the November 20 Studio bundle. That bundle was not rebuilt for today's metrics UI changes. Local evidence uses `/tmp/pylon-security-20261121-*`.
+
+| Command | Result |
+| --- | --- |
+| `cargo test --locked -p pylon-runtime --test update_policy_scope --test sync_scope_scan --test sync_scope_filter_parity --test studio_operator_api_e2e --test studio_access_e2e --test page_response_status` | Exit 0; 43 test entries passed, but two PostgreSQL entries returned without exercising a database |
+| `cargo test --locked -p pylon-router --lib` | 183 passed; one existing test ignored |
+| Bun `packages/functions/src/member.test.ts` | 8 passed |
+| Bun SaaS task/project helpers, consumer social helpers, Stripe entitlement tests | 29 passed across four files |
+| `node --test packages/create-pylon/test/scaffold.test.mjs` | 125 passed |
+| `python3 -m unittest discover -s tools -p 'test_*.py' -v` | 3 scanner tests passed; 2 Docker context tests failed because the Docker daemon was unavailable |
+| `python3 tools/scan-lockfiles.py` and `tools/osv-gate.py` | Scan exit 1; gate exit 0 |
+| `cargo audit --json` and `cargo deny check` | Exit 0 with warnings above |
+| Image-lock and advisory-ignore checks | Passed |
+| `git diff --check` | Passed |
+
+The PostgreSQL test URL was not configured. No PostgreSQL coverage is claimed. The template helper tests do not run complete generated apps over HTTP. Start the local Docker daemon and repeat the context tests. Those failures are scan gaps, not clean results. Full workspace tests, all template handlers, browser attacks, native clients, release builds, full image vulnerability scans, native C library advisory scans, deployed secrets, cloud permissions, and Nix inputs were not checked. No production service was tested. No source changed, so package type checks, package builds, and Rust formatting checks were not repeated. Existing compiler warnings remain.
+
+### Remaining work and deployment steps
+
+Review and merge the existing fix PRs through the normal process. Account for the dependency overlap between PR #87 and PR #90. Rebuild and release the runtime, CLI, and images after those fixes are accepted. Until PR #90 is deployed, require a current authenticator code for sensitive operations and close existing Studio streams when revoking access. Its custom-store atomic update requirement still applies.
+
+Existing generated Docker apps still need PR #86's signing-key exclusions. Keep custom key paths outside build contexts or exclude them explicitly. Rotate a key if an accessible old image or cache included it. Prior B2B, AI Studio, shop checkout, and signed-file handler changes still need to be copied into affected existing apps. Scan each app's own lockfile. Today's report adds no new app migration. The stale primary checkout must not be used as a release source.
+
+This run commits and pushes this report to a new PR under the user's final instruction. No merge, release, or deployment is performed. The final report diff and whitespace are checked before commit. Next main area: HTTP, CSRF, CORS, and WebSocket boundaries. Retain the pending fixes, dependency migrations, and blocked monitoring changes as follow-up work.
