@@ -111,3 +111,16 @@ Recommended:
 - Mount the data directory as a persistent volume
 - Enable `PYLON_EMAIL_PROVIDER=sendgrid`, `resend`, or `stack0` for magic-code delivery
 - Back up the database regularly (`pylon backup <dir>`)
+
+## OIDC signing keys in Docker builds
+
+Keep OIDC private signing keys outside the Docker build context. The default
+key name is `oidc-signing-key.pem`. The repository and generated Docker ignore
+rules exclude this name and `*.oidc-key.pem` at every directory depth.
+If you set `PYLON_OIDC_KEY_PATH` to another name, exclude that path too. Mount
+the key at runtime through your deployment secret store.
+
+Existing Docker apps must update their `.dockerignore` rules and rebuild.
+If an accessible image or build cache contains a key, rotate that key and
+remove the affected artifacts. Update relying parties to trust the new key.
+Removing the key from a later image does not remove it from older layers.

@@ -96,6 +96,9 @@ dist
 **/*.db-journal
 **/*.db-shm
 **/*.db-wal
+# Keep OIDC signing keys out of image layers.
+**/oidc-signing-key.pem
+**/*.oidc-key.pem
 **/.env*
 "#
     )
